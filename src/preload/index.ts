@@ -1,11 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../../shared/types'
+import { TRANSCRIBE_CHANNELS } from '../main/ipc/transcribe.ipc'
 import type {
   ProjectState,
   ProjectSettings,
   ProjectInputs,
   ScanResult
 } from '../../shared/types'
+import type { TranscriptResult } from '../main/transcriber'
 
 // Expose a typed API to the renderer via window.api
 const api = {
@@ -73,6 +75,32 @@ const api = {
       ): void => callback(data)
       ipcRenderer.on(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, handler)
+    }
+  },
+
+  // Audio transcription (Whisper)
+  transcribe: {
+    start: (params: {
+      projectDir: string
+      voiceoverPath: string
+      modelName: 'tiny' | 'base' | 'small' | 'medium'
+      scriptPath: string | null
+    }): Promise<{ success: boolean; transcript?: TranscriptResult; cached?: boolean; error?: string }> =>
+      ipcRenderer.invoke(TRANSCRIBE_CHANNELS.START, params),
+
+    getTranscript: (projectDir: string): Promise<TranscriptResult | null> =>
+      ipcRenderer.invoke(TRANSCRIBE_CHANNELS.GET_TRANSCRIPT, projectDir),
+
+    checkModel: (modelName: string): Promise<{ exists: boolean; path: string; modelsDir: string }> =>
+      ipcRenderer.invoke(TRANSCRIBE_CHANNELS.CHECK_MODEL, modelName),
+
+    onProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        data: { message: string; progress: number }
+      ): void => callback(data)
+      ipcRenderer.on(TRANSCRIBE_CHANNELS.PROGRESS, handler)
+      return () => ipcRenderer.off(TRANSCRIBE_CHANNELS.PROGRESS, handler)
     }
   },
 

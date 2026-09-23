@@ -4,6 +4,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerFsHandlers } from './ipc/fs.ipc'
 import { registerProjectHandlers } from './ipc/project.ipc'
 import { registerMediaHandlers } from './ipc/media.ipc'
+import { registerTranscribeHandlers } from './ipc/transcribe.ipc'
 import { logger } from './logger'
 
 function createWindow(): BrowserWindow {
@@ -54,6 +55,7 @@ app.whenReady().then(() => {
   registerFsHandlers(ipcMain)
   registerProjectHandlers(ipcMain)
   registerMediaHandlers(ipcMain)
+  registerTranscribeHandlers(ipcMain)
 
   const mainWindow = createWindow()
 

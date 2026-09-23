@@ -1,12 +1,13 @@
 import React from 'react'
 import type { ProjectState } from '../../../../shared/types'
 
-type Page = 'home' | 'input' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'settings' | 'analysis' | 'render' | 'qa'
 
 interface SidebarProps {
   project: ProjectState | null
   currentPage: Page
   onNavigate: (page: Page) => void
+  hasTranscript?: boolean
 }
 
 function statusClass(status: string | undefined): string {
@@ -19,7 +20,13 @@ function statusClass(status: string | undefined): string {
   return 'ready'
 }
 
-const NAV_ITEMS: { id: Page; label: string; icon: React.ReactNode; requiresProject: boolean }[] = [
+const NAV_ITEMS: {
+  id: Page
+  label: string
+  icon: React.ReactNode
+  requiresProject: boolean
+  badge?: string
+}[] = [
   {
     id: 'home',
     label: 'Project',
@@ -37,6 +44,16 @@ const NAV_ITEMS: { id: Page; label: string; icon: React.ReactNode; requiresProje
     icon: (
       <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
         <path fillRule="evenodd" d="M3 17a1 1 0 011-1h12a1 1 0 110 2H4a1 1 0 01-1-1zM6.293 6.707a1 1 0 010-1.414l3-3a1 1 0 011.414 0l3 3a1 1 0 01-1.414 1.414L11 5.414V13a1 1 0 11-2 0V5.414L7.707 6.707a1 1 0 01-1.414 0z" clipRule="evenodd" />
+      </svg>
+    )
+  },
+  {
+    id: 'transcribe',
+    label: 'Transcribe',
+    requiresProject: true,
+    icon: (
+      <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
+        <path fillRule="evenodd" d="M7 4a3 3 0 016 0v4a3 3 0 11-6 0V4zm4 10.93A7.001 7.001 0 0017 8a1 1 0 10-2 0A5 5 0 015 8a1 1 0 00-2 0 7.001 7.001 0 006 6.93V17H6a1 1 0 100 2h8a1 1 0 100-2h-3v-2.07z" clipRule="evenodd" />
       </svg>
     )
   },
@@ -82,7 +99,12 @@ const NAV_ITEMS: { id: Page; label: string; icon: React.ReactNode; requiresProje
   }
 ]
 
-export function Sidebar({ project, currentPage, onNavigate }: SidebarProps): React.ReactElement {
+export function Sidebar({
+  project,
+  currentPage,
+  onNavigate,
+  hasTranscript
+}: SidebarProps): React.ReactElement {
   return (
     <aside className="sidebar">
       <div className="sidebar-header">
@@ -99,7 +121,16 @@ export function Sidebar({ project, currentPage, onNavigate }: SidebarProps): Rea
             title={item.requiresProject && !project ? 'Create or open a project first' : undefined}
           >
             {item.icon}
-            {item.label}
+            <span style={{ flex: 1, textAlign: 'left' }}>{item.label}</span>
+            {/* Badge: transcription done */}
+            {item.id === 'transcribe' && hasTranscript && (
+              <span style={{
+                width: 6, height: 6,
+                borderRadius: '50%',
+                background: 'var(--color-success)',
+                flexShrink: 0
+              }} />
+            )}
           </button>
         ))}
       </nav>
