@@ -79,7 +79,7 @@ export function registerTranscribeHandlers(ipcMain: IpcMain): void {
         const transcript = await transcribeAudio(
           params.voiceoverPath,
           params.modelName,
-          (msg) => sendProgress(msg, 0.3)
+          (msg, prog) => sendProgress(msg, prog ?? 0.3)
         )
 
         sendProgress('Saving transcript...', 0.95)

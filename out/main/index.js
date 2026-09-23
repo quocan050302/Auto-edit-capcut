@@ -7,6 +7,7 @@ const uuid = require("uuid");
 const winston = require("winston");
 require("crypto");
 const ffprobeStatic = require("ffprobe-static");
+const child_process = require("child_process");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -439,6 +440,179 @@ function registerMediaHandlers(ipcMain) {
     }
   );
 }
+const UV_PATH = "C:\\Users\\ADMIN\\.local\\bin\\uv.exe";
+function getScriptPath() {
+  const devPath = path.join(electron.app.getAppPath(), "..", "scripts", "transcribe.py");
+  if (fs__namespace.existsSync(devPath)) return devPath;
+  return path.join(process.resourcesPath, "scripts", "transcribe.py");
+}
+function getModelsDir() {
+  const dir = path.join(electron.app.getPath("userData"), "whisper-models");
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+async function transcribeAudio(audioPath, modelName = "base", onProgress) {
+  const scriptPath = getScriptPath();
+  const modelsDir = getModelsDir();
+  if (!fs__namespace.existsSync(scriptPath)) {
+    throw new Error(`Transcription script not found: ${scriptPath}`);
+  }
+  if (!fs__namespace.existsSync(UV_PATH)) {
+    throw new Error(`uv not found at ${UV_PATH}. Please install uv: https://docs.astral.sh/uv/`);
+  }
+  logger.info("Starting transcription via uv + faster-whisper", {
+    audio: audioPath,
+    model: modelName,
+    script: scriptPath
+  });
+  onProgress?.("Starting uv + faster-whisper...", 0.02);
+  return new Promise((resolve, reject) => {
+    const args = [
+      "run",
+      scriptPath,
+      audioPath,
+      "--model",
+      modelName,
+      "--cache-dir",
+      modelsDir
+    ];
+    logger.info(`Spawning: ${UV_PATH} ${args.join(" ")}`);
+    const proc = child_process.spawn(UV_PATH, args, {
+      env: { ...process.env },
+      windowsHide: true
+    });
+    let resultData = null;
+    let stderr = "";
+    proc.stdout.on("data", (chunk) => {
+      const lines = chunk.toString().split("\n").filter((l) => l.trim());
+      for (const line of lines) {
+        try {
+          const msg = JSON.parse(line);
+          if (msg.type === "progress") {
+            onProgress?.(msg.message, msg.progress);
+            logger.info(`[WHISPER] ${msg.message}`);
+          } else if (msg.type === "result") {
+            resultData = msg;
+          }
+        } catch {
+          logger.debug(`[WHISPER stdout] ${line}`);
+        }
+      }
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      const lines = chunk.toString().split("\n");
+      for (const line of lines) {
+        if (line.includes("Transcribing") || line.includes("Detected") || line.includes("%")) {
+          onProgress?.(line.trim(), 0.5);
+        }
+      }
+    });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        logger.error(`Transcription process exited ${code}`, { stderr: stderr.slice(0, 500) });
+        reject(new Error(`Transcription failed (exit ${code}): ${stderr.slice(0, 300)}`));
+        return;
+      }
+      if (!resultData) {
+        reject(new Error("Transcription produced no result"));
+        return;
+      }
+      logger.info("Transcription complete", {
+        segments: resultData.segments.length,
+        words: resultData.wordCount,
+        duration: resultData.duration
+      });
+      resolve(resultData);
+    });
+    proc.on("error", (err) => {
+      logger.error(`Failed to spawn transcription process: ${err.message}`);
+      reject(new Error(`Failed to start transcription: ${err.message}`));
+    });
+  });
+}
+const TRANSCRIBE_CHANNELS = {
+  START: "transcribe:start",
+  PROGRESS: "transcribe:progress",
+  GET_TRANSCRIPT: "transcribe:get",
+  CHECK_MODEL: "transcribe:check-model"
+};
+function registerTranscribeHandlers(ipcMain) {
+  ipcMain.handle(TRANSCRIBE_CHANNELS.CHECK_MODEL, (_event, modelName) => {
+    const modelsDir = getModelsDir();
+    const modelFile = path.join(modelsDir, `ggml-${modelName}.bin`);
+    return {
+      exists: fs__namespace.existsSync(modelFile),
+      path: modelFile,
+      modelsDir
+    };
+  });
+  ipcMain.handle(TRANSCRIBE_CHANNELS.GET_TRANSCRIPT, (_event, projectDir) => {
+    const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
+    if (!fs__namespace.existsSync(transcriptPath)) return null;
+    try {
+      return JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle(
+    TRANSCRIBE_CHANNELS.START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(TRANSCRIBE_CHANNELS.PROGRESS, { message, progress });
+        logger.info(`[TRANSCRIBE] ${message} (${Math.round(progress * 100)}%)`);
+      };
+      try {
+        sendProgress("Initializing Whisper...", 0.02);
+        const transcriptPath = path.join(params.projectDir, "analysis", "transcript.json");
+        const cacheMetaPath = path.join(params.projectDir, "analysis", "transcript-meta.json");
+        if (fs__namespace.existsSync(cacheMetaPath) && fs__namespace.existsSync(transcriptPath)) {
+          const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
+          const stat2 = fs__namespace.statSync(params.voiceoverPath);
+          const currentHash = `${params.voiceoverPath}:${stat2.size}:${stat2.mtimeMs}`;
+          if (meta.hash === currentHash && meta.model === params.modelName) {
+            sendProgress("Using cached transcript", 1);
+            const cached = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+            return { success: true, transcript: cached, cached: true };
+          }
+        }
+        sendProgress(`Downloading/loading model "${params.modelName}"...`, 0.05);
+        const transcript = await transcribeAudio(
+          params.voiceoverPath,
+          params.modelName,
+          (msg, prog) => sendProgress(msg, prog ?? 0.3)
+        );
+        sendProgress("Saving transcript...", 0.95);
+        fs__namespace.mkdirSync(path.join(params.projectDir, "analysis"), { recursive: true });
+        fs__namespace.writeFileSync(transcriptPath, JSON.stringify(transcript, null, 2), "utf-8");
+        const stat = fs__namespace.statSync(params.voiceoverPath);
+        fs__namespace.writeFileSync(
+          cacheMetaPath,
+          JSON.stringify({
+            hash: `${params.voiceoverPath}:${stat.size}:${stat.mtimeMs}`,
+            model: params.modelName,
+            generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }),
+          "utf-8"
+        );
+        sendProgress(`Transcription complete — ${transcript.segments.length} segments`, 1);
+        logger.info("Transcript saved", {
+          segments: transcript.segments.length,
+          words: transcript.wordCount,
+          duration: transcript.duration
+        });
+        return { success: true, transcript, cached: false };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Transcription failed: ${msg}`);
+        sendProgress(`Error: ${msg}`, -1);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -479,6 +653,7 @@ electron.app.whenReady().then(() => {
   registerFsHandlers(electron.ipcMain);
   registerProjectHandlers(electron.ipcMain);
   registerMediaHandlers(electron.ipcMain);
+  registerTranscribeHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {

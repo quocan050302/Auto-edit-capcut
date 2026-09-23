@@ -1,7 +1,8 @@
 import { join } from 'path'
 import * as fs from 'fs'
+import { spawn } from 'child_process'
 import { app } from 'electron'
-import { logger } from '../logger'
+import { logger } from './logger'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -22,6 +23,7 @@ export interface TranscriptSegment {
 
 export interface TranscriptResult {
   language: string
+  languageProbability?: number
   duration: number
   segments: TranscriptSegment[]
   fullText: string
@@ -29,92 +31,122 @@ export interface TranscriptResult {
   generatedAt: string
 }
 
-// ─── Whisper model directory (inside app userData) ───────────────────────────
+// ─── Paths ───────────────────────────────────────────────────────────────────
+
+/** Path to uv binary */
+const UV_PATH = 'C:\\Users\\ADMIN\\.local\\bin\\uv.exe'
+
+/** Path to our Python transcription script */
+function getScriptPath(): string {
+  // In dev: relative to project root
+  const devPath = join(app.getAppPath(), '..', 'scripts', 'transcribe.py')
+  if (fs.existsSync(devPath)) return devPath
+  // In prod: next to app executable
+  return join(process.resourcesPath, 'scripts', 'transcribe.py')
+}
+
+/** Directory to cache Whisper models */
 export function getModelsDir(): string {
   const dir = join(app.getPath('userData'), 'whisper-models')
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
   return dir
 }
 
-// ─── Parse nodejs-whisper output into our TranscriptResult ───────────────────
-function parseWhisperOutput(
-  raw: Array<{ start: number; end: number; speech: string }>,
-  audioDurationSec: number
-): TranscriptResult {
-  const segments: TranscriptSegment[] = raw.map((seg, i) => ({
-    id: `N${String(i + 1).padStart(3, '0')}`,
-    text: seg.speech.trim(),
-    start: seg.start,
-    end: seg.end,
-    duration: parseFloat((seg.end - seg.start).toFixed(3)),
-    words: [] // word-level timing not always available from nodejs-whisper
-  }))
+// ─── Main transcription function ─────────────────────────────────────────────
 
-  const fullText = segments.map((s) => s.text).join(' ')
-  const wordCount = fullText.split(/\s+/).filter(Boolean).length
-
-  return {
-    language: 'auto',
-    duration: audioDurationSec,
-    segments,
-    fullText,
-    wordCount,
-    generatedAt: new Date().toISOString()
-  }
-}
-
-// ─── Main transcription function ──────────────────────────────────────────────
 export async function transcribeAudio(
   audioPath: string,
   modelName: 'tiny' | 'base' | 'small' | 'medium' = 'base',
-  onProgress?: (msg: string) => void
+  onProgress?: (msg: string, progress: number) => void
 ): Promise<TranscriptResult> {
-  const { nodewhisper } = await import('nodejs-whisper')
-
-  onProgress?.(`Loading Whisper model: ${modelName}`)
-  logger.info(`Starting transcription: ${audioPath}`, { model: modelName })
-
+  const scriptPath = getScriptPath()
   const modelsDir = getModelsDir()
-  onProgress?.('Running Whisper transcription...')
 
-  const result = await nodewhisper(audioPath, {
-    modelName,
-    autoDownloadModelName: modelName,
-    removeWavFileAfterTranscription: false,
-    withCuda: false,
-    whisperOptions: {
-      outputInJson: true,
-      language: 'auto',
-      wordTimestamps: true
-    }
+  if (!fs.existsSync(scriptPath)) {
+    throw new Error(`Transcription script not found: ${scriptPath}`)
+  }
+
+  if (!fs.existsSync(UV_PATH)) {
+    throw new Error(`uv not found at ${UV_PATH}. Please install uv: https://docs.astral.sh/uv/`)
+  }
+
+  logger.info('Starting transcription via uv + faster-whisper', {
+    audio: audioPath,
+    model: modelName,
+    script: scriptPath
   })
 
-  logger.info(`Transcription complete: ${result?.length ?? 0} segments`)
+  onProgress?.('Starting uv + faster-whisper...', 0.02)
 
-  // Get audio duration via ffprobe
-  let audioDuration = 0
-  try {
-    const ffprobeStatic = await import('ffprobe-static')
-    const { spawn } = await import('child_process')
-    audioDuration = await new Promise<number>((resolve) => {
-      const proc = spawn(ffprobeStatic.default.path, [
-        '-v', 'quiet',
-        '-print_format', 'json',
-        '-show_format',
-        audioPath
-      ])
-      let out = ''
-      proc.stdout.on('data', (d: Buffer) => (out += d.toString()))
-      proc.on('close', () => {
-        try {
-          const parsed = JSON.parse(out)
-          resolve(parseFloat(parsed.format?.duration ?? '0'))
-        } catch {
-          resolve(0)
-        }
-      })
+  return new Promise<TranscriptResult>((resolve, reject) => {
+    const args = [
+      'run',
+      scriptPath,
+      audioPath,
+      '--model', modelName,
+      '--cache-dir', modelsDir
+    ]
+
+    logger.info(`Spawning: ${UV_PATH} ${args.join(' ')}`)
+
+    const proc = spawn(UV_PATH, args, {
+      env: { ...process.env },
+      windowsHide: true
     })
-  } catch { /* ignore */ }
 
-  return parseWhisperOutput(result || [], audioDuration)
+    let resultData: TranscriptResult | null = null
+    let stderr = ''
+
+    proc.stdout.on('data', (chunk: Buffer) => {
+      const lines = chunk.toString().split('\n').filter(l => l.trim())
+      for (const line of lines) {
+        try {
+          const msg = JSON.parse(line)
+          if (msg.type === 'progress') {
+            onProgress?.(msg.message, msg.progress)
+            logger.info(`[WHISPER] ${msg.message}`)
+          } else if (msg.type === 'result') {
+            resultData = msg as TranscriptResult
+          }
+        } catch {
+          // non-JSON line, ignore
+          logger.debug(`[WHISPER stdout] ${line}`)
+        }
+      }
+    })
+
+    proc.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString()
+      // faster-whisper logs progress to stderr — relay useful lines
+      const lines = chunk.toString().split('\n')
+      for (const line of lines) {
+        if (line.includes('Transcribing') || line.includes('Detected') || line.includes('%')) {
+          onProgress?.(line.trim(), 0.5)
+        }
+      }
+    })
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        logger.error(`Transcription process exited ${code}`, { stderr: stderr.slice(0, 500) })
+        reject(new Error(`Transcription failed (exit ${code}): ${stderr.slice(0, 300)}`))
+        return
+      }
+      if (!resultData) {
+        reject(new Error('Transcription produced no result'))
+        return
+      }
+      logger.info('Transcription complete', {
+        segments: resultData.segments.length,
+        words: resultData.wordCount,
+        duration: resultData.duration
+      })
+      resolve(resultData)
+    })
+
+    proc.on('error', (err) => {
+      logger.error(`Failed to spawn transcription process: ${err.message}`)
+      reject(new Error(`Failed to start transcription: ${err.message}`))
+    })
+  })
 }
