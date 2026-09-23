@@ -8,6 +8,7 @@ const winston = require("winston");
 require("crypto");
 const ffprobeStatic = require("ffprobe-static");
 const child_process = require("child_process");
+const genai = require("@google/genai");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -46,7 +47,14 @@ const IPC_CHANNELS = {
   TRANSCRIBE_CHECK_MODEL: "transcribe:check-model",
   // App info
   GET_APP_VERSION: "app:get-version",
-  GET_PROJECTS_DIR: "app:get-projects-dir"
+  GET_PROJECTS_DIR: "app:get-projects-dir",
+  // Config (API keys, preferences)
+  CONFIG_GET: "config:get",
+  CONFIG_SET: "config:set",
+  // AI Edit Planning
+  PLAN_GENERATE: "plan:generate",
+  PLAN_PROGRESS: "plan:progress",
+  PLAN_GET: "plan:get"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -611,6 +619,244 @@ function registerTranscribeHandlers(ipcMain) {
     }
   );
 }
+function buildPrompt(transcript, scriptText, mediaFiles) {
+  const videoFiles = mediaFiles.filter((m) => m.type === "video");
+  const imageFiles = mediaFiles.filter((m) => m.type === "image");
+  const mediaList = [
+    ...videoFiles.map((v) => `  VIDEO: ${v.filename} (${v.durationSecs?.toFixed(1) ?? "?"}s)`),
+    ...imageFiles.map((i) => `  IMAGE: ${i.filename}`)
+  ].join("\n");
+  const transcriptLines = transcript.segments.map(
+    (seg) => `[${seg.id}] ${seg.start.toFixed(1)}s-${seg.end.toFixed(1)}s: "${seg.text}"`
+  ).join("\n");
+  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan that matches narration segments with available media files.
+
+## NARRATION TRANSCRIPT (${transcript.segments.length} segments, ${transcript.duration.toFixed(0)}s total)
+${transcriptLines}
+
+## AVAILABLE MEDIA LIBRARY
+${mediaList}
+
+${scriptText ? `## ORIGINAL SCRIPT
+${scriptText.slice(0, 8e3)}
+` : ""}
+
+## YOUR TASK
+Create a master edit plan as a JSON object. Rules:
+1. Every second of narration MUST be covered by a media clip
+2. Match media files logically to the narrative content (use filename clues)
+3. Videos can be used for their full duration or trimmed
+4. Images should display for 3-8 seconds
+5. Divide the content into 3-6 chapters with meaningful titles
+6. Each chapter has 2-4 sequences, each sequence has 2-6 scenes
+7. Transition between scenes: mostly "cut", use "fade" for chapter breaks
+
+Return ONLY valid JSON, no explanation, matching this exact schema:
+{
+  "chapters": [
+    {
+      "chapterIndex": 1,
+      "title": "Chapter title",
+      "startTime": 0,
+      "endTime": 120,
+      "sequences": [
+        {
+          "sequenceIndex": 1,
+          "title": "Sequence title",
+          "startTime": 0,
+          "endTime": 60,
+          "scenes": [
+            {
+              "sceneIndex": 1,
+              "mediaFile": "exact_filename.mp4",
+              "mediaType": "video",
+              "startTime": 0,
+              "endTime": 15,
+              "duration": 15,
+              "narrativeText": "The narration text spoken here",
+              "transcriptSegmentIds": ["N001", "N002"],
+              "transitionIn": "cut",
+              "visualNote": "Shows opening establishing shot"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}`;
+}
+async function buildEditPlan(params) {
+  const { projectDir, apiKey, onProgress } = params;
+  const progress = (msg, pct) => {
+    logger.info(`[PLAN] ${msg}`);
+    onProgress?.(msg, pct);
+  };
+  progress("Loading transcript...", 0.05);
+  const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
+  if (!fs__namespace.existsSync(transcriptPath)) {
+    throw new Error("No transcript found. Run transcription first.");
+  }
+  const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+  progress("Loading script...", 0.08);
+  const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
+  let mediaFiles = [];
+  if (fs__namespace.existsSync(mediaIndexPath)) {
+    const rawItems = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
+    mediaFiles = rawItems.map((item) => ({
+      filePath: item.path ?? "",
+      filename: item.filename,
+      type: item.type === "video" ? "video" : "image",
+      durationSecs: item.durationSecs,
+      fps: item.fps,
+      width: item.width,
+      height: item.height
+    }));
+  }
+  let scriptText = null;
+  try {
+    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
+    const scriptPathFromParams = params.scriptPath;
+    const scriptPathFromState = (() => {
+      try {
+        const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+        return st?.inputs?.scriptPath;
+      } catch {
+        return void 0;
+      }
+    })();
+    const resolvedScriptPath = scriptPathFromParams ?? scriptPathFromState;
+    if (resolvedScriptPath && fs__namespace.existsSync(resolvedScriptPath)) {
+      scriptText = fs__namespace.readFileSync(resolvedScriptPath, "utf-8");
+    }
+  } catch (err) {
+    logger.warn(`Could not load script text: ${err}`);
+  }
+  let projectName = "Unnamed";
+  try {
+    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
+    const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+    projectName = st?.name ?? "Unnamed";
+  } catch {
+  }
+  progress(`Building prompt (${transcript.segments.length} segments, ${mediaFiles.length} media files)...`, 0.12);
+  const prompt = buildPrompt(transcript, scriptText, mediaFiles);
+  progress("Sending to Gemini AI...", 0.2);
+  const ai = new genai.GoogleGenAI({
+    apiKey,
+    httpOptions: { apiVersion: "v1alpha" }
+  });
+  progress("Waiting for Gemini response (may take 30-60 seconds)...", 0.3);
+  let rawJson;
+  try {
+    const response = await ai.models.generateContent({
+      model: "gemini-3.6-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        temperature: 0.3,
+        maxOutputTokens: 32768
+      }
+    });
+    rawJson = response.text ?? "";
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new Error(`Gemini API error: ${msg}`);
+  }
+  progress("Parsing edit plan...", 0.85);
+  let planData;
+  try {
+    const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+    planData = JSON.parse(clean);
+  } catch (err) {
+    logger.error("Failed to parse Gemini JSON", { raw: rawJson.slice(0, 500) });
+    throw new Error(`Failed to parse AI response as JSON: ${err}`);
+  }
+  const allScenes = planData.chapters.flatMap(
+    (c) => c.sequences.flatMap((s) => s.scenes)
+  );
+  const totalScenes = allScenes.length;
+  const totalDuration = transcript.duration;
+  const plan = {
+    projectName,
+    totalDuration,
+    totalScenes,
+    language: transcript.language,
+    chapters: planData.chapters,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    modelUsed: "gemini-3.6-flash"
+  };
+  progress("Saving edit plan...", 0.95);
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  logger.info("Edit plan saved", { chapters: plan.chapters.length, scenes: totalScenes });
+  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes`, 1);
+  return plan;
+}
+const CONFIG_PATH = path.join(electron.app.getPath("userData"), "app-config.json");
+function loadConfig() {
+  try {
+    if (fs__namespace.existsSync(CONFIG_PATH)) {
+      return JSON.parse(fs__namespace.readFileSync(CONFIG_PATH, "utf-8"));
+    }
+  } catch {
+    logger.warn("Failed to read app config, using defaults");
+  }
+  return {};
+}
+function saveConfig(config) {
+  try {
+    fs__namespace.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+    logger.info("App config saved", { hasGeminiKey: !!config.geminiApiKey });
+  } catch (err) {
+    logger.error(`Failed to save config: ${err}`);
+  }
+}
+function registerPlannerHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.CONFIG_SET, (_event, key, value) => {
+    const config = loadConfig();
+    config[key] = value;
+    saveConfig(config);
+    return { success: true };
+  });
+  ipcMain.handle(IPC_CHANNELS.CONFIG_GET, (_event, key) => {
+    const config = loadConfig();
+    return config[key] ?? null;
+  });
+  ipcMain.handle(IPC_CHANNELS.PLAN_GET, (_event, projectDir) => {
+    const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+    if (!fs__namespace.existsSync(planPath)) return null;
+    try {
+      return JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.PLAN_GENERATE,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const config = loadConfig();
+      if (!config.geminiApiKey) {
+        return { success: false, error: "Gemini API key not configured. Go to Settings to add it." };
+      }
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.PLAN_PROGRESS, { message, progress });
+      };
+      try {
+        const plan = await buildEditPlan({
+          projectDir: params.projectDir,
+          apiKey: config.geminiApiKey,
+          onProgress: sendProgress
+        });
+        return { success: true, plan };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Edit planning failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -652,6 +898,7 @@ electron.app.whenReady().then(() => {
   registerProjectHandlers(electron.ipcMain);
   registerMediaHandlers(electron.ipcMain);
   registerTranscribeHandlers(electron.ipcMain);
+  registerPlannerHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {

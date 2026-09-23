@@ -143,7 +143,12 @@ export const IPC_CHANNELS = {
   // AI Edit Planning
   PLAN_GENERATE: 'plan:generate',
   PLAN_PROGRESS: 'plan:progress',
-  PLAN_GET: 'plan:get'
+  PLAN_GET: 'plan:get',
+
+  // Video Rendering
+  RENDER_START: 'render:start',
+  RENDER_PROGRESS: 'render:progress',
+  RENDER_CANCEL: 'render:cancel'
 } as const
 
 // ─── Transcript types (shared between main and renderer) ─────────────────────

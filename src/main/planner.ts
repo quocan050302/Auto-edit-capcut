@@ -1,8 +1,8 @@
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { GoogleGenAI } from '@google/genai'
 import * as fs from 'fs'
 import { join } from 'path'
 import { logger } from './logger'
-import type { TranscriptResult, TranscriptSegment } from '../../shared/types'
+import type { TranscriptResult } from '../../shared/types'
 
 // ─── Edit Plan Types ──────────────────────────────────────────────────────────
 
@@ -134,6 +134,7 @@ Return ONLY valid JSON, no explanation, matching this exact schema:
 export async function buildEditPlan(params: {
   projectDir: string
   apiKey: string
+  scriptPath?: string | null
   onProgress?: (msg: string, pct: number) => void
 }): Promise<MasterEditPlan> {
   const { projectDir, apiKey, onProgress } = params
@@ -156,26 +157,60 @@ export async function buildEditPlan(params: {
   let mediaFiles: MediaClip[] = []
 
   if (fs.existsSync(mediaIndexPath)) {
-    const mediaIndex = JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8'))
-    const videos = (mediaIndex.videos ?? []) as Array<{
-      filePath: string; filename: string; durationSecs: number; fps: number; width: number; height: number
+    const rawItems = JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8')) as Array<{
+      type: string
+      path?: string
+      filename: string
+      durationSecs?: number
+      fps?: number
+      width?: number
+      height?: number
     }>
-    const images = (mediaIndex.images ?? []) as Array<{ filePath: string; filename: string }>
 
-    mediaFiles = [
-      ...videos.map(v => ({ ...v, type: 'video' as const })),
-      ...images.map(i => ({ ...i, type: 'image' as const }))
-    ]
+    mediaFiles = rawItems.map(item => ({
+      filePath: item.path ?? '',
+      filename: item.filename,
+      type: (item.type === 'video' ? 'video' : 'image') as 'video' | 'image',
+      durationSecs: item.durationSecs,
+      fps: item.fps,
+      width: item.width,
+      height: item.height
+    }))
   }
 
-  // 3. Load script text
+  // 3. Load script text — prefer passed param, fallback to reading state file
   let scriptText: string | null = null
-  const state = JSON.parse(
-    fs.readFileSync(join(projectDir, 'project.json'), 'utf-8')
-  )
-  if (state?.inputs?.scriptPath && fs.existsSync(state.inputs.scriptPath)) {
-    scriptText = fs.readFileSync(state.inputs.scriptPath, 'utf-8')
+  try {
+    // Try project-state.json (correct filename)
+    const stateFile = fs.existsSync(join(projectDir, 'project-state.json'))
+      ? join(projectDir, 'project-state.json')
+      : join(projectDir, 'project.json')
+
+    const scriptPathFromParams = params.scriptPath
+    const scriptPathFromState = (() => {
+      try {
+        const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'))
+        return st?.inputs?.scriptPath as string | undefined
+      } catch { return undefined }
+    })()
+
+    const resolvedScriptPath = scriptPathFromParams ?? scriptPathFromState
+    if (resolvedScriptPath && fs.existsSync(resolvedScriptPath)) {
+      scriptText = fs.readFileSync(resolvedScriptPath, 'utf-8')
+    }
+  } catch (err) {
+    logger.warn(`Could not load script text: ${err}`)
   }
+
+  // Re-read project name from state
+  let projectName = 'Unnamed'
+  try {
+    const stateFile = fs.existsSync(join(projectDir, 'project-state.json'))
+      ? join(projectDir, 'project-state.json')
+      : join(projectDir, 'project.json')
+    const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'))
+    projectName = st?.name ?? 'Unnamed'
+  } catch { /* ignore */ }
 
   progress(`Building prompt (${transcript.segments.length} segments, ${mediaFiles.length} media files)...`, 0.12)
 
@@ -184,22 +219,25 @@ export async function buildEditPlan(params: {
 
   progress('Sending to Gemini AI...', 0.20)
 
-  const genAI = new GoogleGenerativeAI(apiKey)
-  const model = genAI.getGenerativeModel({
-    model: 'gemini-1.5-flash',
-    generationConfig: {
-      responseMimeType: 'application/json',
-      temperature: 0.3,
-      maxOutputTokens: 32768
-    }
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: { apiVersion: 'v1alpha' }
   })
 
   progress('Waiting for Gemini response (may take 30-60 seconds)...', 0.30)
 
   let rawJson: string
   try {
-    const result = await model.generateContent(prompt)
-    rawJson = result.response.text()
+    const response = await ai.models.generateContent({
+      model: 'gemini-3.6-flash',
+      contents: prompt,
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.3,
+        maxOutputTokens: 32768
+      }
+    })
+    rawJson = response.text ?? ''
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err)
     throw new Error(`Gemini API error: ${msg}`)
@@ -226,13 +264,13 @@ export async function buildEditPlan(params: {
   const totalDuration = transcript.duration
 
   const plan: MasterEditPlan = {
-    projectName: state?.name ?? 'Unnamed',
+    projectName: projectName,
     totalDuration,
     totalScenes,
     language: transcript.language,
     chapters: planData.chapters,
     generatedAt: new Date().toISOString(),
-    modelUsed: 'gemini-1.5-flash'
+    modelUsed: 'gemini-3.6-flash'
   }
 
   // 6. Save

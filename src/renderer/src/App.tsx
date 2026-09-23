@@ -7,11 +7,12 @@ import { InputPage } from './pages/InputPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { AnalysisPage } from './pages/AnalysisPage'
 import { TranscriptionPage } from './pages/TranscriptionPage'
+import { PlanningPage } from './pages/PlanningPage'
 import { RenderPage, QAPage } from './pages/PlaceholderPages'
 import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
 
-type Page = 'home' | 'input' | 'transcribe' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'settings' | 'analysis' | 'render' | 'qa'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
@@ -116,6 +117,10 @@ export default function App(): React.ReactElement {
               transcribeProgress={transcribeProgress}
               onStartTranscription={handleTranscribe}
             />
+          )}
+
+          {currentPage === 'planning' && project && (
+            <PlanningPage project={project} />
           )}
 
           {currentPage === 'settings' && project && (

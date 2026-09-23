@@ -20,7 +20,14 @@ const IPC_CHANNELS = {
   TRANSCRIBE_CHECK_MODEL: "transcribe:check-model",
   // App info
   GET_APP_VERSION: "app:get-version",
-  GET_PROJECTS_DIR: "app:get-projects-dir"
+  GET_PROJECTS_DIR: "app:get-projects-dir",
+  // Config (API keys, preferences)
+  CONFIG_GET: "config:get",
+  CONFIG_SET: "config:set",
+  // AI Edit Planning
+  PLAN_GENERATE: "plan:generate",
+  PLAN_PROGRESS: "plan:progress",
+  PLAN_GET: "plan:get"
 };
 const api = {
   // Window controls
@@ -58,6 +65,21 @@ const api = {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler);
+    }
+  },
+  // App config (API keys stored locally)
+  config: {
+    get: (key) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET, key),
+    set: (key, value) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value)
+  },
+  // AI Edit Planning
+  plan: {
+    generate: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.PLAN_GENERATE, params),
+    get: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PLAN_GET, projectDir),
+    onProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.PLAN_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.PLAN_PROGRESS, handler);
     }
   },
   // App info
