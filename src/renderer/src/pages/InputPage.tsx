@@ -14,6 +14,7 @@ interface FileRowProps {
   value: string | null
   icon: string
   onSelect: () => void
+  onClear?: () => void
   accept?: string
   disabled?: boolean
 }
@@ -24,6 +25,7 @@ function FileRow({
   value,
   icon,
   onSelect,
+  onClear,
   disabled
 }: FileRowProps): React.ReactElement {
   return (
@@ -49,6 +51,30 @@ function FileRow({
       >
         {value ? 'Change' : 'Select'}
       </button>
+      {value && onClear && (
+        <button
+          className="btn btn-sm"
+          onClick={onClear}
+          disabled={disabled}
+          title={`Clear ${label}`}
+          style={{
+            background: 'rgba(248,113,113,0.1)',
+            border: '1px solid rgba(248,113,113,0.3)',
+            color: '#f87171',
+            padding: '4px 8px',
+            borderRadius: 'var(--radius-sm)',
+            cursor: 'pointer',
+            flexShrink: 0,
+            fontSize: '13px',
+            lineHeight: 1
+          }}
+          onMouseEnter={e => (e.currentTarget.style.background = 'rgba(248,113,113,0.25)')}
+          onMouseLeave={e => (e.currentTarget.style.background = 'rgba(248,113,113,0.1)')}
+          id={`btn-clear-${label.toLowerCase().replace(/\s+/g, '-')}`}
+        >
+          🗑
+        </button>
+      )}
       {value && (
         <div
           style={{
@@ -125,6 +151,7 @@ export function InputPage({
             value={inputs.scriptPath}
             icon="📄"
             onSelect={selectScript}
+            onClear={() => onUpdateInputs({ scriptPath: null })}
           />
           <FileRow
             label="Voiceover"
@@ -132,6 +159,7 @@ export function InputPage({
             value={inputs.voiceoverPath}
             icon="🎙️"
             onSelect={selectVoiceover}
+            onClear={() => onUpdateInputs({ voiceoverPath: null })}
           />
         </div>
       </div>
@@ -158,6 +186,7 @@ export function InputPage({
             value={inputs.imagesFolder}
             icon="🖼️"
             onSelect={() => selectFolder('imagesFolder', 'Select Images Folder')}
+            onClear={() => onUpdateInputs({ imagesFolder: null })}
           />
           <FileRow
             label="Videos"
@@ -165,6 +194,7 @@ export function InputPage({
             value={inputs.videosFolder}
             icon="🎥"
             onSelect={() => selectFolder('videosFolder', 'Select Videos Folder')}
+            onClear={() => onUpdateInputs({ videosFolder: null })}
           />
           <FileRow
             label="Music"
@@ -172,6 +202,7 @@ export function InputPage({
             value={inputs.musicFolder}
             icon="🎵"
             onSelect={() => selectFolder('musicFolder', 'Select Music Folder')}
+            onClear={() => onUpdateInputs({ musicFolder: null })}
           />
           <FileRow
             label="SFX"
@@ -179,6 +210,7 @@ export function InputPage({
             value={inputs.sfxFolder}
             icon="🔊"
             onSelect={() => selectFolder('sfxFolder', 'Select SFX Folder')}
+            onClear={() => onUpdateInputs({ sfxFolder: null })}
           />
         </div>
       </div>

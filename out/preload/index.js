@@ -27,7 +27,10 @@ const IPC_CHANNELS = {
   // AI Edit Planning
   PLAN_GENERATE: "plan:generate",
   PLAN_PROGRESS: "plan:progress",
-  PLAN_GET: "plan:get"
+  PLAN_GET: "plan:get",
+  // Video Rendering
+  RENDER_START: "render:start",
+  RENDER_PROGRESS: "render:progress"
 };
 const api = {
   // Window controls
@@ -80,6 +83,15 @@ const api = {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.PLAN_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.PLAN_PROGRESS, handler);
+    }
+  },
+  // Video Rendering
+  render: {
+    start: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_START, params),
+    onProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.RENDER_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.RENDER_PROGRESS, handler);
     }
   },
   // App info

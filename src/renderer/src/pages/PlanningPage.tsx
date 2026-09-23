@@ -190,6 +190,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
   const [progress, setProgress] = useState<{ message: string; progress: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hasKey, setHasKey] = useState<boolean | null>(null)
+  const [selectedModel, setSelectedModel] = useState('gemini-3.6-flash')
 
   useEffect(() => {
     // Load cached plan
@@ -210,7 +211,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
     })
 
     try {
-      const result = await window.api.plan.generate({ projectDir: project.projectDir })
+      const result = await window.api.plan.generate({ projectDir: project.projectDir, model: selectedModel })
       if (result.success && result.plan) {
         setPlan(result.plan as MasterEditPlan)
       } else {
@@ -274,14 +275,42 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
             ))}
           </div>
 
-          {/* Generate button + progress */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          {/* Model selector + Generate button + progress */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            {/* Model dropdown */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>Model</div>
+              <select
+                value={selectedModel}
+                onChange={(e) => setSelectedModel(e.target.value)}
+                disabled={isGenerating}
+                style={{
+                  background: 'var(--bg-elevated)',
+                  border: '1px solid var(--border-default)',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--text-primary)',
+                  fontSize: '12px',
+                  padding: '7px 10px',
+                  outline: 'none',
+                  cursor: 'pointer',
+                  fontFamily: 'var(--font-mono)',
+                  minWidth: '220px'
+                }}
+              >
+                {GEMINI_MODELS.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {m.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <button
               className="btn btn-primary"
               onClick={handleGenerate}
               disabled={isGenerating || hasKey !== true}
               id="btn-generate-plan"
-              style={{ minWidth: '200px' }}
+              style={{ minWidth: '180px', alignSelf: 'flex-end', marginBottom: '1px' }}
             >
               {isGenerating ? (
                 <>
@@ -290,7 +319,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
                     <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                     <path d="M12 2a10 10 0 0110 10" strokeLinecap="round" />
                   </svg>
-                  Generating Plan...
+                  Generating...
                 </>
               ) : plan ? (
                 '🔄 Regenerate Plan'
@@ -300,7 +329,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
             </button>
 
             {isGenerating && progress && (
-              <div style={{ flex: 1 }}>
+              <div style={{ flex: 1, minWidth: '200px' }}>
                 <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
                   {progress.message}
                 </div>
@@ -391,3 +420,11 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
     </div>
   )
 }
+
+const GEMINI_MODELS = [
+  { id: 'gemini-3.6-flash',               label: 'gemini-3.6-flash  (recommended)' },
+  { id: 'gemini-3.8-flash',               label: 'gemini-3.8-flash  (latest)' },
+  { id: 'gemini-2.5-flash-preview-04-17', label: 'gemini-2.5-flash-preview' },
+  { id: 'gemini-2.0-flash',               label: 'gemini-2.0-flash  (stable)' },
+  { id: 'gemini-1.5-flash-latest',        label: 'gemini-1.5-flash-latest (legacy)' },
+]

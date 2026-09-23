@@ -35,7 +35,7 @@ export function registerPlannerHandlers(ipcMain: IpcMain): void {
   // Run AI edit planning
   ipcMain.handle(
     IPC_CHANNELS.PLAN_GENERATE,
-    async (event, params: { projectDir: string }) => {
+    async (event, params: { projectDir: string; model?: string }) => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const config = loadConfig()
 
@@ -51,6 +51,7 @@ export function registerPlannerHandlers(ipcMain: IpcMain): void {
         const plan = await buildEditPlan({
           projectDir: params.projectDir,
           apiKey: config.geminiApiKey,
+          model: params.model,
           onProgress: sendProgress
         })
         return { success: true, plan }

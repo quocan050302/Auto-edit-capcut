@@ -25,6 +25,7 @@ function _interopNamespaceDefault(e) {
   n.default = e;
   return Object.freeze(n);
 }
+const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
 const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const winston__namespace = /* @__PURE__ */ _interopNamespaceDefault(winston);
 const IPC_CHANNELS = {
@@ -54,7 +55,10 @@ const IPC_CHANNELS = {
   // AI Edit Planning
   PLAN_GENERATE: "plan:generate",
   PLAN_PROGRESS: "plan:progress",
-  PLAN_GET: "plan:get"
+  PLAN_GET: "plan:get",
+  // Video Rendering
+  RENDER_START: "render:start",
+  RENDER_PROGRESS: "render:progress"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -136,7 +140,11 @@ const ffmpegLogger = winston__namespace.createLogger({
     })
   ]
 });
-const DEFAULT_PROJECTS_DIR = path.join(electron.app.getPath("documents"), "VideoFactory", "projects");
+const DEFAULT_PROJECTS_DIR = path.join(
+  electron.app.getPath("documents"),
+  "VideoFactory",
+  "projects"
+);
 function ensureProjectsDir() {
   if (!fs__namespace.existsSync(DEFAULT_PROJECTS_DIR)) {
     fs__namespace.mkdirSync(DEFAULT_PROJECTS_DIR, { recursive: true });
@@ -180,7 +188,9 @@ function registerProjectHandlers(ipcMain) {
       const safeName = name.replace(/[^a-zA-Z0-9-_\s]/g, "").trim().replace(/\s+/g, "-");
       const projectDir = path.join(DEFAULT_PROJECTS_DIR, safeName);
       if (fs__namespace.existsSync(projectDir)) {
-        throw new Error(`Project "${safeName}" already exists at ${projectDir}`);
+        throw new Error(
+          `Project "${safeName}" already exists at ${projectDir}`
+        );
       }
       createProjectFolderStructure(projectDir);
       const state = {
@@ -220,38 +230,48 @@ function registerProjectHandlers(ipcMain) {
       return { success: false, error: msg };
     }
   });
-  ipcMain.handle(IPC_CHANNELS.PROJECT_OPEN, async (_event, projectDir) => {
-    try {
-      const statePath = path.join(projectDir, "project-state.json");
-      if (!fs__namespace.existsSync(statePath)) {
-        throw new Error(`No project-state.json found in ${projectDir}`);
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECT_OPEN,
+    async (_event, projectDir) => {
+      try {
+        const statePath = path.join(projectDir, "project-state.json");
+        if (!fs__namespace.existsSync(statePath)) {
+          throw new Error(`No project-state.json found in ${projectDir}`);
+        }
+        const state = JSON.parse(
+          fs__namespace.readFileSync(statePath, "utf-8")
+        );
+        logger.info(`Project opened: ${state.name}`, { projectDir });
+        return { success: true, state };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to open project: ${msg}`);
+        return { success: false, error: msg };
       }
-      const state = JSON.parse(fs__namespace.readFileSync(statePath, "utf-8"));
-      logger.info(`Project opened: ${state.name}`, { projectDir });
-      return { success: true, state };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`Failed to open project: ${msg}`);
-      return { success: false, error: msg };
     }
-  });
-  ipcMain.handle(IPC_CHANNELS.PROJECT_SAVE, async (_event, state) => {
-    try {
-      state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      saveProjectState(state);
-      return { success: true };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`Failed to save project: ${msg}`);
-      return { success: false, error: msg };
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECT_SAVE,
+    async (_event, state) => {
+      try {
+        state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state);
+        return { success: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to save project: ${msg}`);
+        return { success: false, error: msg };
+      }
     }
-  });
+  );
   ipcMain.handle(
     IPC_CHANNELS.PROJECT_UPDATE_INPUTS,
     async (_event, projectDir, inputs) => {
       try {
         const statePath = path.join(projectDir, "project-state.json");
-        const state = JSON.parse(fs__namespace.readFileSync(statePath, "utf-8"));
+        const state = JSON.parse(
+          fs__namespace.readFileSync(statePath, "utf-8")
+        );
         state.inputs = { ...state.inputs, ...inputs };
         state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
         saveProjectState(state);
@@ -268,7 +288,9 @@ function registerProjectHandlers(ipcMain) {
     async (_event, projectDir, settings) => {
       try {
         const statePath = path.join(projectDir, "project-state.json");
-        const state = JSON.parse(fs__namespace.readFileSync(statePath, "utf-8"));
+        const state = JSON.parse(
+          fs__namespace.readFileSync(statePath, "utf-8")
+        );
         state.settings = { ...state.settings, ...settings };
         state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
         saveProjectState(state);
@@ -687,6 +709,7 @@ Return ONLY valid JSON, no explanation, matching this exact schema:
 }
 async function buildEditPlan(params) {
   const { projectDir, apiKey, onProgress } = params;
+  const modelId = params.model ?? "gemini-3.6-flash";
   const progress = (msg, pct) => {
     logger.info(`[PLAN] ${msg}`);
     onProgress?.(msg, pct);
@@ -745,22 +768,40 @@ async function buildEditPlan(params) {
     apiKey,
     httpOptions: { apiVersion: "v1alpha" }
   });
-  progress("Waiting for Gemini response (may take 30-60 seconds)...", 0.3);
-  let rawJson;
-  try {
-    const response = await ai.models.generateContent({
-      model: "gemini-3.6-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        temperature: 0.3,
-        maxOutputTokens: 32768
+  let rawJson = "";
+  const maxRetries = 3;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      progress(
+        attempt === 1 ? "Waiting for Gemini response (may take 30-60 seconds)..." : `Thử lại với Gemini (lần ${attempt}/${maxRetries})...`,
+        0.3 + (attempt - 1) * 0.1
+      );
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
+          maxOutputTokens: 32768
+        }
+      });
+      rawJson = response.text ?? "";
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isOverloaded = msg.includes("503") || msg.includes("high demand") || msg.includes("UNAVAILABLE") || msg.includes("429");
+      if (isOverloaded && attempt < maxRetries) {
+        const waitSec = attempt * 4;
+        logger.warn(`Gemini 503 high demand (attempt ${attempt}/${maxRetries}), waiting ${waitSec}s...`);
+        progress(`Google AI đang quá tải (503), tự động thử lại lần ${attempt + 1}/${maxRetries} sau ${waitSec}s...`, 0.35 + attempt * 0.1);
+        await new Promise((res) => setTimeout(res, waitSec * 1e3));
+        continue;
       }
-    });
-    rawJson = response.text ?? "";
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    throw new Error(`Gemini API error: ${msg}`);
+      if (isOverloaded) {
+        throw new Error(`Google AI đang quá tải (503 High Demand). Bạn hãy thử đổi sang model "gemini-2.0-flash (stable)" ở dropdown hoặc đợi 1-2 phút rồi bấm lại.`);
+      }
+      throw new Error(`Gemini API error: ${msg}`);
+    }
   }
   progress("Parsing edit plan...", 0.85);
   let planData;
@@ -783,7 +824,7 @@ async function buildEditPlan(params) {
     language: transcript.language,
     chapters: planData.chapters,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: "gemini-3.6-flash"
+    modelUsed: modelId
   };
   progress("Saving edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
@@ -846,12 +887,224 @@ function registerPlannerHandlers(ipcMain) {
         const plan = await buildEditPlan({
           projectDir: params.projectDir,
           apiKey: config.geminiApiKey,
+          model: params.model,
           onProgress: sendProgress
         });
         return { success: true, plan };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`Edit planning failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
+const ffmpegPath = require("ffmpeg-static");
+function ffmpegRun(args) {
+  return new Promise((resolve, reject) => {
+    const proc = child_process.spawn(ffmpegPath, args, { windowsHide: true });
+    const stderr = [];
+    proc.stderr.on("data", (d) => stderr.push(d.toString()));
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join("")}`));
+    });
+    proc.on("error", reject);
+  });
+}
+function resolveMediaPath(filename, mediaIndex) {
+  const item = mediaIndex.find((m) => m.filename === filename || path__namespace.basename(m.path) === filename);
+  return item ? item.path : null;
+}
+async function renderVideo(params) {
+  const {
+    projectDir,
+    voiceoverPath,
+    outputName = "final_output",
+    resolution = { width: 1920, height: 1080 },
+    fps = 30,
+    onProgress
+  } = params;
+  const progress = (stage, pct, extra = {}) => {
+    logger.info(`[RENDER] ${stage} (${Math.round(pct * 100)}%)`);
+    onProgress?.({ stage, progress: pct, ...extra });
+  };
+  progress("Loading edit plan...", 0.02);
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) throw new Error("No edit plan found. Run AI Planning first.");
+  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  progress("Loading media index...", 0.04);
+  const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
+  const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
+  const scenes = plan.chapters.flatMap(
+    (ch) => ch.sequences.flatMap((seq) => seq.scenes)
+  );
+  const totalScenes = scenes.length;
+  progress(`Processing ${totalScenes} scenes...`, 0.06);
+  const tmpDir = path__namespace.join(projectDir, "renders", "_tmp");
+  fs__namespace.mkdirSync(tmpDir, { recursive: true });
+  const sceneClips = [];
+  const { width, height } = resolution;
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const pct = 0.06 + i / totalScenes * 0.7;
+    progress(`Scene ${i + 1}/${totalScenes}: ${scene.mediaFile}`, pct, {
+      sceneIndex: i + 1,
+      totalScenes
+    });
+    const mediaPath = resolveMediaPath(scene.mediaFile, mediaIndex);
+    const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
+    const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+    if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
+      logger.warn(`[RENDER] Missing media: ${scene.mediaFile}, using black placeholder`);
+      await ffmpegRun([
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "23",
+        "-t",
+        String(scene.duration),
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ]);
+    } else if (scene.mediaType === "image") {
+      await ffmpegRun([
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        mediaPath,
+        "-vf",
+        scaleFilt,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-t",
+        String(scene.duration),
+        "-r",
+        String(fps),
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ]);
+    } else {
+      await ffmpegRun([
+        "-y",
+        "-i",
+        mediaPath,
+        "-vf",
+        scaleFilt,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-t",
+        String(scene.duration),
+        "-r",
+        String(fps),
+        "-an",
+        // strip audio from source video (voiceover added later)
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ]);
+    }
+    sceneClips.push(outClip);
+  }
+  progress("Concatenating scenes...", 0.78);
+  const concatList = path__namespace.join(tmpDir, "concat.txt");
+  fs__namespace.writeFileSync(
+    concatList,
+    sceneClips.map((f) => `file '${f.replace(/\\/g, "/")}'`).join("\n"),
+    "utf-8"
+  );
+  const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
+  await ffmpegRun([
+    "-y",
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    concatList,
+    "-c",
+    "copy",
+    rawVideo
+  ]);
+  progress("Mixing voiceover audio...", 0.88);
+  const outputDir = path__namespace.join(projectDir, "output");
+  fs__namespace.mkdirSync(outputDir, { recursive: true });
+  const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
+  if (fs__namespace.existsSync(voiceoverPath)) {
+    await ffmpegRun([
+      "-y",
+      "-i",
+      rawVideo,
+      "-i",
+      voiceoverPath,
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-map",
+      "0:v:0",
+      "-map",
+      "1:a:0",
+      "-shortest",
+      outputPath
+    ]);
+  } else {
+    fs__namespace.copyFileSync(rawVideo, outputPath);
+  }
+  progress("Cleaning up...", 0.97);
+  try {
+    for (const clip of sceneClips) fs__namespace.unlinkSync(clip);
+    fs__namespace.unlinkSync(concatList);
+    fs__namespace.unlinkSync(rawVideo);
+  } catch {
+  }
+  const stat = fs__namespace.statSync(outputPath);
+  const durationSecs = scenes.reduce((a, s) => a + s.duration, 0);
+  progress(`Done → ${outputPath}`, 1);
+  logger.info("[RENDER] Complete", {
+    outputPath,
+    durationSecs: Math.round(durationSecs),
+    fileSizeMB: (stat.size / 1024 / 1024).toFixed(1)
+  });
+  return { outputPath, durationSecs, fileSizeBytes: stat.size };
+}
+function registerRenderHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.RENDER_START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const sendProgress = (p) => {
+        win?.webContents.send(IPC_CHANNELS.RENDER_PROGRESS, p);
+      };
+      try {
+        const result = await renderVideo({
+          ...params,
+          onProgress: sendProgress
+        });
+        return { success: true, result };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Render failed: ${msg}`);
         return { success: false, error: msg };
       }
     }
@@ -899,6 +1152,7 @@ electron.app.whenReady().then(() => {
   registerMediaHandlers(electron.ipcMain);
   registerTranscribeHandlers(electron.ipcMain);
   registerPlannerHandlers(electron.ipcMain);
+  registerRenderHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {

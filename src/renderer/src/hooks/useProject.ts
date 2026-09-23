@@ -62,7 +62,15 @@ export function useProject(): ProjectHook {
       })
       return true
     } else {
-      addLog({ level: 'error', message: result.error ?? 'Failed to open project', category: 'project' })
+      const errMsg = result.error ?? 'Failed to open project'
+      addLog({ level: 'error', message: errMsg, category: 'project' })
+      // Show a clear popup so user knows why it failed
+      window.alert(
+        `❌ Cannot open project\n\n` +
+        `Selected folder: ${folder}\n\n` +
+        `Reason: The selected folder does not contain a project-state.json file.\n\n` +
+        `Please select a VideoFactory project folder (e.g. VideoFactory/projects/my-video)`
+      )
       return false
     }
   }, [addLog])

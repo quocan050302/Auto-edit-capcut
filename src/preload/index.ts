@@ -113,7 +113,7 @@ const api = {
 
   // AI Edit Planning
   plan: {
-    generate: (params: { projectDir: string }): Promise<{ success: boolean; plan?: unknown; error?: string }> =>
+    generate: (params: { projectDir: string; model?: string }): Promise<{ success: boolean; plan?: unknown; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PLAN_GENERATE, params),
 
     get: (projectDir: string): Promise<unknown | null> =>
@@ -124,6 +124,31 @@ const api = {
         callback(data)
       ipcRenderer.on(IPC_CHANNELS.PLAN_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.PLAN_PROGRESS, handler)
+    }
+  },
+
+  // Video Rendering
+  render: {
+    start: (params: {
+      projectDir: string
+      voiceoverPath: string
+      outputName?: string
+      resolution?: { width: number; height: number }
+      fps?: number
+    }): Promise<{ success: boolean; result?: unknown; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_START, params),
+
+    onProgress: (callback: (data: {
+      stage: string
+      sceneIndex?: number
+      totalScenes?: number
+      progress: number
+    }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: {
+        stage: string; sceneIndex?: number; totalScenes?: number; progress: number
+      }): void => callback(data)
+      ipcRenderer.on(IPC_CHANNELS.RENDER_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.RENDER_PROGRESS, handler)
     }
   },
 

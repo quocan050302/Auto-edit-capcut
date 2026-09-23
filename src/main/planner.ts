@@ -134,10 +134,12 @@ Return ONLY valid JSON, no explanation, matching this exact schema:
 export async function buildEditPlan(params: {
   projectDir: string
   apiKey: string
+  model?: string
   scriptPath?: string | null
   onProgress?: (msg: string, pct: number) => void
 }): Promise<MasterEditPlan> {
   const { projectDir, apiKey, onProgress } = params
+  const modelId = params.model ?? 'gemini-3.6-flash'
   const progress = (msg: string, pct: number): void => {
     logger.info(`[PLAN] ${msg}`)
     onProgress?.(msg, pct)
@@ -224,23 +226,48 @@ export async function buildEditPlan(params: {
     httpOptions: { apiVersion: 'v1alpha' }
   })
 
-  progress('Waiting for Gemini response (may take 30-60 seconds)...', 0.30)
+  let rawJson = ''
+  const maxRetries = 3
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      progress(
+        attempt === 1
+          ? 'Waiting for Gemini response (may take 30-60 seconds)...'
+          : `Thử lại với Gemini (lần ${attempt}/${maxRetries})...`,
+        0.30 + (attempt - 1) * 0.1
+      )
+      const response = await ai.models.generateContent({
+        model: modelId,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.3,
+          maxOutputTokens: 32768
+        }
+      })
+      rawJson = response.text ?? ''
+      break
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      const isOverloaded =
+        msg.includes('503') ||
+        msg.includes('high demand') ||
+        msg.includes('UNAVAILABLE') ||
+        msg.includes('429')
 
-  let rawJson: string
-  try {
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.6-flash',
-      contents: prompt,
-      config: {
-        responseMimeType: 'application/json',
-        temperature: 0.3,
-        maxOutputTokens: 32768
+      if (isOverloaded && attempt < maxRetries) {
+        const waitSec = attempt * 4
+        logger.warn(`Gemini 503 high demand (attempt ${attempt}/${maxRetries}), waiting ${waitSec}s...`)
+        progress(`Google AI đang quá tải (503), tự động thử lại lần ${attempt + 1}/${maxRetries} sau ${waitSec}s...`, 0.35 + attempt * 0.1)
+        await new Promise((res) => setTimeout(res, waitSec * 1000))
+        continue
       }
-    })
-    rawJson = response.text ?? ''
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err)
-    throw new Error(`Gemini API error: ${msg}`)
+
+      if (isOverloaded) {
+        throw new Error(`Google AI đang quá tải (503 High Demand). Bạn hãy thử đổi sang model "gemini-2.0-flash (stable)" ở dropdown hoặc đợi 1-2 phút rồi bấm lại.`)
+      }
+      throw new Error(`Gemini API error: ${msg}`)
+    }
   }
 
   progress('Parsing edit plan...', 0.85)
@@ -270,7 +297,7 @@ export async function buildEditPlan(params: {
     language: transcript.language,
     chapters: planData.chapters,
     generatedAt: new Date().toISOString(),
-    modelUsed: 'gemini-3.6-flash'
+    modelUsed: modelId
   }
 
   // 6. Save

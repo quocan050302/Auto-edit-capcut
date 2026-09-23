@@ -8,7 +8,8 @@ import { SettingsPage } from './pages/SettingsPage'
 import { AnalysisPage } from './pages/AnalysisPage'
 import { TranscriptionPage } from './pages/TranscriptionPage'
 import { PlanningPage } from './pages/PlanningPage'
-import { RenderPage, QAPage } from './pages/PlaceholderPages'
+import { RenderPage } from './pages/RenderPage'
+import { QAPage } from './pages/PlaceholderPages'
 import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
 
@@ -131,7 +132,7 @@ export default function App(): React.ReactElement {
             <AnalysisPage project={project} scanResult={scanResult} />
           )}
 
-          {currentPage === 'render' && <RenderPage />}
+          {currentPage === 'render' && project && <RenderPage project={project} />}
 
           {currentPage === 'qa' && <QAPage />}
         </div>
