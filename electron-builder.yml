@@ -1,0 +1,30 @@
+appId: com.videofactory.app
+productName: Long-Form AI Video Factory
+copyright: Copyright © 2024
+
+directories:
+  output: release
+  buildResources: resources
+
+files:
+  - dist-electron/**/*
+  - dist/**/*
+
+win:
+  target:
+    - target: nsis
+      arch: x64
+  icon: resources/icon.ico
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+
+mac:
+  target: dmg
+  icon: resources/icon.icns
+
+linux:
+  target: AppImage
+  icon: resources/icon.png
