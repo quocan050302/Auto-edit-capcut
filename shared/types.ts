@@ -123,6 +123,12 @@ export const IPC_CHANNELS = {
   MEDIA_SCAN: 'media:scan',
   MEDIA_SCAN_PROGRESS: 'media:scan-progress',
 
+  // Transcription
+  TRANSCRIBE_START: 'transcribe:start',
+  TRANSCRIBE_PROGRESS: 'transcribe:progress',
+  TRANSCRIBE_GET: 'transcribe:get',
+  TRANSCRIBE_CHECK_MODEL: 'transcribe:check-model',
+
   // Logging
   LOG_ENTRY: 'log:entry',
 
@@ -130,3 +136,30 @@ export const IPC_CHANNELS = {
   GET_APP_VERSION: 'app:get-version',
   GET_PROJECTS_DIR: 'app:get-projects-dir'
 } as const
+
+// ─── Transcript types (shared between main and renderer) ─────────────────────
+
+export interface TranscriptWord {
+  word: string
+  start: number
+  end: number
+}
+
+export interface TranscriptSegment {
+  id: string
+  text: string
+  start: number
+  end: number
+  duration: number
+  words: TranscriptWord[]
+}
+
+export interface TranscriptResult {
+  language: string
+  languageProbability?: number
+  duration: number
+  segments: TranscriptSegment[]
+  fullText: string
+  wordCount: number
+  generatedAt: string
+}

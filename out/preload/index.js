@@ -1,27 +1,5 @@
 "use strict";
 const electron = require("electron");
-const path = require("path");
-const fs = require("fs");
-require("child_process");
-const winston = require("winston");
-function _interopNamespaceDefault(e) {
-  const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
-  if (e) {
-    for (const k in e) {
-      if (k !== "default") {
-        const d = Object.getOwnPropertyDescriptor(e, k);
-        Object.defineProperty(n, k, d.get ? d : {
-          enumerable: true,
-          get: () => e[k]
-        });
-      }
-    }
-  }
-  n.default = e;
-  return Object.freeze(n);
-}
-const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
-const winston__namespace = /* @__PURE__ */ _interopNamespaceDefault(winston);
 const IPC_CHANNELS = {
   // File dialogs
   SELECT_FILE: "select-file",
@@ -35,61 +13,14 @@ const IPC_CHANNELS = {
   // Media scanning
   MEDIA_SCAN: "media:scan",
   MEDIA_SCAN_PROGRESS: "media:scan-progress",
+  // Transcription
+  TRANSCRIBE_START: "transcribe:start",
+  TRANSCRIBE_PROGRESS: "transcribe:progress",
+  TRANSCRIBE_GET: "transcribe:get",
+  TRANSCRIBE_CHECK_MODEL: "transcribe:check-model",
   // App info
   GET_APP_VERSION: "app:get-version",
   GET_PROJECTS_DIR: "app:get-projects-dir"
-};
-const logsDir = path.join(electron.app.getPath("userData"), "logs");
-if (!fs__namespace.existsSync(logsDir)) {
-  fs__namespace.mkdirSync(logsDir, { recursive: true });
-}
-const logFormat = winston__namespace.format.combine(
-  winston__namespace.format.timestamp({ format: "YYYY-MM-DD HH:mm:ss.SSS" }),
-  winston__namespace.format.errors({ stack: true }),
-  winston__namespace.format.printf(({ level, message, timestamp, ...meta }) => {
-    const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : "";
-    return `[${timestamp}] ${level.toUpperCase()}: ${message}${metaStr}`;
-  })
-);
-const logger = winston__namespace.createLogger({
-  level: "debug",
-  format: logFormat,
-  transports: [
-    new winston__namespace.transports.File({
-      filename: path.join(logsDir, "app.log"),
-      maxsize: 10 * 1024 * 1024,
-      // 10 MB
-      maxFiles: 5
-    }),
-    new winston__namespace.transports.File({
-      filename: path.join(logsDir, "error.log"),
-      level: "error"
-    })
-  ]
-});
-if (process.env.NODE_ENV === "development") {
-  logger.add(
-    new winston__namespace.transports.Console({
-      format: winston__namespace.format.combine(winston__namespace.format.colorize(), logFormat)
-    })
-  );
-}
-winston__namespace.createLogger({
-  level: "debug",
-  format: logFormat,
-  transports: [
-    new winston__namespace.transports.File({
-      filename: path.join(logsDir, "ffmpeg.log"),
-      maxsize: 10 * 1024 * 1024,
-      maxFiles: 3
-    })
-  ]
-});
-const TRANSCRIBE_CHANNELS = {
-  START: "transcribe:start",
-  PROGRESS: "transcribe:progress",
-  GET_TRANSCRIPT: "transcribe:get",
-  CHECK_MODEL: "transcribe:check-model"
 };
 const api = {
   // Window controls
@@ -118,15 +49,15 @@ const api = {
       return () => electron.ipcRenderer.off(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, handler);
     }
   },
-  // Audio transcription (Whisper)
+  // Audio transcription (Whisper via uv + faster-whisper)
   transcribe: {
-    start: (params) => electron.ipcRenderer.invoke(TRANSCRIBE_CHANNELS.START, params),
-    getTranscript: (projectDir) => electron.ipcRenderer.invoke(TRANSCRIBE_CHANNELS.GET_TRANSCRIPT, projectDir),
-    checkModel: (modelName) => electron.ipcRenderer.invoke(TRANSCRIBE_CHANNELS.CHECK_MODEL, modelName),
+    start: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_START, params),
+    getTranscript: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_GET, projectDir),
+    checkModel: (modelName) => electron.ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, modelName),
     onProgress: (callback) => {
       const handler = (_event, data) => callback(data);
-      electron.ipcRenderer.on(TRANSCRIBE_CHANNELS.PROGRESS, handler);
-      return () => electron.ipcRenderer.off(TRANSCRIBE_CHANNELS.PROGRESS, handler);
+      electron.ipcRenderer.on(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler);
     }
   },
   // App info

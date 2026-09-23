@@ -1,13 +1,12 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { IPC_CHANNELS } from '../../shared/types'
-import { TRANSCRIBE_CHANNELS } from '../main/ipc/transcribe.ipc'
 import type {
   ProjectState,
   ProjectSettings,
   ProjectInputs,
-  ScanResult
+  ScanResult,
+  TranscriptResult
 } from '../../shared/types'
-import type { TranscriptResult } from '../main/transcriber'
 
 // Expose a typed API to the renderer via window.api
 const api = {
@@ -78,7 +77,7 @@ const api = {
     }
   },
 
-  // Audio transcription (Whisper)
+  // Audio transcription (Whisper via uv + faster-whisper)
   transcribe: {
     start: (params: {
       projectDir: string
@@ -86,21 +85,21 @@ const api = {
       modelName: 'tiny' | 'base' | 'small' | 'medium'
       scriptPath: string | null
     }): Promise<{ success: boolean; transcript?: TranscriptResult; cached?: boolean; error?: string }> =>
-      ipcRenderer.invoke(TRANSCRIBE_CHANNELS.START, params),
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_START, params),
 
     getTranscript: (projectDir: string): Promise<TranscriptResult | null> =>
-      ipcRenderer.invoke(TRANSCRIBE_CHANNELS.GET_TRANSCRIPT, projectDir),
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_GET, projectDir),
 
     checkModel: (modelName: string): Promise<{ exists: boolean; path: string; modelsDir: string }> =>
-      ipcRenderer.invoke(TRANSCRIBE_CHANNELS.CHECK_MODEL, modelName),
+      ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, modelName),
 
     onProgress: (callback: (data: { message: string; progress: number }) => void) => {
       const handler = (
         _event: Electron.IpcRendererEvent,
         data: { message: string; progress: number }
       ): void => callback(data)
-      ipcRenderer.on(TRANSCRIBE_CHANNELS.PROGRESS, handler)
-      return () => ipcRenderer.off(TRANSCRIBE_CHANNELS.PROGRESS, handler)
+      ipcRenderer.on(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler)
     }
   },
 

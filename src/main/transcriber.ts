@@ -3,35 +3,9 @@ import * as fs from 'fs'
 import { spawn } from 'child_process'
 import { app } from 'electron'
 import { logger } from './logger'
+import type { TranscriptResult } from '../../../shared/types'
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface TranscriptWord {
-  word: string
-  start: number
-  end: number
-}
-
-export interface TranscriptSegment {
-  id: string
-  text: string
-  start: number
-  end: number
-  duration: number
-  words: TranscriptWord[]
-}
-
-export interface TranscriptResult {
-  language: string
-  languageProbability?: number
-  duration: number
-  segments: TranscriptSegment[]
-  fullText: string
-  wordCount: number
-  generatedAt: string
-}
-
-// ─── Paths ───────────────────────────────────────────────────────────────────
+export type { TranscriptResult }
 
 /** Path to uv binary */
 const UV_PATH = 'C:\\Users\\ADMIN\\.local\\bin\\uv.exe'

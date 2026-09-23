@@ -2,8 +2,8 @@ import React, { useState } from 'react'
 import { NewProjectModal } from '../components/NewProjectModal'
 
 interface HomePageProps {
-  onCreate: (name: string) => Promise<boolean>
-  onOpen: () => Promise<boolean>
+  onCreate: (name: string) => Promise<void>
+  onOpen: () => Promise<void>
   onNavigate: (page: 'input') => void
 }
 

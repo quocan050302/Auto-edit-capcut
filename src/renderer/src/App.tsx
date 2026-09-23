@@ -50,6 +50,16 @@ export default function App(): React.ReactElement {
     setCurrentPage(page)
   }
 
+  async function handleCreateProject(name: string): Promise<void> {
+    const ok = await createProject(name)
+    if (ok) navigate('input')
+  }
+
+  async function handleOpenProject(): Promise<void> {
+    const ok = await openProject()
+    if (ok) navigate('input')
+  }
+
   async function handleScanMedia(): Promise<void> {
     await scanMedia()
     setCurrentPage('analysis')
@@ -83,8 +93,8 @@ export default function App(): React.ReactElement {
         <div className="main-content">
           {currentPage === 'home' && (
             <HomePage
-              onCreate={createProject}
-              onOpen={openProject}
+              onCreate={handleCreateProject}
+              onOpen={handleOpenProject}
               onNavigate={(p) => navigate(p)}
             />
           )}

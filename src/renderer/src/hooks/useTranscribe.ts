@@ -1,22 +1,10 @@
 import { useState, useCallback, useRef } from 'react'
-import type { LogEntry } from '../../../../shared/types'
+import type { LogEntry, TranscriptResult } from '../../../../shared/types'
 
-export interface TranscriptSegment {
-  id: string
-  text: string
-  start: number
-  end: number
-  duration: number
-}
-
-export interface TranscriptData {
-  language: string
-  duration: number
-  segments: TranscriptSegment[]
-  fullText: string
-  wordCount: number
-  generatedAt: string
-}
+// Re-export for consumers
+export type { TranscriptResult }
+// Alias for convenience
+export type TranscriptData = TranscriptResult
 
 interface TranscribeHook {
   transcript: TranscriptData | null

@@ -39,36 +39,44 @@ const IPC_CHANNELS = {
   // Media scanning
   MEDIA_SCAN: "media:scan",
   MEDIA_SCAN_PROGRESS: "media:scan-progress",
+  // Transcription
+  TRANSCRIBE_START: "transcribe:start",
+  TRANSCRIBE_PROGRESS: "transcribe:progress",
+  TRANSCRIBE_GET: "transcribe:get",
+  TRANSCRIBE_CHECK_MODEL: "transcribe:check-model",
   // App info
   GET_APP_VERSION: "app:get-version",
   GET_PROJECTS_DIR: "app:get-projects-dir"
 };
+function getWindow(event) {
+  return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
+}
 function registerFsHandlers(ipcMain) {
   ipcMain.handle(
     IPC_CHANNELS.SELECT_FILE,
-    async (_event, options) => {
-      const win = electron.BrowserWindow.getFocusedWindow();
-      if (!win) return null;
-      const result = await electron.dialog.showOpenDialog(win, {
+    async (event, options) => {
+      const win = getWindow(event);
+      const dialogOptions = {
         title: options.title,
         defaultPath: options.defaultPath,
         filters: options.filters || [],
         properties: ["openFile"]
-      });
+      };
+      const result = win ? await electron.dialog.showOpenDialog(win, dialogOptions) : await electron.dialog.showOpenDialog(dialogOptions);
       if (result.canceled || result.filePaths.length === 0) return null;
       return result.filePaths[0];
     }
   );
   ipcMain.handle(
     IPC_CHANNELS.SELECT_FOLDER,
-    async (_event, options) => {
-      const win = electron.BrowserWindow.getFocusedWindow();
-      if (!win) return null;
-      const result = await electron.dialog.showOpenDialog(win, {
+    async (event, options) => {
+      const win = getWindow(event);
+      const dialogOptions = {
         title: options.title,
         defaultPath: options.defaultPath,
         properties: ["openDirectory"]
-      });
+      };
+      const result = win ? await electron.dialog.showOpenDialog(win, dialogOptions) : await electron.dialog.showOpenDialog(dialogOptions);
       if (result.canceled || result.filePaths.length === 0) return null;
       return result.filePaths[0];
     }
@@ -531,23 +539,17 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
     });
   });
 }
-const TRANSCRIBE_CHANNELS = {
-  START: "transcribe:start",
-  PROGRESS: "transcribe:progress",
-  GET_TRANSCRIPT: "transcribe:get",
-  CHECK_MODEL: "transcribe:check-model"
-};
 function registerTranscribeHandlers(ipcMain) {
-  ipcMain.handle(TRANSCRIBE_CHANNELS.CHECK_MODEL, (_event, modelName) => {
-    const modelsDir = getModelsDir();
-    const modelFile = path.join(modelsDir, `ggml-${modelName}.bin`);
+  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, (_event, modelName) => {
+    const cacheDir = path.join(process.env.APPDATA || "", "long-form-video-factory", "whisper-models");
+    const modelFile = path.join(cacheDir, `models--Systran--faster-whisper-${modelName}`);
     return {
       exists: fs__namespace.existsSync(modelFile),
       path: modelFile,
-      modelsDir
+      modelsDir: cacheDir
     };
   });
-  ipcMain.handle(TRANSCRIBE_CHANNELS.GET_TRANSCRIPT, (_event, projectDir) => {
+  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_GET, (_event, projectDir) => {
     const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
     if (!fs__namespace.existsSync(transcriptPath)) return null;
     try {
@@ -557,12 +559,12 @@ function registerTranscribeHandlers(ipcMain) {
     }
   });
   ipcMain.handle(
-    TRANSCRIBE_CHANNELS.START,
+    IPC_CHANNELS.TRANSCRIBE_START,
     async (event, params) => {
       const win = electron.BrowserWindow.fromWebContents(event.sender);
       const sendProgress = (message, progress) => {
-        win?.webContents.send(TRANSCRIBE_CHANNELS.PROGRESS, { message, progress });
-        logger.info(`[TRANSCRIBE] ${message} (${Math.round(progress * 100)}%)`);
+        win?.webContents.send(IPC_CHANNELS.TRANSCRIBE_PROGRESS, { message, progress });
+        logger.info(`[TRANSCRIBE] ${message}`);
       };
       try {
         sendProgress("Initializing Whisper...", 0.02);
@@ -578,7 +580,6 @@ function registerTranscribeHandlers(ipcMain) {
             return { success: true, transcript: cached, cached: true };
           }
         }
-        sendProgress(`Downloading/loading model "${params.modelName}"...`, 0.05);
         const transcript = await transcribeAudio(
           params.voiceoverPath,
           params.modelName,
@@ -597,12 +598,8 @@ function registerTranscribeHandlers(ipcMain) {
           }),
           "utf-8"
         );
-        sendProgress(`Transcription complete — ${transcript.segments.length} segments`, 1);
-        logger.info("Transcript saved", {
-          segments: transcript.segments.length,
-          words: transcript.wordCount,
-          duration: transcript.duration
-        });
+        sendProgress(`Done — ${transcript.segments.length} segments`, 1);
+        logger.info("Transcript saved", { segments: transcript.segments.length });
         return { success: true, transcript, cached: false };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

@@ -1,33 +1,25 @@
 import { IpcMain, BrowserWindow } from 'electron'
 import { join } from 'path'
 import * as fs from 'fs'
-import { transcribeAudio, getModelsDir } from '../transcriber'
-import type { TranscriptResult } from '../transcriber'
+import { transcribeAudio } from '../transcriber'
+import { IPC_CHANNELS } from '../../../shared/types'
+import type { TranscriptResult } from '../../../shared/types'
 import { logger } from '../logger'
-
-// IPC channel names for transcription
-export const TRANSCRIBE_CHANNELS = {
-  START: 'transcribe:start',
-  PROGRESS: 'transcribe:progress',
-  RESULT: 'transcribe:result',
-  GET_TRANSCRIPT: 'transcribe:get',
-  CHECK_MODEL: 'transcribe:check-model'
-} as const
 
 export function registerTranscribeHandlers(ipcMain: IpcMain): void {
   // Check if a model is already downloaded
-  ipcMain.handle(TRANSCRIBE_CHANNELS.CHECK_MODEL, (_event, modelName: string) => {
-    const modelsDir = getModelsDir()
-    const modelFile = join(modelsDir, `ggml-${modelName}.bin`)
+  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, (_event, modelName: string) => {
+    const cacheDir = join(process.env.APPDATA || '', 'long-form-video-factory', 'whisper-models')
+    const modelFile = join(cacheDir, `models--Systran--faster-whisper-${modelName}`)
     return {
       exists: fs.existsSync(modelFile),
       path: modelFile,
-      modelsDir
+      modelsDir: cacheDir
     }
   })
 
   // Get existing transcript
-  ipcMain.handle(TRANSCRIBE_CHANNELS.GET_TRANSCRIPT, (_event, projectDir: string) => {
+  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_GET, (_event, projectDir: string) => {
     const transcriptPath = join(projectDir, 'analysis', 'transcript.json')
     if (!fs.existsSync(transcriptPath)) return null
     try {
@@ -39,7 +31,7 @@ export function registerTranscribeHandlers(ipcMain: IpcMain): void {
 
   // Start transcription
   ipcMain.handle(
-    TRANSCRIBE_CHANNELS.START,
+    IPC_CHANNELS.TRANSCRIBE_START,
     async (
       event,
       params: {
@@ -52,14 +44,14 @@ export function registerTranscribeHandlers(ipcMain: IpcMain): void {
       const win = BrowserWindow.fromWebContents(event.sender)
 
       const sendProgress = (message: string, progress: number): void => {
-        win?.webContents.send(TRANSCRIBE_CHANNELS.PROGRESS, { message, progress })
-        logger.info(`[TRANSCRIBE] ${message} (${Math.round(progress * 100)}%)`)
+        win?.webContents.send(IPC_CHANNELS.TRANSCRIBE_PROGRESS, { message, progress })
+        logger.info(`[TRANSCRIBE] ${message}`)
       }
 
       try {
         sendProgress('Initializing Whisper...', 0.02)
 
-        // Check if cached transcript exists and voiceover hasn't changed
+        // Check cache
         const transcriptPath = join(params.projectDir, 'analysis', 'transcript.json')
         const cacheMetaPath = join(params.projectDir, 'analysis', 'transcript-meta.json')
 
@@ -74,8 +66,6 @@ export function registerTranscribeHandlers(ipcMain: IpcMain): void {
           }
         }
 
-        sendProgress(`Downloading/loading model "${params.modelName}"...`, 0.05)
-
         const transcript = await transcribeAudio(
           params.voiceoverPath,
           params.modelName,
@@ -84,11 +74,9 @@ export function registerTranscribeHandlers(ipcMain: IpcMain): void {
 
         sendProgress('Saving transcript...', 0.95)
 
-        // Save transcript
         fs.mkdirSync(join(params.projectDir, 'analysis'), { recursive: true })
         fs.writeFileSync(transcriptPath, JSON.stringify(transcript, null, 2), 'utf-8')
 
-        // Save cache metadata
         const stat = fs.statSync(params.voiceoverPath)
         fs.writeFileSync(
           cacheMetaPath,
@@ -100,14 +88,8 @@ export function registerTranscribeHandlers(ipcMain: IpcMain): void {
           'utf-8'
         )
 
-        sendProgress(`Transcription complete — ${transcript.segments.length} segments`, 1.0)
-
-        logger.info('Transcript saved', {
-          segments: transcript.segments.length,
-          words: transcript.wordCount,
-          duration: transcript.duration
-        })
-
+        sendProgress(`Done — ${transcript.segments.length} segments`, 1.0)
+        logger.info('Transcript saved', { segments: transcript.segments.length })
         return { success: true, transcript, cached: false }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
