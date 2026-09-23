@@ -1,19 +1,55 @@
 import { join } from 'path'
 import * as fs from 'fs'
-import { spawn } from 'child_process'
+import * as os from 'os'
+import { spawn, execSync } from 'child_process'
 import { app } from 'electron'
 import { logger } from './logger'
 import type { TranscriptResult } from '../../../shared/types'
 
 export type { TranscriptResult }
 
-/** Path to uv binary */
-const UV_PATH = 'C:\\Users\\ADMIN\\.local\\bin\\uv.exe'
+/** Dynamically find path to uv binary across macOS, Linux, and Windows */
+export function getUvPath(): string {
+  if (process.env.UV_PATH && fs.existsSync(process.env.UV_PATH)) {
+    return process.env.UV_PATH
+  }
+
+  // Check via which / where
+  try {
+    const cmd = process.platform === 'win32' ? 'where uv' : 'which uv'
+    const out = execSync(cmd, { encoding: 'utf8', env: process.env }).trim().split(/\r?\n/)[0].trim()
+    if (out && fs.existsSync(out)) {
+      return out
+    }
+  } catch {
+    // not in default PATH
+  }
+
+  const homedir = os.homedir()
+  const candidates = process.platform === 'win32'
+    ? [
+        join(homedir, '.local', 'bin', 'uv.exe'),
+        join(homedir, '.cargo', 'bin', 'uv.exe'),
+        'C:\\Users\\ADMIN\\.local\\bin\\uv.exe'
+      ]
+    : [
+        join(homedir, '.local', 'bin', 'uv'),
+        join(homedir, '.cargo', 'bin', 'uv'),
+        '/opt/homebrew/bin/uv',
+        '/usr/local/bin/uv',
+        '/usr/bin/uv'
+      ]
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate
+  }
+
+  return process.platform === 'win32' ? candidates[0] : 'uv'
+}
 
 /** Path to our Python transcription script */
 function getScriptPath(): string {
   if (!app.isPackaged) {
-    // Dev mode: process.cwd() = project root (d:\Web-auto-edit)
     return join(process.cwd(), 'scripts', 'transcribe.py')
   }
   // Production: scripts/ bundled next to app resources
@@ -36,19 +72,32 @@ export async function transcribeAudio(
 ): Promise<TranscriptResult> {
   const scriptPath = getScriptPath()
   const modelsDir = getModelsDir()
+  const uvPath = getUvPath()
 
   if (!fs.existsSync(scriptPath)) {
     throw new Error(`Transcription script not found: ${scriptPath}`)
   }
 
-  if (!fs.existsSync(UV_PATH)) {
-    throw new Error(`uv not found at ${UV_PATH}. Please install uv: https://docs.astral.sh/uv/`)
+  const uvExists = fs.existsSync(uvPath) || (() => {
+    try {
+      execSync(`${uvPath} --version`, { stdio: 'ignore' })
+      return true
+    } catch {
+      return false
+    }
+  })()
+
+  if (!uvExists) {
+    throw new Error(
+      `uv not found at "${uvPath}". Please install uv (https://docs.astral.sh/uv/) or run "brew install uv" on macOS.`
+    )
   }
 
   logger.info('Starting transcription via uv + faster-whisper', {
     audio: audioPath,
     model: modelName,
-    script: scriptPath
+    script: scriptPath,
+    uv: uvPath
   })
 
   onProgress?.('Starting uv + faster-whisper...', 0.02)
@@ -62,30 +111,41 @@ export async function transcribeAudio(
       '--cache-dir', modelsDir
     ]
 
-    logger.info(`Spawning: ${UV_PATH} ${args.join(' ')}`)
+    logger.info(`Spawning: ${uvPath} ${args.join(' ')}`)
 
-    const proc = spawn(UV_PATH, args, {
+    const proc = spawn(uvPath, args, {
       env: { ...process.env },
       windowsHide: true
     })
 
     let resultData: TranscriptResult | null = null
     let stderr = ''
+    let stdoutBuffer = ''  // accumulate chunks; result JSON can be very large
 
     proc.stdout.on('data', (chunk: Buffer) => {
-      const lines = chunk.toString().split('\n').filter(l => l.trim())
+      stdoutBuffer += chunk.toString()
+
+      // Process only complete lines (ending with \n)
+      const lines = stdoutBuffer.split('\n')
+      // Keep the last partial line in the buffer
+      stdoutBuffer = lines.pop() ?? ''
+
       for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed) continue
         try {
-          const msg = JSON.parse(line)
+          const msg = JSON.parse(trimmed)
           if (msg.type === 'progress') {
             onProgress?.(msg.message, msg.progress)
             logger.info(`[WHISPER] ${msg.message}`)
           } else if (msg.type === 'result') {
             resultData = msg as TranscriptResult
+          } else if (msg.type === 'error') {
+            logger.error(`[WHISPER] Script error: ${msg.message}`)
           }
         } catch {
-          // non-JSON line, ignore
-          logger.debug(`[WHISPER stdout] ${line}`)
+          // non-JSON line — log for debugging
+          logger.debug(`[WHISPER stdout] ${trimmed.slice(0, 120)}`)
         }
       }
     })

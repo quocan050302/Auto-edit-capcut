@@ -1,13 +1,14 @@
 import React from 'react'
 import type { ProjectState } from '../../../../shared/types'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'settings' | 'analysis' | 'render' | 'qa'
 
 interface SidebarProps {
   project: ProjectState | null
   currentPage: Page
   onNavigate: (page: Page) => void
   hasTranscript?: boolean
+  stockCoverage?: { assigned: number; total: number } | null
 }
 
 function statusClass(status: string | undefined): string {
@@ -68,6 +69,16 @@ const NAV_ITEMS: {
     )
   },
   {
+    id: 'stock',
+    label: 'Stock Media',
+    requiresProject: true,
+    icon: (
+      <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
+        <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z" clipRule="evenodd" />
+      </svg>
+    )
+  },
+  {
     id: 'settings',
     label: 'Settings',
     requiresProject: true,
@@ -113,7 +124,8 @@ export function Sidebar({
   project,
   currentPage,
   onNavigate,
-  hasTranscript
+  hasTranscript,
+  stockCoverage
 }: SidebarProps): React.ReactElement {
   return (
     <aside className="sidebar">
@@ -140,6 +152,19 @@ export function Sidebar({
                 background: 'var(--color-success)',
                 flexShrink: 0
               }} />
+            )}
+            {/* Badge: stock coverage */}
+            {item.id === 'stock' && stockCoverage && stockCoverage.total > 0 && (
+              <span style={{
+                fontSize: '9px', fontWeight: 700,
+                background: stockCoverage.assigned === stockCoverage.total
+                  ? 'rgba(52,211,153,0.2)' : 'rgba(96,165,250,0.2)',
+                color: stockCoverage.assigned === stockCoverage.total
+                  ? 'var(--color-success)' : 'var(--color-info)',
+                borderRadius: '999px', padding: '1px 5px', flexShrink: 0
+              }}>
+                {stockCoverage.assigned}/{stockCoverage.total}
+              </span>
             )}
           </button>
         ))}

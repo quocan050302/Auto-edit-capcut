@@ -30,19 +30,23 @@ const IPC_CHANNELS = {
   PLAN_GET: "plan:get",
   // Video Rendering
   RENDER_START: "render:start",
-  RENDER_PROGRESS: "render:progress"
+  RENDER_PROGRESS: "render:progress",
+  // Stock Media Engine
+  STOCK_SEARCH_START: "stock:search-start",
+  STOCK_SEARCH_PROGRESS: "stock:search-progress",
+  STOCK_REVIEW_GET: "stock:review-get",
+  STOCK_SCENE_REPLACE: "stock:scene-replace",
+  STOCK_SCENE_LOCK: "stock:scene-lock",
+  STOCK_SCENE_UPLOAD: "stock:scene-upload"
 };
 const api = {
-  // Window controls
   window: {
     minimize: () => electron.ipcRenderer.send("window:minimize"),
     maximize: () => electron.ipcRenderer.send("window:maximize"),
     close: () => electron.ipcRenderer.send("window:close")
   },
-  // File dialogs
   selectFile: (options) => electron.ipcRenderer.invoke(IPC_CHANNELS.SELECT_FILE, options),
   selectFolder: (options) => electron.ipcRenderer.invoke(IPC_CHANNELS.SELECT_FOLDER, options),
-  // Project management
   project: {
     create: (name) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_CREATE, name),
     open: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_OPEN, projectDir),
@@ -50,7 +54,6 @@ const api = {
     updateInputs: (projectDir, inputs) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_INPUTS, projectDir, inputs),
     updateSettings: (projectDir, settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_SETTINGS, projectDir, settings)
   },
-  // Media scanning
   media: {
     scan: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MEDIA_SCAN, params),
     onScanProgress: (callback) => {
@@ -59,7 +62,6 @@ const api = {
       return () => electron.ipcRenderer.off(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, handler);
     }
   },
-  // Audio transcription (Whisper via uv + faster-whisper)
   transcribe: {
     start: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_START, params),
     getTranscript: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_GET, projectDir),
@@ -70,12 +72,10 @@ const api = {
       return () => electron.ipcRenderer.off(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler);
     }
   },
-  // App config (API keys stored locally)
   config: {
     get: (key) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET, key),
     set: (key, value) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value)
   },
-  // AI Edit Planning
   plan: {
     generate: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.PLAN_GENERATE, params),
     get: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PLAN_GET, projectDir),
@@ -85,7 +85,6 @@ const api = {
       return () => electron.ipcRenderer.off(IPC_CHANNELS.PLAN_PROGRESS, handler);
     }
   },
-  // Video Rendering
   render: {
     start: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_START, params),
     onProgress: (callback) => {
@@ -94,7 +93,18 @@ const api = {
       return () => electron.ipcRenderer.off(IPC_CHANNELS.RENDER_PROGRESS, handler);
     }
   },
-  // App info
+  stock: {
+    run: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SEARCH_START, params),
+    getReview: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_REVIEW_GET, projectDir),
+    replaceScene: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_REPLACE, params),
+    lockScene: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_LOCK, params),
+    uploadOwnMedia: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_UPLOAD, params),
+    onProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler);
+    }
+  },
   getProjectsDir: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
   getAppVersion: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION)
 };

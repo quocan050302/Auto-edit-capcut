@@ -106,6 +106,89 @@ export interface ScanResult {
   errors: Array<{ path: string; error: string }>
 }
 
+// ─── Stock Media Types ────────────────────────────────────────────────────────
+
+export type StockProvider = 'pexels' | 'pixabay'
+export type StockMediaType = 'video' | 'photo'
+
+/** A single candidate returned from a stock media API search */
+export interface StockSearchResult {
+  assetId: string
+  provider: StockProvider
+  mediaType: StockMediaType
+  title: string
+  tags: string[]
+  thumbnailUrl: string
+  previewUrl: string       // small/preview video or image URL
+  downloadUrl: string      // best quality download URL
+  width: number
+  height: number
+  durationSecs?: number    // only for video
+  creator: string
+  creatorUrl?: string
+  licenseUrl?: string
+  pageUrl: string
+}
+
+/** A stock asset that has been downloaded to disk */
+export interface StockAsset {
+  assetId: string
+  provider: StockProvider
+  mediaType: StockMediaType
+  localPath: string        // absolute path in project/assets/stock/
+  thumbnailUrl: string
+  downloadUrl: string
+  creator: string
+  licenseUrl?: string
+  searchQuery: string
+  downloadedAt: string
+  fileSizeBytes?: number
+}
+
+/** Assignment of a stock asset to one scene */
+export interface StockSceneAssignment {
+  sceneId: string          // scene identifier from the edit plan
+  sceneIndex: number
+  narrationText: string
+  startTime: number
+  endTime: number
+  visualIntent: string
+  searchQueries: string[]
+  usedQuery: string
+  asset: StockAsset | null
+  score: number
+  locked: boolean
+  manualOverride: boolean  // true if user uploaded their own file
+  status: 'pending' | 'searching' | 'assigned' | 'failed' | 'disabled'
+  errorMessage?: string
+}
+
+/** Parameters passed to the stock engine */
+export interface StockRunParams {
+  projectDir: string
+  pexelsApiKey: string
+  pixabayApiKey?: string
+  preferredAspectRatio?: string  // e.g. '16:9'
+}
+
+/** Result from a completed stock engine run */
+export interface StockRunResult {
+  success: boolean
+  totalScenes: number
+  assignedScenes: number
+  failedScenes: number
+  assignments: StockSceneAssignment[]
+  error?: string
+}
+
+/** What the renderer fetches for the review UI */
+export interface StockReviewData {
+  assignments: StockSceneAssignment[]
+  totalScenes: number
+  assignedScenes: number
+  stockAssetsJson: StockAsset[]
+}
+
 // IPC channel names
 export const IPC_CHANNELS = {
   // File dialogs
@@ -148,7 +231,15 @@ export const IPC_CHANNELS = {
   // Video Rendering
   RENDER_START: 'render:start',
   RENDER_PROGRESS: 'render:progress',
-  RENDER_CANCEL: 'render:cancel'
+  RENDER_CANCEL: 'render:cancel',
+
+  // Stock Media Engine
+  STOCK_SEARCH_START: 'stock:search-start',
+  STOCK_SEARCH_PROGRESS: 'stock:search-progress',
+  STOCK_REVIEW_GET: 'stock:review-get',
+  STOCK_SCENE_REPLACE: 'stock:scene-replace',
+  STOCK_SCENE_LOCK: 'stock:scene-lock',
+  STOCK_SCENE_UPLOAD: 'stock:scene-upload'
 } as const
 
 // ─── Transcript types (shared between main and renderer) ─────────────────────

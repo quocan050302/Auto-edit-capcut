@@ -10,10 +10,12 @@ import { TranscriptionPage } from './pages/TranscriptionPage'
 import { PlanningPage } from './pages/PlanningPage'
 import { RenderPage } from './pages/RenderPage'
 import { QAPage } from './pages/PlaceholderPages'
+import { StockPage } from './pages/StockPage'
 import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
+import { useStock } from './hooks/useStock'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'settings' | 'analysis' | 'render' | 'qa'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
@@ -39,6 +41,17 @@ export default function App(): React.ReactElement {
     startTranscription,
     loadCachedTranscript
   } = useTranscribe(addLog)
+
+  const {
+    isRunning: isStockRunning,
+    progress: stockProgress,
+    review: stockReview,
+    runStockSearch,
+    loadReview: loadStockReview,
+    replaceScene: stockReplace,
+    lockScene: stockLock,
+    uploadOwnMedia: stockUpload
+  } = useStock(addLog)
 
   // Load cached transcript when project opens
   useEffect(() => {
@@ -78,7 +91,7 @@ export default function App(): React.ReactElement {
   }
 
   const activeLogs = logs
-  const activeProgress = isScanning ? scanProgress : isTranscribing ? transcribeProgress : null
+  const activeProgress = isScanning ? scanProgress : isTranscribing ? transcribeProgress : isStockRunning ? stockProgress : null
 
   return (
     <div className="app-shell">
@@ -90,6 +103,7 @@ export default function App(): React.ReactElement {
           currentPage={currentPage}
           onNavigate={navigate}
           hasTranscript={transcript !== null}
+          stockCoverage={stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null}
         />
 
         <div className="main-content">
@@ -122,6 +136,20 @@ export default function App(): React.ReactElement {
 
           {currentPage === 'planning' && project && (
             <PlanningPage project={project} />
+          )}
+
+          {currentPage === 'stock' && project && (
+            <StockPage
+              project={project}
+              review={stockReview}
+              isRunning={isStockRunning}
+              progress={stockProgress}
+              onRun={() => runStockSearch(project.projectDir)}
+              onReplace={(idx, q) => stockReplace(project.projectDir, idx, q)}
+              onLock={(idx, locked) => stockLock(project.projectDir, idx, locked)}
+              onUpload={(idx) => stockUpload(project.projectDir, idx)}
+              onLoad={() => loadStockReview(project.projectDir)}
+            />
           )}
 
           {currentPage === 'settings' && project && (

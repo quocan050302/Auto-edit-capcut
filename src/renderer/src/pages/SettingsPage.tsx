@@ -195,6 +195,50 @@ export function SettingsPage({ project, onUpdateSettings }: SettingsPageProps): 
         </div>
       </div>
 
+      {/* ── Stock API Keys ──────────────────────────────── */}
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-title">
+            <div className="panel-title-icon">
+              <svg width="12" height="12" viewBox="0 0 20 20" fill="var(--brand-primary)">
+                <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z" clipRule="evenodd" />
+              </svg>
+            </div>
+            API Providers — Stock Media
+          </div>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+            Stored locally — never uploaded
+          </span>
+        </div>
+        <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          <ApiKeyRow
+            label="Pexels API Key"
+            configKey="pexelsApiKey"
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            hint="Primary stock video provider. Free tier — 200 requests/hour."
+            link="https://www.pexels.com/api/"
+            linkLabel="Get free key at pexels.com/api ↗"
+          />
+          <ApiKeyRow
+            label="Pixabay API Key"
+            configKey="pixabayApiKey"
+            placeholder="00000000-xxxxxxxxxxxxxxxxxxxxxxxx"
+            hint="Fallback stock provider. Free tier — 100 requests/minute."
+            link="https://pixabay.com/api/docs/"
+            linkLabel="Get free key at pixabay.com/api/docs ↗"
+          />
+          <ApiKeyRow
+            label="Giphy API Key (optional)"
+            configKey="giphyApiKey"
+            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            hint="Optional. Not used as a primary documentary stock provider."
+            link="https://developers.giphy.com/"
+            linkLabel="Get key at developers.giphy.com ↗"
+          />
+        </div>
+      </div>
+
+
       {/* ── Video Type ───────────────────────────────── */}
       <div className="panel">
         <div className="panel-header">

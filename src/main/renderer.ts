@@ -65,6 +65,18 @@ function resolveMediaPath(
   return item ? item.path : null
 }
 
+/** Resolve the actual media path for a scene — prefers localPath (stock downloads) over mediaFile lookup */
+function resolveSceneMedia(
+  scene: ScenePlan & { localPath?: string; localAsset?: string },
+  mediaIndex: Array<{ filename: string; path: string }>
+): string | null {
+  // 1. Direct local path (set by stock engine or user upload)
+  if (scene.localPath && fs.existsSync(scene.localPath)) return scene.localPath
+  if (scene.localAsset && fs.existsSync(scene.localAsset)) return scene.localAsset
+  // 2. Look up by filename in media index
+  return resolveMediaPath(scene.mediaFile, mediaIndex)
+}
+
 // ─── Main render function ─────────────────────────────────────────────────────
 
 export async function renderVideo(params: {
@@ -125,7 +137,7 @@ export async function renderVideo(params: {
       totalScenes
     })
 
-    const mediaPath = resolveMediaPath(scene.mediaFile, mediaIndex)
+    const mediaPath = resolveSceneMedia(scene as ScenePlan & { localPath?: string; localAsset?: string }, mediaIndex)
     const outClip = path.join(tmpDir, `scene_${String(i + 1).padStart(4, '0')}.mp4`)
 
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`

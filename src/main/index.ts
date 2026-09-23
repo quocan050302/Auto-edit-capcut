@@ -7,6 +7,7 @@ import { registerMediaHandlers } from './ipc/media.ipc'
 import { registerTranscribeHandlers } from './ipc/transcribe.ipc'
 import { registerPlannerHandlers } from './ipc/planner.ipc'
 import { registerRenderHandlers } from './ipc/render.ipc'
+import { registerStockHandlers } from './ipc/stock.ipc'
 import { logger } from './logger'
 
 function createWindow(): BrowserWindow {
@@ -60,6 +61,7 @@ app.whenReady().then(() => {
   registerTranscribeHandlers(ipcMain)
   registerPlannerHandlers(ipcMain)
   registerRenderHandlers(ipcMain)
+  registerStockHandlers(ipcMain)
 
   const mainWindow = createWindow()
 

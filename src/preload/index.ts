@@ -5,19 +5,19 @@ import type {
   ProjectSettings,
   ProjectInputs,
   ScanResult,
-  TranscriptResult
+  TranscriptResult,
+  StockRunResult,
+  StockReviewData,
+  StockAsset
 } from '../../shared/types'
 
-// Expose a typed API to the renderer via window.api
 const api = {
-  // Window controls
   window: {
     minimize: () => ipcRenderer.send('window:minimize'),
     maximize: () => ipcRenderer.send('window:maximize'),
     close: () => ipcRenderer.send('window:close')
   },
 
-  // File dialogs
   selectFile: (options: {
     title: string
     filters?: Electron.FileFilter[]
@@ -29,14 +29,11 @@ const api = {
     defaultPath?: string
   }): Promise<string | null> => ipcRenderer.invoke(IPC_CHANNELS.SELECT_FOLDER, options),
 
-  // Project management
   project: {
     create: (name: string): Promise<{ success: boolean; state?: ProjectState; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECT_CREATE, name),
 
-    open: (
-      projectDir: string
-    ): Promise<{ success: boolean; state?: ProjectState; error?: string }> =>
+    open: (projectDir: string): Promise<{ success: boolean; state?: ProjectState; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PROJECT_OPEN, projectDir),
 
     save: (state: ProjectState): Promise<{ success: boolean; error?: string }> =>
@@ -55,7 +52,6 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_SETTINGS, projectDir, settings)
   },
 
-  // Media scanning
   media: {
     scan: (params: {
       projectDir: string
@@ -65,19 +61,14 @@ const api = {
       sfxFolder: string | null
     }): Promise<ScanResult> => ipcRenderer.invoke(IPC_CHANNELS.MEDIA_SCAN, params),
 
-    onScanProgress: (
-      callback: (data: { message: string; progress: number }) => void
-    ) => {
-      const handler = (
-        _event: Electron.IpcRendererEvent,
-        data: { message: string; progress: number }
-      ): void => callback(data)
+    onScanProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
       ipcRenderer.on(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, handler)
     }
   },
 
-  // Audio transcription (Whisper via uv + faster-whisper)
   transcribe: {
     start: (params: {
       projectDir: string
@@ -94,16 +85,13 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, modelName),
 
     onProgress: (callback: (data: { message: string; progress: number }) => void) => {
-      const handler = (
-        _event: Electron.IpcRendererEvent,
-        data: { message: string; progress: number }
-      ): void => callback(data)
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
       ipcRenderer.on(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.TRANSCRIBE_PROGRESS, handler)
     }
   },
 
-  // App config (API keys stored locally)
   config: {
     get: (key: string): Promise<string | null> =>
       ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET, key),
@@ -111,7 +99,6 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value)
   },
 
-  // AI Edit Planning
   plan: {
     generate: (params: { projectDir: string; model?: string }): Promise<{ success: boolean; plan?: unknown; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PLAN_GENERATE, params),
@@ -127,7 +114,6 @@ const api = {
     }
   },
 
-  // Video Rendering
   render: {
     start: (params: {
       projectDir: string
@@ -138,21 +124,38 @@ const api = {
     }): Promise<{ success: boolean; result?: unknown; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.RENDER_START, params),
 
-    onProgress: (callback: (data: {
-      stage: string
-      sceneIndex?: number
-      totalScenes?: number
-      progress: number
-    }) => void) => {
-      const handler = (_event: Electron.IpcRendererEvent, data: {
-        stage: string; sceneIndex?: number; totalScenes?: number; progress: number
-      }): void => callback(data)
+    onProgress: (callback: (data: { stage: string; sceneIndex?: number; totalScenes?: number; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { stage: string; sceneIndex?: number; totalScenes?: number; progress: number }): void =>
+        callback(data)
       ipcRenderer.on(IPC_CHANNELS.RENDER_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.RENDER_PROGRESS, handler)
     }
   },
 
-  // App info
+  stock: {
+    run: (params: { projectDir: string }): Promise<StockRunResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_SEARCH_START, params),
+
+    getReview: (projectDir: string): Promise<StockReviewData> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_REVIEW_GET, projectDir),
+
+    replaceScene: (params: { projectDir: string; sceneIndex: number; query: string }): Promise<{ success: boolean; asset?: StockAsset; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_REPLACE, params),
+
+    lockScene: (params: { projectDir: string; sceneIndex: number; locked: boolean }): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_LOCK, params),
+
+    uploadOwnMedia: (params: { projectDir: string; sceneIndex: number; filePath: string }): Promise<{ success: boolean; asset?: StockAsset; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_UPLOAD, params),
+
+    onProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler)
+    }
+  },
+
   getProjectsDir: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION)
 }

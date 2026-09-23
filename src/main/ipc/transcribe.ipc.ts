@@ -1,7 +1,7 @@
 import { IpcMain, BrowserWindow } from 'electron'
 import { join } from 'path'
 import * as fs from 'fs'
-import { transcribeAudio } from '../transcriber'
+import { transcribeAudio, getModelsDir } from '../transcriber'
 import { IPC_CHANNELS } from '../../../shared/types'
 import type { TranscriptResult } from '../../../shared/types'
 import { logger } from '../logger'
@@ -9,7 +9,7 @@ import { logger } from '../logger'
 export function registerTranscribeHandlers(ipcMain: IpcMain): void {
   // Check if a model is already downloaded
   ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, (_event, modelName: string) => {
-    const cacheDir = join(process.env.APPDATA || '', 'long-form-video-factory', 'whisper-models')
+    const cacheDir = getModelsDir()
     const modelFile = join(cacheDir, `models--Systran--faster-whisper-${modelName}`)
     return {
       exists: fs.existsSync(modelFile),

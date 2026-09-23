@@ -64,35 +64,72 @@ function buildPrompt(
 ): string {
   const videoFiles = mediaFiles.filter(m => m.type === 'video')
   const imageFiles = mediaFiles.filter(m => m.type === 'image')
+  const hasLocalMedia = mediaFiles.length > 0
 
-  const mediaList = [
+  const mediaList = hasLocalMedia ? [
     ...videoFiles.map(v => `  VIDEO: ${v.filename} (${v.durationSecs?.toFixed(1) ?? '?'}s)`),
     ...imageFiles.map(i => `  IMAGE: ${i.filename}`)
-  ].join('\n')
+  ].join('\n') : ''
 
   const transcriptLines = transcript.segments.map(seg =>
     `[${seg.id}] ${seg.start.toFixed(1)}s-${seg.end.toFixed(1)}s: "${seg.text}"`
   ).join('\n')
 
-  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan that matches narration segments with available media files.
+  const mediaSection = hasLocalMedia
+    ? `## AVAILABLE LOCAL MEDIA LIBRARY\n${mediaList}\n`
+    : `## MEDIA MODE: STOCK SEARCH ONLY\nNo local media files provided. You MUST NOT invent filenames. Set "localAsset" to null for all scenes.\n`
+
+  const sceneSchemaExample = hasLocalMedia
+    ? `{
+              "sceneIndex": 1,
+              "localAsset": "exact_filename.mp4 or null if no match",
+              "mediaType": "video",
+              "startTime": 0,
+              "endTime": 15,
+              "duration": 15,
+              "narrativeText": "The narration text spoken here",
+              "transcriptSegmentIds": ["N001", "N002"],
+              "transitionIn": "cut",
+              "visualNote": "Shows opening establishing shot",
+              "visualIntent": "short description of visual concept (3-10 words)",
+              "searchQueries": ["short query 1", "short query 2", "short query 3"]
+            }`
+    : `{
+              "sceneIndex": 1,
+              "localAsset": null,
+              "mediaType": "video",
+              "startTime": 0,
+              "endTime": 15,
+              "duration": 15,
+              "narrativeText": "The narration text spoken here",
+              "transcriptSegmentIds": ["N001", "N002"],
+              "transitionIn": "cut",
+              "visualNote": "Shows opening establishing shot",
+              "visualIntent": "short description of visual concept (3-10 words)",
+              "searchQueries": ["short query 1", "short query 2", "short query 3"]
+            }`
+
+  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan.
 
 ## NARRATION TRANSCRIPT (${transcript.segments.length} segments, ${transcript.duration.toFixed(0)}s total)
 ${transcriptLines}
 
-## AVAILABLE MEDIA LIBRARY
-${mediaList}
-
+${mediaSection}
 ${scriptText ? `## ORIGINAL SCRIPT\n${scriptText.slice(0, 8000)}\n` : ''}
 
 ## YOUR TASK
 Create a master edit plan as a JSON object. Rules:
 1. Every second of narration MUST be covered by a media clip
-2. Match media files logically to the narrative content (use filename clues)
+2. ${hasLocalMedia ? 'Match local files logically to narrative content. Set "localAsset" to the exact filename if matched, or null if no local file fits — stock search will fill those gaps.' : 'Set "localAsset" to null for all scenes (stock will be auto-searched).'}
 3. Videos can be used for their full duration or trimmed
 4. Images should display for 3-8 seconds
 5. Divide the content into 3-6 chapters with meaningful titles
 6. Each chapter has 2-4 sequences, each sequence has 2-6 scenes
 7. Transition between scenes: mostly "cut", use "fade" for chapter breaks
+8. For EVERY scene, write a "visualIntent" (3-10 words describing the visual concept) and 3-5 "searchQueries".
+   IMPORTANT — searchQueries must be SHORT and VISUALLY SEARCHABLE (not literal narration sentences).
+   BAD:  "family has to borrow money to cover funeral expenses"
+   GOOD: ["worried family bills", "credit card debt", "financial stress", "loan paperwork"]
 
 Return ONLY valid JSON, no explanation, matching this exact schema:
 {
@@ -109,18 +146,7 @@ Return ONLY valid JSON, no explanation, matching this exact schema:
           "startTime": 0,
           "endTime": 60,
           "scenes": [
-            {
-              "sceneIndex": 1,
-              "mediaFile": "exact_filename.mp4",
-              "mediaType": "video",
-              "startTime": 0,
-              "endTime": 15,
-              "duration": 15,
-              "narrativeText": "The narration text spoken here",
-              "transcriptSegmentIds": ["N001", "N002"],
-              "transitionIn": "cut",
-              "visualNote": "Shows opening establishing shot"
-            }
+            ${sceneSchemaExample}
           ]
         }
       ]

@@ -7,8 +7,12 @@ const uuid = require("uuid");
 const winston = require("winston");
 require("crypto");
 const ffprobeStatic = require("ffprobe-static");
+const os = require("os");
 const child_process = require("child_process");
 const genai = require("@google/genai");
+const https = require("https");
+const http = require("http");
+const url = require("url");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -28,6 +32,9 @@ function _interopNamespaceDefault(e) {
 const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
 const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const winston__namespace = /* @__PURE__ */ _interopNamespaceDefault(winston);
+const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
+const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
+const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 const IPC_CHANNELS = {
   // File dialogs
   SELECT_FILE: "select-file",
@@ -58,7 +65,14 @@ const IPC_CHANNELS = {
   PLAN_GET: "plan:get",
   // Video Rendering
   RENDER_START: "render:start",
-  RENDER_PROGRESS: "render:progress"
+  RENDER_PROGRESS: "render:progress",
+  // Stock Media Engine
+  STOCK_SEARCH_START: "stock:search-start",
+  STOCK_SEARCH_PROGRESS: "stock:search-progress",
+  STOCK_REVIEW_GET: "stock:review-get",
+  STOCK_SCENE_REPLACE: "stock:scene-replace",
+  STOCK_SCENE_LOCK: "stock:scene-lock",
+  STOCK_SCENE_UPLOAD: "stock:scene-upload"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -478,7 +492,35 @@ function registerMediaHandlers(ipcMain) {
     }
   );
 }
-const UV_PATH = "C:\\Users\\ADMIN\\.local\\bin\\uv.exe";
+function getUvPath() {
+  if (process.env.UV_PATH && fs__namespace.existsSync(process.env.UV_PATH)) {
+    return process.env.UV_PATH;
+  }
+  try {
+    const cmd = process.platform === "win32" ? "where uv" : "which uv";
+    const out = child_process.execSync(cmd, { encoding: "utf8", env: process.env }).trim().split(/\r?\n/)[0].trim();
+    if (out && fs__namespace.existsSync(out)) {
+      return out;
+    }
+  } catch {
+  }
+  const homedir = os__namespace.homedir();
+  const candidates = process.platform === "win32" ? [
+    path.join(homedir, ".local", "bin", "uv.exe"),
+    path.join(homedir, ".cargo", "bin", "uv.exe"),
+    "C:\\Users\\ADMIN\\.local\\bin\\uv.exe"
+  ] : [
+    path.join(homedir, ".local", "bin", "uv"),
+    path.join(homedir, ".cargo", "bin", "uv"),
+    "/opt/homebrew/bin/uv",
+    "/usr/local/bin/uv",
+    "/usr/bin/uv"
+  ];
+  for (const candidate of candidates) {
+    if (fs__namespace.existsSync(candidate)) return candidate;
+  }
+  return process.platform === "win32" ? candidates[0] : "uv";
+}
 function getScriptPath() {
   if (!electron.app.isPackaged) {
     return path.join(process.cwd(), "scripts", "transcribe.py");
@@ -493,16 +535,28 @@ function getModelsDir() {
 async function transcribeAudio(audioPath, modelName = "base", onProgress) {
   const scriptPath = getScriptPath();
   const modelsDir = getModelsDir();
+  const uvPath = getUvPath();
   if (!fs__namespace.existsSync(scriptPath)) {
     throw new Error(`Transcription script not found: ${scriptPath}`);
   }
-  if (!fs__namespace.existsSync(UV_PATH)) {
-    throw new Error(`uv not found at ${UV_PATH}. Please install uv: https://docs.astral.sh/uv/`);
+  const uvExists = fs__namespace.existsSync(uvPath) || (() => {
+    try {
+      child_process.execSync(`${uvPath} --version`, { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+  if (!uvExists) {
+    throw new Error(
+      `uv not found at "${uvPath}". Please install uv (https://docs.astral.sh/uv/) or run "brew install uv" on macOS.`
+    );
   }
   logger.info("Starting transcription via uv + faster-whisper", {
     audio: audioPath,
     model: modelName,
-    script: scriptPath
+    script: scriptPath,
+    uv: uvPath
   });
   onProgress?.("Starting uv + faster-whisper...", 0.02);
   return new Promise((resolve, reject) => {
@@ -515,26 +569,33 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
       "--cache-dir",
       modelsDir
     ];
-    logger.info(`Spawning: ${UV_PATH} ${args.join(" ")}`);
-    const proc = child_process.spawn(UV_PATH, args, {
+    logger.info(`Spawning: ${uvPath} ${args.join(" ")}`);
+    const proc = child_process.spawn(uvPath, args, {
       env: { ...process.env },
       windowsHide: true
     });
     let resultData = null;
     let stderr = "";
+    let stdoutBuffer = "";
     proc.stdout.on("data", (chunk) => {
-      const lines = chunk.toString().split("\n").filter((l) => l.trim());
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split("\n");
+      stdoutBuffer = lines.pop() ?? "";
       for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
         try {
-          const msg = JSON.parse(line);
+          const msg = JSON.parse(trimmed);
           if (msg.type === "progress") {
             onProgress?.(msg.message, msg.progress);
             logger.info(`[WHISPER] ${msg.message}`);
           } else if (msg.type === "result") {
             resultData = msg;
+          } else if (msg.type === "error") {
+            logger.error(`[WHISPER] Script error: ${msg.message}`);
           }
         } catch {
-          logger.debug(`[WHISPER stdout] ${line}`);
+          logger.debug(`[WHISPER stdout] ${trimmed.slice(0, 120)}`);
         }
       }
     });
@@ -572,7 +633,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
 }
 function registerTranscribeHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, (_event, modelName) => {
-    const cacheDir = path.join(process.env.APPDATA || "", "long-form-video-factory", "whisper-models");
+    const cacheDir = getModelsDir();
     const modelFile = path.join(cacheDir, `models--Systran--faster-whisper-${modelName}`);
     return {
       exists: fs__namespace.existsSync(modelFile),
@@ -644,21 +705,52 @@ function registerTranscribeHandlers(ipcMain) {
 function buildPrompt(transcript, scriptText, mediaFiles) {
   const videoFiles = mediaFiles.filter((m) => m.type === "video");
   const imageFiles = mediaFiles.filter((m) => m.type === "image");
-  const mediaList = [
+  const hasLocalMedia = mediaFiles.length > 0;
+  const mediaList = hasLocalMedia ? [
     ...videoFiles.map((v) => `  VIDEO: ${v.filename} (${v.durationSecs?.toFixed(1) ?? "?"}s)`),
     ...imageFiles.map((i) => `  IMAGE: ${i.filename}`)
-  ].join("\n");
+  ].join("\n") : "";
   const transcriptLines = transcript.segments.map(
     (seg) => `[${seg.id}] ${seg.start.toFixed(1)}s-${seg.end.toFixed(1)}s: "${seg.text}"`
   ).join("\n");
-  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan that matches narration segments with available media files.
+  const mediaSection = hasLocalMedia ? `## AVAILABLE LOCAL MEDIA LIBRARY
+${mediaList}
+` : `## MEDIA MODE: STOCK SEARCH ONLY
+No local media files provided. You MUST NOT invent filenames. Set "localAsset" to null for all scenes.
+`;
+  const sceneSchemaExample = hasLocalMedia ? `{
+              "sceneIndex": 1,
+              "localAsset": "exact_filename.mp4 or null if no match",
+              "mediaType": "video",
+              "startTime": 0,
+              "endTime": 15,
+              "duration": 15,
+              "narrativeText": "The narration text spoken here",
+              "transcriptSegmentIds": ["N001", "N002"],
+              "transitionIn": "cut",
+              "visualNote": "Shows opening establishing shot",
+              "visualIntent": "short description of visual concept (3-10 words)",
+              "searchQueries": ["short query 1", "short query 2", "short query 3"]
+            }` : `{
+              "sceneIndex": 1,
+              "localAsset": null,
+              "mediaType": "video",
+              "startTime": 0,
+              "endTime": 15,
+              "duration": 15,
+              "narrativeText": "The narration text spoken here",
+              "transcriptSegmentIds": ["N001", "N002"],
+              "transitionIn": "cut",
+              "visualNote": "Shows opening establishing shot",
+              "visualIntent": "short description of visual concept (3-10 words)",
+              "searchQueries": ["short query 1", "short query 2", "short query 3"]
+            }`;
+  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan.
 
 ## NARRATION TRANSCRIPT (${transcript.segments.length} segments, ${transcript.duration.toFixed(0)}s total)
 ${transcriptLines}
 
-## AVAILABLE MEDIA LIBRARY
-${mediaList}
-
+${mediaSection}
 ${scriptText ? `## ORIGINAL SCRIPT
 ${scriptText.slice(0, 8e3)}
 ` : ""}
@@ -666,12 +758,16 @@ ${scriptText.slice(0, 8e3)}
 ## YOUR TASK
 Create a master edit plan as a JSON object. Rules:
 1. Every second of narration MUST be covered by a media clip
-2. Match media files logically to the narrative content (use filename clues)
+2. ${hasLocalMedia ? 'Match local files logically to narrative content. Set "localAsset" to the exact filename if matched, or null if no local file fits — stock search will fill those gaps.' : 'Set "localAsset" to null for all scenes (stock will be auto-searched).'}
 3. Videos can be used for their full duration or trimmed
 4. Images should display for 3-8 seconds
 5. Divide the content into 3-6 chapters with meaningful titles
 6. Each chapter has 2-4 sequences, each sequence has 2-6 scenes
 7. Transition between scenes: mostly "cut", use "fade" for chapter breaks
+8. For EVERY scene, write a "visualIntent" (3-10 words describing the visual concept) and 3-5 "searchQueries".
+   IMPORTANT — searchQueries must be SHORT and VISUALLY SEARCHABLE (not literal narration sentences).
+   BAD:  "family has to borrow money to cover funeral expenses"
+   GOOD: ["worried family bills", "credit card debt", "financial stress", "loan paperwork"]
 
 Return ONLY valid JSON, no explanation, matching this exact schema:
 {
@@ -688,18 +784,7 @@ Return ONLY valid JSON, no explanation, matching this exact schema:
           "startTime": 0,
           "endTime": 60,
           "scenes": [
-            {
-              "sceneIndex": 1,
-              "mediaFile": "exact_filename.mp4",
-              "mediaType": "video",
-              "startTime": 0,
-              "endTime": 15,
-              "duration": 15,
-              "narrativeText": "The narration text spoken here",
-              "transcriptSegmentIds": ["N001", "N002"],
-              "transitionIn": "cut",
-              "visualNote": "Shows opening establishing shot"
-            }
+            ${sceneSchemaExample}
           ]
         }
       ]
@@ -916,6 +1001,11 @@ function resolveMediaPath(filename, mediaIndex) {
   const item = mediaIndex.find((m) => m.filename === filename || path__namespace.basename(m.path) === filename);
   return item ? item.path : null;
 }
+function resolveSceneMedia(scene, mediaIndex) {
+  if (scene.localPath && fs__namespace.existsSync(scene.localPath)) return scene.localPath;
+  if (scene.localAsset && fs__namespace.existsSync(scene.localAsset)) return scene.localAsset;
+  return resolveMediaPath(scene.mediaFile, mediaIndex);
+}
 async function renderVideo(params) {
   const {
     projectDir,
@@ -952,7 +1042,7 @@ async function renderVideo(params) {
       sceneIndex: i + 1,
       totalScenes
     });
-    const mediaPath = resolveMediaPath(scene.mediaFile, mediaIndex);
+    const mediaPath = resolveSceneMedia(scene, mediaIndex);
     const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
     if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
@@ -1110,6 +1200,745 @@ function registerRenderHandlers(ipcMain) {
     }
   );
 }
+const PEXELS_BASE = "https://api.pexels.com";
+async function pexelsFetch(url2, apiKey, attempt = 0) {
+  const res = await fetch(url2, {
+    headers: { Authorization: apiKey }
+  });
+  if (res.status === 429 && attempt < 3) {
+    const retryAfter = Number(res.headers.get("Retry-After") ?? 5) || 5;
+    const delay = Math.max(retryAfter, Math.pow(2, attempt) * 3) * 1e3;
+    logger.warn(`[Pexels] 429 rate-limited — waiting ${delay / 1e3}s (attempt ${attempt + 1}/3)`);
+    await new Promise((r) => setTimeout(r, delay));
+    return pexelsFetch(url2, apiKey, attempt + 1);
+  }
+  return res;
+}
+async function pexelsSearchVideos(query, apiKey, perPage = 8, orientation = "landscape") {
+  const url2 = `${PEXELS_BASE}/videos/search?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=${orientation}`;
+  let res;
+  try {
+    res = await pexelsFetch(url2, apiKey);
+  } catch (err) {
+    logger.error(`[Pexels] Network error searching videos: ${err}`);
+    return [];
+  }
+  if (!res.ok) {
+    logger.warn(`[Pexels] Video search returned ${res.status} for query "${query}"`);
+    return [];
+  }
+  const data = await res.json();
+  return (data.videos ?? []).map((v) => {
+    const files = (v.video_files ?? []).sort((a, b) => {
+      const qualityOrder = { hd: 3, sd: 2, hls: 1 };
+      return (qualityOrder[b.quality] ?? 0) - (qualityOrder[a.quality] ?? 0);
+    });
+    const best = files[0] ?? { link: "", width: v.width, height: v.height };
+    return {
+      assetId: `pexels_v_${v.id}`,
+      provider: "pexels",
+      mediaType: "video",
+      title: `Pexels video ${v.id}`,
+      tags: [],
+      thumbnailUrl: v.image ?? "",
+      previewUrl: v.image ?? "",
+      downloadUrl: best.link,
+      width: best.width ?? v.width,
+      height: best.height ?? v.height,
+      durationSecs: v.duration,
+      creator: v.user?.name ?? "Unknown",
+      creatorUrl: v.user?.url,
+      pageUrl: v.url
+    };
+  });
+}
+async function pexelsSearchPhotos(query, apiKey, perPage = 8, orientation = "landscape") {
+  const url2 = `${PEXELS_BASE}/v1/search?query=${encodeURIComponent(query)}&per_page=${perPage}&orientation=${orientation}`;
+  let res;
+  try {
+    res = await pexelsFetch(url2, apiKey);
+  } catch (err) {
+    logger.error(`[Pexels] Network error searching photos: ${err}`);
+    return [];
+  }
+  if (!res.ok) {
+    logger.warn(`[Pexels] Photo search returned ${res.status} for query "${query}"`);
+    return [];
+  }
+  const data = await res.json();
+  return (data.photos ?? []).map((p) => ({
+    assetId: `pexels_p_${p.id}`,
+    provider: "pexels",
+    mediaType: "photo",
+    title: p.alt || `Pexels photo ${p.id}`,
+    tags: [],
+    thumbnailUrl: p.src?.large ?? p.src?.original ?? "",
+    previewUrl: p.src?.large ?? "",
+    downloadUrl: p.src?.original ?? p.src?.large2x ?? "",
+    width: p.width,
+    height: p.height,
+    creator: p.photographer ?? "Unknown",
+    creatorUrl: p.photographer_url,
+    pageUrl: p.url
+  }));
+}
+const PIXABAY_BASE = "https://pixabay.com/api";
+async function pixabayFetch(url2, attempt = 0) {
+  const res = await fetch(url2);
+  if (res.status === 429 && attempt < 3) {
+    const delay = Math.pow(2, attempt) * 4e3;
+    logger.warn(`[Pixabay] 429 rate-limited — waiting ${delay / 1e3}s (attempt ${attempt + 1}/3)`);
+    await new Promise((r) => setTimeout(r, delay));
+    return pixabayFetch(url2, attempt + 1);
+  }
+  return res;
+}
+async function pixabaySearchVideos(query, apiKey, perPage = 8, orientation = "horizontal") {
+  const url2 = `${PIXABAY_BASE}/videos/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=${perPage}&video_type=all&orientation=${orientation}`;
+  let res;
+  try {
+    res = await pixabayFetch(url2);
+  } catch (err) {
+    logger.error(`[Pixabay] Network error searching videos: ${err}`);
+    return [];
+  }
+  if (!res.ok) {
+    logger.warn(`[Pixabay] Video search returned ${res.status} for query "${query}"`);
+    return [];
+  }
+  const data = await res.json();
+  return (data.hits ?? []).map((v) => {
+    const best = v.videos?.large?.url ? v.videos.large : v.videos?.medium ?? v.videos?.small;
+    const thumb = `https://i.vimeocdn.com/video/${v.picture_id}_640x360.jpg`;
+    return {
+      assetId: `pixabay_v_${v.id}`,
+      provider: "pixabay",
+      mediaType: "video",
+      title: `Pixabay video ${v.id}`,
+      tags: (v.tags ?? "").split(",").map((t) => t.trim()),
+      thumbnailUrl: thumb,
+      previewUrl: thumb,
+      downloadUrl: best?.url ?? "",
+      width: best?.width ?? 1920,
+      height: best?.height ?? 1080,
+      durationSecs: v.duration,
+      creator: v.user ?? "Unknown",
+      pageUrl: v.pageURL
+    };
+  });
+}
+async function pixabaySearchPhotos(query, apiKey, perPage = 8, orientation = "horizontal") {
+  const url2 = `${PIXABAY_BASE}/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=${perPage}&image_type=photo&orientation=${orientation}`;
+  let res;
+  try {
+    res = await pixabayFetch(url2);
+  } catch (err) {
+    logger.error(`[Pixabay] Network error searching photos: ${err}`);
+    return [];
+  }
+  if (!res.ok) {
+    logger.warn(`[Pixabay] Photo search returned ${res.status} for query "${query}"`);
+    return [];
+  }
+  const data = await res.json();
+  return (data.hits ?? []).map((p) => ({
+    assetId: `pixabay_p_${p.id}`,
+    provider: "pixabay",
+    mediaType: "photo",
+    title: `Pixabay photo ${p.id}`,
+    tags: (p.tags ?? "").split(",").map((t) => t.trim()),
+    thumbnailUrl: p.webformatURL ?? "",
+    previewUrl: p.webformatURL ?? "",
+    downloadUrl: p.largeImageURL ?? p.webformatURL ?? "",
+    width: p.imageWidth ?? 1920,
+    height: p.imageHeight ?? 1080,
+    creator: p.user ?? "Unknown",
+    pageUrl: p.pageURL
+  }));
+}
+const CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
+class QueryCache {
+  cachePath;
+  data = {};
+  dirty = false;
+  constructor(cacheDir) {
+    fs__namespace.mkdirSync(cacheDir, { recursive: true });
+    this.cachePath = path.join(cacheDir, ".query-cache.json");
+    this.load();
+  }
+  /** Normalize a query so "wood working", "Wood Working" and "woodworking" are similar keys */
+  static normalize(query) {
+    return query.toLowerCase().trim().replace(/\s+/g, " ").replace(/[^a-z0-9 ]/g, "");
+  }
+  load() {
+    try {
+      if (fs__namespace.existsSync(this.cachePath)) {
+        this.data = JSON.parse(fs__namespace.readFileSync(this.cachePath, "utf-8"));
+      }
+    } catch {
+      this.data = {};
+    }
+  }
+  save() {
+    if (!this.dirty) return;
+    try {
+      fs__namespace.writeFileSync(this.cachePath, JSON.stringify(this.data, null, 2), "utf-8");
+      this.dirty = false;
+    } catch {
+    }
+  }
+  get(query) {
+    const key = QueryCache.normalize(query);
+    const entry = this.data[key];
+    if (!entry) return null;
+    if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
+      delete this.data[key];
+      this.dirty = true;
+      return null;
+    }
+    return entry.results;
+  }
+  set(query, results) {
+    const key = QueryCache.normalize(query);
+    this.data[key] = { results, cachedAt: Date.now() };
+    this.dirty = true;
+  }
+  size() {
+    return Object.keys(this.data).length;
+  }
+}
+function tokenize(text) {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2)
+  );
+}
+function jaccardSimilarity(a, b) {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  a.forEach((token) => {
+    if (b.has(token)) intersection++;
+  });
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+}
+function semanticScore(candidate, ctx) {
+  const intentTokens = tokenize(ctx.visualIntent);
+  const narrationTokens = tokenize(ctx.narrationText);
+  const refTokens = /* @__PURE__ */ new Set([...intentTokens, ...narrationTokens]);
+  const titleTokens = tokenize(candidate.title);
+  const tagTokens = new Set(candidate.tags.flatMap((t) => t.toLowerCase().split(/\s+/)));
+  const candidateTokens = /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
+  return Math.min(1, jaccardSimilarity(refTokens, candidateTokens) * 5);
+}
+function technicalScore(candidate) {
+  const minDim = Math.min(candidate.width, candidate.height);
+  if (minDim >= 2160) return 1;
+  if (minDim >= 1080) return 0.9;
+  if (minDim >= 720) return 0.6;
+  return 0.3;
+}
+function compositionScore(candidate, preferredAr) {
+  const [pw, ph] = preferredAr.split(":").map(Number);
+  const preferred = pw / ph;
+  const actual = candidate.width / candidate.height;
+  if (!preferred || !actual) return 0.5;
+  const diff = Math.abs(preferred - actual) / preferred;
+  return Math.max(0, 1 - diff * 2);
+}
+function durationScore(candidate, sceneDuration) {
+  if (candidate.mediaType === "photo") return 0.8;
+  const clipDur = candidate.durationSecs ?? 0;
+  if (clipDur <= 0) return 0.4;
+  if (clipDur >= sceneDuration) return 1;
+  return Math.max(0.2, clipDur / sceneDuration);
+}
+function scoreCandidate(candidate, ctx) {
+  const sem = semanticScore(candidate, ctx) * 0.5;
+  const tech = technicalScore(candidate) * 0.2;
+  const comp = compositionScore(candidate, ctx.preferredAspectRatio) * 0.15;
+  const dur = durationScore(candidate, ctx.sceneDurationSecs) * 0.15;
+  const reuse = ctx.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
+  return Math.max(0, sem + tech + comp + dur - reuse);
+}
+function rankCandidates(candidates, ctx) {
+  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx) })).sort((a, b) => b.score - a.score);
+}
+const ASSETS_MANIFEST = "stock-assets.json";
+function loadAssetsManifest(stockDir) {
+  const p = path.join(stockDir, ASSETS_MANIFEST);
+  try {
+    if (fs__namespace.existsSync(p)) return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+  } catch {
+  }
+  return [];
+}
+function saveAssetsManifest(stockDir, assets) {
+  const p = path.join(stockDir, ASSETS_MANIFEST);
+  fs__namespace.writeFileSync(p, JSON.stringify(assets, null, 2), "utf-8");
+}
+function downloadToFile(url$1, destPath) {
+  return new Promise((resolve, reject) => {
+    const parsed = new url.URL(url$1);
+    const proto = parsed.protocol === "https:" ? https__namespace : http__namespace;
+    const doRequest = (targetUrl, redirectCount = 0) => {
+      if (redirectCount > 5) {
+        reject(new Error("Too many redirects"));
+        return;
+      }
+      proto.get(targetUrl, (res) => {
+        if (res.statusCode === 301 || res.statusCode === 302) {
+          const location = res.headers.location;
+          if (!location) {
+            reject(new Error("Redirect without location"));
+            return;
+          }
+          doRequest(location, redirectCount + 1);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode} downloading ${targetUrl}`));
+          return;
+        }
+        const out = fs__namespace.createWriteStream(destPath);
+        res.pipe(out);
+        out.on("finish", () => {
+          const stat = fs__namespace.statSync(destPath);
+          resolve(stat.size);
+        });
+        out.on("error", reject);
+        res.on("error", reject);
+      }).on("error", reject);
+    };
+    doRequest(url$1);
+  });
+}
+function guessExtension(url$1, mediaType) {
+  try {
+    const pathname = new url.URL(url$1).pathname;
+    const ext = path.extname(pathname).toLowerCase();
+    if (ext && ext.length > 1 && ext.length < 6) return ext;
+  } catch {
+  }
+  return mediaType === "video" ? ".mp4" : ".jpg";
+}
+async function downloadAsset(candidate, sceneIndex, searchQuery, stockDir, existingManifest) {
+  fs__namespace.mkdirSync(stockDir, { recursive: true });
+  const existing = existingManifest.find(
+    (a) => a.assetId === candidate.assetId && fs__namespace.existsSync(a.localPath)
+  );
+  if (existing) {
+    logger.info(`[Downloader] Reusing cached asset ${candidate.assetId}`);
+    return existing;
+  }
+  const ext = guessExtension(candidate.downloadUrl, candidate.mediaType);
+  const filename = `S${String(sceneIndex).padStart(3, "0")}_${candidate.provider}_${candidate.assetId}${ext}`;
+  const destPath = path.join(stockDir, filename);
+  logger.info(`[Downloader] Downloading ${candidate.assetId} → ${filename}`);
+  let fileSizeBytes;
+  try {
+    fileSizeBytes = await downloadToFile(candidate.downloadUrl, destPath);
+  } catch (err) {
+    logger.error(`[Downloader] Failed to download ${candidate.assetId}: ${err}`);
+    throw new Error(`Download failed for ${candidate.assetId}: ${err}`);
+  }
+  const asset = {
+    assetId: candidate.assetId,
+    provider: candidate.provider,
+    mediaType: candidate.mediaType,
+    localPath: destPath,
+    thumbnailUrl: candidate.thumbnailUrl,
+    downloadUrl: candidate.downloadUrl,
+    creator: candidate.creator,
+    licenseUrl: candidate.licenseUrl,
+    searchQuery,
+    downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    fileSizeBytes
+  };
+  logger.info(`[Downloader] Downloaded ${filename} (${Math.round((fileSizeBytes ?? 0) / 1024)} KB)`);
+  return asset;
+}
+function flattenScenes(plan) {
+  return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+}
+async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
+  const allCandidates = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  const addCandidates = (results) => {
+    for (const r of results) {
+      if (!seenIds.has(r.assetId)) {
+        seenIds.add(r.assetId);
+        allCandidates.push(r);
+      }
+    }
+  };
+  for (const query of queries) {
+    let cached = cache.get(`pexels_v:${query}`);
+    if (cached) {
+      addCandidates(cached);
+    } else {
+      const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation);
+      cache.set(`pexels_v:${query}`, res);
+      addCandidates(res);
+    }
+    if (allCandidates.length >= 6) break;
+  }
+  if (allCandidates.length < 3 && pixabayApiKey) {
+    for (const query of queries.slice(0, 2)) {
+      const cached = cache.get(`pixabay_v:${query}`);
+      if (cached) {
+        addCandidates(cached);
+      } else {
+        const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
+        const res = await pixabaySearchVideos(query, pixabayApiKey, 8, orientation);
+        cache.set(`pixabay_v:${query}`, res);
+        addCandidates(res);
+      }
+    }
+  }
+  if (allCandidates.length < 2) {
+    for (const query of queries.slice(0, 2)) {
+      const cached = cache.get(`pexels_p:${query}`);
+      if (cached) {
+        addCandidates(cached);
+      } else {
+        const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation);
+        cache.set(`pexels_p:${query}`, res);
+        addCandidates(res);
+      }
+    }
+  }
+  if (allCandidates.length < 2 && pixabayApiKey) {
+    for (const query of queries.slice(0, 1)) {
+      const cached = cache.get(`pixabay_p:${query}`);
+      if (cached) {
+        addCandidates(cached);
+      } else {
+        const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
+        const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation);
+        cache.set(`pixabay_p:${query}`, res);
+        addCandidates(res);
+      }
+    }
+  }
+  return allCandidates;
+}
+function toOrientation(ar) {
+  if (ar === "9:16") return "portrait";
+  if (ar === "1:1") return "square";
+  return "landscape";
+}
+async function runStockEngine(params, onProgress = () => {
+}) {
+  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9" } = params;
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    return {
+      success: false,
+      totalScenes: 0,
+      assignedScenes: 0,
+      failedScenes: 0,
+      assignments: [],
+      error: "No edit plan found. Run AI Planning first."
+    };
+  }
+  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const stockDir = path.join(projectDir, "assets", "stock");
+  fs__namespace.mkdirSync(stockDir, { recursive: true });
+  const cache = new QueryCache(stockDir);
+  let manifest = loadAssetsManifest(stockDir);
+  const usedAssetIds = new Set(manifest.map((a) => a.assetId));
+  const allScenes = flattenScenes(plan);
+  const scenesNeedingStock = allScenes.filter(
+    (s) => !s.locked && (!s.localPath || !fs__namespace.existsSync(s.localPath))
+  );
+  const assignments = [];
+  let assignedCount = 0;
+  let failedCount = 0;
+  const orientation = toOrientation(preferredAspectRatio);
+  onProgress(`Starting stock search for ${scenesNeedingStock.length} scenes…`, 0.01);
+  for (let i = 0; i < scenesNeedingStock.length; i++) {
+    const scene = scenesNeedingStock[i];
+    const pct = 0.05 + i / scenesNeedingStock.length * 0.85;
+    const queries = scene.searchQueries?.length ? scene.searchQueries : [scene.visualIntent ?? scene.narrativeText ?? "nature background"].slice(0, 4);
+    const visualIntent = scene.visualIntent ?? queries[0] ?? "";
+    const narrationText = scene.narrativeText ?? "";
+    const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
+    onProgress(
+      `[${i + 1}/${scenesNeedingStock.length}] Scene ${scene.sceneIndex} — "${queries[0]}"`,
+      pct
+    );
+    const assignment = {
+      sceneId: `scene_${scene.sceneIndex}`,
+      sceneIndex: scene.sceneIndex,
+      narrationText,
+      startTime: scene.startTime,
+      endTime: scene.endTime,
+      visualIntent,
+      searchQueries: queries,
+      usedQuery: queries[0],
+      asset: null,
+      score: 0,
+      locked: false,
+      manualOverride: false,
+      status: "searching"
+    };
+    try {
+      const candidates = await searchForScene(
+        queries,
+        pexelsApiKey,
+        pixabayApiKey,
+        orientation,
+        cache
+      );
+      if (candidates.length === 0) {
+        assignment.status = "failed";
+        assignment.errorMessage = "No candidates found from any provider";
+        failedCount++;
+      } else {
+        const ranked = rankCandidates(candidates, {
+          visualIntent,
+          narrationText,
+          sceneDurationSecs: sceneDuration,
+          preferredAspectRatio,
+          usedAssetIds
+        });
+        const winner = ranked[0];
+        const usedQuery = queries.find(
+          (q) => winner.searchQuery !== void 0 ? winner.searchQuery === q : true
+        ) ?? queries[0];
+        const downloadedAsset = await downloadAsset(
+          winner,
+          scene.sceneIndex,
+          usedQuery,
+          stockDir,
+          manifest
+        );
+        manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+        manifest.push(downloadedAsset);
+        usedAssetIds.add(downloadedAsset.assetId);
+        scene.localPath = downloadedAsset.localPath;
+        assignment.asset = downloadedAsset;
+        assignment.score = winner.score;
+        assignment.usedQuery = usedQuery;
+        assignment.status = "assigned";
+        assignedCount++;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[StockEngine] Scene ${scene.sceneIndex} failed: ${msg}`);
+      assignment.status = "failed";
+      assignment.errorMessage = msg;
+      failedCount++;
+    }
+    assignments.push(assignment);
+    cache.save();
+    saveAssetsManifest(stockDir, manifest);
+  }
+  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
+  fs__namespace.writeFileSync(reviewPath, JSON.stringify(assignments, null, 2), "utf-8");
+  onProgress(
+    `Done — ${assignedCount}/${scenesNeedingStock.length} scenes assigned, ${failedCount} failed`,
+    1
+  );
+  return {
+    success: true,
+    totalScenes: scenesNeedingStock.length,
+    assignedScenes: assignedCount,
+    failedScenes: failedCount,
+    assignments
+  };
+}
+async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9") {
+  const stockDir = path.join(projectDir, "assets", "stock");
+  const cache = new QueryCache(stockDir);
+  const manifest = loadAssetsManifest(stockDir);
+  const orientation = toOrientation(preferredAspectRatio);
+  const candidates = await searchForScene(
+    [newQuery],
+    pexelsApiKey,
+    pixabayApiKey,
+    orientation,
+    cache
+  );
+  if (candidates.length === 0) throw new Error(`No results for query "${newQuery}"`);
+  const usedIds = new Set(manifest.map((a) => a.assetId));
+  const ranked = rankCandidates(candidates, {
+    visualIntent: newQuery,
+    narrationText: newQuery,
+    sceneDurationSecs: 10,
+    preferredAspectRatio,
+    usedAssetIds: usedIds
+  });
+  const winner = ranked[0];
+  const asset = await downloadAsset(winner, sceneIndex, newQuery, stockDir, manifest);
+  const updatedManifest = manifest.filter((a) => a.assetId !== asset.assetId);
+  updatedManifest.push(asset);
+  saveAssetsManifest(stockDir, updatedManifest);
+  cache.save();
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (fs__namespace.existsSync(planPath)) {
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    const scene = flattenScenes(plan).find((s) => s.sceneIndex === sceneIndex);
+    if (scene) {
+      scene.localPath = asset.localPath;
+      fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+    }
+  }
+  return asset;
+}
+function registerStockHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SEARCH_START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const config = loadConfig();
+      if (!config.pexelsApiKey && !config.pixabayApiKey) {
+        return {
+          success: false,
+          error: "No stock API keys configured. Go to Settings → API Providers to add Pexels or Pixabay key."
+        };
+      }
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, { message, progress });
+      };
+      try {
+        const result = await runStockEngine(
+          {
+            projectDir: params.projectDir,
+            pexelsApiKey: config.pexelsApiKey ?? "",
+            pixabayApiKey: config.pixabayApiKey,
+            preferredAspectRatio: "16:9"
+          },
+          sendProgress
+        );
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Stock engine error: ${msg}`);
+        return { success: false, error: msg, totalScenes: 0, assignedScenes: 0, failedScenes: 0, assignments: [] };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.STOCK_REVIEW_GET, (_event, projectDir) => {
+    const stockDir = path.join(projectDir, "assets", "stock");
+    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+    let assignments = [];
+    try {
+      if (fs__namespace.existsSync(assignmentsPath)) {
+        assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      }
+    } catch {
+    }
+    const manifest = loadAssetsManifest(stockDir);
+    const assigned = assignments.filter((a) => a.status === "assigned").length;
+    const review = {
+      assignments,
+      totalScenes: assignments.length,
+      assignedScenes: assigned,
+      stockAssetsJson: manifest
+    };
+    return review;
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SCENE_REPLACE,
+    async (_event, params) => {
+      const config = loadConfig();
+      if (!config.pexelsApiKey && !config.pixabayApiKey) {
+        throw new Error("No stock API keys configured");
+      }
+      try {
+        const asset = await replaceSceneAsset(
+          params.projectDir,
+          params.sceneIndex,
+          params.query,
+          config.pexelsApiKey ?? "",
+          config.pixabayApiKey
+        );
+        const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
+        if (fs__namespace.existsSync(assignmentsPath)) {
+          const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+          const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
+          if (idx >= 0) {
+            assignments[idx].asset = asset;
+            assignments[idx].usedQuery = params.query;
+            assignments[idx].status = "assigned";
+            fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+          }
+        }
+        return { success: true, asset };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SCENE_LOCK,
+    (_event, params) => {
+      const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
+      if (!fs__namespace.existsSync(assignmentsPath)) return { success: false, error: "No assignments found" };
+      const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
+      if (idx >= 0) {
+        assignments[idx].locked = params.locked;
+        fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+      }
+      return { success: true };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SCENE_UPLOAD,
+    (_event, params) => {
+      if (!fs__namespace.existsSync(params.filePath)) {
+        return { success: false, error: `File not found: ${params.filePath}` };
+      }
+      const stockDir = path.join(params.projectDir, "assets", "stock");
+      fs__namespace.mkdirSync(stockDir, { recursive: true });
+      const stat = fs__namespace.statSync(params.filePath);
+      const asset = {
+        assetId: `manual_${params.sceneIndex}_${Date.now()}`,
+        provider: "pexels",
+        // placeholder; not actually from Pexels
+        mediaType: params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? "video" : "photo",
+        localPath: params.filePath,
+        thumbnailUrl: "",
+        downloadUrl: params.filePath,
+        creator: "User",
+        searchQuery: "manual upload",
+        downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        fileSizeBytes: stat.size
+      };
+      const manifest = loadAssetsManifest(stockDir);
+      const updated = manifest.filter((a) => !a.assetId.startsWith(`manual_${params.sceneIndex}_`));
+      updated.push(asset);
+      saveAssetsManifest(stockDir, updated);
+      const planPath = path.join(params.projectDir, "analysis", "master-edit-plan.json");
+      if (fs__namespace.existsSync(planPath)) {
+        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+        const allScenes = (plan.chapters ?? []).flatMap((ch) => ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+        const scene = allScenes.find((s) => s.sceneIndex === params.sceneIndex);
+        if (scene) {
+          scene.localPath = params.filePath;
+          fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+        }
+      }
+      const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
+      if (fs__namespace.existsSync(assignmentsPath)) {
+        const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+        const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
+        if (idx >= 0) {
+          assignments[idx].asset = asset;
+          assignments[idx].status = "assigned";
+          assignments[idx].manualOverride = true;
+          assignments[idx].locked = true;
+          fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+        }
+      }
+      return { success: true, asset };
+    }
+  );
+}
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -1153,6 +1982,7 @@ electron.app.whenReady().then(() => {
   registerTranscribeHandlers(electron.ipcMain);
   registerPlannerHandlers(electron.ipcMain);
   registerRenderHandlers(electron.ipcMain);
+  registerStockHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {

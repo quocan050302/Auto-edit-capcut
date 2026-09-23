@@ -11,6 +11,9 @@ export interface AppConfig {
   geminiApiKey?: string;
   openaiApiKey?: string;
   preferredModel?: string;
+  pexelsApiKey?: string;
+  pixabayApiKey?: string;
+  giphyApiKey?: string;
 }
 
 export function loadConfig(): AppConfig {
