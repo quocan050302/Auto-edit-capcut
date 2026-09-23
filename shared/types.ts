@@ -134,7 +134,16 @@ export const IPC_CHANNELS = {
 
   // App info
   GET_APP_VERSION: 'app:get-version',
-  GET_PROJECTS_DIR: 'app:get-projects-dir'
+  GET_PROJECTS_DIR: 'app:get-projects-dir',
+
+  // Config (API keys, preferences)
+  CONFIG_GET: 'config:get',
+  CONFIG_SET: 'config:set',
+
+  // AI Edit Planning
+  PLAN_GENERATE: 'plan:generate',
+  PLAN_PROGRESS: 'plan:progress',
+  PLAN_GET: 'plan:get'
 } as const
 
 // ─── Transcript types (shared between main and renderer) ─────────────────────

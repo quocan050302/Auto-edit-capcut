@@ -5,3 +5,8 @@ release/
 *.local
 .DS_Store
 logs/
+
+# API keys
+.env
+.env.local
+app-config.json

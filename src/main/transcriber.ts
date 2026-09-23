@@ -12,10 +12,11 @@ const UV_PATH = 'C:\\Users\\ADMIN\\.local\\bin\\uv.exe'
 
 /** Path to our Python transcription script */
 function getScriptPath(): string {
-  // In dev: relative to project root
-  const devPath = join(app.getAppPath(), '..', 'scripts', 'transcribe.py')
-  if (fs.existsSync(devPath)) return devPath
-  // In prod: next to app executable
+  if (!app.isPackaged) {
+    // Dev mode: process.cwd() = project root (d:\Web-auto-edit)
+    return join(process.cwd(), 'scripts', 'transcribe.py')
+  }
+  // Production: scripts/ bundled next to app resources
   return join(process.resourcesPath, 'scripts', 'transcribe.py')
 }
 

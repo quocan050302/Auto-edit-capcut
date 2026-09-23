@@ -103,6 +103,30 @@ const api = {
     }
   },
 
+  // App config (API keys stored locally)
+  config: {
+    get: (key: string): Promise<string | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET, key),
+    set: (key: string, value: string): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value)
+  },
+
+  // AI Edit Planning
+  plan: {
+    generate: (params: { projectDir: string }): Promise<{ success: boolean; plan?: unknown; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PLAN_GENERATE, params),
+
+    get: (projectDir: string): Promise<unknown | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PLAN_GET, projectDir),
+
+    onProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.PLAN_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.PLAN_PROGRESS, handler)
+    }
+  },
+
   // App info
   getProjectsDir: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
   getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION)

@@ -450,8 +450,9 @@ function registerMediaHandlers(ipcMain) {
 }
 const UV_PATH = "C:\\Users\\ADMIN\\.local\\bin\\uv.exe";
 function getScriptPath() {
-  const devPath = path.join(electron.app.getAppPath(), "..", "scripts", "transcribe.py");
-  if (fs__namespace.existsSync(devPath)) return devPath;
+  if (!electron.app.isPackaged) {
+    return path.join(process.cwd(), "scripts", "transcribe.py");
+  }
   return path.join(process.resourcesPath, "scripts", "transcribe.py");
 }
 function getModelsDir() {
