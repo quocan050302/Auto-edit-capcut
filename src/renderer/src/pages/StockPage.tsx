@@ -482,7 +482,6 @@ export function StockPage({
     setAnalyzingCtx(true)
     setCtxProgress('Starting global context analysis...')
     const unsub = window.api.stock.onContextProgress((d) => setCtxProgress(d.message))
-    let hasError = false
     try {
       const result = await window.api.stock.analyzeContext({
         projectDir: project.projectDir,
@@ -492,18 +491,21 @@ export function StockPage({
       if (result.success && result.context) {
         setGlobalCtx(result.context)
         setCtxExpanded(true)
-      } else if (!result.success) {
-        hasError = true
-        setCtxProgress(`⚠ ${result.error}`)
-        setTimeout(() => setCtxProgress(null), 5000)
+        if (result.warning) {
+          setCtxProgress(`⚠ ${result.warning}`)
+          setTimeout(() => setCtxProgress(null), 8000)
+        } else {
+          setCtxProgress(null)
+        }
+      } else {
+        setCtxProgress(`⚠ ${result.error || 'Failed to analyze script'}`)
+        setTimeout(() => setCtxProgress(null), 8000)
       }
     } catch (e: unknown) {
-      hasError = true
       setCtxProgress(`⚠ ${e instanceof Error ? e.message : String(e)}`)
-      setTimeout(() => setCtxProgress(null), 5000)
+      setTimeout(() => setCtxProgress(null), 8000)
     } finally {
       setAnalyzingCtx(false)
-      if (!hasError) setCtxProgress(null)
       unsub()
     }
   }
@@ -545,9 +547,27 @@ export function StockPage({
           </div>
         </div>
 
-        {analyzingCtx && ctxProgress && (
-          <div style={{ padding: '8px 20px', fontSize: '11px', color: 'var(--text-secondary)', background: 'var(--bg-overlay)' }}>
-            {ctxProgress}
+        {ctxProgress && (
+          <div style={{
+            padding: '8px 20px',
+            fontSize: '11px',
+            color: ctxProgress.startsWith('⚠') ? '#f59e0b' : 'var(--text-secondary)',
+            background: 'var(--bg-overlay)',
+            borderTop: '1px solid var(--border-subtle)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between'
+          }}>
+            <span>{ctxProgress}</span>
+            {!analyzingCtx && (
+              <button
+                onClick={() => setCtxProgress(null)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '13px', padding: '0 4px' }}
+                title="Dismiss"
+              >
+                ✕
+              </button>
+            )}
           </div>
         )}
 
@@ -560,10 +580,10 @@ export function StockPage({
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.5 }}>{globalCtx.centralThesis}</div>
               <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>LOCATION</div>
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: 12 }}>
-                {[globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(', ') || 'Not specified'}
+                {[globalCtx.geography?.primaryCountry, globalCtx.geography?.primaryRegion, ...(globalCtx.geography?.secondaryLocations ?? [])].filter(Boolean).join(', ') || 'Not specified'}
               </div>
               <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>TIME PERIOD</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{globalCtx.timeContext.primaryPeriod}</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{globalCtx.timeContext?.primaryPeriod || 'Contemporary'}</div>
             </div>
             <div>
               <div style={{ fontSize: '10px', fontWeight: 700, color: '#22c55e', marginBottom: 4 }}>✓ EXACT TOPIC ANCHORS</div>

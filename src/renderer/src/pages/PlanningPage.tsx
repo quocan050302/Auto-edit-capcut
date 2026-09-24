@@ -194,7 +194,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
   const [progress, setProgress] = useState<{ message: string; progress: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hasKey, setHasKey] = useState<boolean | null>(null)
-  const [selectedModel, setSelectedModel] = useState('gemini-3.6-flash')
+  const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash')
 
   useEffect(() => {
     // Load cached plan
@@ -426,9 +426,8 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
 }
 
 const GEMINI_MODELS = [
-  { id: 'gemini-3.6-flash',               label: 'gemini-3.6-flash  (recommended)' },
-  { id: 'gemini-3.8-flash',               label: 'gemini-3.8-flash  (latest)' },
-  { id: 'gemini-2.5-flash-preview-04-17', label: 'gemini-2.5-flash-preview' },
-  { id: 'gemini-2.0-flash',               label: 'gemini-2.0-flash  (stable)' },
+  { id: 'gemini-3.8-flash',               label: 'gemini-3.8-flash  (latest — recommended)' },
+  { id: 'gemini-3.6-flash',               label: 'gemini-3.6-flash' },
+  { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash-preview' },
   { id: 'gemini-1.5-flash-latest',        label: 'gemini-1.5-flash-latest (legacy)' },
 ]

@@ -169,7 +169,7 @@ const ffmpegLogger = winston__namespace.createLogger({
     })
   ]
 });
-const FALLBACK_PROJECTS_DIR = "D:\\Video_factory_hutteries";
+const FALLBACK_PROJECTS_DIR = process.platform === "win32" ? "D:\\Video_factory_hutteries" : path.join(electron.app.getPath("documents"), "Video_factory_hutteries");
 function getConfigPath() {
   return path.join(electron.app.getPath("userData"), "config.json");
 }
@@ -916,7 +916,7 @@ function buildAlgorithmicPlan(transcript, projectName) {
 }
 async function buildEditPlan(params) {
   const { projectDir, apiKey, onProgress } = params;
-  const modelId = params.model ?? "gemini-2.0-flash";
+  const modelId = params.model ?? "gemini-3.8-flash";
   const progress = (msg, pct) => {
     logger.info(`[PLAN] ${msg}`);
     onProgress?.(msg, pct);
@@ -973,12 +973,14 @@ async function buildEditPlan(params) {
   progress("Sending to Gemini AI...", 0.2);
   const ai = new genai.GoogleGenAI({
     apiKey,
-    httpOptions: { apiVersion: "v1alpha" }
+    httpOptions: { apiVersion: "v1beta" }
   });
   const fallbackModelChain = [
     modelId,
-    "gemini-2.0-flash",
-    "gemini-1.5-flash"
+    "gemini-3.8-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-1.5-flash-latest"
   ].filter((v, i, a) => a.indexOf(v) === i);
   let activeModelIndex = 0;
   let rawJson = "";
@@ -1164,14 +1166,25 @@ function ffmpegRun(args) {
     proc.on("error", reject);
   });
 }
+function normalizePathForFFmpeg(p) {
+  if (!p) return p;
+  if (p.startsWith("/")) return p;
+  return path__namespace.resolve(p);
+}
 function resolveMediaPath(filename, mediaIndex) {
   if (!filename) return null;
   const item = mediaIndex.find((m) => m.filename === filename || path__namespace.basename(m.path) === filename);
-  return item ? item.path : null;
+  return item ? normalizePathForFFmpeg(item.path) : null;
 }
 function resolveSceneMedia(scene, mediaIndex) {
-  if (scene.localPath && fs__namespace.existsSync(scene.localPath)) return scene.localPath;
-  if (scene.localAsset && fs__namespace.existsSync(scene.localAsset)) return scene.localAsset;
+  if (scene.localPath) {
+    const p = normalizePathForFFmpeg(scene.localPath);
+    if (fs__namespace.existsSync(p)) return p;
+  }
+  if (scene.localAsset) {
+    const p = normalizePathForFFmpeg(scene.localAsset);
+    if (fs__namespace.existsSync(p)) return p;
+  }
   if (scene.mediaFile) {
     const found = resolveMediaPath(scene.mediaFile, mediaIndex);
     if (found) return found;
@@ -1184,13 +1197,13 @@ function resolveSceneMedia(scene, mediaIndex) {
 }
 async function renderVideo(params) {
   const {
-    projectDir,
-    voiceoverPath,
     outputName = "final_output",
     resolution = { width: 1920, height: 1080 },
     fps = 30,
     onProgress
   } = params;
+  const projectDir = normalizePathForFFmpeg(params.projectDir);
+  const voiceoverPath = normalizePathForFFmpeg(params.voiceoverPath);
   const progress = (stage, pct, extra = {}) => {
     logger.info(`[RENDER] ${stage} (${Math.round(pct * 100)}%)`);
     onProgress?.({ stage, progress: pct, ...extra });
@@ -1207,7 +1220,8 @@ async function renderVideo(params) {
   );
   const totalScenes = scenes.length;
   progress(`Processing ${totalScenes} scenes...`, 0.06);
-  const tmpDir = path__namespace.join(projectDir, "renders", "_tmp");
+  const projectHash = Buffer.from(projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
+  const tmpDir = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${projectHash}`);
   fs__namespace.mkdirSync(tmpDir, { recursive: true });
   const sceneClips = [];
   const { width, height } = resolution;
@@ -1298,7 +1312,8 @@ async function renderVideo(params) {
   const concatList = path__namespace.join(tmpDir, "concat.txt");
   fs__namespace.writeFileSync(
     concatList,
-    sceneClips.map((f) => `file '${f.replace(/\\/g, "/")}'`).join("\n"),
+    // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
+    sceneClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
     "utf-8"
   );
   const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
@@ -1318,10 +1333,10 @@ async function renderVideo(params) {
   const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
   const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;
   const approvedMusic = audioPlan?.sections.filter(
-    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
   ) ?? [];
   const approvedSfx = audioPlan?.sfxAssignments.filter(
-    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
   ) ?? [];
   const hasAudio = fs__namespace.existsSync(voiceoverPath);
   const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0;
@@ -1359,12 +1374,12 @@ async function renderVideo(params) {
     if (hasAudio) ffArgs.push("-i", voiceoverPath);
     const musicInputs = [];
     for (const sec of approvedMusic) {
-      ffArgs.push("-i", sec.approvedLocalPath);
+      ffArgs.push("-i", normalizePathForFFmpeg(sec.approvedLocalPath));
       musicInputs.push({ idx: inputIdx++, section: sec });
     }
     const sfxInputs = [];
     for (const sfx of approvedSfx) {
-      ffArgs.push("-i", sfx.approvedLocalPath);
+      ffArgs.push("-i", normalizePathForFFmpeg(sfx.approvedLocalPath));
       sfxInputs.push({ idx: inputIdx++, sfx });
     }
     const filterParts = [];
@@ -2103,7 +2118,7 @@ async function analyzeGlobalContext(params) {
   const { projectDir, apiKey, forceRegenerate = false } = params;
   const progress = params.onProgress ?? (() => {
   });
-  const modelId = params.model ?? "gemini-2.0-flash";
+  const modelId = params.model ?? "gemini-3.8-flash";
   const fullText = params.scriptText ?? params.transcript?.fullText ?? params.transcript?.segments.map((s) => s.text).join(" ") ?? "";
   if (!fullText.trim()) throw new Error("No script or transcript text for global context analysis.");
   let projectId = "unknown";
@@ -2127,84 +2142,307 @@ async function analyzeGlobalContext(params) {
     } catch {
     }
   }
-  progress("Analyzing full script for global context...", 0.05);
-  const ai = new genai.GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } });
-  const prompt = buildGeminiPrompt(fullText, projectId, language);
-  const fallbackModels = [modelId, "gemini-2.0-flash", "gemini-1.5-flash"].filter((v, i, a) => a.indexOf(v) === i);
   let rawJson = "";
-  const maxRetries = 5;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
+  let aiError = null;
+  if (apiKey && apiKey.trim().length > 0) {
+    progress("Analyzing full script for global context...", 0.05);
     try {
-      progress(attempt === 1 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.1);
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
-        config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
-      });
-      rawJson = response.text ?? "";
-      break;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
-      if (overloaded && attempt < maxRetries) {
-        const wait = Math.min(attempt * 3, 12);
-        for (let s = wait; s > 0; s--) {
-          progress(`Gemini overloaded, retrying in ${s}s...`, 0.2);
-          await new Promise((r) => setTimeout(r, 1e3));
+      const ai = new genai.GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } });
+      const prompt = buildGeminiPrompt(fullText, projectId, language);
+      const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
+      const maxRetries = 3;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
+        try {
+          progress(attempt === 1 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.15);
+          const response = await ai.models.generateContent({
+            model: currentModel,
+            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
+            config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+          });
+          rawJson = response.text ?? "";
+          if (rawJson) break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          aiError = msg;
+          logger.warn(`[GlobalContext] Gemini attempt ${attempt} failed: ${msg}`);
+          if (msg.includes("401") || msg.includes("UNAUTHENTICATED") || msg.includes("API_KEY") || msg.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
+            break;
+          }
+          const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
+          if (overloaded && attempt < maxRetries) {
+            const wait = Math.min(attempt * 2, 6);
+            for (let s = wait; s > 0; s--) {
+              progress(`Gemini overloaded, retrying in ${s}s...`, 0.2);
+              await new Promise((r) => setTimeout(r, 1e3));
+            }
+            continue;
+          }
         }
-        continue;
       }
-      throw new Error(`Global context analysis failed: ${msg}`);
+    } catch (outerErr) {
+      aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
+      logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
     }
+  } else {
+    logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
   }
   let ctx;
-  try {
-    const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    ctx = JSON.parse(clean);
-  } catch {
-    logger.warn("[GlobalContext] JSON parse failed, using fallback context");
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      ctx = JSON.parse(clean);
+      ctx.modelUsed = modelId;
+    } catch {
+      logger.warn("[GlobalContext] JSON parse failed, using fallback context");
+      ctx = buildFallbackContext(projectId, language, fullText);
+      ctx.modelUsed = "algorithmic (JSON parse fallback)";
+    }
+  } else {
+    logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
+    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.7);
     ctx = buildFallbackContext(projectId, language, fullText);
+    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
   }
   ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ctx.modelUsed = modelId;
   ctx.version = 1;
   ctx._scriptHash = hash;
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
   fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
-  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject });
-  progress(`Global context ready -- "${ctx.primarySubject}"`, 1);
+  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
+  progress(`Global context ready — "${ctx.primarySubject}"`, 1);
   return ctx;
 }
 function buildFallbackContext(projectId, language, text) {
-  const words = text.split(/\s+/).filter((w) => w.length > 4);
+  const STOP_WORDS = /* @__PURE__ */ new Set([
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "another",
+    "any",
+    "are",
+    "aren't",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "can",
+    "cannot",
+    "could",
+    "couldn't",
+    "did",
+    "didn't",
+    "does",
+    "doesn't",
+    "doing",
+    "don't",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "hadn't",
+    "has",
+    "hasn't",
+    "have",
+    "haven't",
+    "having",
+    "here",
+    "here's",
+    "hers",
+    "herself",
+    "himself",
+    "how",
+    "how's",
+    "into",
+    "it's",
+    "its",
+    "itself",
+    "let's",
+    "more",
+    "most",
+    "mustn't",
+    "myself",
+    "never",
+    "only",
+    "other",
+    "ought",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "same",
+    "shan't",
+    "should",
+    "shouldn't",
+    "some",
+    "such",
+    "than",
+    "that",
+    "that's",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "there's",
+    "these",
+    "they",
+    "they'd",
+    "they'll",
+    "they're",
+    "they've",
+    "this",
+    "those",
+    "through",
+    "until",
+    "very",
+    "was",
+    "wasn't",
+    "we'd",
+    "we'll",
+    "we're",
+    "we've",
+    "were",
+    "weren't",
+    "what",
+    "what's",
+    "when",
+    "when's",
+    "where",
+    "where's",
+    "which",
+    "while",
+    "who",
+    "who's",
+    "whom",
+    "why",
+    "why's",
+    "with",
+    "won't",
+    "would",
+    "wouldn't",
+    "you",
+    "you'd",
+    "you'll",
+    "you're",
+    "you've",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "video",
+    "channel",
+    "going",
+    "first",
+    "today",
+    "finally",
+    "place",
+    "entire",
+    "exact",
+    "thing",
+    "things",
+    "really",
+    "almost",
+    "turns",
+    "right",
+    "breakdown",
+    // Vietnamese common stop words
+    "những",
+    "chúng",
+    "trong",
+    "người",
+    "không",
+    "được",
+    "nhiều",
+    "chính",
+    "thực",
+    "thấy",
+    "video",
+    "kênh",
+    "hoặc",
+    "cũng",
+    "này",
+    "đang",
+    "phải",
+    "theo",
+    "cùng",
+    "nhau"
+  ]);
+  const properMatches = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
+  const properFreq = {};
+  for (const p of properMatches) {
+    const lower = p.toLowerCase();
+    if (!STOP_WORDS.has(lower) && lower.length > 3) {
+      properFreq[p] = (properFreq[p] ?? 0) + 1;
+    }
+  }
+  const topProper = Object.entries(properFreq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const words = text.split(/\s+/);
   const freq = {};
   for (const w of words) {
-    const key = w.toLowerCase().replace(/[^a-z]/g, "");
-    if (key) freq[key] = (freq[key] ?? 0) + 1;
+    const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "");
+    if (clean.length > 3 && !STOP_WORDS.has(clean)) {
+      freq[clean] = (freq[clean] ?? 0) + 1;
+    }
   }
-  const top = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([w]) => w);
+  const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const primarySubject = topProper[0] || topWords[0] || "Documentary Subject";
+  const exactTopicAnchors = topProper.length > 0 ? topProper.slice(0, 5) : topWords.slice(0, 5);
+  const contextualAnchors = topWords.filter((w) => !exactTopicAnchors.map((x) => x.toLowerCase()).includes(w)).slice(0, 8);
+  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.?!])\s+/).filter(Boolean);
+  const centralThesis = sentences.slice(0, 2).join(" ") || text.slice(0, 250);
+  const globalSynopsis = sentences.slice(0, 4).join(" ") || text.slice(0, 350);
   return {
     projectId,
     language,
     version: 1,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: "fallback",
-    primarySubject: top[0] ?? "documentary subject",
-    secondarySubjects: top.slice(1, 4),
-    globalSynopsis: text.slice(0, 200),
-    centralThesis: "See script",
-    documentaryAngle: "documentary",
+    modelUsed: "algorithmic-fallback",
+    primarySubject,
+    secondarySubjects: topWords.slice(1, 5),
+    globalSynopsis,
+    centralThesis,
+    documentaryAngle: "observational documentary",
     targetAudience: "general audience",
-    geography: { secondaryLocations: [] },
-    timeContext: { primaryPeriod: "contemporary", historicalPeriods: [] },
+    geography: {
+      primaryCountry: "Not specified",
+      secondaryLocations: []
+    },
+    timeContext: {
+      primaryPeriod: "contemporary",
+      historicalPeriods: []
+    },
     communities: [],
     recurringPeople: [],
-    visualWorld: { environment: [], architecture: [], clothing: [], occupations: [], machinery: [], recurringObjects: [], colorMood: "natural", documentaryStyle: "observational" },
-    exactTopicAnchors: top.slice(0, 3),
-    contextualAnchors: top.slice(3, 6),
+    visualWorld: {
+      environment: [],
+      architecture: [],
+      clothing: [],
+      occupations: [],
+      machinery: [],
+      recurringObjects: [],
+      colorMood: "natural cinematics",
+      documentaryStyle: "observational"
+    },
+    exactTopicAnchors,
+    contextualAnchors,
     forbiddenSubstitutions: [],
-    negativeKeywords: [],
+    negativeKeywords: ["cartoon", "cgi", "animation", "vlog", "generic"],
     recurringVisualMotifs: [],
     storyArc: []
   };
@@ -2342,16 +2580,16 @@ function buildFallbackPlan(packet, globalCtx) {
 }
 async function generateContextAwareSearchPlan(params) {
   const { projectDir, apiKey, packet, globalContext, sceneId, useCache = true } = params;
-  const modelId = params.model ?? "gemini-2.0-flash";
+  const modelId = params.model ?? "gemini-3.8-flash";
   const cacheKey = makeCacheKey(globalContext, sceneId, packet.localContext.narration);
   const cache = useCache ? loadQueryCache(projectDir) : {};
   if (useCache && cache[cacheKey] && cache[cacheKey].contextVersion === globalContext.version) {
     logger.info(`[QueryGen] Cache hit for scene ${sceneId}`);
     return cache[cacheKey].plan;
   }
-  const ai = new genai.GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } });
+  const ai = new genai.GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1beta" } });
   const prompt = buildScenePrompt(packet, globalContext);
-  const fallbackModels = [modelId, "gemini-2.0-flash", "gemini-1.5-flash"].filter((v, i, a) => a.indexOf(v) === i);
+  const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
   let rawJson = "";
   for (let attempt = 1; attempt <= 3; attempt++) {
     const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
@@ -3053,7 +3291,7 @@ function registerStockHandlers(ipcMain) {
     async (event, params) => {
       const win = electron.BrowserWindow.fromWebContents(event.sender);
       const config = loadConfig();
-      if (!config.geminiApiKey) return { success: false, error: "Gemini API key required for global context analysis." };
+      const geminiKey = config.geminiApiKey?.trim() ?? "";
       const sendProgress = (message, progress) => {
         win?.webContents.send(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, { message, progress });
       };
@@ -3086,13 +3324,24 @@ function registerStockHandlers(ipcMain) {
         }
         const ctx = await analyzeGlobalContext({
           projectDir: params.projectDir,
-          apiKey: config.geminiApiKey,
+          apiKey: geminiKey,
+          model: config.preferredModel ?? "gemini-3.8-flash",
           scriptText,
           transcript,
           forceRegenerate: params.forceRegenerate ?? false,
           onProgress: sendProgress
         });
-        return { success: true, context: ctx };
+        let warning;
+        if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
+          if (!geminiKey) {
+            warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn.";
+          } else if (!geminiKey.startsWith("AIza")) {
+            warning = "Khóa Gemini API không đúng định dạng (cần bắt đầu bằng AIzaSy... từ Google AI Studio). Đã phân tích tự động từ kịch bản.";
+          } else {
+            warning = "Gemini AI tạm thời quá tải. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
+          }
+        }
+        return { success: true, context: ctx, warning };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: msg };

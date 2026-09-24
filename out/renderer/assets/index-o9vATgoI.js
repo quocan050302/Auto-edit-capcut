@@ -7643,12 +7643,14 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
     setTimeout(() => setSaved(false), 2e3);
   }
   const hasValue = value.trim().length > 0;
-  const isValid = hasValue && value.trim().length > 10;
+  const isGemini = configKey === "geminiApiKey";
+  const isGeminiFormat = !isGemini || value.trim().startsWith("AIza");
+  const isValid = hasValue && value.trim().length > 10 && isGeminiFormat;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
     padding: "16px",
     background: "var(--bg-elevated)",
     borderRadius: "var(--radius-md)",
-    border: `1px solid ${hasValue && isValid ? "var(--border-brand)" : "var(--border-subtle)"}`,
+    border: `1px solid ${hasValue && isValid ? "var(--border-brand)" : hasValue && !isValid ? "rgba(248,113,113,0.4)" : "var(--border-subtle)"}`,
     display: "flex",
     flexDirection: "column",
     gap: "10px",
@@ -7672,7 +7674,7 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
           color: "var(--color-error)",
           borderRadius: "999px",
           fontWeight: 600
-        }, children: "✗ INVALID FORMAT" })
+        }, children: isGemini && !isGeminiFormat ? '✗ CẦN KEY "AIzaSy..."' : "✗ INVALID FORMAT" })
       ] }),
       link && /* @__PURE__ */ jsxRuntimeExports.jsx(
         "a",
@@ -7706,7 +7708,7 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
             style: {
               width: "100%",
               background: "var(--bg-base)",
-              border: "1px solid var(--border-default)",
+              border: `1px solid ${hasValue && !isValid ? "rgba(248,113,113,0.5)" : "var(--border-default)"}`,
               borderRadius: "var(--radius-sm)",
               color: "var(--text-primary)",
               fontFamily: "var(--font-mono)",
@@ -7752,7 +7754,7 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
         }
       )
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: hint })
+    hasValue && isGemini && !isGeminiFormat ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#f87171" }, children: '⚠️ Key Gemini hiện tại không bắt đầu bằng "AIzaSy...". Hãy lấy API key từ Google AI Studio (aistudio.google.com/apikey).' }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: hint })
   ] });
 }
 function SettingsPage({ project, onUpdateSettings }) {
@@ -8660,7 +8662,7 @@ function PlanningPage({ project }) {
   const [progress, setProgress] = reactExports.useState(null);
   const [error, setError] = reactExports.useState(null);
   const [hasKey, setHasKey] = reactExports.useState(null);
-  const [selectedModel, setSelectedModel] = reactExports.useState("gemini-3.6-flash");
+  const [selectedModel, setSelectedModel] = reactExports.useState("gemini-3.8-flash");
   reactExports.useEffect(() => {
     window.api.plan.get(project.projectDir).then((p2) => {
       if (p2) setPlan(p2);
@@ -8857,10 +8859,9 @@ function PlanningPage({ project }) {
   ] });
 }
 const GEMINI_MODELS = [
-  { id: "gemini-3.6-flash", label: "gemini-3.6-flash  (recommended)" },
-  { id: "gemini-3.8-flash", label: "gemini-3.8-flash  (latest)" },
-  { id: "gemini-2.5-flash-preview-04-17", label: "gemini-2.5-flash-preview" },
-  { id: "gemini-2.0-flash", label: "gemini-2.0-flash  (stable)" },
+  { id: "gemini-3.8-flash", label: "gemini-3.8-flash  (latest — recommended)" },
+  { id: "gemini-3.6-flash", label: "gemini-3.6-flash" },
+  { id: "gemini-2.5-flash", label: "gemini-2.5-flash-preview" },
   { id: "gemini-1.5-flash-latest", label: "gemini-1.5-flash-latest (legacy)" }
 ];
 function fmt$1(secs) {
@@ -9684,14 +9685,29 @@ function StockPage({
     setCtxProgress("Starting global context analysis...");
     const unsub = window.api.stock.onContextProgress((d) => setCtxProgress(d.message));
     try {
-      const result = await window.api.stock.analyzeContext({ projectDir: project.projectDir, forceRegenerate: true });
+      const result = await window.api.stock.analyzeContext({
+        projectDir: project.projectDir,
+        forceRegenerate: true,
+        scriptPath: project.inputs?.scriptPath ?? null
+      });
       if (result.success && result.context) {
         setGlobalCtx(result.context);
         setCtxExpanded(true);
+        if (result.warning) {
+          setCtxProgress(`⚠ ${result.warning}`);
+          setTimeout(() => setCtxProgress(null), 8e3);
+        } else {
+          setCtxProgress(null);
+        }
+      } else {
+        setCtxProgress(`⚠ ${result.error || "Failed to analyze script"}`);
+        setTimeout(() => setCtxProgress(null), 8e3);
       }
+    } catch (e) {
+      setCtxProgress(`⚠ ${e instanceof Error ? e.message : String(e)}`);
+      setTimeout(() => setCtxProgress(null), 8e3);
     } finally {
       setAnalyzingCtx(false);
-      setCtxProgress(null);
       unsub();
     }
   }
@@ -9729,7 +9745,27 @@ function StockPage({
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: 12 }, children: ctxExpanded ? "▲" : "▼" })
         ] })
       ] }),
-      analyzingCtx && ctxProgress && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "8px 20px", fontSize: "11px", color: "var(--text-secondary)", background: "var(--bg-overlay)" }, children: ctxProgress }),
+      ctxProgress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        padding: "8px 20px",
+        fontSize: "11px",
+        color: ctxProgress.startsWith("⚠") ? "#f59e0b" : "var(--text-secondary)",
+        background: "var(--bg-overlay)",
+        borderTop: "1px solid var(--border-subtle)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: ctxProgress }),
+        !analyzingCtx && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => setCtxProgress(null),
+            style: { background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "13px", padding: "0 4px" },
+            title: "Dismiss",
+            children: "✕"
+          }
+        )
+      ] }),
       ctxExpanded && globalCtx && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "PRIMARY SUBJECT" }),
@@ -9737,9 +9773,9 @@ function StockPage({
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "CENTRAL THESIS" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12, lineHeight: 1.5 }, children: globalCtx.centralThesis }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "LOCATION" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12 }, children: [globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(", ") || "Not specified" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12 }, children: [globalCtx.geography?.primaryCountry, globalCtx.geography?.primaryRegion, ...globalCtx.geography?.secondaryLocations ?? []].filter(Boolean).join(", ") || "Not specified" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "TIME PERIOD" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: globalCtx.timeContext.primaryPeriod })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: globalCtx.timeContext?.primaryPeriod || "Contemporary" })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#22c55e", marginBottom: 4 }, children: "✓ EXACT TOPIC ANCHORS" }),

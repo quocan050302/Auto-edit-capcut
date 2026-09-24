@@ -158,7 +158,7 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_UPLOAD, params),
 
     // Context-Aware Global Script Director
-    analyzeContext: (params: { projectDir: string; forceRegenerate?: boolean; scriptPath?: string | null }): Promise<{ success: boolean; context?: GlobalScriptContext; error?: string }> =>
+    analyzeContext: (params: { projectDir: string; forceRegenerate?: boolean; scriptPath?: string | null }): Promise<{ success: boolean; context?: GlobalScriptContext; error?: string; warning?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_ANALYZE, params),
 
     getContext: (projectDir: string): Promise<GlobalScriptContext | null> =>

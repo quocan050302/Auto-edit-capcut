@@ -167,7 +167,7 @@ export async function generateContextAwareSearchPlan(params: {
   onProgress?: QueryProgressCallback
 }): Promise<StockSearchPlan> {
   const { projectDir, apiKey, packet, globalContext, sceneId, useCache = true } = params
-  const modelId = params.model ?? "gemini-2.0-flash"
+  const modelId = params.model ?? "gemini-3.8-flash"
 
   const cacheKey = makeCacheKey(globalContext, sceneId, packet.localContext.narration)
   const cache = useCache ? loadQueryCache(projectDir) : {}
@@ -178,9 +178,9 @@ export async function generateContextAwareSearchPlan(params: {
     return cache[cacheKey].plan
   }
 
-  const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } })
+  const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1beta" } })
   const prompt = buildScenePrompt(packet, globalContext)
-  const fallbackModels = [modelId, "gemini-2.0-flash", "gemini-1.5-flash"].filter((v, i, a) => a.indexOf(v) === i)
+  const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i)
   let rawJson = ""
 
   for (let attempt = 1; attempt <= 3; attempt++) {

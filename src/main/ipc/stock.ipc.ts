@@ -215,7 +215,7 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
     async (event, params: { projectDir: string; forceRegenerate?: boolean; scriptPath?: string | null }) => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const config = loadConfig()
-      if (!config.geminiApiKey) return { success: false, error: "Gemini API key required for global context analysis." }
+      const geminiKey = config.geminiApiKey?.trim() ?? ""
 
       const sendProgress = (message: string, progress: number): void => {
         win?.webContents.send(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, { message, progress })
@@ -259,12 +259,25 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
 
         const ctx = await analyzeGlobalContext({
           projectDir: params.projectDir,
-          apiKey: config.geminiApiKey,
+          apiKey: geminiKey,
+          model: config.preferredModel ?? "gemini-3.8-flash",
           scriptText, transcript,
           forceRegenerate: params.forceRegenerate ?? false,
           onProgress: sendProgress
         })
-        return { success: true, context: ctx }
+
+        let warning: string | undefined
+        if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
+          if (!geminiKey) {
+            warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn."
+          } else if (!geminiKey.startsWith("AIza")) {
+            warning = "Khóa Gemini API không đúng định dạng (cần bắt đầu bằng AIzaSy... từ Google AI Studio). Đã phân tích tự động từ kịch bản."
+          } else {
+            warning = "Gemini AI tạm thời quá tải. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc."
+          }
+        }
+
+        return { success: true, context: ctx, warning }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         return { success: false, error: msg }

@@ -58,14 +58,16 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
   }
 
   const hasValue = value.trim().length > 0
-  const isValid = hasValue && value.trim().length > 10
+  const isGemini = configKey === 'geminiApiKey'
+  const isGeminiFormat = !isGemini || value.trim().startsWith('AIza')
+  const isValid = hasValue && value.trim().length > 10 && isGeminiFormat
 
   return (
     <div style={{
       padding: '16px',
       background: 'var(--bg-elevated)',
       borderRadius: 'var(--radius-md)',
-      border: `1px solid ${hasValue && isValid ? 'var(--border-brand)' : 'var(--border-subtle)'}`,
+      border: `1px solid ${hasValue && isValid ? 'var(--border-brand)' : (hasValue && !isValid ? 'rgba(248,113,113,0.4)' : 'var(--border-subtle)')}`,
       display: 'flex',
       flexDirection: 'column',
       gap: '10px',
@@ -86,7 +88,9 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
               fontSize: '10px', padding: '2px 8px',
               background: 'rgba(248,113,113,0.15)', color: 'var(--color-error)',
               borderRadius: '999px', fontWeight: 600
-            }}>✗ INVALID FORMAT</span>
+            }}>
+              {isGemini && !isGeminiFormat ? '✗ CẦN KEY "AIzaSy..."' : '✗ INVALID FORMAT'}
+            </span>
           )}
         </div>
         {link && (
@@ -114,7 +118,7 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
             style={{
               width: '100%',
               background: 'var(--bg-base)',
-              border: '1px solid var(--border-default)',
+              border: `1px solid ${hasValue && !isValid ? 'rgba(248,113,113,0.5)' : 'var(--border-default)'}`,
               borderRadius: 'var(--radius-sm)',
               color: 'var(--text-primary)',
               fontFamily: 'var(--font-mono)',
@@ -147,7 +151,13 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
         </button>
       </div>
 
-      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{hint}</div>
+      {hasValue && isGemini && !isGeminiFormat ? (
+        <div style={{ fontSize: '11px', color: '#f87171' }}>
+          ⚠️ Key Gemini hiện tại không bắt đầu bằng &quot;AIzaSy...&quot;. Hãy lấy API key từ Google AI Studio (aistudio.google.com/apikey).
+        </div>
+      ) : (
+        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{hint}</div>
+      )}
     </div>
   )
 }

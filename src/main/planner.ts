@@ -262,7 +262,7 @@ export async function buildEditPlan(params: {
   onProgress?: (msg: string, pct: number) => void
 }): Promise<MasterEditPlan> {
   const { projectDir, apiKey, onProgress } = params
-  const modelId = params.model ?? 'gemini-2.0-flash'
+  const modelId = params.model ?? 'gemini-3.8-flash'
   const progress = (msg: string, pct: number): void => {
     logger.info(`[PLAN] ${msg}`)
     onProgress?.(msg, pct)
@@ -346,14 +346,16 @@ export async function buildEditPlan(params: {
 
   const ai = new GoogleGenAI({
     apiKey,
-    httpOptions: { apiVersion: 'v1alpha' }
+    httpOptions: { apiVersion: 'v1beta' }
   })
 
-  // Fallback model chain: selected model -> gemini-2.0-flash -> gemini-1.5-flash
+  // Fallback model chain: selected model -> newest -> older stable
   const fallbackModelChain = [
     modelId,
-    'gemini-2.0-flash',
-    'gemini-1.5-flash'
+    'gemini-3.8-flash',
+    'gemini-3.6-flash',
+    'gemini-2.5-flash',
+    'gemini-1.5-flash-latest'
   ].filter((v, i, a) => a.indexOf(v) === i)
 
   let activeModelIndex = 0

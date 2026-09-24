@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as os from 'os'
 import * as path from 'path'
 import { spawn } from 'child_process'
 import { logger } from './logger'
@@ -63,6 +64,21 @@ function ffmpegRun(args: string[]): Promise<void> {
   })
 }
 
+/**
+ * On macOS, paths stored as Windows-style (e.g. "D:\\Video_factory..." relative to CWD) must
+ * be resolved to a valid absolute path. FFmpeg interprets "D:" as a protocol and fails.
+ * Also strips any remaining Windows backslashes used as path separators.
+ */
+function normalizePathForFFmpeg(p: string): string {
+  if (!p) return p
+  // Already absolute Unix path
+  if (p.startsWith('/')) return p
+  // path.resolve() from CWD gives an absolute path
+  // then we replace any backslash PATH SEPARATORs (Windows), but NOT backslashes in dir names
+  // Since path.resolve on macOS treats backslash as literal char, the resolved path is correct.
+  return path.resolve(p)
+}
+
 /** Find actual file path for a media filename by searching source folders */
 function resolveMediaPath(
   filename: string,
@@ -70,7 +86,7 @@ function resolveMediaPath(
 ): string | null {
   if (!filename) return null
   const item = mediaIndex.find(m => m.filename === filename || path.basename(m.path) === filename)
-  return item ? item.path : null
+  return item ? normalizePathForFFmpeg(item.path) : null
 }
 
 /** Resolve the actual media path for a scene — prefers localPath (stock downloads) over mediaFile lookup */
@@ -79,8 +95,14 @@ function resolveSceneMedia(
   mediaIndex: Array<{ filename: string; path: string }>
 ): string | null {
   // 1. Direct local path (set by stock engine or user upload)
-  if (scene.localPath && fs.existsSync(scene.localPath)) return scene.localPath
-  if (scene.localAsset && fs.existsSync(scene.localAsset)) return scene.localAsset
+  if (scene.localPath) {
+    const p = normalizePathForFFmpeg(scene.localPath)
+    if (fs.existsSync(p)) return p
+  }
+  if (scene.localAsset) {
+    const p = normalizePathForFFmpeg(scene.localAsset)
+    if (fs.existsSync(p)) return p
+  }
   // 2. Look up by filename in media index
   if (scene.mediaFile) {
     const found = resolveMediaPath(scene.mediaFile, mediaIndex)
@@ -104,13 +126,15 @@ export async function renderVideo(params: {
   onProgress?: (p: RenderProgress) => void
 }): Promise<RenderResult> {
   const {
-    projectDir,
-    voiceoverPath,
     outputName = 'final_output',
     resolution = { width: 1920, height: 1080 },
     fps = 30,
     onProgress
   } = params
+
+  // Normalize paths that may be Windows-style (D:\...) on macOS
+  const projectDir = normalizePathForFFmpeg(params.projectDir)
+  const voiceoverPath = normalizePathForFFmpeg(params.voiceoverPath)
 
   const progress = (stage: string, pct: number, extra: Partial<RenderProgress> = {}): void => {
     logger.info(`[RENDER] ${stage} (${Math.round(pct * 100)}%)`)
@@ -139,7 +163,10 @@ export async function renderVideo(params: {
   progress(`Processing ${totalScenes} scenes...`, 0.06)
 
   // ── 4. Render each scene to a temp clip ───────────────────────────────────
-  const tmpDir = path.join(projectDir, 'renders', '_tmp')
+  // Use OS temp dir to avoid issues with special characters (colons, backslashes)
+  // in the project directory path (which may be stored as a Windows-style path on macOS)
+  const projectHash = Buffer.from(projectDir).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)
+  const tmpDir = path.join(os.tmpdir(), `auto-edit-render-${projectHash}`)
   fs.mkdirSync(tmpDir, { recursive: true })
 
   const sceneClips: string[] = []
@@ -212,7 +239,8 @@ export async function renderVideo(params: {
   const concatList = path.join(tmpDir, 'concat.txt')
   fs.writeFileSync(
     concatList,
-    sceneClips.map(f => `file '${f.replace(/\\/g, '/')}'`).join('\n'),
+    // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
+    sceneClips.map(f => `file '${process.platform === 'win32' ? f.replace(/\\/g, '/') : f}'`).join('\n'),
     'utf-8'
   )
 
@@ -233,11 +261,11 @@ export async function renderVideo(params: {
     : null
 
   const approvedMusic = audioPlan?.sections.filter(
-    (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+    (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
   ) ?? []
 
   const approvedSfx = audioPlan?.sfxAssignments.filter(
-    (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+    (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
   ) ?? []
 
   const hasAudio = fs.existsSync(voiceoverPath)
@@ -280,14 +308,14 @@ export async function renderVideo(params: {
     // Inputs: background music sections
     const musicInputs: Array<{ idx: number; section: typeof approvedMusic[0] }> = []
     for (const sec of approvedMusic) {
-      ffArgs.push('-i', sec.approvedLocalPath!)
+      ffArgs.push('-i', normalizePathForFFmpeg(sec.approvedLocalPath!))
       musicInputs.push({ idx: inputIdx++, section: sec })
     }
 
     // Inputs: SFX
     const sfxInputs: Array<{ idx: number; sfx: typeof approvedSfx[0] }> = []
     for (const sfx of approvedSfx) {
-      ffArgs.push('-i', sfx.approvedLocalPath!)
+      ffArgs.push('-i', normalizePathForFFmpeg(sfx.approvedLocalPath!))
       sfxInputs.push({ idx: inputIdx++, sfx })
     }
 

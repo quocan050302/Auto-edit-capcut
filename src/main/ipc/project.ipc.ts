@@ -15,7 +15,9 @@ import { logger } from "../logger";
 // Reads from userData/config.json { "projectsDir": "..." }
 // Defaults to D:\Video_factory_hutteries if not set.
 
-const FALLBACK_PROJECTS_DIR = "D:\\Video_factory_hutteries"
+const FALLBACK_PROJECTS_DIR = process.platform === "win32"
+  ? "D:\\Video_factory_hutteries"
+  : join(app.getPath("documents"), "Video_factory_hutteries")
 
 function getConfigPath(): string {
   return join(app.getPath("userData"), "config.json")

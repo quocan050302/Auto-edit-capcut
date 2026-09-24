@@ -1,4 +1,4 @@
-﻿import { GoogleGenAI } from "@google/genai"
+import { GoogleGenAI } from "@google/genai"
 import * as fs from "fs"
 import { join } from "path"
 import { createHash } from "crypto"
@@ -71,7 +71,7 @@ export async function analyzeGlobalContext(params: {
 }): Promise<GlobalScriptContext> {
   const { projectDir, apiKey, forceRegenerate = false } = params
   const progress = params.onProgress ?? (() => {})
-  const modelId = params.model ?? "gemini-2.0-flash"
+  const modelId = params.model ?? "gemini-3.8-flash"
 
   const fullText = params.scriptText
     ?? params.transcript?.fullText
@@ -103,83 +103,180 @@ export async function analyzeGlobalContext(params: {
     } catch { /* regenerate */ }
   }
 
-  progress("Analyzing full script for global context...", 0.05)
-  const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1alpha" } })
-  const prompt = buildGeminiPrompt(fullText, projectId, language)
-  const fallbackModels = [modelId, "gemini-2.0-flash", "gemini-1.5-flash"].filter((v, i, a) => a.indexOf(v) === i)
   let rawJson = ""
-  const maxRetries = 5
+  let aiError: string | null = null
 
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)]
+  if (apiKey && apiKey.trim().length > 0) {
+    progress("Analyzing full script for global context...", 0.05)
     try {
-      progress(attempt === 1
-        ? `Sending full script to Gemini (${currentModel}) for global analysis...`
-        : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.10)
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-        config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
-      })
-      rawJson = response.text ?? ""
-      break
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE")
-      if (overloaded && attempt < maxRetries) {
-        const wait = Math.min(attempt * 3, 12)
-        for (let s = wait; s > 0; s--) {
-          progress(`Gemini overloaded, retrying in ${s}s...`, 0.20)
-          await new Promise((r) => setTimeout(r, 1000))
+      const ai = new GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } })
+      const prompt = buildGeminiPrompt(fullText, projectId, language)
+      const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i)
+      const maxRetries = 3
+
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)]
+        try {
+          progress(attempt === 1
+            ? `Sending full script to Gemini (${currentModel}) for global analysis...`
+            : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.15)
+          const response = await ai.models.generateContent({
+            model: currentModel,
+            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+            config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+          })
+          rawJson = response.text ?? ""
+          if (rawJson) break
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err)
+          aiError = msg
+          logger.warn(`[GlobalContext] Gemini attempt ${attempt} failed: ${msg}`)
+
+          // If authentication error or invalid key, stop retrying immediately
+          if (msg.includes("401") || msg.includes("UNAUTHENTICATED") || msg.includes("API_KEY") || msg.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
+            break
+          }
+
+          const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE")
+          if (overloaded && attempt < maxRetries) {
+            const wait = Math.min(attempt * 2, 6)
+            for (let s = wait; s > 0; s--) {
+              progress(`Gemini overloaded, retrying in ${s}s...`, 0.20)
+              await new Promise((r) => setTimeout(r, 1000))
+            }
+            continue
+          }
         }
-        continue
       }
-      throw new Error(`Global context analysis failed: ${msg}`)
+    } catch (outerErr: unknown) {
+      aiError = outerErr instanceof Error ? outerErr.message : String(outerErr)
+      logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`)
     }
+  } else {
+    logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context")
   }
 
   let ctx: GlobalScriptContext
-  try {
-    const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
-    ctx = JSON.parse(clean) as GlobalScriptContext
-  } catch {
-    logger.warn("[GlobalContext] JSON parse failed, using fallback context")
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
+      ctx = JSON.parse(clean) as GlobalScriptContext
+      ctx.modelUsed = modelId
+    } catch {
+      logger.warn("[GlobalContext] JSON parse failed, using fallback context")
+      ctx = buildFallbackContext(projectId, language, fullText)
+      ctx.modelUsed = "algorithmic (JSON parse fallback)"
+    }
+  } else {
+    logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`)
+    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.70)
     ctx = buildFallbackContext(projectId, language, fullText)
+    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic"
   }
 
   ctx.generatedAt = new Date().toISOString()
-  ctx.modelUsed = modelId
   ctx.version = 1
   ;(ctx as GlobalScriptContext & { _scriptHash: string })._scriptHash = hash
 
   fs.mkdirSync(join(projectDir, "analysis"), { recursive: true })
   fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8")
-  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject })
-  progress(`Global context ready -- "${ctx.primarySubject}"`, 1.0)
+  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed })
+  progress(`Global context ready — "${ctx.primarySubject}"`, 1.0)
   return ctx
 }
 
 function buildFallbackContext(projectId: string, language: string, text: string): GlobalScriptContext {
-  const words = text.split(/\s+/).filter((w) => w.length > 4)
+  const STOP_WORDS = new Set([
+    "about", "above", "after", "again", "against", "all", "another", "any", "are", "aren't",
+    "because", "been", "before", "being", "below", "between", "both", "but", "can", "cannot",
+    "could", "couldn't", "did", "didn't", "does", "doesn't", "doing", "don't", "down", "during",
+    "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't",
+    "having", "here", "here's", "hers", "herself", "himself", "how", "how's", "into", "it's",
+    "its", "itself", "let's", "more", "most", "mustn't", "myself", "never", "only", "other",
+    "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shan't", "should",
+    "shouldn't", "some", "such", "than", "that", "that's", "the", "their", "theirs", "them",
+    "themselves", "then", "there", "there's", "these", "they", "they'd", "they'll", "they're",
+    "they've", "this", "those", "through", "until", "very", "was", "wasn't", "we'd", "we'll",
+    "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where", "where's",
+    "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
+    "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours", "yourself",
+    "yourselves", "video", "channel", "going", "first", "today", "finally", "place", "entire",
+    "exact", "thing", "things", "really", "almost", "turns", "right", "breakdown",
+    // Vietnamese common stop words
+    "những", "chúng", "trong", "người", "không", "được", "nhiều", "chính", "thực", "thấy",
+    "video", "kênh", "hoặc", "cũng", "này", "đang", "phải", "theo", "cùng", "nhau"
+  ])
+
+  // Extract Capitalized Proper Nouns / Names (e.g. Hutterite, Canada)
+  const properMatches = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? []
+  const properFreq: Record<string, number> = {}
+  for (const p of properMatches) {
+    const lower = p.toLowerCase()
+    if (!STOP_WORDS.has(lower) && lower.length > 3) {
+      properFreq[p] = (properFreq[p] ?? 0) + 1
+    }
+  }
+  const topProper = Object.entries(properFreq).sort((a, b) => b[1] - a[1]).map(([w]) => w)
+
+  // Frequency of all content words
+  const words = text.split(/\s+/)
   const freq: Record<string, number> = {}
   for (const w of words) {
-    const key = w.toLowerCase().replace(/[^a-z]/g, "")
-    if (key) freq[key] = (freq[key] ?? 0) + 1
+    const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "")
+    if (clean.length > 3 && !STOP_WORDS.has(clean)) {
+      freq[clean] = (freq[clean] ?? 0) + 1
+    }
   }
-  const top = Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 10).map(([w]) => w)
+  const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([w]) => w)
+
+  // Derive primary subject
+  const primarySubject = topProper[0] || topWords[0] || "Documentary Subject"
+  const exactTopicAnchors = topProper.length > 0 ? topProper.slice(0, 5) : topWords.slice(0, 5)
+  const contextualAnchors = topWords.filter((w) => !exactTopicAnchors.map((x) => x.toLowerCase()).includes(w)).slice(0, 8)
+
+  // Sentences for synopsis & thesis
+  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.?!])\s+/).filter(Boolean)
+  const centralThesis = sentences.slice(0, 2).join(" ") || text.slice(0, 250)
+  const globalSynopsis = sentences.slice(0, 4).join(" ") || text.slice(0, 350)
+
   return {
-    projectId, language, version: 1,
-    generatedAt: new Date().toISOString(), modelUsed: "fallback",
-    primarySubject: top[0] ?? "documentary subject",
-    secondarySubjects: top.slice(1, 4),
-    globalSynopsis: text.slice(0, 200), centralThesis: "See script",
-    documentaryAngle: "documentary", targetAudience: "general audience",
-    geography: { secondaryLocations: [] },
-    timeContext: { primaryPeriod: "contemporary", historicalPeriods: [] },
-    communities: [], recurringPeople: [],
-    visualWorld: { environment: [], architecture: [], clothing: [], occupations: [], machinery: [], recurringObjects: [], colorMood: "natural", documentaryStyle: "observational" },
-    exactTopicAnchors: top.slice(0, 3), contextualAnchors: top.slice(3, 6),
-    forbiddenSubstitutions: [], negativeKeywords: [], recurringVisualMotifs: [], storyArc: []
+    projectId,
+    language,
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    modelUsed: "algorithmic-fallback",
+    primarySubject,
+    secondarySubjects: topWords.slice(1, 5),
+    globalSynopsis,
+    centralThesis,
+    documentaryAngle: "observational documentary",
+    targetAudience: "general audience",
+    geography: {
+      primaryCountry: "Not specified",
+      secondaryLocations: []
+    },
+    timeContext: {
+      primaryPeriod: "contemporary",
+      historicalPeriods: []
+    },
+    communities: [],
+    recurringPeople: [],
+    visualWorld: {
+      environment: [],
+      architecture: [],
+      clothing: [],
+      occupations: [],
+      machinery: [],
+      recurringObjects: [],
+      colorMood: "natural cinematics",
+      documentaryStyle: "observational"
+    },
+    exactTopicAnchors,
+    contextualAnchors,
+    forbiddenSubstitutions: [],
+    negativeKeywords: ["cartoon", "cgi", "animation", "vlog", "generic"],
+    recurringVisualMotifs: [],
+    storyArc: []
   }
 }
 
