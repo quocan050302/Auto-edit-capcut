@@ -31,12 +31,18 @@ interface ScenePlan {
   endTime: number
   duration: number
   transitionIn?: string
+  localPath?: string
+  localAsset?: string
+  visualIntent?: string
 }
 
 interface EditPlan {
   chapters: Array<{
-    sequences: Array<{
-      scenes: ScenePlan[]
+    sequences?: Array<{
+      scenes?: ScenePlan[]
+    }>
+    chapters_seq?: Array<{
+      scenes?: ScenePlan[]
     }>
   }>
 }
@@ -61,20 +67,29 @@ function resolveMediaPath(
   filename: string,
   mediaIndex: Array<{ filename: string; path: string }>
 ): string | null {
+  if (!filename) return null
   const item = mediaIndex.find(m => m.filename === filename || path.basename(m.path) === filename)
   return item ? item.path : null
 }
 
 /** Resolve the actual media path for a scene — prefers localPath (stock downloads) over mediaFile lookup */
 function resolveSceneMedia(
-  scene: ScenePlan & { localPath?: string; localAsset?: string },
+  scene: ScenePlan,
   mediaIndex: Array<{ filename: string; path: string }>
 ): string | null {
   // 1. Direct local path (set by stock engine or user upload)
   if (scene.localPath && fs.existsSync(scene.localPath)) return scene.localPath
   if (scene.localAsset && fs.existsSync(scene.localAsset)) return scene.localAsset
   // 2. Look up by filename in media index
-  return resolveMediaPath(scene.mediaFile, mediaIndex)
+  if (scene.mediaFile) {
+    const found = resolveMediaPath(scene.mediaFile, mediaIndex)
+    if (found) return found
+  }
+  if (scene.localAsset) {
+    const found = resolveMediaPath(scene.localAsset, mediaIndex)
+    if (found) return found
+  }
+  return null
 }
 
 // ─── Main render function ─────────────────────────────────────────────────────
@@ -117,7 +132,7 @@ export async function renderVideo(params: {
 
   // ── 3. Flatten scenes ─────────────────────────────────────────────────────
   const scenes: ScenePlan[] = plan.chapters.flatMap(ch =>
-    ch.sequences.flatMap(seq => seq.scenes)
+    (ch.sequences ?? ch.chapters_seq ?? []).flatMap(seq => seq.scenes ?? [])
   )
   const totalScenes = scenes.length
   progress(`Processing ${totalScenes} scenes...`, 0.06)
@@ -131,20 +146,24 @@ export async function renderVideo(params: {
 
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i]
+    const mediaName = scene.localPath
+      ? path.basename(scene.localPath)
+      : (scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`)
+
     const pct = 0.06 + (i / totalScenes) * 0.70
-    progress(`Scene ${i + 1}/${totalScenes}: ${scene.mediaFile}`, pct, {
+    progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
       sceneIndex: i + 1,
       totalScenes
     })
 
-    const mediaPath = resolveSceneMedia(scene as ScenePlan & { localPath?: string; localAsset?: string }, mediaIndex)
+    const mediaPath = resolveSceneMedia(scene, mediaIndex)
     const outClip = path.join(tmpDir, `scene_${String(i + 1).padStart(4, '0')}.mp4`)
 
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`
 
     if (!mediaPath || !fs.existsSync(mediaPath)) {
       // Missing media: generate a black placeholder
-      logger.warn(`[RENDER] Missing media: ${scene.mediaFile}, using black placeholder`)
+      logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`)
       await ffmpegRun([
         '-y',
         '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
@@ -153,32 +172,35 @@ export async function renderVideo(params: {
         '-pix_fmt', 'yuv420p',
         outClip
       ])
-    } else if (scene.mediaType === 'image') {
-      // Image → loop for duration
-      await ffmpegRun([
-        '-y',
-        '-loop', '1',
-        '-i', mediaPath,
-        '-vf', scaleFilt,
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-        '-t', String(scene.duration),
-        '-r', String(fps),
-        '-pix_fmt', 'yuv420p',
-        outClip
-      ])
     } else {
-      // Video → trim + scale
-      await ffmpegRun([
-        '-y',
-        '-i', mediaPath,
-        '-vf', scaleFilt,
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-        '-t', String(scene.duration),
-        '-r', String(fps),
-        '-an',                // strip audio from source video (voiceover added later)
-        '-pix_fmt', 'yuv420p',
-        outClip
-      ])
+      const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === 'image'
+      if (isImage) {
+        // Image → loop for duration
+        await ffmpegRun([
+          '-y',
+          '-loop', '1',
+          '-i', mediaPath,
+          '-vf', scaleFilt,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+          '-t', String(scene.duration),
+          '-r', String(fps),
+          '-pix_fmt', 'yuv420p',
+          outClip
+        ])
+      } else {
+        // Video → trim + scale
+        await ffmpegRun([
+          '-y',
+          '-i', mediaPath,
+          '-vf', scaleFilt,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+          '-t', String(scene.duration),
+          '-r', String(fps),
+          '-an',                // strip audio from source video (voiceover added later)
+          '-pix_fmt', 'yuv420p',
+          outClip
+        ])
+      }
     }
 
     sceneClips.push(outClip)

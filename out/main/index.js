@@ -792,9 +792,86 @@ Return ONLY valid JSON, no explanation, matching this exact schema:
   ]
 }`;
 }
+function extractVisualQueries(text) {
+  const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
+  const words = clean.split(/\s+/).filter((w) => w.length > 2);
+  const queries = [];
+  if (words.length >= 3) {
+    queries.push(words.slice(0, 4).join(" "));
+    const mid = Math.floor(words.length / 2);
+    queries.push(words.slice(mid, mid + 3).join(" "));
+    queries.push(words.slice(-3).join(" "));
+  } else {
+    queries.push(clean || "documentary cinematic shot");
+  }
+  return queries.filter((q) => q.length >= 3).slice(0, 3);
+}
+function buildAlgorithmicPlan(transcript, projectName) {
+  const segments = transcript.segments;
+  const totalDuration = transcript.duration;
+  const numChapters = Math.min(5, Math.max(2, Math.round(totalDuration / 90)));
+  const segsPerChapter = Math.ceil(segments.length / numChapters);
+  const chapters = [];
+  let globalSceneIdx = 1;
+  for (let chIdx = 0; chIdx < numChapters; chIdx++) {
+    const chSegs = segments.slice(chIdx * segsPerChapter, (chIdx + 1) * segsPerChapter);
+    if (chSegs.length === 0) continue;
+    const chStart = chSegs[0].start;
+    const chEnd = chSegs[chSegs.length - 1].end;
+    const seqsPerCh = Math.min(3, Math.max(1, Math.ceil(chSegs.length / 4)));
+    const segsPerSeq = Math.ceil(chSegs.length / seqsPerCh);
+    const sequences = [];
+    for (let seqIdx = 0; seqIdx < seqsPerCh; seqIdx++) {
+      const seqSegs = chSegs.slice(seqIdx * segsPerSeq, (seqIdx + 1) * segsPerSeq);
+      if (seqSegs.length === 0) continue;
+      const scenes = seqSegs.map((seg) => {
+        const dur = Math.max(2, Number((seg.end - seg.start).toFixed(1)));
+        const queries = extractVisualQueries(seg.text);
+        return {
+          sceneIndex: globalSceneIdx++,
+          mediaFile: "",
+          mediaType: "video",
+          startTime: seg.start,
+          endTime: seg.end,
+          duration: dur,
+          narrativeText: seg.text,
+          transcriptSegmentIds: [seg.id],
+          transitionIn: "cut",
+          visualNote: `Visual shot: ${queries[0]}`,
+          visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+          searchQueries: queries
+        };
+      });
+      sequences.push({
+        sequenceIndex: seqIdx + 1,
+        title: `Sequence ${seqIdx + 1}`,
+        startTime: seqSegs[0].start,
+        endTime: seqSegs[seqSegs.length - 1].end,
+        scenes
+      });
+    }
+    chapters.push({
+      chapterIndex: chIdx + 1,
+      title: chIdx === 0 ? "Chapter 1: Introduction" : chIdx === numChapters - 1 ? `Chapter ${chIdx + 1}: Conclusion` : `Chapter ${chIdx + 1}`,
+      startTime: chStart,
+      endTime: chEnd,
+      sequences
+    });
+  }
+  const allScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
+  return {
+    projectName,
+    totalDuration,
+    totalScenes: allScenes.length,
+    language: transcript.language,
+    chapters,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    modelUsed: "rule-based-engine"
+  };
+}
 async function buildEditPlan(params) {
   const { projectDir, apiKey, onProgress } = params;
-  const modelId = params.model ?? "gemini-3.6-flash";
+  const modelId = params.model ?? "gemini-2.0-flash";
   const progress = (msg, pct) => {
     logger.info(`[PLAN] ${msg}`);
     onProgress?.(msg, pct);
@@ -853,16 +930,24 @@ async function buildEditPlan(params) {
     apiKey,
     httpOptions: { apiVersion: "v1alpha" }
   });
+  const fallbackModelChain = [
+    modelId,
+    "gemini-2.0-flash",
+    "gemini-1.5-flash"
+  ].filter((v, i, a) => a.indexOf(v) === i);
+  let activeModelIndex = 0;
   let rawJson = "";
-  const maxRetries = 3;
+  let finalModelUsed = modelId;
+  const maxRetries = 5;
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    const currentModel = fallbackModelChain[activeModelIndex];
     try {
       progress(
-        attempt === 1 ? "Waiting for Gemini response (may take 30-60 seconds)..." : `Thử lại với Gemini (lần ${attempt}/${maxRetries})...`,
-        0.3 + (attempt - 1) * 0.1
+        attempt === 1 ? `Đang gửi yêu cầu tới Gemini AI (${currentModel})...` : `Thử lại lần ${attempt}/${maxRetries} (${currentModel})...`,
+        0.2 + (attempt - 1) * 0.1
       );
       const response = await ai.models.generateContent({
-        model: modelId,
+        model: currentModel,
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -871,21 +956,41 @@ async function buildEditPlan(params) {
         }
       });
       rawJson = response.text ?? "";
+      finalModelUsed = currentModel;
       break;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       const isOverloaded = msg.includes("503") || msg.includes("high demand") || msg.includes("UNAVAILABLE") || msg.includes("429");
-      if (isOverloaded && attempt < maxRetries) {
-        const waitSec = attempt * 4;
-        logger.warn(`Gemini 503 high demand (attempt ${attempt}/${maxRetries}), waiting ${waitSec}s...`);
-        progress(`Google AI đang quá tải (503), tự động thử lại lần ${attempt + 1}/${maxRetries} sau ${waitSec}s...`, 0.35 + attempt * 0.1);
-        await new Promise((res) => setTimeout(res, waitSec * 1e3));
+      if (isOverloaded && activeModelIndex + 1 < fallbackModelChain.length) {
+        activeModelIndex++;
+        const nextModel = fallbackModelChain[activeModelIndex];
+        logger.warn(`Model ${currentModel} overloaded (503). Auto-switching to fallback: ${nextModel}`);
+        progress(
+          `Model ${currentModel} đang quá tải (503). Tự động chuyển sang model dự phòng "${nextModel}"...`,
+          0.3 + attempt / maxRetries * 0.35
+        );
+        await new Promise((res) => setTimeout(res, 2e3));
         continue;
       }
-      if (isOverloaded) {
-        throw new Error(`Google AI đang quá tải (503 High Demand). Bạn hãy thử đổi sang model "gemini-2.0-flash (stable)" ở dropdown hoặc đợi 1-2 phút rồi bấm lại.`);
+      if (isOverloaded && attempt < maxRetries) {
+        const waitSec = Math.min(attempt * 4, 16);
+        logger.warn(`Gemini 503 high demand (attempt ${attempt}/${maxRetries}), waiting ${waitSec}s...`);
+        for (let sec = waitSec; sec > 0; sec--) {
+          progress(
+            `Google AI đang quá tải (503 High Demand), tự động thử lại lần ${attempt + 1}/${maxRetries} sau ${sec}s...`,
+            0.3 + (attempt - 1) / maxRetries * 0.35
+          );
+          await new Promise((res) => setTimeout(res, 1e3));
+        }
+        continue;
       }
-      throw new Error(`Gemini API error: ${msg}`);
+      logger.warn(`All AI attempts failed (${msg}). Activating algorithmic rule-based fallback generator...`);
+      progress("Google AI tạm thời quá tải trên diện rộng. Tự động kích hoạt bộ tạo phân cảnh thông minh theo kịch bản...", 0.85);
+      const fallbackPlan = buildAlgorithmicPlan(transcript, projectName);
+      const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
+      fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
+      progress(`Hoàn tất — đã tạo phân cảnh dự phòng (${fallbackPlan.totalScenes} scenes)`, 1);
+      return fallbackPlan;
     }
   }
   progress("Parsing edit plan...", 0.85);
@@ -894,11 +999,28 @@ async function buildEditPlan(params) {
     const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
     planData = JSON.parse(clean);
   } catch (err) {
-    logger.error("Failed to parse Gemini JSON", { raw: rawJson.slice(0, 500) });
-    throw new Error(`Failed to parse AI response as JSON: ${err}`);
+    logger.warn("Failed to parse Gemini JSON, falling back to algorithmic plan", { raw: rawJson.slice(0, 300) });
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName);
+    const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
+    fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
+    progress(`Hoàn tất — đã tạo phân cảnh dự phòng (${fallbackPlan.totalScenes} scenes)`, 1);
+    return fallbackPlan;
+  }
+  for (const ch of planData.chapters || []) {
+    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+    for (const seq of seqs) {
+      for (const sc of seq.scenes || []) {
+        if (!sc.mediaFile) {
+          sc.mediaFile = sc.localAsset || "";
+        }
+        if (!sc.mediaType) {
+          sc.mediaType = "video";
+        }
+      }
+    }
   }
   const allScenes = planData.chapters.flatMap(
-    (c) => c.sequences.flatMap((s) => s.scenes)
+    (c) => (c.sequences ?? c.chapters_seq ?? []).flatMap((s) => s.scenes ?? [])
   );
   const totalScenes = allScenes.length;
   const totalDuration = transcript.duration;
@@ -909,7 +1031,7 @@ async function buildEditPlan(params) {
     language: transcript.language,
     chapters: planData.chapters,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: modelId
+    modelUsed: finalModelUsed
   };
   progress("Saving edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
@@ -998,13 +1120,22 @@ function ffmpegRun(args) {
   });
 }
 function resolveMediaPath(filename, mediaIndex) {
+  if (!filename) return null;
   const item = mediaIndex.find((m) => m.filename === filename || path__namespace.basename(m.path) === filename);
   return item ? item.path : null;
 }
 function resolveSceneMedia(scene, mediaIndex) {
   if (scene.localPath && fs__namespace.existsSync(scene.localPath)) return scene.localPath;
   if (scene.localAsset && fs__namespace.existsSync(scene.localAsset)) return scene.localAsset;
-  return resolveMediaPath(scene.mediaFile, mediaIndex);
+  if (scene.mediaFile) {
+    const found = resolveMediaPath(scene.mediaFile, mediaIndex);
+    if (found) return found;
+  }
+  if (scene.localAsset) {
+    const found = resolveMediaPath(scene.localAsset, mediaIndex);
+    if (found) return found;
+  }
+  return null;
 }
 async function renderVideo(params) {
   const {
@@ -1027,7 +1158,7 @@ async function renderVideo(params) {
   const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
   const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
   const scenes = plan.chapters.flatMap(
-    (ch) => ch.sequences.flatMap((seq) => seq.scenes)
+    (ch) => (ch.sequences ?? ch.chapters_seq ?? []).flatMap((seq) => seq.scenes ?? [])
   );
   const totalScenes = scenes.length;
   progress(`Processing ${totalScenes} scenes...`, 0.06);
@@ -1037,8 +1168,9 @@ async function renderVideo(params) {
   const { width, height } = resolution;
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i];
+    const mediaName = scene.localPath ? path__namespace.basename(scene.localPath) : scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`;
     const pct = 0.06 + i / totalScenes * 0.7;
-    progress(`Scene ${i + 1}/${totalScenes}: ${scene.mediaFile}`, pct, {
+    progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
       sceneIndex: i + 1,
       totalScenes
     });
@@ -1046,7 +1178,7 @@ async function renderVideo(params) {
     const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
     if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
-      logger.warn(`[RENDER] Missing media: ${scene.mediaFile}, using black placeholder`);
+      logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`);
       await ffmpegRun([
         "-y",
         "-f",
@@ -1065,52 +1197,55 @@ async function renderVideo(params) {
         "yuv420p",
         outClip
       ]);
-    } else if (scene.mediaType === "image") {
-      await ffmpegRun([
-        "-y",
-        "-loop",
-        "1",
-        "-i",
-        mediaPath,
-        "-vf",
-        scaleFilt,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
-        "-t",
-        String(scene.duration),
-        "-r",
-        String(fps),
-        "-pix_fmt",
-        "yuv420p",
-        outClip
-      ]);
     } else {
-      await ffmpegRun([
-        "-y",
-        "-i",
-        mediaPath,
-        "-vf",
-        scaleFilt,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
-        "-t",
-        String(scene.duration),
-        "-r",
-        String(fps),
-        "-an",
-        // strip audio from source video (voiceover added later)
-        "-pix_fmt",
-        "yuv420p",
-        outClip
-      ]);
+      const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === "image";
+      if (isImage) {
+        await ffmpegRun([
+          "-y",
+          "-loop",
+          "1",
+          "-i",
+          mediaPath,
+          "-vf",
+          scaleFilt,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "20",
+          "-t",
+          String(scene.duration),
+          "-r",
+          String(fps),
+          "-pix_fmt",
+          "yuv420p",
+          outClip
+        ]);
+      } else {
+        await ffmpegRun([
+          "-y",
+          "-i",
+          mediaPath,
+          "-vf",
+          scaleFilt,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "20",
+          "-t",
+          String(scene.duration),
+          "-r",
+          String(fps),
+          "-an",
+          // strip audio from source video (voiceover added later)
+          "-pix_fmt",
+          "yuv420p",
+          outClip
+        ]);
+      }
     }
     sceneClips.push(outClip);
   }
@@ -1717,6 +1852,8 @@ async function runStockEngine(params, onProgress = () => {
         manifest.push(downloadedAsset);
         usedAssetIds.add(downloadedAsset.assetId);
         scene.localPath = downloadedAsset.localPath;
+        scene.mediaFile = path.basename(downloadedAsset.localPath);
+        scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
         assignment.asset = downloadedAsset;
         assignment.score = winner.score;
         assignment.usedQuery = usedQuery;
@@ -1782,6 +1919,8 @@ async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey,
     const scene = flattenScenes(plan).find((s) => s.sceneIndex === sceneIndex);
     if (scene) {
       scene.localPath = asset.localPath;
+      scene.mediaFile = path.basename(asset.localPath);
+      scene.mediaType = asset.mediaType === "photo" ? "image" : "video";
       fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
     }
   }
@@ -1920,6 +2059,8 @@ function registerStockHandlers(ipcMain) {
         const scene = allScenes.find((s) => s.sceneIndex === params.sceneIndex);
         if (scene) {
           scene.localPath = params.filePath;
+          scene.mediaFile = path.basename(params.filePath);
+          scene.mediaType = params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? "video" : "image";
           fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
         }
       }

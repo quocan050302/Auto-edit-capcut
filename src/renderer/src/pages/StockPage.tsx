@@ -169,6 +169,7 @@ function SceneCard({
   const [showReplace, setShowReplace] = useState(false)
   const [replacing, setReplacing] = useState(false)
   const [locking, setLocking] = useState(false)
+  const [thumbError, setThumbError] = useState(false)
 
   const asset = assignment.asset
   const isAssigned = assignment.status === 'assigned' && asset
@@ -222,13 +223,25 @@ function SceneCard({
 
         {/* Thumbnail */}
         <div style={{ height: '120px', background: 'var(--bg-void)', overflow: 'hidden', position: 'relative' }}>
-          {isAssigned && asset?.thumbnailUrl ? (
+          {isAssigned && asset?.thumbnailUrl && !thumbError ? (
             <img
               src={asset.thumbnailUrl}
               alt={`Scene ${assignment.sceneIndex}`}
               style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              onError={(e) => { (e.target as HTMLImageElement).style.display = 'none' }}
+              onError={() => setThumbError(true)}
             />
+          ) : isAssigned ? (
+            <div style={{
+              width: '100%', height: '100%',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              flexDirection: 'column', gap: '6px',
+              background: 'linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(168,85,247,0.08) 100%)'
+            }}>
+              <span style={{ fontSize: '26px' }}>🎬</span>
+              <span style={{ fontSize: '10px', color: 'var(--text-brand)', fontWeight: 600, letterSpacing: '0.5px' }}>
+                {asset?.provider?.toUpperCase() || 'STOCK'} VIDEO
+              </span>
+            </div>
           ) : (
             <div style={{
               width: '100%', height: '100%',

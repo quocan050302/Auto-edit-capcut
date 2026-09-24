@@ -1,5 +1,5 @@
 import { IpcMain, BrowserWindow } from 'electron'
-import { join } from 'path'
+import { join, basename } from 'path'
 import * as fs from 'fs'
 import { IPC_CHANNELS } from '../../../shared/types'
 import type { StockReviewData, StockAsset, StockSceneAssignment } from '../../../shared/types'
@@ -166,6 +166,8 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
         const scene = allScenes.find((s) => s.sceneIndex === params.sceneIndex)
         if (scene) {
           scene.localPath = params.filePath
+          scene.mediaFile = basename(params.filePath)
+          scene.mediaType = params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? 'video' : 'image'
           fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
         }
       }

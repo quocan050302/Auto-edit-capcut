@@ -14,6 +14,9 @@ interface ScenePlan {
   transcriptSegmentIds: string[]
   transitionIn?: string
   visualNote?: string
+  localPath?: string
+  visualIntent?: string
+  localAsset?: string
 }
 
 interface SequencePlan {
@@ -54,6 +57,7 @@ function fmt(secs: number): string {
 
 function SceneRow({ scene, globalIdx }: { scene: ScenePlan; globalIdx: number }): React.ReactElement {
   const [expanded, setExpanded] = useState(false)
+  const mediaLabel = scene.mediaFile || (scene.localPath ? scene.localPath.split(/[/\\]/).pop() : (scene.visualIntent || scene.localAsset || 'Stock media pending'))
   return (
     <div
       style={{
@@ -82,10 +86,10 @@ function SceneRow({ scene, globalIdx }: { scene: ScenePlan; globalIdx: number })
           {scene.duration.toFixed(1)}s
         </span>
         <span style={{
-          fontSize: '11px', color: 'var(--text-secondary)',
+          fontSize: '11px', color: scene.localPath || scene.mediaFile ? 'var(--text-secondary)' : 'var(--text-muted)',
           flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
         }}>
-          {scene.mediaFile}
+          {mediaLabel}
         </span>
         <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{expanded ? '▲' : '▼'}</span>
       </div>

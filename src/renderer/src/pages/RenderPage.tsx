@@ -41,6 +41,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [error, setError] = useState<string | null>(null)
   const [hasPlan, setHasPlan] = useState(false)
   const [sceneCount, setSceneCount] = useState(0)
+  const [mediaReadyCount, setMediaReadyCount] = useState(0)
   const [elapsed, setElapsed] = useState(0)
   const startTimeRef = useRef<number | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -61,11 +62,18 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
     window.api.plan.get(project.projectDir).then((p) => {
       if (p) {
         setHasPlan(true)
-        const plan = p as { chapters: Array<{ sequences: Array<{ scenes: unknown[] }> }> }
-        const total = plan.chapters.reduce(
-          (a, ch) => a + ch.sequences.reduce((b, seq) => b + seq.scenes.length, 0), 0
+        const plan = p as {
+          chapters: Array<{
+            sequences?: Array<{ scenes?: Array<{ localPath?: string; mediaFile?: string; localAsset?: string }> }>
+            chapters_seq?: Array<{ scenes?: Array<{ localPath?: string; mediaFile?: string; localAsset?: string }> }>
+          }>
+        }
+        const allScenes = (plan.chapters || []).flatMap(
+          (ch) => (ch.sequences ?? ch.chapters_seq ?? []).flatMap((seq) => seq.scenes ?? [])
         )
-        setSceneCount(total)
+        setSceneCount(allScenes.length)
+        const ready = allScenes.filter((s) => !!(s.localPath || s.mediaFile || s.localAsset)).length
+        setMediaReadyCount(ready)
       }
     })
   }, [project.projectDir])
@@ -136,9 +144,16 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
         </div>
         <div className="panel-body">
           {/* Pre-flight checks */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '10px', marginBottom: '20px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '20px' }}>
             {[
               { label: 'Edit Plan', ok: hasPlan, value: hasPlan ? '✓ Ready' : '✗ Missing → AI Planning' },
+              {
+                label: 'Media Footage',
+                ok: mediaReadyCount > 0 && mediaReadyCount >= sceneCount,
+                value: sceneCount > 0
+                  ? (mediaReadyCount >= sceneCount ? `✓ ${mediaReadyCount}/${sceneCount} ready` : `⚠ ${mediaReadyCount}/${sceneCount} ready`)
+                  : '—'
+              },
               { label: 'Voiceover', ok: !!voiceoverPath, value: voiceoverPath ? `✓ ${voiceoverPath.split(/[\/\\]/).pop()}` : '⚠ Not set (optional)' },
               { label: 'Output Format', ok: true, value: `${resolution} · ${fps}fps` }
             ].map(({ label, ok, value }) => (

@@ -6,7 +6,7 @@
  * Ranks candidates, downloads the winner, stamps the edit plan.
  */
 
-import { join } from 'path'
+import { join, basename } from 'path'
 import * as fs from 'fs'
 import type {
   StockRunParams,
@@ -37,6 +37,7 @@ interface ScenePlanWithIntent {
   localPath?: string
   locked?: boolean
   mediaFile?: string
+  mediaType?: 'video' | 'image'
 }
 
 interface EditPlan {
@@ -254,6 +255,8 @@ export async function runStockEngine(
 
         // Stamp the plan scene
         scene.localPath = downloadedAsset.localPath
+        scene.mediaFile = basename(downloadedAsset.localPath)
+        scene.mediaType = downloadedAsset.mediaType === 'photo' ? 'image' : 'video'
 
         assignment.asset = downloadedAsset
         assignment.score = winner.score
@@ -338,6 +341,8 @@ export async function replaceSceneAsset(
     const scene = flattenScenes(plan).find((s) => s.sceneIndex === sceneIndex)
     if (scene) {
       scene.localPath = asset.localPath
+      scene.mediaFile = basename(asset.localPath)
+      scene.mediaType = asset.mediaType === 'photo' ? 'image' : 'video'
       fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
     }
   }
