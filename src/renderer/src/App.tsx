@@ -11,11 +11,13 @@ import { PlanningPage } from './pages/PlanningPage'
 import { RenderPage } from './pages/RenderPage'
 import { QAPage } from './pages/PlaceholderPages'
 import { StockPage } from './pages/StockPage'
+import { AudioDirectorPage } from './pages/AudioDirectorPage'
 import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
 import { useStock } from './hooks/useStock'
+import { useAudioDirector } from './hooks/useAudioDirector'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
@@ -52,6 +54,10 @@ export default function App(): React.ReactElement {
     lockScene: stockLock,
     uploadOwnMedia: stockUpload
   } = useStock(addLog)
+
+  const audioDirector = useAudioDirector(
+    (level, message, category) => addLog({ level: level as 'info' | 'warn' | 'error' | 'success' | 'debug', message, category })
+  )
 
   // Load cached transcript when project opens
   useEffect(() => {
@@ -91,7 +97,12 @@ export default function App(): React.ReactElement {
   }
 
   const activeLogs = logs
-  const activeProgress = isScanning ? scanProgress : isTranscribing ? transcribeProgress : isStockRunning ? stockProgress : null
+  const activeProgress = isScanning ? scanProgress
+    : isTranscribing ? transcribeProgress
+    : isStockRunning ? stockProgress
+    : audioDirector.isSearching ? audioDirector.progress
+    : audioDirector.isDownloading ? audioDirector.downloadProgress
+    : null
 
   return (
     <div className="app-shell">
@@ -104,6 +115,10 @@ export default function App(): React.ReactElement {
           onNavigate={navigate}
           hasTranscript={transcript !== null}
           stockCoverage={stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null}
+          audioCoverage={audioDirector.plan ? {
+            approved: audioDirector.plan.sections.filter((s) => s.approved).length,
+            total: audioDirector.plan.sections.length
+          } : null}
         />
 
         <div className="main-content">
@@ -149,6 +164,13 @@ export default function App(): React.ReactElement {
               onLock={(idx, locked) => stockLock(project.projectDir, idx, locked)}
               onUpload={(idx) => stockUpload(project.projectDir, idx)}
               onLoad={() => loadStockReview(project.projectDir)}
+            />
+          )}
+
+          {currentPage === 'audio' && project && (
+            <AudioDirectorPage
+              project={project}
+              audioDirector={audioDirector}
             />
           )}
 

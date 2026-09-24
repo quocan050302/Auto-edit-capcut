@@ -157,6 +157,37 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
 export function SettingsPage({ project, onUpdateSettings }: SettingsPageProps): React.ReactElement {
   const s = project.settings
 
+  // ── Storage directory ───────────────────────────────────────────────────────
+  const [storageDir, setStorageDir] = useState('')
+  const [storageSaved, setStorageSaved] = useState(false)
+  const [storageError, setStorageError] = useState<string | null>(null)
+  const [storageSaving, setStorageSaving] = useState(false)
+
+  useEffect(() => {
+    window.api.project.getDir().then((dir) => {
+      if (dir) setStorageDir(dir)
+    }).catch(() => {})
+  }, [])
+
+  async function handleSaveStorageDir(): Promise<void> {
+    if (!storageDir.trim()) return
+    setStorageSaving(true)
+    setStorageError(null)
+    try {
+      const res = await window.api.project.setDir(storageDir.trim())
+      if (res.success) {
+        setStorageSaved(true)
+        setTimeout(() => setStorageSaved(false), 3000)
+      } else {
+        setStorageError(res.error ?? 'Failed to save')
+      }
+    } catch (err: unknown) {
+      setStorageError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setStorageSaving(false)
+    }
+  }
+
   function update<K extends keyof ProjectSettings>(key: K, value: ProjectSettings[K]): void {
     onUpdateSettings({ [key]: value })
   }
@@ -167,6 +198,57 @@ export function SettingsPage({ project, onUpdateSettings }: SettingsPageProps): 
 
   return (
     <div className="page-container">
+
+      {/* ── Storage Location ──────────────────────────── */}
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-title">
+            <div className="panel-title-icon">
+              <svg width="12" height="12" viewBox="0 0 20 20" fill="var(--brand-primary)">
+                <path fillRule="evenodd" d="M2 6a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1H8a3 3 0 00-3 3v1.5a1.5 1.5 0 01-3 0V6z" clipRule="evenodd" />
+                <path d="M6 12a2 2 0 012-2h8a2 2 0 012 2v2a2 2 0 01-2 2H2h2a2 2 0 002-2v-2z" />
+              </svg>
+            </div>
+            Storage Location
+          </div>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+            Where all projects are saved
+          </span>
+        </div>
+        <div className="panel-body">
+          <div style={{ marginBottom: 8 }}>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+              Projects directory — all new projects will be created here
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                className="settings-input"
+                value={storageDir}
+                onChange={(e) => setStorageDir(e.target.value)}
+                placeholder="D:\Video_factory_hutteries"
+                onKeyDown={(e) => { if (e.key === 'Enter') handleSaveStorageDir() }}
+                style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12 }}
+              />
+              <button
+                className={`btn ${storageSaved ? 'btn-success' : 'btn-primary'}`}
+                onClick={handleSaveStorageDir}
+                disabled={storageSaving || !storageDir.trim()}
+                style={{ minWidth: 80, flexShrink: 0 }}
+              >
+                {storageSaving ? '…' : storageSaved ? '✓ Saved' : 'Save'}
+              </button>
+            </div>
+            {storageError && (
+              <div style={{ fontSize: 11, color: '#f87171', marginTop: 6 }}>⚠ {storageError}</div>
+            )}
+            {storageSaved && (
+              <div style={{ fontSize: 11, color: '#34d399', marginTop: 6 }}>
+                ✓ Path saved — new projects will be created in <code style={{ fontFamily: 'var(--font-mono)' }}>{storageDir}</code>
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
 
       {/* ── API Keys ─────────────────────────────────── */}
       <div className="panel">

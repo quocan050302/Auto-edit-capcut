@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { spawn } from 'child_process'
 import { logger } from './logger'
+import type { AudioPlan } from '../../shared/types'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -224,13 +225,37 @@ export async function renderVideo(params: {
     rawVideo
   ])
 
-  // ── 6. Mix voiceover audio ────────────────────────────────────────────────
-  progress('Mixing voiceover audio...', 0.88)
+  // ── 6. Load audio plan (Smart Audio Director) ─────────────────────────────
+  progress('Loading audio plan…', 0.86)
+  const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
+  const audioPlan: AudioPlan | null = fs.existsSync(audioPlanPath)
+    ? (JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8')) as AudioPlan)
+    : null
+
+  const approvedMusic = audioPlan?.sections.filter(
+    (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+  ) ?? []
+
+  const approvedSfx = audioPlan?.sfxAssignments.filter(
+    (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+  ) ?? []
+
+  const hasAudio = fs.existsSync(voiceoverPath)
+  const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0
+
+  logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`)
+
+  // ── 7. Mix voiceover + music + SFX ────────────────────────────────────────
+  progress('Mixing audio tracks…', 0.90)
   const outputDir = path.join(projectDir, 'output')
   fs.mkdirSync(outputDir, { recursive: true })
   const outputPath = path.join(outputDir, `${outputName}.mp4`)
 
-  if (fs.existsSync(voiceoverPath)) {
+  if (!hasAudio && !hasMusicOrSfx) {
+    // No audio at all — just copy raw video
+    fs.copyFileSync(rawVideo, outputPath)
+  } else if (!hasMusicOrSfx && hasAudio) {
+    // Simple case: voiceover only
     await ffmpegRun([
       '-y',
       '-i', rawVideo,
@@ -242,8 +267,97 @@ export async function renderVideo(params: {
       outputPath
     ])
   } else {
-    // No audio — just copy raw video
-    fs.copyFileSync(rawVideo, outputPath)
+    // Complex case: voiceover + background music + SFX
+    // Build ffmpeg inputs and filter_complex
+    const ffArgs: string[] = ['-y', '-i', rawVideo]
+
+    let inputIdx = 1
+
+    // Input: voiceover
+    const voiceoverIdx = hasAudio ? inputIdx++ : -1
+    if (hasAudio) ffArgs.push('-i', voiceoverPath)
+
+    // Inputs: background music sections
+    const musicInputs: Array<{ idx: number; section: typeof approvedMusic[0] }> = []
+    for (const sec of approvedMusic) {
+      ffArgs.push('-i', sec.approvedLocalPath!)
+      musicInputs.push({ idx: inputIdx++, section: sec })
+    }
+
+    // Inputs: SFX
+    const sfxInputs: Array<{ idx: number; sfx: typeof approvedSfx[0] }> = []
+    for (const sfx of approvedSfx) {
+      ffArgs.push('-i', sfx.approvedLocalPath!)
+      sfxInputs.push({ idx: inputIdx++, sfx })
+    }
+
+    // Build filter_complex
+    const filterParts: string[] = []
+    const mixLabels: string[] = []
+
+    // Voiceover — normalize loudness to -16 LUFS so it's always clear and consistent
+    if (hasAudio) {
+      filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`)
+      mixLabels.push('[vo]')
+    }
+
+    // Music sections — ducked under voiceover
+    // Default: -30 dB (3.2% amplitude) — subtle background bed
+    for (const { idx, section } of musicInputs) {
+      const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6)
+      const fadeIn = section.fadeInSecs ?? 2
+      const fadeOut = section.fadeOutSecs ?? 3
+      const dur = section.durationSecs
+      const label = `music_${idx}`
+      filterParts.push(
+        `[${idx}:a]volume=${vol},` +
+        `afade=t=in:ss=0:d=${fadeIn},` +
+        `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
+        `adelay=${Math.round(section.startTime * 1000)}|${Math.round(section.startTime * 1000)},` +
+        `apad[${label}]`
+      )
+      mixLabels.push(`[${label}]`)
+    }
+
+    // SFX — placed at scene start time
+    for (const { idx, sfx } of sfxInputs) {
+      const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6)
+      const fadeIn = sfx.fadeInSecs ?? 0.5
+      const fadeOut = sfx.fadeOutSecs ?? 0.5
+      const dur = sfx.endTime - sfx.startTime
+      const label = `sfx_${idx}`
+      filterParts.push(
+        `[${idx}:a]volume=${vol},` +
+        `afade=t=in:ss=0:d=${fadeIn},` +
+        `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
+        `adelay=${Math.round(sfx.startTime * 1000)}|${Math.round(sfx.startTime * 1000)},` +
+        `apad[${label}]`
+      )
+      mixLabels.push(`[${label}]`)
+    }
+
+    // Mix all tracks, then limit output to prevent clipping
+    const nInputs = mixLabels.length
+    filterParts.push(
+      // normalize=1 scales by 1/nInputs to prevent summing clips
+      `${mixLabels.join('')}amix=inputs=${nInputs}:duration=first:normalize=1,` +
+      // Final brick-wall limiter: ensure no sample exceeds -1 dBTP
+      `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+    )
+
+    const filterComplex = filterParts.join(';')
+    logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`)
+
+    await ffmpegRun([
+      ...ffArgs,
+      '-filter_complex', filterComplex,
+      '-map', '0:v:0',
+      '-map', '[amixed]',
+      '-c:v', 'copy',
+      '-c:a', 'aac', '-b:a', '192k',
+      '-shortest',
+      outputPath
+    ])
   }
 
   // ── 7. Cleanup temp files ─────────────────────────────────────────────────

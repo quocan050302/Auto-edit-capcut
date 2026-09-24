@@ -1,7 +1,7 @@
 import React from 'react'
 import type { ProjectState } from '../../../../shared/types'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa'
 
 interface SidebarProps {
   project: ProjectState | null
@@ -9,6 +9,7 @@ interface SidebarProps {
   onNavigate: (page: Page) => void
   hasTranscript?: boolean
   stockCoverage?: { assigned: number; total: number } | null
+  audioCoverage?: { approved: number; total: number } | null
 }
 
 function statusClass(status: string | undefined): string {
@@ -79,6 +80,16 @@ const NAV_ITEMS: {
     )
   },
   {
+    id: 'audio',
+    label: 'Audio Director',
+    requiresProject: true,
+    icon: (
+      <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
+        <path fillRule="evenodd" d="M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z" clipRule="evenodd" />
+      </svg>
+    )
+  },
+  {
     id: 'settings',
     label: 'Settings',
     requiresProject: true,
@@ -125,7 +136,8 @@ export function Sidebar({
   currentPage,
   onNavigate,
   hasTranscript,
-  stockCoverage
+  stockCoverage,
+  audioCoverage
 }: SidebarProps): React.ReactElement {
   return (
     <aside className="sidebar">
@@ -164,6 +176,18 @@ export function Sidebar({
                 borderRadius: '999px', padding: '1px 5px', flexShrink: 0
               }}>
                 {stockCoverage.assigned}/{stockCoverage.total}
+              </span>
+            )}
+            {/* Badge: audio coverage */}
+            {item.id === 'audio' && audioCoverage && audioCoverage.total > 0 && (
+              <span style={{
+                fontSize: '9px', fontWeight: 700,
+                background: audioCoverage.approved > 0
+                  ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.06)',
+                color: audioCoverage.approved > 0 ? '#a5b4fc' : 'var(--text-muted)',
+                borderRadius: '999px', padding: '1px 5px', flexShrink: 0
+              }}>
+                {audioCoverage.approved}/{audioCoverage.total}
               </span>
             )}
           </button>

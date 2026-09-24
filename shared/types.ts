@@ -189,6 +189,83 @@ export interface StockReviewData {
   stockAssetsJson: StockAsset[]
 }
 
+// ─── Smart Audio Director Types ───────────────────────────────────────────────
+
+export type AudioProvider = 'openverse'
+export type AudioMediaType = 'music' | 'sfx'
+
+/** A single candidate returned from an audio search provider */
+export interface AudioSearchResult {
+  assetId: string
+  provider: AudioProvider
+  audioType: AudioMediaType
+  title: string
+  creator: string
+  creatorUrl?: string
+  downloadUrl: string
+  thumbnailUrl: string
+  durationSecs: number
+  tags: string[]
+  license: string
+  licenseUrl: string
+  pageUrl: string
+  filetype: string
+  searchQuery: string
+}
+
+/** A music section spanning one or more scenes that share a narrative mood */
+export interface AudioSection {
+  sectionId: string
+  sectionLabel: string
+  mood: string
+  startTime: number
+  endTime: number
+  durationSecs: number
+  sceneIndexes: number[]
+  musicCandidate: AudioSearchResult | null
+  approved: boolean
+  status: 'found' | 'failed' | 'pending'
+  errorMessage?: string
+  // Populated after download
+  approvedLocalPath?: string
+  approvedFilename?: string
+  // User-customisable volume & fade
+  volumeDb?: number       // default -18 (background)
+  fadeInSecs?: number     // default 2
+  fadeOutSecs?: number    // default 3
+}
+
+/** Sound-effect assignment for one scene */
+export interface AudioSfxAssignment {
+  sceneIndex: number
+  startTime: number
+  endTime: number
+  sfxQuery: string
+  sfxCandidate: AudioSearchResult | null
+  approved: boolean
+  volumeDb: number        // default -12
+  fadeInSecs: number
+  fadeOutSecs: number
+  // Populated after download
+  approvedLocalPath?: string
+  approvedFilename?: string
+}
+
+/** Full audio plan saved to disk */
+export interface AudioPlan {
+  generatedAt: string
+  sections: AudioSection[]
+  sfxAssignments: AudioSfxAssignment[]
+}
+
+/** Result from a runAudioDirector() call */
+export interface AudioRunResult {
+  success: boolean
+  sections: AudioSection[]
+  sfxAssignments: AudioSfxAssignment[]
+  error?: string
+}
+
 // IPC channel names
 export const IPC_CHANNELS = {
   // File dialogs
@@ -218,6 +295,8 @@ export const IPC_CHANNELS = {
   // App info
   GET_APP_VERSION: 'app:get-version',
   GET_PROJECTS_DIR: 'app:get-projects-dir',
+  SET_PROJECTS_DIR: 'app:set-projects-dir',
+
 
   // Config (API keys, preferences)
   CONFIG_GET: 'config:get',
@@ -239,7 +318,17 @@ export const IPC_CHANNELS = {
   STOCK_REVIEW_GET: 'stock:review-get',
   STOCK_SCENE_REPLACE: 'stock:scene-replace',
   STOCK_SCENE_LOCK: 'stock:scene-lock',
-  STOCK_SCENE_UPLOAD: 'stock:scene-upload'
+  STOCK_SCENE_UPLOAD: 'stock:scene-upload',
+
+  // Smart Audio Director
+  AUDIO_SEARCH_START: 'audio:search-start',
+  AUDIO_SEARCH_PROGRESS: 'audio:search-progress',
+  AUDIO_PLAN_GET: 'audio:plan-get',
+  AUDIO_PLAN_SAVE: 'audio:plan-save',
+  AUDIO_APPROVE_SECTION: 'audio:approve-section',
+  AUDIO_APPROVE_SFX: 'audio:approve-sfx',
+  AUDIO_DOWNLOAD_APPROVED: 'audio:download-approved',
+  AUDIO_DOWNLOAD_PROGRESS: 'audio:download-progress'
 } as const
 
 // ─── Transcript types (shared between main and renderer) ─────────────────────

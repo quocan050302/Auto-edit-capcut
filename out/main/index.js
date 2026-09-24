@@ -56,6 +56,7 @@ const IPC_CHANNELS = {
   // App info
   GET_APP_VERSION: "app:get-version",
   GET_PROJECTS_DIR: "app:get-projects-dir",
+  SET_PROJECTS_DIR: "app:set-projects-dir",
   // Config (API keys, preferences)
   CONFIG_GET: "config:get",
   CONFIG_SET: "config:set",
@@ -72,7 +73,16 @@ const IPC_CHANNELS = {
   STOCK_REVIEW_GET: "stock:review-get",
   STOCK_SCENE_REPLACE: "stock:scene-replace",
   STOCK_SCENE_LOCK: "stock:scene-lock",
-  STOCK_SCENE_UPLOAD: "stock:scene-upload"
+  STOCK_SCENE_UPLOAD: "stock:scene-upload",
+  // Smart Audio Director
+  AUDIO_SEARCH_START: "audio:search-start",
+  AUDIO_SEARCH_PROGRESS: "audio:search-progress",
+  AUDIO_PLAN_GET: "audio:plan-get",
+  AUDIO_PLAN_SAVE: "audio:plan-save",
+  AUDIO_APPROVE_SECTION: "audio:approve-section",
+  AUDIO_APPROVE_SFX: "audio:approve-sfx",
+  AUDIO_DOWNLOAD_APPROVED: "audio:download-approved",
+  AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -154,14 +164,31 @@ const ffmpegLogger = winston__namespace.createLogger({
     })
   ]
 });
-const DEFAULT_PROJECTS_DIR = path.join(
-  electron.app.getPath("documents"),
-  "VideoFactory",
-  "projects"
-);
+const FALLBACK_PROJECTS_DIR = "D:\\Video_factory_hutteries";
+function getConfigPath() {
+  return path.join(electron.app.getPath("userData"), "config.json");
+}
+function readConfig() {
+  try {
+    const cfgPath = getConfigPath();
+    if (fs__namespace.existsSync(cfgPath)) {
+      return JSON.parse(fs__namespace.readFileSync(cfgPath, "utf-8"));
+    }
+  } catch {
+  }
+  return {};
+}
+function writeConfig(cfg) {
+  fs__namespace.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), "utf-8");
+}
+function getProjectsDir() {
+  return readConfig().projectsDir ?? FALLBACK_PROJECTS_DIR;
+}
+getProjectsDir();
 function ensureProjectsDir() {
-  if (!fs__namespace.existsSync(DEFAULT_PROJECTS_DIR)) {
-    fs__namespace.mkdirSync(DEFAULT_PROJECTS_DIR, { recursive: true });
+  const dir = getProjectsDir();
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
   }
 }
 function createProjectFolderStructure(projectDir) {
@@ -200,7 +227,7 @@ function registerProjectHandlers(ipcMain) {
     try {
       ensureProjectsDir();
       const safeName = name.replace(/[^a-zA-Z0-9-_\s]/g, "").trim().replace(/\s+/g, "-");
-      const projectDir = path.join(DEFAULT_PROJECTS_DIR, safeName);
+      const projectDir = path.join(getProjectsDir(), safeName);
       if (fs__namespace.existsSync(projectDir)) {
         throw new Error(
           `Project "${safeName}" already exists at ${projectDir}`
@@ -318,7 +345,20 @@ function registerProjectHandlers(ipcMain) {
   );
   ipcMain.handle(IPC_CHANNELS.GET_PROJECTS_DIR, () => {
     ensureProjectsDir();
-    return DEFAULT_PROJECTS_DIR;
+    return getProjectsDir();
+  });
+  ipcMain.handle(IPC_CHANNELS.SET_PROJECTS_DIR, (_event, newDir) => {
+    try {
+      if (!newDir || typeof newDir !== "string") return { success: false, error: "Invalid path" };
+      fs__namespace.mkdirSync(newDir, { recursive: true });
+      const cfg = readConfig();
+      cfg.projectsDir = newDir;
+      writeConfig(cfg);
+      return { success: true, projectsDir: newDir };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
+    }
   });
   ipcMain.handle(IPC_CHANNELS.GET_APP_VERSION, () => electron.app.getVersion());
 }
@@ -1269,11 +1309,25 @@ async function renderVideo(params) {
     "copy",
     rawVideo
   ]);
-  progress("Mixing voiceover audio...", 0.88);
+  progress("Loading audio plan…", 0.86);
+  const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+  const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;
+  const approvedMusic = audioPlan?.sections.filter(
+    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+  ) ?? [];
+  const approvedSfx = audioPlan?.sfxAssignments.filter(
+    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+  ) ?? [];
+  const hasAudio = fs__namespace.existsSync(voiceoverPath);
+  const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0;
+  logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`);
+  progress("Mixing audio tracks…", 0.9);
   const outputDir = path__namespace.join(projectDir, "output");
   fs__namespace.mkdirSync(outputDir, { recursive: true });
   const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
-  if (fs__namespace.existsSync(voiceoverPath)) {
+  if (!hasAudio && !hasMusicOrSfx) {
+    fs__namespace.copyFileSync(rawVideo, outputPath);
+  } else if (!hasMusicOrSfx && hasAudio) {
     await ffmpegRun([
       "-y",
       "-i",
@@ -1294,7 +1348,72 @@ async function renderVideo(params) {
       outputPath
     ]);
   } else {
-    fs__namespace.copyFileSync(rawVideo, outputPath);
+    const ffArgs = ["-y", "-i", rawVideo];
+    let inputIdx = 1;
+    const voiceoverIdx = hasAudio ? inputIdx++ : -1;
+    if (hasAudio) ffArgs.push("-i", voiceoverPath);
+    const musicInputs = [];
+    for (const sec of approvedMusic) {
+      ffArgs.push("-i", sec.approvedLocalPath);
+      musicInputs.push({ idx: inputIdx++, section: sec });
+    }
+    const sfxInputs = [];
+    for (const sfx of approvedSfx) {
+      ffArgs.push("-i", sfx.approvedLocalPath);
+      sfxInputs.push({ idx: inputIdx++, sfx });
+    }
+    const filterParts = [];
+    const mixLabels = [];
+    if (hasAudio) {
+      filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`);
+      mixLabels.push("[vo]");
+    }
+    for (const { idx, section } of musicInputs) {
+      const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6);
+      const fadeIn = section.fadeInSecs ?? 2;
+      const fadeOut = section.fadeOutSecs ?? 3;
+      const dur = section.durationSecs;
+      const label = `music_${idx}`;
+      filterParts.push(
+        `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(section.startTime * 1e3)}|${Math.round(section.startTime * 1e3)},apad[${label}]`
+      );
+      mixLabels.push(`[${label}]`);
+    }
+    for (const { idx, sfx } of sfxInputs) {
+      const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6);
+      const fadeIn = sfx.fadeInSecs ?? 0.5;
+      const fadeOut = sfx.fadeOutSecs ?? 0.5;
+      const dur = sfx.endTime - sfx.startTime;
+      const label = `sfx_${idx}`;
+      filterParts.push(
+        `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(sfx.startTime * 1e3)}|${Math.round(sfx.startTime * 1e3)},apad[${label}]`
+      );
+      mixLabels.push(`[${label}]`);
+    }
+    const nInputs = mixLabels.length;
+    filterParts.push(
+      // normalize=1 scales by 1/nInputs to prevent summing clips
+      `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+    );
+    const filterComplex = filterParts.join(";");
+    logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`);
+    await ffmpegRun([
+      ...ffArgs,
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "0:v:0",
+      "-map",
+      "[amixed]",
+      "-c:v",
+      "copy",
+      "-c:a",
+      "aac",
+      "-b:a",
+      "192k",
+      "-shortest",
+      outputPath
+    ]);
   }
   progress("Cleaning up...", 0.97);
   try {
@@ -1692,7 +1811,7 @@ async function downloadAsset(candidate, sceneIndex, searchQuery, stockDir, exist
   logger.info(`[Downloader] Downloaded ${filename} (${Math.round((fileSizeBytes ?? 0) / 1024)} KB)`);
   return asset;
 }
-function flattenScenes(plan) {
+function flattenScenes$1(plan) {
   return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
 }
 async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
@@ -1782,7 +1901,7 @@ async function runStockEngine(params, onProgress = () => {
   const cache = new QueryCache(stockDir);
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
-  const allScenes = flattenScenes(plan);
+  const allScenes = flattenScenes$1(plan);
   const scenesNeedingStock = allScenes.filter(
     (s) => !s.locked && (!s.localPath || !fs__namespace.existsSync(s.localPath))
   );
@@ -1916,7 +2035,7 @@ async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey,
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   if (fs__namespace.existsSync(planPath)) {
     const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    const scene = flattenScenes(plan).find((s) => s.sceneIndex === sceneIndex);
+    const scene = flattenScenes$1(plan).find((s) => s.sceneIndex === sceneIndex);
     if (scene) {
       scene.localPath = asset.localPath;
       scene.mediaFile = path.basename(asset.localPath);
@@ -2080,6 +2199,497 @@ function registerStockHandlers(ipcMain) {
     }
   );
 }
+const OV_HOST = "api.openverse.org";
+function httpsGet(url2, headers, timeoutMs = 12e3) {
+  return new Promise((resolve, reject) => {
+    const u = new URL(url2);
+    const req = https__namespace.request(
+      {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: "GET",
+        headers,
+        timeout: timeoutMs
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (d) => chunks.push(d));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8");
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 300)}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            reject(new Error(`JSON parse error: ${body.slice(0, 200)}`));
+          }
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    req.on("error", (err) => reject(new Error(`Request error: ${err.message}`)));
+    req.end();
+  });
+}
+async function openverseSearchAudio(query, category, limit = 6, accessToken) {
+  const params = {
+    q: query,
+    page_size: String(Math.min(limit, 20)),
+    license_type: "commercial",
+    mature: "false"
+  };
+  if (category) params.category = category;
+  const qs = new URLSearchParams(params);
+  const headers = {
+    Accept: "application/json",
+    "User-Agent": "VideoFactory/1.0 (AI video editor)"
+  };
+  const url2 = `https://${OV_HOST}/v1/audio/?${qs.toString()}`;
+  logger.info(`[Openverse] ${category ?? "any"} search: "${query}"`);
+  let data;
+  try {
+    data = await httpsGet(url2, headers, 12e3);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[Openverse] Search "${query}" failed: ${msg}`);
+    return [];
+  }
+  logger.info(`[Openverse] "${query}" → ${data.result_count ?? 0} results`);
+  return (data.results ?? []).map((item) => ({
+    assetId: item.id,
+    provider: "openverse",
+    audioType: category === "sound_effects" ? "sfx" : "music",
+    title: item.title ?? "Unknown",
+    creator: item.creator ?? "Unknown",
+    creatorUrl: item.creator_url,
+    downloadUrl: item.url,
+    thumbnailUrl: item.thumbnail ?? "",
+    durationSecs: item.duration ?? 0,
+    tags: item.tags?.map((t) => t.name) ?? [],
+    license: item.license,
+    licenseUrl: item.license_url ?? `https://creativecommons.org/licenses/${item.license}/${item.license_version ?? "4.0"}/`,
+    pageUrl: item.foreign_landing_url,
+    filetype: item.filetype ?? "mp3",
+    searchQuery: query
+  }));
+}
+function flattenScenes(plan) {
+  return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+}
+function groupScenesIntoSections(plan) {
+  const sections = [];
+  for (const ch of plan.chapters) {
+    const scenes = (ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+    if (scenes.length === 0) continue;
+    const startTime = Math.min(...scenes.map((s) => s.startTime));
+    const endTime = Math.max(...scenes.map((s) => s.endTime));
+    const narrativeSummary = scenes.map((s) => s.narrativeText ?? s.visualIntent ?? "").filter(Boolean).join(". ").slice(0, 300);
+    sections.push({
+      sectionLabel: ch.title ?? `Section ${sections.length + 1}`,
+      mood: ch.mood ?? "neutral",
+      narrativeSummary,
+      scenes,
+      startTime,
+      endTime
+    });
+  }
+  if (sections.length === 0) {
+    const allScenes = flattenScenes(plan);
+    if (allScenes.length > 0) {
+      sections.push({
+        sectionLabel: "Main",
+        mood: "neutral",
+        narrativeSummary: allScenes.map((s) => s.narrativeText ?? "").filter(Boolean).join(". ").slice(0, 300),
+        scenes: allScenes,
+        startTime: allScenes[0].startTime,
+        endTime: allScenes[allScenes.length - 1].endTime
+      });
+    }
+  }
+  return sections;
+}
+function buildMusicQuery(mood, _narrativeSummary, _sectionLabel) {
+  const moodMap = {
+    tense: ["dramatic tension", "suspense", "thriller"],
+    emotional: ["emotional piano", "sad piano", "cinematic emotional"],
+    inspirational: ["uplifting", "motivational", "inspiring"],
+    peaceful: ["calm ambient", "peaceful", "relaxing"],
+    dramatic: ["cinematic epic", "dramatic orchestral", "epic"],
+    melancholic: ["melancholic", "sad ambient", "nostalgic"],
+    hopeful: ["hopeful", "uplifting acoustic", "positive"],
+    neutral: ["ambient", "background music", "instrumental"],
+    action: ["action", "driving", "energetic"],
+    mysterious: ["mysterious", "dark ambient", "eerie"]
+  };
+  const queries = moodMap[mood.toLowerCase()] ?? moodMap.neutral;
+  return queries;
+}
+function buildSfxQuery(visualIntent) {
+  const text = (visualIntent ?? "").toLowerCase();
+  const patterns = [
+    [/crowd|audience|people|group/i, "crowd ambience"],
+    [/rain|storm|thunder/i, "rain storm sound"],
+    [/ocean|sea|wave|beach/i, "ocean waves"],
+    [/forest|bird|nature|park/i, "forest nature ambience"],
+    [/city|traffic|urban|street/i, "city street ambience"],
+    [/wind|breeze/i, "wind sound effect"],
+    [/fire|flame/i, "fire crackling"],
+    [/music|concert|instrument/i, "live music crowd"],
+    [/whisper|quiet|silence/i, "subtle ambient"],
+    [/footstep|walk|run/i, "footsteps walking"],
+    [/door|enter|exit/i, "door sound effect"],
+    [/phone|call|ring/i, "phone notification"],
+    [/car|vehicle|drive/i, "car engine driving"],
+    [/explosion|crash|impact/i, "impact crash sound"],
+    [/water|river|stream/i, "flowing water stream"]
+  ];
+  for (const [pattern, sfxQuery] of patterns) {
+    if (pattern.test(text)) return sfxQuery;
+  }
+  return null;
+}
+async function downloadAudio(asset, audioDir, timeoutMs = 45e3) {
+  const ext = (asset.filetype ?? path.extname(asset.downloadUrl).slice(1)) || "mp3";
+  const filename = `${asset.audioType}_${asset.assetId.replace(/[^a-z0-9]/gi, "_").slice(0, 40)}.${ext}`;
+  const destPath = path.join(audioDir, filename);
+  if (fs__namespace.existsSync(destPath) && fs__namespace.statSync(destPath).size > 0) return destPath;
+  const fetchUrl = (url2, redirectsLeft = 8) => new Promise((resolve, reject) => {
+    const u = new URL(url2);
+    const protocol = u.protocol === "https:" ? https__namespace : http__namespace;
+    const req = protocol.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (u.protocol === "https:" ? 443 : 80),
+        path: u.pathname + u.search,
+        method: "GET",
+        headers: { "User-Agent": "VideoFactory/1.0" },
+        timeout: timeoutMs
+      },
+      (res) => {
+        const loc = res.headers.location;
+        if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && loc) {
+          res.resume();
+          if (redirectsLeft <= 0) {
+            reject(new Error("Too many redirects"));
+            return;
+          }
+          const nextUrl = loc.startsWith("http") ? loc : `${u.protocol}//${u.host}${loc}`;
+          fetchUrl(nextUrl, redirectsLeft - 1).then(resolve).catch(reject);
+          return;
+        }
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          reject(new Error(`HTTP ${res.statusCode} downloading ${url2}`));
+          return;
+        }
+        const tmp = destPath + ".tmp";
+        const out = fs__namespace.createWriteStream(tmp);
+        res.pipe(out);
+        out.on("finish", () => {
+          const size = fs__namespace.existsSync(tmp) ? fs__namespace.statSync(tmp).size : 0;
+          if (size < 1024) {
+            fs__namespace.unlinkSync(tmp);
+            reject(new Error(`Downloaded file too small (${size} bytes) — likely an error page`));
+            return;
+          }
+          fs__namespace.rename(tmp, destPath, (err) => {
+            if (err) reject(err);
+            else resolve(destPath);
+          });
+        });
+        out.on("error", (err) => {
+          try {
+            fs__namespace.unlinkSync(tmp);
+          } catch {
+          }
+          reject(err);
+        });
+        res.on("error", (err) => {
+          try {
+            fs__namespace.unlinkSync(tmp);
+          } catch {
+          }
+          reject(err);
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Download timed out after ${timeoutMs}ms: ${url2}`));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  return fetchUrl(asset.downloadUrl);
+}
+async function runAudioDirector(projectDir, onProgress = () => {
+}, openverseToken) {
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    return { success: false, error: "No edit plan found. Run AI Planning first.", sections: [], sfxAssignments: [] };
+  }
+  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const audioDir = path.join(projectDir, "assets", "audio");
+  fs__namespace.mkdirSync(audioDir, { recursive: true });
+  onProgress("Analysing narrative structure…", 0.05);
+  const rawSections = groupScenesIntoSections(plan);
+  logger.info(`[AudioDirector] Found ${rawSections.length} narrative sections`);
+  const sections = [];
+  const sfxAssignments = [];
+  for (let i = 0; i < rawSections.length; i++) {
+    const sec = rawSections[i];
+    const pct = 0.08 + i / rawSections.length * 0.5;
+    onProgress(`[${i + 1}/${rawSections.length}] Music search: "${sec.sectionLabel}"`, pct);
+    const queries = buildMusicQuery(sec.mood, sec.narrativeSummary, sec.sectionLabel);
+    const sectionDuration = sec.endTime - sec.startTime;
+    const pickBest = (results) => {
+      if (results.length === 0) return null;
+      const sorted = results.sort((a, b) => {
+        const aDiff = Math.abs((a.durationSecs || 120) - sectionDuration);
+        const bDiff = Math.abs((b.durationSecs || 120) - sectionDuration);
+        return aDiff - bDiff;
+      });
+      return sorted[0];
+    };
+    let musicResult = null;
+    for (const q of queries) {
+      const results = await openverseSearchAudio(q, "music", 6);
+      const best = pickBest(results);
+      if (best) {
+        musicResult = { ...best, searchQuery: q };
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → "${q}" (music category): ${best.title}`);
+        break;
+      }
+    }
+    if (!musicResult) {
+      for (const q of queries) {
+        const results = await openverseSearchAudio(q, void 0, 6);
+        const best = pickBest(results);
+        if (best) {
+          musicResult = { ...best, searchQuery: q };
+          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → "${q}" (no category): ${best.title}`);
+          break;
+        }
+      }
+    }
+    if (!musicResult) {
+      const results = await openverseSearchAudio("ambient background music", void 0, 6);
+      const best = pickBest(results);
+      if (best) {
+        musicResult = { ...best, searchQuery: "ambient background music" };
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → fallback generic: ${best.title}`);
+      }
+    }
+    if (!musicResult) {
+      logger.warn(`[AudioDirector] Section "${sec.sectionLabel}": no music found after all passes`);
+    }
+    const section = {
+      sectionId: `section_${i}`,
+      sectionLabel: sec.sectionLabel,
+      mood: sec.mood,
+      startTime: sec.startTime,
+      endTime: sec.endTime,
+      durationSecs: sec.endTime - sec.startTime,
+      sceneIndexes: sec.scenes.map((s) => s.sceneIndex),
+      musicCandidate: musicResult,
+      approved: false,
+      status: musicResult ? "found" : "failed"
+    };
+    sections.push(section);
+  }
+  const allScenes = flattenScenes(plan);
+  let sfxCount = 0;
+  for (let i = 0; i < allScenes.length; i++) {
+    const scene = allScenes[i];
+    const sfxQuery = buildSfxQuery(scene.visualIntent ?? scene.narrativeText ?? "");
+    if (!sfxQuery) continue;
+    const pct = 0.6 + i / allScenes.length * 0.3;
+    onProgress(`[SFX] Scene ${scene.sceneIndex}: ${sfxQuery}`, pct);
+    try {
+      const results = await openverseSearchAudio(sfxQuery, "sound_effects", 3, openverseToken);
+      if (results.length > 0) {
+        sfxAssignments.push({
+          sceneIndex: scene.sceneIndex,
+          startTime: scene.startTime,
+          endTime: scene.endTime,
+          sfxQuery,
+          sfxCandidate: results[0],
+          approved: false,
+          volumeDb: -12,
+          fadeInSecs: 0.5,
+          fadeOutSecs: 0.5
+        });
+        sfxCount++;
+      }
+    } catch {
+    }
+  }
+  const foundSections = sections.filter((s) => s.status === "found" && s.musicCandidate);
+  for (let i = 0; i < foundSections.length; i++) {
+    const sec = foundSections[i];
+    sec.approved = true;
+    const pct = 0.62 + i / Math.max(foundSections.length, 1) * 0.3;
+    onProgress(`Downloading music [${i + 1}/${foundSections.length}]: ${sec.sectionLabel}…`, pct);
+    try {
+      const localPath = await downloadAudio(sec.musicCandidate, audioDir);
+      sec.approvedLocalPath = localPath;
+      sec.approvedFilename = path.basename(localPath);
+      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} → ${localPath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[AudioDirector] Download failed for ${sec.sectionLabel}: ${msg}`);
+    }
+  }
+  const audioPlan = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sections,
+    sfxAssignments
+  };
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(audioPlan, null, 2), "utf-8");
+  const downloadedCount = sections.filter((s) => s.approvedLocalPath).length;
+  onProgress(`Complete — ${sections.filter((s) => s.status === "found").length}/${sections.length} music found, ${downloadedCount} downloaded, ${sfxCount} SFX`, 1);
+  return {
+    success: true,
+    sections,
+    sfxAssignments
+  };
+}
+async function downloadApprovedAudio(projectDir, plan, onProgress = () => {
+}) {
+  const audioDir = path.join(projectDir, "assets", "audio");
+  fs__namespace.mkdirSync(audioDir, { recursive: true });
+  const total = plan.sections.filter((s) => s.approved && s.musicCandidate).length + plan.sfxAssignments.filter((s) => s.approved && s.sfxCandidate).length;
+  let done = 0;
+  for (const section of plan.sections) {
+    if (!section.approved || !section.musicCandidate) continue;
+    try {
+      onProgress(`Downloading music: ${section.sectionLabel}`, done / total);
+      const localPath = await downloadAudio(section.musicCandidate, audioDir);
+      section.approvedLocalPath = localPath;
+      section.approvedFilename = path.basename(localPath);
+      done++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[AudioDirector] Failed to download music for ${section.sectionLabel}: ${msg}`);
+    }
+  }
+  for (const sfx of plan.sfxAssignments) {
+    if (!sfx.approved || !sfx.sfxCandidate) continue;
+    try {
+      onProgress(`Downloading SFX: Scene ${sfx.sceneIndex}`, done / total);
+      const localPath = await downloadAudio(sfx.sfxCandidate, audioDir);
+      sfx.approvedLocalPath = localPath;
+      sfx.approvedFilename = path.basename(localPath);
+      done++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[AudioDirector] Failed to download SFX for scene ${sfx.sceneIndex}: ${msg}`);
+    }
+  }
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+  return plan;
+}
+function loadAudioPlan(projectDir) {
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  if (!fs__namespace.existsSync(audioPlanPath)) return null;
+  try {
+    return JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function saveAudioPlan(projectDir, plan) {
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+}
+function registerAudioHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_SEARCH_START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, { message, progress });
+      };
+      try {
+        const result = await runAudioDirector(params.projectDir, sendProgress);
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[AudioIPC] Search error: ${msg}`);
+        return { success: false, error: msg, sections: [], sfxAssignments: [] };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.AUDIO_PLAN_GET, (_event, projectDir) => {
+    return loadAudioPlan(projectDir);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_PLAN_SAVE,
+    (_event, params) => {
+      try {
+        saveAudioPlan(params.projectDir, params.plan);
+        return { success: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_APPROVE_SECTION,
+    (_event, params) => {
+      const plan = loadAudioPlan(params.projectDir);
+      if (!plan) return { success: false, error: "No audio plan found" };
+      const section = plan.sections.find((s) => s.sectionId === params.sectionId);
+      if (!section) return { success: false, error: "Section not found" };
+      section.approved = params.approved;
+      if (params.volumeDb !== void 0) section.volumeDb = params.volumeDb;
+      if (params.fadeInSecs !== void 0) section.fadeInSecs = params.fadeInSecs;
+      if (params.fadeOutSecs !== void 0) section.fadeOutSecs = params.fadeOutSecs;
+      saveAudioPlan(params.projectDir, plan);
+      return { success: true, plan };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_APPROVE_SFX,
+    (_event, params) => {
+      const plan = loadAudioPlan(params.projectDir);
+      if (!plan) return { success: false, error: "No audio plan found" };
+      const sfx = plan.sfxAssignments.find((s) => s.sceneIndex === params.sceneIndex);
+      if (!sfx) return { success: false, error: "SFX assignment not found" };
+      sfx.approved = params.approved;
+      if (params.volumeDb !== void 0) sfx.volumeDb = params.volumeDb;
+      saveAudioPlan(params.projectDir, plan);
+      return { success: true, plan };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_DOWNLOAD_APPROVED,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const plan = loadAudioPlan(params.projectDir);
+      if (!plan) return { success: false, error: "No audio plan found" };
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, { message, progress });
+      };
+      try {
+        const updatedPlan = await downloadApprovedAudio(params.projectDir, plan, sendProgress);
+        return { success: true, plan: updatedPlan };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[AudioIPC] Download error: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -2124,6 +2734,7 @@ electron.app.whenReady().then(() => {
   registerPlannerHandlers(electron.ipcMain);
   registerRenderHandlers(electron.ipcMain);
   registerStockHandlers(electron.ipcMain);
+  registerAudioHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {

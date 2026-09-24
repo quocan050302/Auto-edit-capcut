@@ -21,6 +21,7 @@ const IPC_CHANNELS = {
   // App info
   GET_APP_VERSION: "app:get-version",
   GET_PROJECTS_DIR: "app:get-projects-dir",
+  SET_PROJECTS_DIR: "app:set-projects-dir",
   // Config (API keys, preferences)
   CONFIG_GET: "config:get",
   CONFIG_SET: "config:set",
@@ -37,7 +38,16 @@ const IPC_CHANNELS = {
   STOCK_REVIEW_GET: "stock:review-get",
   STOCK_SCENE_REPLACE: "stock:scene-replace",
   STOCK_SCENE_LOCK: "stock:scene-lock",
-  STOCK_SCENE_UPLOAD: "stock:scene-upload"
+  STOCK_SCENE_UPLOAD: "stock:scene-upload",
+  // Smart Audio Director
+  AUDIO_SEARCH_START: "audio:search-start",
+  AUDIO_SEARCH_PROGRESS: "audio:search-progress",
+  AUDIO_PLAN_GET: "audio:plan-get",
+  AUDIO_PLAN_SAVE: "audio:plan-save",
+  AUDIO_APPROVE_SECTION: "audio:approve-section",
+  AUDIO_APPROVE_SFX: "audio:approve-sfx",
+  AUDIO_DOWNLOAD_APPROVED: "audio:download-approved",
+  AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress"
 };
 const api = {
   window: {
@@ -52,7 +62,9 @@ const api = {
     open: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_OPEN, projectDir),
     save: (state) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_SAVE, state),
     updateInputs: (projectDir, inputs) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_INPUTS, projectDir, inputs),
-    updateSettings: (projectDir, settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_SETTINGS, projectDir, settings)
+    updateSettings: (projectDir, settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_SETTINGS, projectDir, settings),
+    getDir: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
+    setDir: (newDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.SET_PROJECTS_DIR, newDir)
   },
   media: {
     scan: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MEDIA_SCAN, params),
@@ -106,6 +118,24 @@ const api = {
     }
   },
   getProjectsDir: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
-  getAppVersion: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION)
+  getAppVersion: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION),
+  audio: {
+    search: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.AUDIO_SEARCH_START, params),
+    getPlan: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.AUDIO_PLAN_GET, projectDir),
+    savePlan: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.AUDIO_PLAN_SAVE, params),
+    approveSection: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.AUDIO_APPROVE_SECTION, params),
+    approveSfx: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.AUDIO_APPROVE_SFX, params),
+    downloadApproved: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.AUDIO_DOWNLOAD_APPROVED, params),
+    onProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, handler);
+    },
+    onDownloadProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler);
+    }
+  }
 };
 electron.contextBridge.exposeInMainWorld("api", api);

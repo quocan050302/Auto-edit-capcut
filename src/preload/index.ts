@@ -8,7 +8,9 @@ import type {
   TranscriptResult,
   StockRunResult,
   StockReviewData,
-  StockAsset
+  StockAsset,
+  AudioPlan,
+  AudioRunResult
 } from '../../shared/types'
 
 const api = {
@@ -49,7 +51,13 @@ const api = {
       projectDir: string,
       settings: Partial<ProjectSettings>
     ): Promise<{ success: boolean; state?: ProjectState; error?: string }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_SETTINGS, projectDir, settings)
+      ipcRenderer.invoke(IPC_CHANNELS.PROJECT_UPDATE_SETTINGS, projectDir, settings),
+
+    getDir: (): Promise<string> =>
+      ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
+
+    setDir: (newDir: string): Promise<{ success: boolean; projectsDir?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SET_PROJECTS_DIR, newDir)
   },
 
   media: {
@@ -157,7 +165,53 @@ const api = {
   },
 
   getProjectsDir: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
-  getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION)
+  getAppVersion: (): Promise<string> => ipcRenderer.invoke(IPC_CHANNELS.GET_APP_VERSION),
+
+  audio: {
+    search: (params: { projectDir: string }): Promise<AudioRunResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUDIO_SEARCH_START, params),
+
+    getPlan: (projectDir: string): Promise<AudioPlan | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUDIO_PLAN_GET, projectDir),
+
+    savePlan: (params: { projectDir: string; plan: AudioPlan }): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUDIO_PLAN_SAVE, params),
+
+    approveSection: (params: {
+      projectDir: string
+      sectionId: string
+      approved: boolean
+      volumeDb?: number
+      fadeInSecs?: number
+      fadeOutSecs?: number
+    }): Promise<{ success: boolean; plan?: AudioPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUDIO_APPROVE_SECTION, params),
+
+    approveSfx: (params: {
+      projectDir: string
+      sceneIndex: number
+      approved: boolean
+      volumeDb?: number
+    }): Promise<{ success: boolean; plan?: AudioPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUDIO_APPROVE_SFX, params),
+
+    downloadApproved: (params: { projectDir: string }): Promise<{ success: boolean; plan?: AudioPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.AUDIO_DOWNLOAD_APPROVED, params),
+
+    onProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, handler)
+    },
+
+    onDownloadProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler)
+    }
+  }
 }
 
 contextBridge.exposeInMainWorld('api', api)

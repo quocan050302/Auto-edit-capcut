@@ -11,15 +11,41 @@ import {
 } from "../../../shared/types";
 import { logger } from "../logger";
 
-const DEFAULT_PROJECTS_DIR = join(
-  app.getPath("documents"),
-  "VideoFactory",
-  "projects",
-);
+// ── Configurable storage root ──────────────────────────────────────────────
+// Reads from userData/config.json { "projectsDir": "..." }
+// Defaults to D:\Video_factory_hutteries if not set.
+
+const FALLBACK_PROJECTS_DIR = "D:\\Video_factory_hutteries"
+
+function getConfigPath(): string {
+  return join(app.getPath("userData"), "config.json")
+}
+
+function readConfig(): Record<string, string> {
+  try {
+    const cfgPath = getConfigPath()
+    if (fs.existsSync(cfgPath)) {
+      return JSON.parse(fs.readFileSync(cfgPath, "utf-8")) as Record<string, string>
+    }
+  } catch { /* ignore */ }
+  return {}
+}
+
+function writeConfig(cfg: Record<string, string>): void {
+  fs.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), "utf-8")
+}
+
+function getProjectsDir(): string {
+  return readConfig().projectsDir ?? FALLBACK_PROJECTS_DIR
+}
+
+// Keep DEFAULT_PROJECTS_DIR as an alias for backward compat
+const DEFAULT_PROJECTS_DIR = getProjectsDir()
 
 function ensureProjectsDir(): void {
-  if (!fs.existsSync(DEFAULT_PROJECTS_DIR)) {
-    fs.mkdirSync(DEFAULT_PROJECTS_DIR, { recursive: true });
+  const dir = getProjectsDir()
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
   }
 }
 
@@ -67,7 +93,7 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
         .replace(/[^a-zA-Z0-9-_\s]/g, "")
         .trim()
         .replace(/\s+/g, "-");
-      const projectDir = join(DEFAULT_PROJECTS_DIR, safeName);
+      const projectDir = join(getProjectsDir(), safeName);
 
       if (fs.existsSync(projectDir)) {
         throw new Error(
@@ -199,7 +225,22 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
   // Get projects directory
   ipcMain.handle(IPC_CHANNELS.GET_PROJECTS_DIR, () => {
     ensureProjectsDir();
-    return DEFAULT_PROJECTS_DIR;
+    return getProjectsDir();
+  });
+
+  // Set projects directory (called from Settings page)
+  ipcMain.handle(IPC_CHANNELS.SET_PROJECTS_DIR, (_event, newDir: string) => {
+    try {
+      if (!newDir || typeof newDir !== 'string') return { success: false, error: 'Invalid path' }
+      fs.mkdirSync(newDir, { recursive: true })
+      const cfg = readConfig()
+      cfg.projectsDir = newDir
+      writeConfig(cfg)
+      return { success: true, projectsDir: newDir }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return { success: false, error: msg }
+    }
   });
 
   // Get app version

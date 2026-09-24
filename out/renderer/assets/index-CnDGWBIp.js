@@ -7039,6 +7039,12 @@ const NAV_ITEMS = [
     icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z", clipRule: "evenodd" }) })
   },
   {
+    id: "audio",
+    label: "Audio Director",
+    requiresProject: true,
+    icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M9.383 3.076A1 1 0 0110 4v12a1 1 0 01-1.707.707L4.586 13H2a1 1 0 01-1-1V8a1 1 0 011-1h2.586l3.707-3.707a1 1 0 011.09-.217zM14.657 2.929a1 1 0 011.414 0A9.972 9.972 0 0119 10a9.972 9.972 0 01-2.929 7.071 1 1 0 01-1.414-1.414A7.971 7.971 0 0017 10c0-2.21-.894-4.208-2.343-5.657a1 1 0 010-1.414zm-2.829 2.828a1 1 0 011.415 0A5.983 5.983 0 0115 10a5.984 5.984 0 01-1.757 4.243 1 1 0 01-1.415-1.415A3.984 3.984 0 0013 10a3.983 3.983 0 00-1.172-2.828 1 1 0 010-1.415z", clipRule: "evenodd" }) })
+  },
+  {
     id: "settings",
     label: "Settings",
     requiresProject: true,
@@ -7068,7 +7074,8 @@ function Sidebar({
   currentPage,
   onNavigate,
   hasTranscript,
-  stockCoverage
+  stockCoverage,
+  audioCoverage
 }) {
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("aside", { className: "sidebar", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-header", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sidebar-section-label", children: "Navigation" }) }),
@@ -7101,6 +7108,19 @@ function Sidebar({
             stockCoverage.assigned,
             "/",
             stockCoverage.total
+          ] }),
+          item.id === "audio" && audioCoverage && audioCoverage.total > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+            fontSize: "9px",
+            fontWeight: 700,
+            background: audioCoverage.approved > 0 ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.06)",
+            color: audioCoverage.approved > 0 ? "#a5b4fc" : "var(--text-muted)",
+            borderRadius: "999px",
+            padding: "1px 5px",
+            flexShrink: 0
+          }, children: [
+            audioCoverage.approved,
+            "/",
+            audioCoverage.total
           ] })
         ]
       },
@@ -7606,7 +7626,7 @@ function SegControl({
     opt.value
   )) });
 }
-function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
+function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel, priorityBadge }) {
   const [value, setValue] = reactExports.useState("");
   const [saved, setSaved] = reactExports.useState(false);
   const [loading, setLoading] = reactExports.useState(true);
@@ -7637,6 +7657,15 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }, children: label }),
+        priorityBadge && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+          fontSize: "10px",
+          padding: "2px 8px",
+          background: "rgba(99,102,241,0.15)",
+          color: "var(--text-brand)",
+          borderRadius: "999px",
+          fontWeight: 700,
+          letterSpacing: "0.05em"
+        }, children: priorityBadge }),
         hasValue && isValid && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
           fontSize: "10px",
           padding: "2px 8px",
@@ -7735,8 +7764,159 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: hint })
   ] });
 }
+function WikimediaCard() {
+  const [enabled, setEnabled] = reactExports.useState(() => {
+    const saved = localStorage.getItem("stock_wikimedia_enabled");
+    return saved !== null ? saved === "true" : true;
+  });
+  const [testStatus, setTestStatus] = reactExports.useState("idle");
+  const [latency, setLatency] = reactExports.useState(null);
+  function handleToggle() {
+    const next = !enabled;
+    setEnabled(next);
+    localStorage.setItem("stock_wikimedia_enabled", String(next));
+  }
+  async function handleTest() {
+    setTestStatus("testing");
+    try {
+      const res = await window.api.stock.testWikimedia();
+      if (res.success) {
+        setLatency(res.latencyMs);
+        setTestStatus("available");
+      } else {
+        setTestStatus("failed");
+      }
+    } catch {
+      setTestStatus("failed");
+    }
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    padding: "16px",
+    background: "var(--bg-elevated)",
+    borderRadius: "var(--radius-md)",
+    border: `1px solid ${enabled ? "var(--border-brand)" : "var(--border-subtle)"}`,
+    display: "flex",
+    flexDirection: "column",
+    gap: "12px",
+    transition: "border-color 0.2s"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }, children: "Wikimedia Commons" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+          fontSize: "10px",
+          padding: "2px 8px",
+          background: "rgba(52,211,153,0.15)",
+          color: "var(--color-success)",
+          borderRadius: "999px",
+          fontWeight: 700,
+          letterSpacing: "0.05em"
+        }, children: "NO API KEY" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+          fontSize: "10px",
+          padding: "2px 8px",
+          background: "rgba(99,102,241,0.15)",
+          color: "var(--text-brand)",
+          borderRadius: "999px",
+          fontWeight: 700,
+          letterSpacing: "0.05em"
+        }, children: "PRIORITY 1" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "a",
+        {
+          href: "https://commons.wikimedia.org",
+          target: "_blank",
+          rel: "noreferrer",
+          onClick: (e) => {
+            e.preventDefault();
+            window.open("https://commons.wikimedia.org");
+          },
+          style: { fontSize: "11px", color: "var(--text-brand)", textDecoration: "none" },
+          children: "commons.wikimedia.org ↗"
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.5 }, children: "Priority 1 — Niche-specific and historical media." }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "space-between",
+      paddingTop: "10px",
+      borderTop: "1px solid var(--border-subtle)",
+      flexWrap: "wrap",
+      gap: "8px"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", userSelect: "none" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            type: "checkbox",
+            checked: enabled,
+            onChange: handleToggle,
+            style: { width: "16px", height: "16px", accentColor: "var(--brand-primary)", cursor: "pointer" }
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 600, color: enabled ? "var(--text-primary)" : "var(--text-muted)" }, children: "Enable Wikimedia Commons" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
+        testStatus === "testing" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-pending)", fontWeight: 600 }, children: "Testing..." }),
+        testStatus === "available" && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+          fontSize: "11px",
+          color: "var(--color-success)",
+          fontWeight: 600,
+          display: "flex",
+          alignItems: "center",
+          gap: "4px"
+        }, children: [
+          "✓ Available ",
+          latency ? `(${latency}ms)` : ""
+        ] }),
+        testStatus === "failed" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-error)", fontWeight: 600 }, children: "✗ Connection failed" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "btn btn-secondary btn-sm",
+            onClick: handleTest,
+            disabled: testStatus === "testing",
+            style: { fontSize: "11px", padding: "5px 12px" },
+            children: "Test Connection"
+          }
+        )
+      ] })
+    ] })
+  ] });
+}
 function SettingsPage({ project, onUpdateSettings }) {
   const s = project.settings;
+  const [storageDir, setStorageDir] = reactExports.useState("");
+  const [storageSaved, setStorageSaved] = reactExports.useState(false);
+  const [storageError, setStorageError] = reactExports.useState(null);
+  const [storageSaving, setStorageSaving] = reactExports.useState(false);
+  reactExports.useEffect(() => {
+    window.api.project.getDir().then((dir) => {
+      if (dir) setStorageDir(dir);
+    }).catch(() => {
+    });
+  }, []);
+  async function handleSaveStorageDir() {
+    if (!storageDir.trim()) return;
+    setStorageSaving(true);
+    setStorageError(null);
+    try {
+      const res = await window.api.project.setDir(storageDir.trim());
+      if (res.success) {
+        setStorageSaved(true);
+        setTimeout(() => setStorageSaved(false), 3e3);
+      } else {
+        setStorageError(res.error ?? "Failed to save");
+      }
+    } catch (err) {
+      setStorageError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setStorageSaving(false);
+    }
+  }
   function update(key, value) {
     onUpdateSettings({ [key]: value });
   }
@@ -7744,6 +7924,54 @@ function SettingsPage({ project, onUpdateSettings }) {
     onUpdateSettings({ resolution: { width: w2, height: h } });
   }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M2 6a2 2 0 012-2h4l2 2h4a2 2 0 012 2v1H8a3 3 0 00-3 3v1.5a1.5 1.5 0 01-3 0V6z", clipRule: "evenodd" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M6 12a2 2 0 012-2h8a2 2 0 012 2v2a2 2 0 01-2 2H2h2a2 2 0 002-2v-2z" })
+          ] }) }),
+          "Storage Location"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Where all projects are saved" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 8 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)", marginBottom: 6 }, children: "Projects directory — all new projects will be created here" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              className: "settings-input",
+              value: storageDir,
+              onChange: (e) => setStorageDir(e.target.value),
+              placeholder: "D:\\Video_factory_hutteries",
+              onKeyDown: (e) => {
+                if (e.key === "Enter") handleSaveStorageDir();
+              },
+              style: { flex: 1, fontFamily: "var(--font-mono)", fontSize: 12 }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: `btn ${storageSaved ? "btn-success" : "btn-primary"}`,
+              onClick: handleSaveStorageDir,
+              disabled: storageSaving || !storageDir.trim(),
+              style: { minWidth: 80, flexShrink: 0 },
+              children: storageSaving ? "…" : storageSaved ? "✓ Saved" : "Save"
+            }
+          )
+        ] }),
+        storageError && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#f87171", marginTop: 6 }, children: [
+          "⚠ ",
+          storageError
+        ] }),
+        storageSaved && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#34d399", marginTop: 6 }, children: [
+          "✓ Path saved — new projects will be created in ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontFamily: "var(--font-mono)" }, children: storageDir })
+        ] })
+      ] }) })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
@@ -7773,6 +8001,7 @@ function SettingsPage({ project, onUpdateSettings }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Stored locally — never uploaded" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(WikimediaCard, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           ApiKeyRow,
           {
@@ -7781,7 +8010,8 @@ function SettingsPage({ project, onUpdateSettings }) {
             placeholder: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             hint: "Primary stock video provider. Free tier — 200 requests/hour.",
             link: "https://www.pexels.com/api/",
-            linkLabel: "Get free key at pexels.com/api ↗"
+            linkLabel: "Get free key at pexels.com/api ↗",
+            priorityBadge: "PRIORITY 2"
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -7792,7 +8022,8 @@ function SettingsPage({ project, onUpdateSettings }) {
             placeholder: "00000000-xxxxxxxxxxxxxxxxxxxxxxxx",
             hint: "Fallback stock provider. Free tier — 100 requests/minute.",
             link: "https://pixabay.com/api/docs/",
-            linkLabel: "Get free key at pixabay.com/api/docs ↗"
+            linkLabel: "Get free key at pixabay.com/api/docs ↗",
+            priorityBadge: "PRIORITY 3"
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -8403,6 +8634,7 @@ function fmt$2(secs) {
 }
 function SceneRow({ scene, globalIdx }) {
   const [expanded, setExpanded] = reactExports.useState(false);
+  const mediaLabel = scene.mediaFile || (scene.localPath ? scene.localPath.split(/[/\\]/).pop() : scene.visualIntent || scene.localAsset || "Stock media pending");
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
     {
@@ -8435,12 +8667,12 @@ function SceneRow({ scene, globalIdx }) {
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
             fontSize: "11px",
-            color: "var(--text-secondary)",
+            color: scene.localPath || scene.mediaFile ? "var(--text-secondary)" : "var(--text-muted)",
             flex: 1,
             whiteSpace: "nowrap",
             overflow: "hidden",
             textOverflow: "ellipsis"
-          }, children: scene.mediaFile }),
+          }, children: mediaLabel }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: expanded ? "▲" : "▼" })
         ] }),
         expanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "8px 0 8px 38px", display: "flex", flexDirection: "column", gap: "6px" }, children: [
@@ -8783,7 +9015,9 @@ function RenderPage({ project }) {
   const [error, setError] = reactExports.useState(null);
   const [hasPlan, setHasPlan] = reactExports.useState(false);
   const [sceneCount, setSceneCount] = reactExports.useState(0);
+  const [mediaReadyCount, setMediaReadyCount] = reactExports.useState(0);
   const [elapsed, setElapsed] = reactExports.useState(0);
+  const [audioReady, setAudioReady] = reactExports.useState(0);
   const startTimeRef = reactExports.useRef(null);
   const timerRef = reactExports.useRef(null);
   const [resolution, setResolution] = reactExports.useState("1920x1080");
@@ -8800,12 +9034,20 @@ function RenderPage({ project }) {
       if (p2) {
         setHasPlan(true);
         const plan = p2;
-        const total = plan.chapters.reduce(
-          (a, ch2) => a + ch2.sequences.reduce((b, seq) => b + seq.scenes.length, 0),
-          0
+        const allScenes = (plan.chapters || []).flatMap(
+          (ch2) => (ch2.sequences ?? ch2.chapters_seq ?? []).flatMap((seq) => seq.scenes ?? [])
         );
-        setSceneCount(total);
+        setSceneCount(allScenes.length);
+        const ready = allScenes.filter((s) => !!(s.localPath || s.mediaFile || s.localAsset)).length;
+        setMediaReadyCount(ready);
       }
+    });
+    window.api.audio.getPlan(project.projectDir).then((ap) => {
+      if (ap) {
+        const downloaded = ap.sections.filter((s) => s.approved && s.approvedLocalPath).length;
+        setAudioReady(downloaded);
+      }
+    }).catch(() => {
     });
   }, [project.projectDir]);
   function startTimer() {
@@ -8859,8 +9101,13 @@ function RenderPage({ project }) {
         isRendering && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-warning", style: { animation: "pulse 1.5s infinite" }, children: "● Rendering" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "10px", marginBottom: "20px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px", marginBottom: "16px" }, children: [
           { label: "Edit Plan", ok: hasPlan, value: hasPlan ? "✓ Ready" : "✗ Missing → AI Planning" },
+          {
+            label: "Media Footage",
+            ok: mediaReadyCount > 0 && mediaReadyCount >= sceneCount,
+            value: sceneCount > 0 ? mediaReadyCount >= sceneCount ? `✓ ${mediaReadyCount}/${sceneCount} ready` : `⚠ ${mediaReadyCount}/${sceneCount} ready` : "—"
+          },
           { label: "Voiceover", ok: !!voiceoverPath, value: voiceoverPath ? `✓ ${voiceoverPath.split(/[\/\\]/).pop()}` : "⚠ Not set (optional)" },
           { label: "Output Format", ok: true, value: `${resolution} · ${fps}fps` }
         ].map(({ label, ok: ok2, value }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
@@ -8872,6 +9119,36 @@ function RenderPage({ project }) {
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "4px", textTransform: "uppercase", letterSpacing: "0.5px" }, children: label }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 700, color: ok2 ? "var(--color-success)" : "var(--color-error)" }, children: value })
         ] }, label)) }),
+        audioReady > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          display: "flex",
+          alignItems: "center",
+          gap: 12,
+          background: "rgba(99,102,241,0.1)",
+          border: "1px solid rgba(99,102,241,0.35)",
+          borderRadius: 10,
+          padding: "12px 16px",
+          marginBottom: 16
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 20 }, children: "🎵" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 13, fontWeight: 600, color: "#a5b4fc", marginBottom: 2 }, children: [
+              audioReady,
+              " background music track",
+              audioReady !== 1 ? "s" : "",
+              " ready"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "var(--text-muted)" }, children: result ? "Click Re-render to include background music in the output video." : "Background music will be mixed into the rendered video automatically." })
+          ] }),
+          result && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            fontSize: 11,
+            padding: "4px 10px",
+            borderRadius: 999,
+            background: "rgba(251,191,36,0.15)",
+            color: "#fbbf24",
+            fontWeight: 600,
+            flexShrink: 0
+          }, children: "↻ Re-render needed" })
+        ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "16px", alignItems: "flex-end", marginBottom: "20px", flexWrap: "wrap" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", style: { flex: 1, minWidth: "180px" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", children: "Resolution" }),
@@ -9093,10 +9370,11 @@ function fmt(secs) {
 }
 function providerBadge(provider) {
   const colors = {
-    pexels: { bg: "rgba(5, 193, 112, 0.15)", fg: "#05C170" },
-    pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9" }
+    wikimedia: { bg: "rgba(56, 189, 248, 0.15)", fg: "#38bdf8", label: "Wikimedia" },
+    pexels: { bg: "rgba(5, 193, 112, 0.15)", fg: "#05C170", label: "Pexels" },
+    pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9", label: "Pixabay" }
   };
-  const c = colors[provider] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0" };
+  const c = colors[provider] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0", label: provider };
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
     fontSize: "10px",
     fontWeight: 700,
@@ -9106,7 +9384,58 @@ function providerBadge(provider) {
     color: c.fg,
     letterSpacing: "0.05em",
     textTransform: "uppercase"
-  }, children: provider });
+  }, children: c.label });
+}
+function matchTypeBadge(matchType, isExact) {
+  if (isExact || matchType === "exact") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      fontSize: "9px",
+      fontWeight: 800,
+      padding: "2px 7px",
+      borderRadius: "999px",
+      background: "rgba(52, 211, 153, 0.2)",
+      color: "#34d399",
+      border: "1px solid rgba(52, 211, 153, 0.4)",
+      letterSpacing: "0.05em"
+    }, children: "EXACT HUTTERITE" });
+  }
+  if (matchType === "historical") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      fontSize: "9px",
+      fontWeight: 800,
+      padding: "2px 7px",
+      borderRadius: "999px",
+      background: "rgba(251, 191, 36, 0.2)",
+      color: "#fbbf24",
+      border: "1px solid rgba(251, 191, 36, 0.4)",
+      letterSpacing: "0.05em"
+    }, children: "HISTORICAL" });
+  }
+  if (matchType === "contextual") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      fontSize: "9px",
+      fontWeight: 800,
+      padding: "2px 7px",
+      borderRadius: "999px",
+      background: "rgba(96, 165, 250, 0.2)",
+      color: "#60a5fa",
+      border: "1px solid rgba(96, 165, 250, 0.4)",
+      letterSpacing: "0.05em"
+    }, children: "CONTEXTUAL" });
+  }
+  if (matchType === "illustrative") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      fontSize: "9px",
+      fontWeight: 800,
+      padding: "2px 7px",
+      borderRadius: "999px",
+      background: "rgba(148, 163, 184, 0.15)",
+      color: "#94a3b8",
+      border: "1px solid rgba(148, 163, 184, 0.3)",
+      letterSpacing: "0.05em"
+    }, children: "ILLUSTRATIVE" });
+  }
+  return null;
 }
 function statusBadge(status) {
   const map = {
@@ -9124,8 +9453,10 @@ function ReplaceModal({
   onConfirm,
   onClose
 }) {
-  const [query, setQuery] = reactExports.useState(assignment.searchQueries[0] ?? "");
-  const suggestions = assignment.searchQueries;
+  const [query, setQuery] = reactExports.useState(assignment.usedQuery || assignment.searchQueries[0] || "");
+  const exact = assignment.exactQueries ?? [];
+  const contextual = assignment.contextualQueries ?? [];
+  const general = (assignment.searchQueries ?? []).filter((q2) => !exact.includes(q2) && !contextual.includes(q2));
   return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
     position: "fixed",
     inset: 0,
@@ -9139,18 +9470,20 @@ function ReplaceModal({
     border: "1px solid var(--border-strong)",
     borderRadius: "var(--radius-lg)",
     padding: "28px",
-    width: "520px",
-    boxShadow: "var(--shadow-lg)"
+    width: "560px",
+    boxShadow: "var(--shadow-lg)",
+    maxHeight: "90vh",
+    overflowY: "auto"
   }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "6px" }, children: [
       "Replace Scene ",
       assignment.sceneIndex
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginBottom: "20px", lineHeight: 1.5 }, children: [
-      assignment.narrationText.slice(0, 120),
-      assignment.narrationText.length > 120 ? "…" : ""
+      assignment.narrationText.slice(0, 140),
+      assignment.narrationText.length > 140 ? "…" : ""
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "12px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "16px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "6px" }, children: "SEARCH QUERY" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "input",
@@ -9160,7 +9493,7 @@ function ReplaceModal({
           onKeyDown: (e) => {
             if (e.key === "Enter") onConfirm(query);
           },
-          placeholder: "Enter a short, visual search query…",
+          placeholder: "Enter search query (e.g. Hutterite colony Manitoba, wheat harvest)...",
           style: {
             width: "100%",
             background: "var(--bg-base)",
@@ -9174,9 +9507,55 @@ function ReplaceModal({
         }
       )
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "6px" }, children: "SUGGESTED QUERIES (click to use)" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: suggestions.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+    exact.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "14px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-success)", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.05em" }, children: "NICHE / WIKIMEDIA QUERIES (Priority 1)" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: exact.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => setQuery(q2),
+          style: {
+            background: query === q2 ? "rgba(52, 211, 153, 0.2)" : "var(--bg-overlay)",
+            border: `1px solid ${query === q2 ? "var(--color-success)" : "var(--border-subtle)"}`,
+            color: query === q2 ? "var(--color-success)" : "var(--text-secondary)",
+            borderRadius: "var(--radius-sm)",
+            fontSize: "11px",
+            padding: "4px 10px",
+            cursor: "pointer"
+          },
+          children: [
+            "🏛️ ",
+            q2
+          ]
+        },
+        q2
+      )) })
+    ] }),
+    contextual.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "14px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-info)", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.05em" }, children: "CONTEXTUAL B-ROLL (Pexels / Pixabay)" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: contextual.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => setQuery(q2),
+          style: {
+            background: query === q2 ? "rgba(96, 165, 250, 0.2)" : "var(--bg-overlay)",
+            border: `1px solid ${query === q2 ? "var(--color-info)" : "var(--border-subtle)"}`,
+            color: query === q2 ? "var(--color-info)" : "var(--text-secondary)",
+            borderRadius: "var(--radius-sm)",
+            fontSize: "11px",
+            padding: "4px 10px",
+            cursor: "pointer"
+          },
+          children: [
+            "🎬 ",
+            q2
+          ]
+        },
+        q2
+      )) })
+    ] }),
+    general.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "6px" }, children: "OTHER SUGGESTIONS" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: general.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
           onClick: () => setQuery(q2),
@@ -9194,7 +9573,7 @@ function ReplaceModal({
         q2
       )) })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", justifyContent: "flex-end" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", justifyContent: "flex-end", marginTop: "16px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
@@ -9210,7 +9589,7 @@ function ReplaceModal({
           className: "btn btn-primary",
           onClick: () => onConfirm(query),
           disabled: !query.trim(),
-          style: { minWidth: "120px" },
+          style: { minWidth: "130px" },
           children: "🔍 Search & Replace"
         }
       )
@@ -9227,6 +9606,8 @@ function SceneCard({
   const [showReplace, setShowReplace] = reactExports.useState(false);
   const [replacing, setReplacing] = reactExports.useState(false);
   const [locking, setLocking] = reactExports.useState(false);
+  const [thumbError, setThumbError] = reactExports.useState(false);
+  const [copiedCredit, setCopiedCredit] = reactExports.useState(false);
   const asset = assignment.asset;
   const isAssigned = assignment.status === "assigned" && asset;
   async function handleReplace(query) {
@@ -9239,6 +9620,19 @@ function SceneCard({
     setLocking(true);
     await onLock(assignment.sceneIndex, !assignment.locked);
     setLocking(false);
+  }
+  function handleCopySceneCredit() {
+    if (!asset) return;
+    const title = asset.searchQuery ? `“${asset.searchQuery}”` : `“Scene ${assignment.sceneIndex}”`;
+    const author = asset.creator ? `by ${asset.creator}` : "";
+    const license = asset.license ? `— ${asset.license}` : "";
+    const provider = asset.provider === "wikimedia" ? "— Wikimedia Commons" : `— ${asset.provider.toUpperCase()}`;
+    const source = asset.sourceUrl ? `— ${asset.sourceUrl}` : "";
+    const credit = [title, author, license, provider, source].filter(Boolean).join(" ");
+    navigator.clipboard.writeText(credit).then(() => {
+      setCopiedCredit(true);
+      setTimeout(() => setCopiedCredit(false), 2e3);
+    });
   }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
@@ -9276,17 +9670,30 @@ function SceneCard({
         fontWeight: 700
       }, children: "📤 OWN" }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { height: "120px", background: "var(--bg-void)", overflow: "hidden", position: "relative" }, children: [
-        isAssigned && asset?.thumbnailUrl ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        isAssigned && asset?.thumbnailUrl && !thumbError ? /* @__PURE__ */ jsxRuntimeExports.jsx(
           "img",
           {
             src: asset.thumbnailUrl,
             alt: `Scene ${assignment.sceneIndex}`,
             style: { width: "100%", height: "100%", objectFit: "cover" },
-            onError: (e) => {
-              e.target.style.display = "none";
-            }
+            onError: () => setThumbError(true)
           }
-        ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        ) : isAssigned ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          width: "100%",
+          height: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexDirection: "column",
+          gap: "6px",
+          background: "linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(168,85,247,0.08) 100%)"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "26px" }, children: "🎬" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-brand)", fontWeight: 600, letterSpacing: "0.5px" }, children: [
+            asset?.provider?.toUpperCase() || "STOCK",
+            " VIDEO"
+          ] })
+        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
           width: "100%",
           height: "100%",
           display: "flex",
@@ -9329,9 +9736,10 @@ function SceneCard({
             ] }),
             statusBadge(assignment.status)
           ] }),
-          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "5px", flexWrap: "wrap" }, children: [
             providerBadge(asset.provider),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+            matchTypeBadge(asset.matchType ?? assignment.matchType, asset.isExactTopic ?? assignment.isExactTopic),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)", fontWeight: 600 }, children: [
               Math.round(assignment.score * 100),
               "%"
             ] })
@@ -9347,16 +9755,60 @@ function SceneCard({
           WebkitLineClamp: 2,
           WebkitBoxOrient: "vertical"
         }, children: assignment.narrationText || "(no narration)" }),
-        isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-          fontSize: "10px",
-          color: "var(--text-muted)",
-          fontFamily: "var(--font-mono)",
-          marginBottom: "8px"
-        }, children: [
-          '🔍 "',
-          assignment.usedQuery,
-          '" · by ',
-          asset.creator
+        isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            fontSize: "10px",
+            color: "var(--text-muted)",
+            fontFamily: "var(--font-mono)",
+            marginBottom: "4px"
+          }, children: [
+            '🔍 "',
+            assignment.usedQuery,
+            '" · by ',
+            asset.creator
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            fontSize: "10px",
+            color: "var(--text-secondary)",
+            display: "flex",
+            alignItems: "center",
+            gap: "8px",
+            flexWrap: "wrap",
+            marginBottom: "8px"
+          }, children: [
+            asset.width && asset.height && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", color: "var(--text-muted)" }, children: [
+              "📐 ",
+              asset.width,
+              "×",
+              asset.height
+            ] }),
+            asset.license && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+              padding: "1px 5px",
+              borderRadius: "4px",
+              background: "var(--bg-overlay)",
+              border: "1px solid var(--border-subtle)",
+              fontSize: "9px",
+              fontWeight: 600,
+              color: "var(--text-secondary)"
+            }, children: [
+              "📜 ",
+              asset.license
+            ] }),
+            (asset.sourceUrl || asset.downloadUrl) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "a",
+              {
+                href: asset.sourceUrl || asset.downloadUrl,
+                target: "_blank",
+                rel: "noreferrer",
+                onClick: (e) => {
+                  e.preventDefault();
+                  window.open(asset.sourceUrl || asset.downloadUrl);
+                },
+                style: { fontSize: "10px", color: "var(--text-brand)", textDecoration: "none" },
+                children: "🔗 Source ↗"
+              }
+            )
+          ] })
         ] }),
         assignment.status === "failed" && assignment.errorMessage && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-error)", marginBottom: "8px" }, children: assignment.errorMessage.slice(0, 80) }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "5px", flexWrap: "wrap" }, children: [
@@ -9410,6 +9862,24 @@ function SceneCard({
               title: "Upload your own media for this scene",
               children: "📤 Upload"
             }
+          ),
+          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: "btn btn-sm",
+              onClick: handleCopySceneCredit,
+              style: {
+                fontSize: "10px",
+                padding: "4px 8px",
+                background: copiedCredit ? "rgba(52,211,153,0.15)" : "var(--bg-overlay)",
+                border: `1px solid ${copiedCredit ? "var(--color-success)" : "var(--border-subtle)"}`,
+                color: copiedCredit ? "var(--color-success)" : "var(--text-muted)",
+                cursor: "pointer",
+                borderRadius: "var(--radius-sm)"
+              },
+              title: "Copy attribution line for YouTube description",
+              children: copiedCredit ? "✓ Copied" : "📋 Credit"
+            }
           )
         ] })
       ] })
@@ -9435,12 +9905,36 @@ function StockPage({
   onUpload,
   onLoad
 }) {
+  const [copiedAttribution, setCopiedAttribution] = reactExports.useState(false);
   reactExports.useEffect(() => {
     onLoad();
   }, []);
   const assigned = review?.assignedScenes ?? 0;
   const total = review?.totalScenes ?? 0;
   const coverage = total > 0 ? Math.round(assigned / total * 100) : 0;
+  function handleCopyAttribution() {
+    let text = review?.creditsText;
+    if (!text && review?.assignments) {
+      const lines = ["Media credits:"];
+      for (const a of review.assignments) {
+        if (a.asset) {
+          const title = a.asset.searchQuery ? `“${a.asset.searchQuery}”` : "Stock Media";
+          const author = a.asset.creator ? `by ${a.asset.creator}` : "";
+          const license = a.asset.license ? `— ${a.asset.license}` : "";
+          const provider = a.asset.provider === "wikimedia" ? "— Wikimedia Commons" : `— ${a.asset.provider.toUpperCase()}`;
+          const source = a.asset.sourceUrl ? `— ${a.asset.sourceUrl}` : "";
+          lines.push([title, author, license, provider, source].filter(Boolean).join(" "));
+        }
+      }
+      text = lines.join("\n");
+    }
+    if (text) {
+      navigator.clipboard.writeText(text).then(() => {
+        setCopiedAttribution(true);
+        setTimeout(() => setCopiedAttribution(false), 3e3);
+      });
+    }
+  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
@@ -9448,7 +9942,7 @@ function StockPage({
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z", clipRule: "evenodd" }) }) }),
           "Stock Media Engine"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "12px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }, children: [
           review && total > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
               width: "80px",
@@ -9471,6 +9965,20 @@ function StockPage({
               "%)"
             ] })
           ] }),
+          review && assigned > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: "btn btn-secondary",
+              onClick: handleCopyAttribution,
+              style: {
+                minWidth: "150px",
+                color: copiedAttribution ? "var(--color-success)" : void 0,
+                borderColor: copiedAttribution ? "var(--color-success)" : void 0
+              },
+              title: "Copy all media credits formatted for YouTube description",
+              children: copiedAttribution ? "✓ Credits Copied!" : "📋 Copy Attribution"
+            }
+          ),
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
@@ -9504,16 +10012,22 @@ function StockPage({
     !review && !isRunning && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { textAlign: "center", padding: "48px 24px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "48px", marginBottom: "16px" }, children: "🎬" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "8px" }, children: "Automatic Stock Media Engine" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.8, maxWidth: "480px", margin: "0 auto 24px" }, children: [
-        "After running AI Planning, click ",
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.8, maxWidth: "520px", margin: "0 auto 24px" }, children: [
+        "Click ",
         /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Run Stock Search" }),
-        " to automatically find, rank, and download the best matching stock footage from Pexels and Pixabay for each scene in your edit plan."
+        " to automatically search ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Wikimedia Commons (Priority 1)" }),
+        " for niche, historical, and cultural footage without needing an API key, then fallback to ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Pexels (Priority 2)" }),
+        " and ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Pixabay (Priority 3)" }),
+        "."
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", justifyContent: "center", gap: "20px", flexWrap: "wrap" }, children: [
-        { icon: "🔍", label: "AI-generated queries", desc: "Short, visual search terms" },
-        { icon: "📊", label: "Multi-factor ranking", desc: "Relevance + quality + fit" },
-        { icon: "⬇️", label: "Auto download", desc: "Saved to project/assets/stock/" },
-        { icon: "🔒", label: "User review", desc: "Replace, lock, or upload own" }
+        { icon: "🏛️", label: "Wikimedia Commons", desc: "Priority 1: authentic niche media" },
+        { icon: "🔍", label: "Multi-pass queries", desc: "Exact topic & contextual b-roll" },
+        { icon: "📊", label: "0–100 ranking", desc: "Relevance + license + quality" },
+        { icon: "📋", label: "Auto attribution", desc: "One-click YouTube description copy" }
       ].map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
         background: "var(--bg-elevated)",
         border: "1px solid var(--border-subtle)",
@@ -9525,12 +10039,7 @@ function StockPage({
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "24px", marginBottom: "8px" }, children: f2.icon }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "4px" }, children: f2.label }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: f2.desc })
-      ] }, f2.label)) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "24px", fontSize: "11px", color: "var(--text-muted)" }, children: [
-        "Make sure Pexels and/or Pixabay API keys are configured in",
-        " ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-brand)" }, children: "Settings → API Providers" })
-      ] })
+      ] }, f2.label)) })
     ] }),
     review && total > 0 && !isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }, children: [
       { label: "Total Scenes", value: total, icon: "🎬" },
@@ -9562,7 +10071,7 @@ function StockPage({
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
         display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))",
+        gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
         gap: "14px"
       }, children: review.assignments.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx(
         SceneCard,
@@ -9577,9 +10086,9 @@ function StockPage({
       )) }) })
     ] }),
     review && review.assignments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { background: "var(--bg-elevated)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", lineHeight: 1.7 }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Provider chain:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Provider Priority Chain:" }),
       " ",
-      "Pexels Video → Pixabay Video → Pexels Photo → Pixabay Photo → Manual Review",
+      "Wikimedia Commons (Priority 1) → Pexels Video (Priority 2) → Pixabay Video (Priority 3) → Photo Fallbacks → Manual Review",
       /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
       /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Downloads:" }),
       " ",
@@ -9589,12 +10098,492 @@ function StockPage({
         "/assets/stock/"
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "License:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Licenses & Attributions:" }),
       " ",
-      "Pexels and Pixabay assets are free for commercial use under their respective licenses."
+      "Manifest generated at ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-brand)" }, children: "media-attribution.json" }),
+      " and ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-brand)" }, children: "media-attribution.txt" }),
+      ". Use the ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "📋 Copy Attribution" }),
+      " button above to paste credits directly into your video description."
     ] }) }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
         @keyframes spin { to { transform: rotate(360deg); } }
+      ` })
+  ] });
+}
+function ProgressBar({ value }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+    height: 4,
+    borderRadius: 2,
+    background: "rgba(255,255,255,0.08)",
+    overflow: "hidden"
+  }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+    width: `${Math.min(100, value * 100)}%`,
+    height: "100%",
+    background: "linear-gradient(90deg, #6366f1, #8b5cf6)",
+    transition: "width 0.3s ease",
+    borderRadius: 2
+  } }) });
+}
+function LicenseBadge({ license }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+    fontSize: 10,
+    padding: "2px 6px",
+    borderRadius: 999,
+    background: "rgba(99,102,241,0.15)",
+    color: "#a5b4fc",
+    fontWeight: 600,
+    letterSpacing: "0.03em",
+    textTransform: "uppercase"
+  }, children: [
+    "CC ",
+    license
+  ] });
+}
+function DurationBadge({ secs }) {
+  const m2 = Math.floor(secs / 60);
+  const s = Math.round(secs % 60);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--text-muted)" }, children: [
+    m2,
+    ":",
+    String(s).padStart(2, "0")
+  ] });
+}
+function SectionCard({ section, onApprove, onVolumeChange }) {
+  const [volumeDb, setVolumeDb] = reactExports.useState(section.volumeDb ?? -30);
+  const candidate = section.musicCandidate;
+  const downloaded = !!section.approvedLocalPath;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: section.approved ? "rgba(99,102,241,0.08)" : "rgba(255,255,255,0.03)",
+    border: `1px solid ${section.approved ? "rgba(99,102,241,0.35)" : "rgba(255,255,255,0.06)"}`,
+    borderRadius: 12,
+    padding: 18,
+    transition: "all 0.2s ease"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "flex-start", gap: 12, marginBottom: 12 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        width: 40,
+        height: 40,
+        borderRadius: 10,
+        background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        flexShrink: 0,
+        fontSize: 18
+      }, children: "🎵" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 14, marginBottom: 2, color: "var(--text-primary)" }, children: section.sectionLabel }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            fontSize: 10,
+            padding: "1px 6px",
+            borderRadius: 999,
+            background: "rgba(251,191,36,0.15)",
+            color: "#fbbf24",
+            fontWeight: 600,
+            textTransform: "uppercase"
+          }, children: section.mood }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(DurationBadge, { secs: section.durationSecs }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--text-muted)" }, children: [
+            section.sceneIndexes.length,
+            " scene",
+            section.sceneIndexes.length !== 1 ? "s" : ""
+          ] })
+        ] })
+      ] }),
+      section.status === "found" && candidate ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => onApprove(section.sectionId, !section.approved),
+          style: {
+            padding: "6px 14px",
+            borderRadius: 8,
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: 12,
+            background: section.approved ? "rgba(52,211,153,0.15)" : "rgba(99,102,241,0.15)",
+            color: section.approved ? "#34d399" : "#a5b4fc",
+            border: `1px solid ${section.approved ? "rgba(52,211,153,0.3)" : "rgba(99,102,241,0.3)"}`,
+            transition: "all 0.15s ease",
+            flexShrink: 0
+          },
+          children: section.approved ? "✓ Approved" : "Approve"
+        }
+      ) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#f87171", fontWeight: 600 }, children: "No result" })
+    ] }),
+    candidate && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(255,255,255,0.03)",
+      borderRadius: 8,
+      padding: 12,
+      marginBottom: 12
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, alignItems: "center", marginBottom: 6 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 500, fontSize: 13, color: "var(--text-primary)", marginBottom: 2 }, children: candidate.title }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "var(--text-muted)" }, children: [
+            "by ",
+            candidate.creator,
+            candidate.durationSecs > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              " · ",
+              /* @__PURE__ */ jsxRuntimeExports.jsx(DurationBadge, { secs: candidate.durationSecs })
+            ] })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(LicenseBadge, { license: candidate.license })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" }, children: candidate.tags.slice(0, 5).map((tag) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        fontSize: 10,
+        padding: "1px 6px",
+        borderRadius: 999,
+        background: "rgba(255,255,255,0.06)",
+        color: "var(--text-muted)"
+      }, children: tag }, tag)) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: 6 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "a",
+        {
+          href: candidate.pageUrl,
+          target: "_blank",
+          rel: "noreferrer",
+          style: { fontSize: 10, color: "#6366f1", textDecoration: "none" },
+          children: "View on Openverse ↗"
+        }
+      ) })
+    ] }),
+    section.approved && candidate && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 6 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, alignItems: "center" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "var(--text-muted)", width: 110, flexShrink: 0 }, children: [
+          "🔉 Music: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { style: { color: "#a5b4fc" }, children: [
+            volumeDb,
+            " dB"
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            type: "range",
+            min: -45,
+            max: -10,
+            step: 1,
+            value: volumeDb,
+            onChange: (e) => {
+              setVolumeDb(Number(e.target.value));
+            },
+            onPointerUp: (e) => {
+              const v2 = Number(e.target.value);
+              onVolumeChange(section.sectionId, v2);
+            },
+            style: { flex: 1, accentColor: "#6366f1" }
+          }
+        ),
+        downloaded && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#34d399", flexShrink: 0 }, children: "✓ Downloaded" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, paddingLeft: 110 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          flex: 1,
+          height: 3,
+          borderRadius: 2,
+          background: "rgba(255,255,255,0.06)",
+          overflow: "hidden"
+        }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          width: `${(volumeDb + 45) / 35 * 100}%`,
+          height: "100%",
+          background: volumeDb > -20 ? "linear-gradient(90deg, #f59e0b, #ef4444)" : "linear-gradient(90deg, #6366f1, #34d399)",
+          transition: "width 0.1s ease, background 0.2s ease"
+        } }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 9, color: "var(--text-muted)", flexShrink: 0, width: 80 }, children: volumeDb > -20 ? "⚠ May be loud" : volumeDb < -38 ? "Very quiet" : "Good level" })
+      ] })
+    ] })
+  ] });
+}
+function SfxRow({ sfx, onApprove }) {
+  const candidate = sfx.sfxCandidate;
+  const downloaded = !!sfx.approvedLocalPath;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    display: "flex",
+    alignItems: "center",
+    gap: 10,
+    padding: "10px 14px",
+    background: sfx.approved ? "rgba(52,211,153,0.05)" : "rgba(255,255,255,0.02)",
+    borderRadius: 8,
+    border: `1px solid ${sfx.approved ? "rgba(52,211,153,0.2)" : "rgba(255,255,255,0.05)"}`
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 16, flexShrink: 0 }, children: "🔊" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, fontWeight: 500, color: "var(--text-primary)" }, children: [
+        "Scene ",
+        sfx.sceneIndex,
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "var(--text-muted)", fontWeight: 400 }, children: [
+          " — ",
+          sfx.sfxQuery
+        ] })
+      ] }),
+      candidate && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "var(--text-muted)" }, children: [
+        candidate.title,
+        " by ",
+        candidate.creator,
+        candidate.durationSecs > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          " · ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx(DurationBadge, { secs: candidate.durationSecs })
+        ] })
+      ] })
+    ] }),
+    downloaded && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#34d399", flexShrink: 0 }, children: "✓" }),
+    candidate && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        onClick: () => onApprove(sfx.sceneIndex, !sfx.approved),
+        style: {
+          padding: "4px 10px",
+          borderRadius: 6,
+          cursor: "pointer",
+          fontWeight: 600,
+          fontSize: 11,
+          background: sfx.approved ? "rgba(52,211,153,0.15)" : "rgba(99,102,241,0.12)",
+          color: sfx.approved ? "#34d399" : "#a5b4fc",
+          border: `1px solid ${sfx.approved ? "rgba(52,211,153,0.25)" : "rgba(99,102,241,0.25)"}`,
+          flexShrink: 0
+        },
+        children: sfx.approved ? "✓" : "Add"
+      }
+    )
+  ] });
+}
+function AudioDirectorPage({ project, audioDirector }) {
+  const {
+    plan,
+    isSearching,
+    isDownloading,
+    progress,
+    downloadProgress,
+    lastError,
+    runSearch,
+    loadPlan,
+    approveSection,
+    approveSfx,
+    approveAll,
+    downloadApproved
+  } = audioDirector;
+  const [activeTab, setActiveTab] = reactExports.useState("music");
+  reactExports.useEffect(() => {
+    loadPlan(project.projectDir);
+  }, [project.projectDir]);
+  const approvedMusicCount = plan?.sections.filter((s) => s.approved).length ?? 0;
+  const downloadedMusicCount = plan?.sections.filter((s) => s.approvedLocalPath).length ?? 0;
+  const approvedSfxCount = plan?.sfxAssignments.filter((s) => s.approved).length ?? 0;
+  const downloadedSfxCount = plan?.sfxAssignments.filter((s) => s.approvedLocalPath).length ?? 0;
+  const hasApproved = approvedMusicCount > 0 || approvedSfxCount > 0;
+  const allDownloaded = downloadedMusicCount >= approvedMusicCount && downloadedSfxCount >= approvedSfxCount;
+  const currentProgress = isSearching ? progress : isDownloading ? downloadProgress : null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", style: { display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "24px 28px 0", flexShrink: 0 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, marginBottom: 20 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+              width: 36,
+              height: 36,
+              borderRadius: 10,
+              background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 18
+            }, children: "🎼" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { style: { margin: 0, fontSize: 22, fontWeight: 700 }, children: "Smart Audio Director" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: 0, fontSize: 13, color: "var(--text-muted)", maxWidth: 480 }, children: "Analyses your narration, groups scenes into musical sections, then finds CC-licensed music & sound effects from Openverse." })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, flexShrink: 0, flexWrap: "wrap", justifyContent: "flex-end" }, children: [
+          plan && !isSearching && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => approveAll(project.projectDir),
+                disabled: isDownloading,
+                className: "btn btn-secondary",
+                style: { fontSize: 12, padding: "8px 14px" },
+                children: "✓ Approve All"
+              }
+            ),
+            hasApproved && !allDownloaded && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => downloadApproved(project.projectDir),
+                disabled: isDownloading,
+                className: "btn btn-primary",
+                style: { fontSize: 12, padding: "8px 14px" },
+                children: isDownloading ? "Downloading…" : "⬇ Download Approved"
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: () => runSearch(project.projectDir),
+              disabled: isSearching || isDownloading,
+              className: "btn btn-primary",
+              style: { fontSize: 12, padding: "8px 16px" },
+              children: isSearching ? "⟳ Searching…" : plan ? "↻ Re-search" : "🎵 Find Audio"
+            }
+          )
+        ] })
+      ] }),
+      currentProgress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 16 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: 6 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: "var(--text-muted)" }, children: currentProgress.message }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 12, color: "var(--text-muted)" }, children: [
+            Math.round(currentProgress.progress * 100),
+            "%"
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(ProgressBar, { value: currentProgress.progress })
+      ] }),
+      plan && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 16, marginBottom: 20, flexWrap: "wrap" }, children: [
+        { label: "Sections", value: plan.sections.length, icon: "🎵" },
+        { label: "Music found", value: plan.sections.filter((s) => s.status === "found").length, icon: "✓", color: "#34d399" },
+        { label: "Approved", value: approvedMusicCount, icon: "🎯", color: "#6366f1" },
+        { label: "Downloaded", value: downloadedMusicCount, icon: "💾", color: "#fbbf24" },
+        { label: "SFX", value: plan.sfxAssignments.length, icon: "🔊" }
+      ].map((stat) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(255,255,255,0.03)",
+        border: "1px solid rgba(255,255,255,0.06)",
+        borderRadius: 8,
+        padding: "8px 14px",
+        display: "flex",
+        alignItems: "center",
+        gap: 8
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 14 }, children: stat.icon }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 16, fontWeight: 700, color: stat.color ?? "var(--text-primary)" }, children: stat.value }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "var(--text-muted)" }, children: stat.label })
+        ] })
+      ] }, stat.label)) }),
+      plan && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 2, marginBottom: -1 }, children: ["music", "sfx"].map((tab) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => setActiveTab(tab),
+          style: {
+            padding: "8px 18px",
+            borderRadius: "8px 8px 0 0",
+            background: activeTab === tab ? "rgba(99,102,241,0.12)" : "transparent",
+            color: activeTab === tab ? "#a5b4fc" : "var(--text-muted)",
+            border: "none",
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: 13,
+            borderBottom: activeTab === tab ? "2px solid #6366f1" : "2px solid transparent",
+            transition: "all 0.15s ease"
+          },
+          children: [
+            tab === "music" ? "🎵 Background Music" : "🔊 Sound Effects",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+              marginLeft: 6,
+              fontSize: 10,
+              padding: "1px 6px",
+              borderRadius: 999,
+              background: activeTab === tab ? "rgba(99,102,241,0.2)" : "rgba(255,255,255,0.06)",
+              color: activeTab === tab ? "#a5b4fc" : "var(--text-muted)"
+            }, children: tab === "music" ? plan.sections.length : plan.sfxAssignments.length })
+          ]
+        },
+        tab
+      )) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, overflow: "auto", padding: "16px 28px 28px" }, children: [
+      lastError && !isSearching && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(248,113,113,0.1)",
+        border: "1px solid rgba(248,113,113,0.3)",
+        borderRadius: 10,
+        padding: "14px 18px",
+        marginBottom: 16,
+        display: "flex",
+        gap: 12,
+        alignItems: "flex-start"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 18, flexShrink: 0 }, children: "⚠️" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600, fontSize: 13, color: "#f87171", marginBottom: 4 }, children: "Search failed" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "rgba(248,113,113,0.8)" }, children: lastError }),
+          lastError.includes("edit plan") && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "var(--text-muted)", marginTop: 6 }, children: [
+            "💡 Go to ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "AI Planning" }),
+            " first to generate the edit plan, then come back here."
+          ] })
+        ] })
+      ] }),
+      !plan && !isSearching && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: 320,
+        gap: 16,
+        textAlign: "center"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 56 }, children: "🎼" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 18, fontWeight: 700, marginBottom: 8 }, children: "No audio plan yet" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 13, color: "var(--text-muted)", maxWidth: 360 }, children: [
+            "Click ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Find Audio" }),
+            " to analyse your narration and find CC-licensed background music & sound effects from Openverse."
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => runSearch(project.projectDir),
+            className: "btn btn-primary",
+            style: { fontSize: 14, padding: "12px 24px" },
+            children: "🎵 Find Audio"
+          }
+        )
+      ] }),
+      isSearching && !plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        height: 320,
+        gap: 16
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 48, animation: "spin 2s linear infinite" }, children: "🎵" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 16, fontWeight: 600 }, children: "Searching for audio…" }),
+        progress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { width: 320 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "var(--text-muted)", marginBottom: 8, textAlign: "center" }, children: progress.message }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ProgressBar, { value: progress.progress })
+        ] })
+      ] }),
+      plan && activeTab === "music" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: 12 }, children: plan.sections.map((section) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        SectionCard,
+        {
+          section,
+          projectDir: project.projectDir,
+          onApprove: (sectionId, approved) => approveSection(project.projectDir, sectionId, approved),
+          onVolumeChange: (sectionId, db2) => approveSection(project.projectDir, sectionId, true, { volumeDb: db2 })
+        },
+        section.sectionId
+      )) }),
+      plan && activeTab === "sfx" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: plan.sfxAssignments.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { textAlign: "center", color: "var(--text-muted)", padding: 40, fontSize: 13 }, children: "No SFX candidates found. The engine assigns SFX only when a scene's visual description matches a known action (crowd, rain, footsteps, etc.)" }) : plan.sfxAssignments.map((sfx) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        SfxRow,
+        {
+          sfx,
+          projectDir: project.projectDir,
+          onApprove: (sceneIndex, approved) => approveSfx(project.projectDir, sceneIndex, approved)
+        },
+        sfx.sceneIndex
+      )) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
       ` })
   ] });
 }
@@ -9834,7 +10823,8 @@ function useStock(addLog) {
     });
     addLog({ level: "info", message: "Starting Stock Media Engine…", category: "stock" });
     try {
-      const result = await window.api.stock.run({ projectDir });
+      const wikimediaEnabled = localStorage.getItem("stock_wikimedia_enabled") !== "false";
+      const result = await window.api.stock.run({ projectDir, wikimediaEnabled });
       setLastResult(result);
       if (result.success) {
         addLog({
@@ -9860,7 +10850,8 @@ function useStock(addLog) {
   }, [addLog, loadReview]);
   const replaceScene = reactExports.useCallback(async (projectDir, sceneIndex, query) => {
     try {
-      const res = await window.api.stock.replaceScene({ projectDir, sceneIndex, query });
+      const wikimediaEnabled = localStorage.getItem("stock_wikimedia_enabled") !== "false";
+      const res = await window.api.stock.replaceScene({ projectDir, sceneIndex, query, wikimediaEnabled });
       if (res.success && res.asset) {
         await loadReview(projectDir);
         addLog({ level: "success", message: `Scene ${sceneIndex} replaced with "${query}"`, category: "stock" });
@@ -9911,6 +10902,129 @@ function useStock(addLog) {
     uploadOwnMedia
   };
 }
+function useAudioDirector(addLog) {
+  const [plan, setPlan] = reactExports.useState(null);
+  const [isSearching, setIsSearching] = reactExports.useState(false);
+  const [isDownloading, setIsDownloading] = reactExports.useState(false);
+  const [progress, setProgress] = reactExports.useState(null);
+  const [downloadProgress, setDownloadProgress] = reactExports.useState(null);
+  const [lastResult, setLastResult] = reactExports.useState(null);
+  const [lastError, setLastError] = reactExports.useState(null);
+  const unsubSearch = reactExports.useRef(null);
+  const unsubDownload = reactExports.useRef(null);
+  const runSearch = reactExports.useCallback(async (projectDir) => {
+    setIsSearching(true);
+    setLastError(null);
+    setProgress({ message: "Initialising…", progress: 0 });
+    addLog("info", "Smart Audio Director: starting search…", "audio");
+    unsubSearch.current?.();
+    unsubSearch.current = window.api.audio.onProgress((data) => {
+      setProgress(data);
+    });
+    try {
+      const result = await window.api.audio.search({ projectDir });
+      setLastResult(result);
+      if (result.success) {
+        const updatedPlan = { generatedAt: (/* @__PURE__ */ new Date()).toISOString(), sections: result.sections, sfxAssignments: result.sfxAssignments };
+        setPlan(updatedPlan);
+        const found = result.sections.filter((s) => s.status === "found").length;
+        const downloaded = result.sections.filter((s) => s.approvedLocalPath).length;
+        addLog("success", `Audio complete: ${found}/${result.sections.length} music found, ${downloaded} downloaded, ${result.sfxAssignments.length} SFX`, "audio");
+        if (downloaded > 0) {
+          addLog("info", `✅ Music ready — go to Render page and click Re-render to include background music`, "audio");
+        }
+      } else {
+        const errMsg = result.error ?? "Search returned no results";
+        setLastError(errMsg);
+        addLog("error", `Audio search failed: ${errMsg}`, "audio");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLastError(msg);
+      addLog("error", `Audio search error: ${msg}`, "audio");
+    } finally {
+      setIsSearching(false);
+      setProgress(null);
+      unsubSearch.current?.();
+    }
+  }, [addLog]);
+  const loadPlan = reactExports.useCallback(async (projectDir) => {
+    try {
+      const loaded = await window.api.audio.getPlan(projectDir);
+      setPlan(loaded);
+    } catch {
+    }
+  }, []);
+  const approveSection = reactExports.useCallback(async (projectDir, sectionId, approved, opts = {}) => {
+    const result = await window.api.audio.approveSection({ projectDir, sectionId, approved, ...opts });
+    if (result.success && result.plan) {
+      setPlan(result.plan);
+    }
+  }, []);
+  const approveSfx = reactExports.useCallback(async (projectDir, sceneIndex, approved, volumeDb) => {
+    const result = await window.api.audio.approveSfx({ projectDir, sceneIndex, approved, volumeDb });
+    if (result.success && result.plan) {
+      setPlan(result.plan);
+    }
+  }, []);
+  const approveAll = reactExports.useCallback(async (projectDir) => {
+    if (!plan) return;
+    const updatedPlan = { ...plan };
+    updatedPlan.sections = plan.sections.map((s) => ({
+      ...s,
+      approved: s.status === "found"
+    }));
+    updatedPlan.sfxAssignments = plan.sfxAssignments.map((sfx) => ({
+      ...sfx,
+      approved: !!sfx.sfxCandidate
+    }));
+    await window.api.audio.savePlan({ projectDir, plan: updatedPlan });
+    setPlan(updatedPlan);
+    addLog("info", "All available audio approved", "audio");
+  }, [plan, addLog]);
+  const downloadApproved = reactExports.useCallback(async (projectDir) => {
+    setIsDownloading(true);
+    setDownloadProgress({ message: "Starting downloads…", progress: 0 });
+    addLog("info", "Downloading approved audio tracks…", "audio");
+    unsubDownload.current?.();
+    unsubDownload.current = window.api.audio.onDownloadProgress((data) => {
+      setDownloadProgress(data);
+    });
+    try {
+      const result = await window.api.audio.downloadApproved({ projectDir });
+      if (result.success && result.plan) {
+        setPlan(result.plan);
+        const musicDone = result.plan.sections.filter((s) => s.approvedLocalPath).length;
+        const sfxDone = result.plan.sfxAssignments.filter((s) => s.approvedLocalPath).length;
+        addLog("success", `Downloads complete: ${musicDone} music tracks, ${sfxDone} SFX`, "audio");
+      } else {
+        addLog("error", `Download failed: ${result.error}`, "audio");
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addLog("error", `Download error: ${msg}`, "audio");
+    } finally {
+      setIsDownloading(false);
+      setDownloadProgress(null);
+      unsubDownload.current?.();
+    }
+  }, [addLog]);
+  return {
+    plan,
+    isSearching,
+    isDownloading,
+    progress,
+    downloadProgress,
+    lastResult,
+    lastError,
+    runSearch,
+    loadPlan,
+    approveSection,
+    approveSfx,
+    approveAll,
+    downloadApproved
+  };
+}
 function App() {
   const [currentPage, setCurrentPage] = reactExports.useState("home");
   const {
@@ -9943,6 +11057,9 @@ function App() {
     lockScene: stockLock,
     uploadOwnMedia: stockUpload
   } = useStock(addLog);
+  const audioDirector = useAudioDirector(
+    (level, message, category) => addLog({ level, message, category })
+  );
   reactExports.useEffect(() => {
     if (project?.projectDir) {
       loadCachedTranscript(project.projectDir);
@@ -9974,7 +11091,7 @@ function App() {
     });
   }
   const activeLogs = logs;
-  const activeProgress = isScanning ? scanProgress : isTranscribing ? transcribeProgress : isStockRunning ? stockProgress : null;
+  const activeProgress = isScanning ? scanProgress : isTranscribing ? transcribeProgress : isStockRunning ? stockProgress : audioDirector.isSearching ? audioDirector.progress : audioDirector.isDownloading ? audioDirector.downloadProgress : null;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-shell", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsx(TitleBar, { projectName: project?.name ?? null }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "app-body", children: [
@@ -9985,7 +11102,11 @@ function App() {
           currentPage,
           onNavigate: navigate,
           hasTranscript: transcript !== null,
-          stockCoverage: stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null
+          stockCoverage: stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null,
+          audioCoverage: audioDirector.plan ? {
+            approved: audioDirector.plan.sections.filter((s) => s.approved).length,
+            total: audioDirector.plan.sections.length
+          } : null
         }
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "main-content", children: [
@@ -10029,6 +11150,13 @@ function App() {
             onLock: (idx, locked) => stockLock(project.projectDir, idx, locked),
             onUpload: (idx) => stockUpload(project.projectDir, idx),
             onLoad: () => loadStockReview(project.projectDir)
+          }
+        ),
+        currentPage === "audio" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          AudioDirectorPage,
+          {
+            project,
+            audioDirector
           }
         ),
         currentPage === "settings" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsPage, { project, onUpdateSettings: updateSettings }),

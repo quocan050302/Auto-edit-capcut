@@ -43,6 +43,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [sceneCount, setSceneCount] = useState(0)
   const [mediaReadyCount, setMediaReadyCount] = useState(0)
   const [elapsed, setElapsed] = useState(0)
+  const [audioReady, setAudioReady] = useState(0)  // count of downloaded music tracks
   const startTimeRef = useRef<number | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -76,6 +77,13 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
         setMediaReadyCount(ready)
       }
     })
+    // Check audio plan
+    window.api.audio.getPlan(project.projectDir).then((ap) => {
+      if (ap) {
+        const downloaded = ap.sections.filter((s) => s.approved && s.approvedLocalPath).length
+        setAudioReady(downloaded)
+      }
+    }).catch(() => {})
   }, [project.projectDir])
 
   function startTimer(): void {
@@ -144,7 +152,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
         </div>
         <div className="panel-body">
           {/* Pre-flight checks */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '20px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '16px' }}>
             {[
               { label: 'Edit Plan', ok: hasPlan, value: hasPlan ? '✓ Ready' : '✗ Missing → AI Planning' },
               {
@@ -168,6 +176,38 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               </div>
             ))}
           </div>
+
+          {/* Audio music banner */}
+          {audioReady > 0 && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 12,
+              background: 'rgba(99,102,241,0.1)',
+              border: '1px solid rgba(99,102,241,0.35)',
+              borderRadius: 10, padding: '12px 16px',
+              marginBottom: 16
+            }}>
+              <span style={{ fontSize: 20 }}>🎵</span>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: '#a5b4fc', marginBottom: 2 }}>
+                  {audioReady} background music track{audioReady !== 1 ? 's' : ''} ready
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                  {result
+                    ? 'Click Re-render to include background music in the output video.'
+                    : 'Background music will be mixed into the rendered video automatically.'}
+                </div>
+              </div>
+              {result && (
+                <span style={{
+                  fontSize: 11, padding: '4px 10px', borderRadius: 999,
+                  background: 'rgba(251,191,36,0.15)', color: '#fbbf24',
+                  fontWeight: 600, flexShrink: 0
+                }}>
+                  ↻ Re-render needed
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Settings row */}
           <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap' }}>
