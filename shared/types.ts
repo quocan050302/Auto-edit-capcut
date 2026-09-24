@@ -106,6 +106,153 @@ export interface ScanResult {
   errors: Array<{ path: string; error: string }>
 }
 
+// ─── Global Script Context (Phase 1) ────────────────────────────────────────
+
+export interface GlobalScriptGeography {
+  primaryCountry?: string
+  primaryRegion?: string
+  secondaryLocations: string[]
+}
+
+export interface GlobalScriptTimeContext {
+  primaryPeriod: string
+  historicalPeriods: string[]
+}
+
+export interface GlobalScriptCommunity {
+  name: string
+  role: string
+  visualDescription: string
+  mustNotConfuseWith: string[]
+}
+
+export interface GlobalScriptPerson {
+  id: string
+  role: string
+  ageRange?: string
+  gender?: string
+  appearance?: string
+  clothing?: string
+}
+
+export interface GlobalScriptVisualWorld {
+  environment: string[]
+  architecture: string[]
+  clothing: string[]
+  occupations: string[]
+  machinery: string[]
+  recurringObjects: string[]
+  colorMood: string
+  documentaryStyle: string
+}
+
+export interface GlobalScriptStoryArc {
+  chapterId: string
+  title: string
+  purpose: string
+  startText: string
+  endText: string
+}
+
+export interface GlobalScriptContext {
+  projectId: string
+  language: string
+  version: number             // incremented when user edits context
+  generatedAt: string
+  modelUsed: string
+
+  primarySubject: string
+  secondarySubjects: string[]
+
+  globalSynopsis: string
+  centralThesis: string
+  documentaryAngle: string
+  targetAudience: string
+
+  geography: GlobalScriptGeography
+  timeContext: GlobalScriptTimeContext
+  communities: GlobalScriptCommunity[]
+  recurringPeople: GlobalScriptPerson[]
+
+  visualWorld: GlobalScriptVisualWorld
+
+  exactTopicAnchors: string[]    // e.g. "Hutterite", "Hutterian Brethren"
+  contextualAnchors: string[]    // e.g. "Canadian prairie", "communal farming"
+  forbiddenSubstitutions: string[] // e.g. "Amish presented as Hutterite"
+  negativeKeywords: string[]     // e.g. "horse and buggy", "urban teenager"
+  recurringVisualMotifs: string[]
+
+  storyArc: GlobalScriptStoryArc[]
+}
+
+// ─── Stock Search Plan (tiered queries — Phase 4) ─────────────────────────────
+
+export interface StockSearchPlan {
+  visualIntent: string
+
+  exactQueries: string[]        // Tier A — exact subject + location
+  subjectQueries: string[]      // Tier B — subject anchored, broader action
+  contextualQueries: string[]   // Tier C — contextual, no exact name
+  fallbackQueries: string[]     // Tier D — illustrative only
+
+  requiredTerms: string[]
+  preferredTerms: string[]
+  negativeTerms: string[]
+
+  targetMediaType: 'video' | 'image' | 'either'
+  desiredShotTypes: string[]
+  desiredOrientation: 'landscape' | 'portrait'
+}
+
+// ─── Scene Context Packet (Phase 3) ──────────────────────────────────────────
+
+export interface SceneContextPacket {
+  globalContext: {
+    primarySubject: string
+    centralThesis: string
+    geography: string[]
+    timePeriod: string[]
+    exactTopicAnchors: string[]
+    contextualAnchors: string[]
+    forbiddenSubstitutions: string[]
+    negativeKeywords: string[]
+  }
+  chapterContext: {
+    chapterId: string
+    chapterTitle: string
+    chapterPurpose: string
+  }
+  localContext: {
+    narration: string
+    scenePurpose: string
+    visibleSubject: string
+    visibleAction: string
+    preferredLocation: string
+    preferredTimePeriod: string
+  }
+  neighboringContext: {
+    previousScene: string
+    nextScene: string
+  }
+}
+
+// ─── Context-Aware Score Breakdown (Phase 7) ─────────────────────────────────
+
+export interface ContextScoreBreakdown {
+  localRelevance: number      // 0–30
+  globalSubjectRelevance: number  // 0–25
+  geographyMatch: number      // 0–15
+  timePeriodMatch: number     // 0–10
+  chapterPurposeMatch: number // 0–10
+  technicalQuality: number    // 0–5
+  sequenceContinuity: number  // 0–5
+  totalScore: number          // 0–100
+  penalties: number           // negative value
+  penaltyReasons: string[]
+  matchLabel: 'STRONG_MATCH' | 'ACCEPTABLE' | 'ILLUSTRATIVE' | 'REJECTED'
+  visualTruthLabel: 'EXACT_SUBJECT' | 'CONTEXTUAL_MATCH' | 'ILLUSTRATIVE' | 'HISTORICAL' | 'USER_MEDIA'
+}
+
 // ─── Stock Media Types ────────────────────────────────────────────────────────
 
 export type StockProvider = 'pexels' | 'pixabay'
@@ -161,6 +308,17 @@ export interface StockSceneAssignment {
   manualOverride: boolean  // true if user uploaded their own file
   status: 'pending' | 'searching' | 'assigned' | 'failed' | 'disabled'
   errorMessage?: string
+  // Context-aware extension fields
+  chapterId?: string
+  chapterTitle?: string
+  scenePurpose?: string
+  continuityGroup?: string
+  matchLabel?: string
+  visualTruthLabel?: string
+  scoreBreakdown?: ContextScoreBreakdown
+  searchPlan?: StockSearchPlan
+  rejectedCandidates?: Array<{ title: string; score: number; reason: string }>
+  tierUsed?: 'A' | 'B' | 'C' | 'D'
 }
 
 /** Parameters passed to the stock engine */
@@ -319,6 +477,12 @@ export const IPC_CHANNELS = {
   STOCK_SCENE_REPLACE: 'stock:scene-replace',
   STOCK_SCENE_LOCK: 'stock:scene-lock',
   STOCK_SCENE_UPLOAD: 'stock:scene-upload',
+
+  // Context-Aware Global Script Director
+  STOCK_CONTEXT_ANALYZE: 'stock:context-analyze',
+  STOCK_CONTEXT_GET: 'stock:context-get',
+  STOCK_CONTEXT_SAVE: 'stock:context-save',
+  STOCK_CONTEXT_PROGRESS: 'stock:context-progress',
 
   // Smart Audio Director
   AUDIO_SEARCH_START: 'audio:search-start',

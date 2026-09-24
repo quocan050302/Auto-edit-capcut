@@ -7626,7 +7626,7 @@ function SegControl({
     opt.value
   )) });
 }
-function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel, priorityBadge }) {
+function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
   const [value, setValue] = reactExports.useState("");
   const [saved, setSaved] = reactExports.useState(false);
   const [loading, setLoading] = reactExports.useState(true);
@@ -7657,15 +7657,6 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel, prior
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }, children: label }),
-        priorityBadge && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-          fontSize: "10px",
-          padding: "2px 8px",
-          background: "rgba(99,102,241,0.15)",
-          color: "var(--text-brand)",
-          borderRadius: "999px",
-          fontWeight: 700,
-          letterSpacing: "0.05em"
-        }, children: priorityBadge }),
         hasValue && isValid && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
           fontSize: "10px",
           padding: "2px 8px",
@@ -7762,129 +7753,6 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel, prior
       )
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: hint })
-  ] });
-}
-function WikimediaCard() {
-  const [enabled, setEnabled] = reactExports.useState(() => {
-    const saved = localStorage.getItem("stock_wikimedia_enabled");
-    return saved !== null ? saved === "true" : true;
-  });
-  const [testStatus, setTestStatus] = reactExports.useState("idle");
-  const [latency, setLatency] = reactExports.useState(null);
-  function handleToggle() {
-    const next = !enabled;
-    setEnabled(next);
-    localStorage.setItem("stock_wikimedia_enabled", String(next));
-  }
-  async function handleTest() {
-    setTestStatus("testing");
-    try {
-      const res = await window.api.stock.testWikimedia();
-      if (res.success) {
-        setLatency(res.latencyMs);
-        setTestStatus("available");
-      } else {
-        setTestStatus("failed");
-      }
-    } catch {
-      setTestStatus("failed");
-    }
-  }
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-    padding: "16px",
-    background: "var(--bg-elevated)",
-    borderRadius: "var(--radius-md)",
-    border: `1px solid ${enabled ? "var(--border-brand)" : "var(--border-subtle)"}`,
-    display: "flex",
-    flexDirection: "column",
-    gap: "12px",
-    transition: "border-color 0.2s"
-  }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }, children: "Wikimedia Commons" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-          fontSize: "10px",
-          padding: "2px 8px",
-          background: "rgba(52,211,153,0.15)",
-          color: "var(--color-success)",
-          borderRadius: "999px",
-          fontWeight: 700,
-          letterSpacing: "0.05em"
-        }, children: "NO API KEY" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-          fontSize: "10px",
-          padding: "2px 8px",
-          background: "rgba(99,102,241,0.15)",
-          color: "var(--text-brand)",
-          borderRadius: "999px",
-          fontWeight: 700,
-          letterSpacing: "0.05em"
-        }, children: "PRIORITY 1" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "a",
-        {
-          href: "https://commons.wikimedia.org",
-          target: "_blank",
-          rel: "noreferrer",
-          onClick: (e) => {
-            e.preventDefault();
-            window.open("https://commons.wikimedia.org");
-          },
-          style: { fontSize: "11px", color: "var(--text-brand)", textDecoration: "none" },
-          children: "commons.wikimedia.org ↗"
-        }
-      )
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.5 }, children: "Priority 1 — Niche-specific and historical media." }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "space-between",
-      paddingTop: "10px",
-      borderTop: "1px solid var(--border-subtle)",
-      flexWrap: "wrap",
-      gap: "8px"
-    }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", userSelect: "none" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "input",
-          {
-            type: "checkbox",
-            checked: enabled,
-            onChange: handleToggle,
-            style: { width: "16px", height: "16px", accentColor: "var(--brand-primary)", cursor: "pointer" }
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 600, color: enabled ? "var(--text-primary)" : "var(--text-muted)" }, children: "Enable Wikimedia Commons" })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
-        testStatus === "testing" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-pending)", fontWeight: 600 }, children: "Testing..." }),
-        testStatus === "available" && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
-          fontSize: "11px",
-          color: "var(--color-success)",
-          fontWeight: 600,
-          display: "flex",
-          alignItems: "center",
-          gap: "4px"
-        }, children: [
-          "✓ Available ",
-          latency ? `(${latency}ms)` : ""
-        ] }),
-        testStatus === "failed" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-error)", fontWeight: 600 }, children: "✗ Connection failed" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            className: "btn btn-secondary btn-sm",
-            onClick: handleTest,
-            disabled: testStatus === "testing",
-            style: { fontSize: "11px", padding: "5px 12px" },
-            children: "Test Connection"
-          }
-        )
-      ] })
-    ] })
   ] });
 }
 function SettingsPage({ project, onUpdateSettings }) {
@@ -8001,7 +7869,6 @@ function SettingsPage({ project, onUpdateSettings }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Stored locally — never uploaded" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(WikimediaCard, {}),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           ApiKeyRow,
           {
@@ -8010,8 +7877,7 @@ function SettingsPage({ project, onUpdateSettings }) {
             placeholder: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
             hint: "Primary stock video provider. Free tier — 200 requests/hour.",
             link: "https://www.pexels.com/api/",
-            linkLabel: "Get free key at pexels.com/api ↗",
-            priorityBadge: "PRIORITY 2"
+            linkLabel: "Get free key at pexels.com/api ↗"
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -8022,8 +7888,7 @@ function SettingsPage({ project, onUpdateSettings }) {
             placeholder: "00000000-xxxxxxxxxxxxxxxxxxxxxxxx",
             hint: "Fallback stock provider. Free tier — 100 requests/minute.",
             link: "https://pixabay.com/api/docs/",
-            linkLabel: "Get free key at pixabay.com/api/docs ↗",
-            priorityBadge: "PRIORITY 3"
+            linkLabel: "Get free key at pixabay.com/api/docs ↗"
           }
         ),
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -9370,11 +9235,10 @@ function fmt(secs) {
 }
 function providerBadge(provider) {
   const colors = {
-    wikimedia: { bg: "rgba(56, 189, 248, 0.15)", fg: "#38bdf8", label: "Wikimedia" },
-    pexels: { bg: "rgba(5, 193, 112, 0.15)", fg: "#05C170", label: "Pexels" },
-    pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9", label: "Pixabay" }
+    pexels: { bg: "rgba(5, 193, 112, 0.15)", fg: "#05C170" },
+    pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9" }
   };
-  const c = colors[provider] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0", label: provider };
+  const c = colors[provider] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0" };
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
     fontSize: "10px",
     fontWeight: 700,
@@ -9384,58 +9248,7 @@ function providerBadge(provider) {
     color: c.fg,
     letterSpacing: "0.05em",
     textTransform: "uppercase"
-  }, children: c.label });
-}
-function matchTypeBadge(matchType, isExact) {
-  if (isExact || matchType === "exact") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-      fontSize: "9px",
-      fontWeight: 800,
-      padding: "2px 7px",
-      borderRadius: "999px",
-      background: "rgba(52, 211, 153, 0.2)",
-      color: "#34d399",
-      border: "1px solid rgba(52, 211, 153, 0.4)",
-      letterSpacing: "0.05em"
-    }, children: "EXACT HUTTERITE" });
-  }
-  if (matchType === "historical") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-      fontSize: "9px",
-      fontWeight: 800,
-      padding: "2px 7px",
-      borderRadius: "999px",
-      background: "rgba(251, 191, 36, 0.2)",
-      color: "#fbbf24",
-      border: "1px solid rgba(251, 191, 36, 0.4)",
-      letterSpacing: "0.05em"
-    }, children: "HISTORICAL" });
-  }
-  if (matchType === "contextual") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-      fontSize: "9px",
-      fontWeight: 800,
-      padding: "2px 7px",
-      borderRadius: "999px",
-      background: "rgba(96, 165, 250, 0.2)",
-      color: "#60a5fa",
-      border: "1px solid rgba(96, 165, 250, 0.4)",
-      letterSpacing: "0.05em"
-    }, children: "CONTEXTUAL" });
-  }
-  if (matchType === "illustrative") {
-    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-      fontSize: "9px",
-      fontWeight: 800,
-      padding: "2px 7px",
-      borderRadius: "999px",
-      background: "rgba(148, 163, 184, 0.15)",
-      color: "#94a3b8",
-      border: "1px solid rgba(148, 163, 184, 0.3)",
-      letterSpacing: "0.05em"
-    }, children: "ILLUSTRATIVE" });
-  }
-  return null;
+  }, children: provider });
 }
 function statusBadge(status) {
   const map = {
@@ -9448,15 +9261,47 @@ function statusBadge(status) {
   const s = map[status] ?? map.pending;
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", fontWeight: 600, color: s.color }, children: s.label });
 }
+function matchLabelBadge(label) {
+  if (!label) return null;
+  const map = {
+    STRONG_MATCH: { color: "#22c55e", bg: "rgba(34,197,94,0.12)" },
+    ACCEPTABLE: { color: "#60a5fa", bg: "rgba(96,165,250,0.12)" },
+    ILLUSTRATIVE: { color: "#f59e0b", bg: "rgba(245,158,11,0.12)" },
+    REJECTED: { color: "#f87171", bg: "rgba(248,113,113,0.12)" }
+  };
+  const c = map[label] ?? { color: "var(--text-muted)", bg: "transparent" };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+    fontSize: "9px",
+    fontWeight: 700,
+    padding: "2px 6px",
+    borderRadius: "999px",
+    background: c.bg,
+    color: c.color,
+    letterSpacing: "0.05em"
+  }, children: label.replace("_", " ") });
+}
+function tierBadge(tier) {
+  if (!tier) return null;
+  const colors = { A: "#22c55e", B: "#60a5fa", C: "#f59e0b", D: "#f87171" };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+    fontSize: "9px",
+    fontWeight: 700,
+    padding: "2px 6px",
+    borderRadius: "4px",
+    background: "rgba(255,255,255,0.06)",
+    color: colors[tier] ?? "#a0a0c0"
+  }, children: [
+    "Tier ",
+    tier
+  ] });
+}
 function ReplaceModal({
   assignment,
   onConfirm,
   onClose
 }) {
-  const [query, setQuery] = reactExports.useState(assignment.usedQuery || assignment.searchQueries[0] || "");
-  const exact = assignment.exactQueries ?? [];
-  const contextual = assignment.contextualQueries ?? [];
-  const general = (assignment.searchQueries ?? []).filter((q2) => !exact.includes(q2) && !contextual.includes(q2));
+  const [query, setQuery] = reactExports.useState(assignment.searchQueries[0] ?? "");
+  const suggestions = assignment.searchQueries;
   return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
     position: "fixed",
     inset: 0,
@@ -9470,20 +9315,18 @@ function ReplaceModal({
     border: "1px solid var(--border-strong)",
     borderRadius: "var(--radius-lg)",
     padding: "28px",
-    width: "560px",
-    boxShadow: "var(--shadow-lg)",
-    maxHeight: "90vh",
-    overflowY: "auto"
+    width: "520px",
+    boxShadow: "var(--shadow-lg)"
   }, children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "6px" }, children: [
       "Replace Scene ",
       assignment.sceneIndex
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginBottom: "20px", lineHeight: 1.5 }, children: [
-      assignment.narrationText.slice(0, 140),
-      assignment.narrationText.length > 140 ? "…" : ""
+      assignment.narrationText.slice(0, 120),
+      assignment.narrationText.length > 120 ? "…" : ""
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "16px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "12px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "6px" }, children: "SEARCH QUERY" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "input",
@@ -9493,7 +9336,7 @@ function ReplaceModal({
           onKeyDown: (e) => {
             if (e.key === "Enter") onConfirm(query);
           },
-          placeholder: "Enter search query (e.g. Hutterite colony Manitoba, wheat harvest)...",
+          placeholder: "Enter a short, visual search query…",
           style: {
             width: "100%",
             background: "var(--bg-base)",
@@ -9507,55 +9350,9 @@ function ReplaceModal({
         }
       )
     ] }),
-    exact.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "14px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-success)", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.05em" }, children: "NICHE / WIKIMEDIA QUERIES (Priority 1)" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: exact.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "button",
-        {
-          onClick: () => setQuery(q2),
-          style: {
-            background: query === q2 ? "rgba(52, 211, 153, 0.2)" : "var(--bg-overlay)",
-            border: `1px solid ${query === q2 ? "var(--color-success)" : "var(--border-subtle)"}`,
-            color: query === q2 ? "var(--color-success)" : "var(--text-secondary)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "11px",
-            padding: "4px 10px",
-            cursor: "pointer"
-          },
-          children: [
-            "🏛️ ",
-            q2
-          ]
-        },
-        q2
-      )) })
-    ] }),
-    contextual.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "14px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-info)", fontWeight: 700, marginBottom: "6px", letterSpacing: "0.05em" }, children: "CONTEXTUAL B-ROLL (Pexels / Pixabay)" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: contextual.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "button",
-        {
-          onClick: () => setQuery(q2),
-          style: {
-            background: query === q2 ? "rgba(96, 165, 250, 0.2)" : "var(--bg-overlay)",
-            border: `1px solid ${query === q2 ? "var(--color-info)" : "var(--border-subtle)"}`,
-            color: query === q2 ? "var(--color-info)" : "var(--text-secondary)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "11px",
-            padding: "4px 10px",
-            cursor: "pointer"
-          },
-          children: [
-            "🎬 ",
-            q2
-          ]
-        },
-        q2
-      )) })
-    ] }),
-    general.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "6px" }, children: "OTHER SUGGESTIONS" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: general.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "6px" }, children: "SUGGESTED QUERIES (click to use)" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: suggestions.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
           onClick: () => setQuery(q2),
@@ -9573,7 +9370,7 @@ function ReplaceModal({
         q2
       )) })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", justifyContent: "flex-end", marginTop: "16px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", justifyContent: "flex-end" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
@@ -9589,7 +9386,7 @@ function ReplaceModal({
           className: "btn btn-primary",
           onClick: () => onConfirm(query),
           disabled: !query.trim(),
-          style: { minWidth: "130px" },
+          style: { minWidth: "120px" },
           children: "🔍 Search & Replace"
         }
       )
@@ -9607,7 +9404,6 @@ function SceneCard({
   const [replacing, setReplacing] = reactExports.useState(false);
   const [locking, setLocking] = reactExports.useState(false);
   const [thumbError, setThumbError] = reactExports.useState(false);
-  const [copiedCredit, setCopiedCredit] = reactExports.useState(false);
   const asset = assignment.asset;
   const isAssigned = assignment.status === "assigned" && asset;
   async function handleReplace(query) {
@@ -9620,19 +9416,6 @@ function SceneCard({
     setLocking(true);
     await onLock(assignment.sceneIndex, !assignment.locked);
     setLocking(false);
-  }
-  function handleCopySceneCredit() {
-    if (!asset) return;
-    const title = asset.searchQuery ? `“${asset.searchQuery}”` : `“Scene ${assignment.sceneIndex}”`;
-    const author = asset.creator ? `by ${asset.creator}` : "";
-    const license = asset.license ? `— ${asset.license}` : "";
-    const provider = asset.provider === "wikimedia" ? "— Wikimedia Commons" : `— ${asset.provider.toUpperCase()}`;
-    const source = asset.sourceUrl ? `— ${asset.sourceUrl}` : "";
-    const credit = [title, author, license, provider, source].filter(Boolean).join(" ");
-    navigator.clipboard.writeText(credit).then(() => {
-      setCopiedCredit(true);
-      setTimeout(() => setCopiedCredit(false), 2e3);
-    });
   }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
@@ -9736,10 +9519,9 @@ function SceneCard({
             ] }),
             statusBadge(assignment.status)
           ] }),
-          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "5px", flexWrap: "wrap" }, children: [
+          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
             providerBadge(asset.provider),
-            matchTypeBadge(asset.matchType ?? assignment.matchType, asset.isExactTopic ?? assignment.isExactTopic),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)", fontWeight: 600 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
               Math.round(assignment.score * 100),
               "%"
             ] })
@@ -9755,59 +9537,56 @@ function SceneCard({
           WebkitLineClamp: 2,
           WebkitBoxOrient: "vertical"
         }, children: assignment.narrationText || "(no narration)" }),
-        isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-            fontSize: "10px",
-            color: "var(--text-muted)",
-            fontFamily: "var(--font-mono)",
-            marginBottom: "4px"
-          }, children: [
-            '🔍 "',
-            assignment.usedQuery,
-            '" · by ',
-            asset.creator
+        isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          fontSize: "10px",
+          color: "var(--text-muted)",
+          fontFamily: "var(--font-mono)",
+          marginBottom: "8px"
+        }, children: [
+          '🔍 "',
+          assignment.usedQuery,
+          '" · by ',
+          asset.creator
+        ] }),
+        (assignment.tierUsed || assignment.matchLabel) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }, children: [
+          tierBadge(assignment.tierUsed),
+          matchLabelBadge(assignment.matchLabel),
+          assignment.chapterTitle && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", color: "var(--text-muted)", padding: "2px 6px", background: "var(--bg-overlay)", borderRadius: 4 }, children: assignment.chapterTitle.slice(0, 30) })
+        ] }),
+        assignment.scoreBreakdown && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          fontSize: "9px",
+          color: "var(--text-muted)",
+          background: "var(--bg-void)",
+          borderRadius: 4,
+          padding: "6px 8px",
+          marginBottom: 8,
+          lineHeight: 1.6
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 12px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Local: ",
+              assignment.scoreBreakdown.localRelevance,
+              "/30"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Global: ",
+              assignment.scoreBreakdown.globalSubjectRelevance,
+              "/25"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Geo: ",
+              assignment.scoreBreakdown.geographyMatch,
+              "/15"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Time: ",
+              assignment.scoreBreakdown.timePeriodMatch,
+              "/10"
+            ] })
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-            fontSize: "10px",
-            color: "var(--text-secondary)",
-            display: "flex",
-            alignItems: "center",
-            gap: "8px",
-            flexWrap: "wrap",
-            marginBottom: "8px"
-          }, children: [
-            asset.width && asset.height && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", color: "var(--text-muted)" }, children: [
-              "📐 ",
-              asset.width,
-              "×",
-              asset.height
-            ] }),
-            asset.license && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
-              padding: "1px 5px",
-              borderRadius: "4px",
-              background: "var(--bg-overlay)",
-              border: "1px solid var(--border-subtle)",
-              fontSize: "9px",
-              fontWeight: 600,
-              color: "var(--text-secondary)"
-            }, children: [
-              "📜 ",
-              asset.license
-            ] }),
-            (asset.sourceUrl || asset.downloadUrl) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "a",
-              {
-                href: asset.sourceUrl || asset.downloadUrl,
-                target: "_blank",
-                rel: "noreferrer",
-                onClick: (e) => {
-                  e.preventDefault();
-                  window.open(asset.sourceUrl || asset.downloadUrl);
-                },
-                style: { fontSize: "10px", color: "var(--text-brand)", textDecoration: "none" },
-                children: "🔗 Source ↗"
-              }
-            )
+          assignment.scoreBreakdown.penaltyReasons?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#f87171", marginTop: 2 }, children: [
+            "⚠ ",
+            assignment.scoreBreakdown.penaltyReasons[0].slice(0, 50)
           ] })
         ] }),
         assignment.status === "failed" && assignment.errorMessage && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-error)", marginBottom: "8px" }, children: assignment.errorMessage.slice(0, 80) }),
@@ -9862,24 +9641,6 @@ function SceneCard({
               title: "Upload your own media for this scene",
               children: "📤 Upload"
             }
-          ),
-          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              className: "btn btn-sm",
-              onClick: handleCopySceneCredit,
-              style: {
-                fontSize: "10px",
-                padding: "4px 8px",
-                background: copiedCredit ? "rgba(52,211,153,0.15)" : "var(--bg-overlay)",
-                border: `1px solid ${copiedCredit ? "var(--color-success)" : "var(--border-subtle)"}`,
-                color: copiedCredit ? "var(--color-success)" : "var(--text-muted)",
-                cursor: "pointer",
-                borderRadius: "var(--radius-sm)"
-              },
-              title: "Copy attribution line for YouTube description",
-              children: copiedCredit ? "✓ Copied" : "📋 Credit"
-            }
           )
         ] })
       ] })
@@ -9905,44 +9666,100 @@ function StockPage({
   onUpload,
   onLoad
 }) {
-  const [copiedAttribution, setCopiedAttribution] = reactExports.useState(false);
   reactExports.useEffect(() => {
     onLoad();
   }, []);
+  const [globalCtx, setGlobalCtx] = reactExports.useState(null);
+  const [ctxExpanded, setCtxExpanded] = reactExports.useState(false);
+  const [analyzingCtx, setAnalyzingCtx] = reactExports.useState(false);
+  const [ctxProgress, setCtxProgress] = reactExports.useState(null);
+  reactExports.useEffect(() => {
+    window.api.stock.getContext(project.projectDir).then((ctx) => {
+      if (ctx) setGlobalCtx(ctx);
+    }).catch(() => {
+    });
+  }, [project.projectDir]);
+  async function handleAnalyzeContext() {
+    setAnalyzingCtx(true);
+    setCtxProgress("Starting global context analysis...");
+    const unsub = window.api.stock.onContextProgress((d) => setCtxProgress(d.message));
+    try {
+      const result = await window.api.stock.analyzeContext({ projectDir: project.projectDir, forceRegenerate: true });
+      if (result.success && result.context) {
+        setGlobalCtx(result.context);
+        setCtxExpanded(true);
+      }
+    } finally {
+      setAnalyzingCtx(false);
+      setCtxProgress(null);
+      unsub();
+    }
+  }
   const assigned = review?.assignedScenes ?? 0;
   const total = review?.totalScenes ?? 0;
   const coverage = total > 0 ? Math.round(assigned / total * 100) : 0;
-  function handleCopyAttribution() {
-    let text = review?.creditsText;
-    if (!text && review?.assignments) {
-      const lines = ["Media credits:"];
-      for (const a of review.assignments) {
-        if (a.asset) {
-          const title = a.asset.searchQuery ? `“${a.asset.searchQuery}”` : "Stock Media";
-          const author = a.asset.creator ? `by ${a.asset.creator}` : "";
-          const license = a.asset.license ? `— ${a.asset.license}` : "";
-          const provider = a.asset.provider === "wikimedia" ? "— Wikimedia Commons" : `— ${a.asset.provider.toUpperCase()}`;
-          const source = a.asset.sourceUrl ? `— ${a.asset.sourceUrl}` : "";
-          lines.push([title, author, license, provider, source].filter(Boolean).join(" "));
-        }
-      }
-      text = lines.join("\n");
-    }
-    if (text) {
-      navigator.clipboard.writeText(text).then(() => {
-        setCopiedAttribution(true);
-        setTimeout(() => setCopiedAttribution(false), 3e3);
-      });
-    }
-  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { borderColor: globalCtx ? "rgba(99,102,241,0.35)" : "var(--border-subtle)" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", style: { cursor: "pointer" }, onClick: () => setCtxExpanded((e) => !e), children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { marginRight: 8 }, children: "🌐" }),
+          "Global Visual Context",
+          globalCtx && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { marginLeft: 8, fontSize: "10px", color: "var(--text-muted)", fontWeight: 400 }, children: [
+            "v",
+            globalCtx.version,
+            " · ",
+            globalCtx.primarySubject.slice(0, 60)
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center" }, children: [
+          !globalCtx && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", color: "var(--color-warning)" }, children: "⚠ No context — run Analyze to improve stock accuracy" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: "btn btn-secondary",
+              style: { fontSize: "11px", padding: "4px 12px" },
+              onClick: (e) => {
+                e.stopPropagation();
+                void handleAnalyzeContext();
+              },
+              disabled: analyzingCtx,
+              children: analyzingCtx ? "⟳ Analyzing..." : "🧠 Analyze Script"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: 12 }, children: ctxExpanded ? "▲" : "▼" })
+        ] })
+      ] }),
+      analyzingCtx && ctxProgress && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "8px 20px", fontSize: "11px", color: "var(--text-secondary)", background: "var(--bg-overlay)" }, children: ctxProgress }),
+      ctxExpanded && globalCtx && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "PRIMARY SUBJECT" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-primary)", marginBottom: 12 }, children: globalCtx.primarySubject }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "CENTRAL THESIS" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12, lineHeight: 1.5 }, children: globalCtx.centralThesis }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "LOCATION" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12 }, children: [globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(", ") || "Not specified" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "TIME PERIOD" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: globalCtx.timeContext.primaryPeriod })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#22c55e", marginBottom: 4 }, children: "✓ EXACT TOPIC ANCHORS" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }, children: globalCtx.exactTopicAnchors.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(34,197,94,0.1)", color: "#22c55e", padding: "2px 8px", borderRadius: 999 }, children: a }, a)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#60a5fa", marginBottom: 4 }, children: "~ CONTEXTUAL ANCHORS" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }, children: globalCtx.contextualAnchors.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(96,165,250,0.1)", color: "#60a5fa", padding: "2px 8px", borderRadius: 999 }, children: a }, a)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#f87171", marginBottom: 4 }, children: "✗ FORBIDDEN SUBSTITUTIONS" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }, children: globalCtx.forbiddenSubstitutions.map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(248,113,113,0.1)", color: "#f87171", padding: "2px 8px", borderRadius: 999 }, children: f2 }, f2)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#f59e0b", marginBottom: 4 }, children: "⊘ NEGATIVE KEYWORDS" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4 }, children: globalCtx.negativeKeywords.map((n2) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(245,158,11,0.1)", color: "#f59e0b", padding: "2px 8px", borderRadius: 999 }, children: n2 }, n2)) })
+        ] })
+      ] })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z", clipRule: "evenodd" }) }) }),
           "Stock Media Engine"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "12px" }, children: [
           review && total > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
               width: "80px",
@@ -9965,20 +9782,6 @@ function StockPage({
               "%)"
             ] })
           ] }),
-          review && assigned > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              className: "btn btn-secondary",
-              onClick: handleCopyAttribution,
-              style: {
-                minWidth: "150px",
-                color: copiedAttribution ? "var(--color-success)" : void 0,
-                borderColor: copiedAttribution ? "var(--color-success)" : void 0
-              },
-              title: "Copy all media credits formatted for YouTube description",
-              children: copiedAttribution ? "✓ Credits Copied!" : "📋 Copy Attribution"
-            }
-          ),
           /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
@@ -10012,22 +9815,16 @@ function StockPage({
     !review && !isRunning && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { textAlign: "center", padding: "48px 24px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "48px", marginBottom: "16px" }, children: "🎬" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "8px" }, children: "Automatic Stock Media Engine" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.8, maxWidth: "520px", margin: "0 auto 24px" }, children: [
-        "Click ",
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.8, maxWidth: "480px", margin: "0 auto 24px" }, children: [
+        "After running AI Planning, click ",
         /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Run Stock Search" }),
-        " to automatically search ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Wikimedia Commons (Priority 1)" }),
-        " for niche, historical, and cultural footage without needing an API key, then fallback to ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Pexels (Priority 2)" }),
-        " and ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Pixabay (Priority 3)" }),
-        "."
+        " to automatically find, rank, and download the best matching stock footage from Pexels and Pixabay for each scene in your edit plan."
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", justifyContent: "center", gap: "20px", flexWrap: "wrap" }, children: [
-        { icon: "🏛️", label: "Wikimedia Commons", desc: "Priority 1: authentic niche media" },
-        { icon: "🔍", label: "Multi-pass queries", desc: "Exact topic & contextual b-roll" },
-        { icon: "📊", label: "0–100 ranking", desc: "Relevance + license + quality" },
-        { icon: "📋", label: "Auto attribution", desc: "One-click YouTube description copy" }
+        { icon: "🔍", label: "AI-generated queries", desc: "Short, visual search terms" },
+        { icon: "📊", label: "Multi-factor ranking", desc: "Relevance + quality + fit" },
+        { icon: "⬇️", label: "Auto download", desc: "Saved to project/assets/stock/" },
+        { icon: "🔒", label: "User review", desc: "Replace, lock, or upload own" }
       ].map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
         background: "var(--bg-elevated)",
         border: "1px solid var(--border-subtle)",
@@ -10039,7 +9836,12 @@ function StockPage({
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "24px", marginBottom: "8px" }, children: f2.icon }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "4px" }, children: f2.label }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: f2.desc })
-      ] }, f2.label)) })
+      ] }, f2.label)) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "24px", fontSize: "11px", color: "var(--text-muted)" }, children: [
+        "Make sure Pexels and/or Pixabay API keys are configured in",
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-brand)" }, children: "Settings → API Providers" })
+      ] })
     ] }),
     review && total > 0 && !isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }, children: [
       { label: "Total Scenes", value: total, icon: "🎬" },
@@ -10071,7 +9873,7 @@ function StockPage({
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
         display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))",
+        gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))",
         gap: "14px"
       }, children: review.assignments.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx(
         SceneCard,
@@ -10086,9 +9888,9 @@ function StockPage({
       )) }) })
     ] }),
     review && review.assignments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { background: "var(--bg-elevated)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", lineHeight: 1.7 }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Provider Priority Chain:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Provider chain:" }),
       " ",
-      "Wikimedia Commons (Priority 1) → Pexels Video (Priority 2) → Pixabay Video (Priority 3) → Photo Fallbacks → Manual Review",
+      "Pexels Video → Pixabay Video → Pexels Photo → Pixabay Photo → Manual Review",
       /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
       /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Downloads:" }),
       " ",
@@ -10098,15 +9900,9 @@ function StockPage({
         "/assets/stock/"
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Licenses & Attributions:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "License:" }),
       " ",
-      "Manifest generated at ",
-      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-brand)" }, children: "media-attribution.json" }),
-      " and ",
-      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-brand)" }, children: "media-attribution.txt" }),
-      ". Use the ",
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "📋 Copy Attribution" }),
-      " button above to paste credits directly into your video description."
+      "Pexels and Pixabay assets are free for commercial use under their respective licenses."
     ] }) }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -10823,8 +10619,7 @@ function useStock(addLog) {
     });
     addLog({ level: "info", message: "Starting Stock Media Engine…", category: "stock" });
     try {
-      const wikimediaEnabled = localStorage.getItem("stock_wikimedia_enabled") !== "false";
-      const result = await window.api.stock.run({ projectDir, wikimediaEnabled });
+      const result = await window.api.stock.run({ projectDir });
       setLastResult(result);
       if (result.success) {
         addLog({
@@ -10850,8 +10645,7 @@ function useStock(addLog) {
   }, [addLog, loadReview]);
   const replaceScene = reactExports.useCallback(async (projectDir, sceneIndex, query) => {
     try {
-      const wikimediaEnabled = localStorage.getItem("stock_wikimedia_enabled") !== "false";
-      const res = await window.api.stock.replaceScene({ projectDir, sceneIndex, query, wikimediaEnabled });
+      const res = await window.api.stock.replaceScene({ projectDir, sceneIndex, query });
       if (res.success && res.asset) {
         await loadReview(projectDir);
         addLog({ level: "success", message: `Scene ${sceneIndex} replaced with "${query}"`, category: "stock" });

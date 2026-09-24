@@ -10,7 +10,8 @@ import type {
   StockReviewData,
   StockAsset,
   AudioPlan,
-  AudioRunResult
+  AudioRunResult,
+  GlobalScriptContext
 } from '../../shared/types'
 
 const api = {
@@ -141,7 +142,7 @@ const api = {
   },
 
   stock: {
-    run: (params: { projectDir: string }): Promise<StockRunResult> =>
+    run: (params: { projectDir: string; forceReanalysis?: boolean }): Promise<StockRunResult> =>
       ipcRenderer.invoke(IPC_CHANNELS.STOCK_SEARCH_START, params),
 
     getReview: (projectDir: string): Promise<StockReviewData> =>
@@ -156,11 +157,28 @@ const api = {
     uploadOwnMedia: (params: { projectDir: string; sceneIndex: number; filePath: string }): Promise<{ success: boolean; asset?: StockAsset; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_UPLOAD, params),
 
+    // Context-Aware Global Script Director
+    analyzeContext: (params: { projectDir: string; forceRegenerate?: boolean; scriptPath?: string | null }): Promise<{ success: boolean; context?: GlobalScriptContext; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_ANALYZE, params),
+
+    getContext: (projectDir: string): Promise<GlobalScriptContext | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_GET, projectDir),
+
+    saveContext: (params: { projectDir: string; context: GlobalScriptContext }): Promise<{ success: boolean; version?: number; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_SAVE, params),
+
     onProgress: (callback: (data: { message: string; progress: number }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
         callback(data)
       ipcRenderer.on(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler)
+    },
+
+    onContextProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, handler)
     }
   },
 

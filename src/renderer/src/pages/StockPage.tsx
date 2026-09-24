@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import type { ProjectState, StockSceneAssignment, StockAsset, StockReviewData } from '../../../../shared/types'
+import type { ProjectState, StockSceneAssignment, StockAsset, StockReviewData, GlobalScriptContext } from '../../../../shared/types'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -51,6 +51,36 @@ function statusBadge(status: string): React.ReactElement {
   const s = map[status] ?? map.pending
   return (
     <span style={{ fontSize: '10px', fontWeight: 600, color: s.color }}>{s.label}</span>
+  )
+}
+
+function matchLabelBadge(label?: string): React.ReactElement | null {
+  if (!label) return null
+  const map: Record<string, { color: string; bg: string }> = {
+    STRONG_MATCH: { color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+    ACCEPTABLE: { color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
+    ILLUSTRATIVE: { color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+    REJECTED: { color: '#f87171', bg: 'rgba(248,113,113,0.12)' }
+  }
+  const c = map[label] ?? { color: 'var(--text-muted)', bg: 'transparent' }
+  return (
+    <span style={{
+      fontSize: '9px', fontWeight: 700, padding: '2px 6px',
+      borderRadius: '999px', background: c.bg, color: c.color,
+      letterSpacing: '0.05em'
+    }}>{label.replace('_', ' ')}</span>
+  )
+}
+
+function tierBadge(tier?: string): React.ReactElement | null {
+  if (!tier) return null
+  const colors: Record<string, string> = { A: '#22c55e', B: '#60a5fa', C: '#f59e0b', D: '#f87171' }
+  return (
+    <span style={{
+      fontSize: '9px', fontWeight: 700, padding: '2px 6px',
+      borderRadius: '4px', background: 'rgba(255,255,255,0.06)',
+      color: colors[tier] ?? '#a0a0c0'
+    }}>Tier {tier}</span>
   )
 }
 
@@ -322,6 +352,41 @@ function SceneCard({
             </div>
           )}
 
+          {/* Context-aware debug info */}
+          {(assignment.tierUsed || assignment.matchLabel) && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
+              {tierBadge(assignment.tierUsed)}
+              {matchLabelBadge(assignment.matchLabel)}
+              {assignment.chapterTitle && (
+                <span style={{ fontSize: '9px', color: 'var(--text-muted)', padding: '2px 6px', background: 'var(--bg-overlay)', borderRadius: 4 }}>
+                  {assignment.chapterTitle.slice(0, 30)}
+                </span>
+              )}
+            </div>
+          )}
+
+          {/* Score breakdown tooltip */}
+          {assignment.scoreBreakdown && (
+            <div style={{
+              fontSize: '9px', color: 'var(--text-muted)',
+              background: 'var(--bg-void)', borderRadius: 4,
+              padding: '6px 8px', marginBottom: 8,
+              lineHeight: 1.6
+            }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 12px' }}>
+                <span>Local: {assignment.scoreBreakdown.localRelevance}/30</span>
+                <span>Global: {assignment.scoreBreakdown.globalSubjectRelevance}/25</span>
+                <span>Geo: {assignment.scoreBreakdown.geographyMatch}/15</span>
+                <span>Time: {assignment.scoreBreakdown.timePeriodMatch}/10</span>
+              </div>
+              {assignment.scoreBreakdown.penaltyReasons?.length > 0 && (
+                <div style={{ color: '#f87171', marginTop: 2 }}>
+                  ⚠ {assignment.scoreBreakdown.penaltyReasons[0].slice(0, 50)}
+                </div>
+              )}
+            </div>
+          )}
+
           {assignment.status === 'failed' && assignment.errorMessage && (
             <div style={{ fontSize: '10px', color: 'var(--color-error)', marginBottom: '8px' }}>
               {assignment.errorMessage.slice(0, 80)}
@@ -401,6 +466,49 @@ export function StockPage({
     onLoad()
   }, [])
 
+  const [globalCtx, setGlobalCtx] = useState<GlobalScriptContext | null>(null)
+  const [ctxExpanded, setCtxExpanded] = useState(false)
+  const [analyzingCtx, setAnalyzingCtx] = useState(false)
+  const [ctxProgress, setCtxProgress] = useState<string | null>(null)
+
+  // Load existing GlobalContext on mount
+  useEffect(() => {
+    window.api.stock.getContext(project.projectDir).then((ctx) => {
+      if (ctx) setGlobalCtx(ctx)
+    }).catch(() => {})
+  }, [project.projectDir])
+
+  async function handleAnalyzeContext(): Promise<void> {
+    setAnalyzingCtx(true)
+    setCtxProgress('Starting global context analysis...')
+    const unsub = window.api.stock.onContextProgress((d) => setCtxProgress(d.message))
+    let hasError = false
+    try {
+      const result = await window.api.stock.analyzeContext({
+        projectDir: project.projectDir,
+        forceRegenerate: true,
+        scriptPath: project.inputs?.scriptPath ?? null
+      })
+      if (result.success && result.context) {
+        setGlobalCtx(result.context)
+        setCtxExpanded(true)
+      } else if (!result.success) {
+        hasError = true
+        setCtxProgress(`⚠ ${result.error}`)
+        setTimeout(() => setCtxProgress(null), 5000)
+      }
+    } catch (e: unknown) {
+      hasError = true
+      setCtxProgress(`⚠ ${e instanceof Error ? e.message : String(e)}`)
+      setTimeout(() => setCtxProgress(null), 5000)
+    } finally {
+      setAnalyzingCtx(false)
+      if (!hasError) setCtxProgress(null)
+      unsub()
+    }
+  }
+
+
   const assigned = review?.assignedScenes ?? 0
   const total = review?.totalScenes ?? 0
   const coverage = total > 0 ? Math.round((assigned / total) * 100) : 0
@@ -408,6 +516,84 @@ export function StockPage({
 
   return (
     <div className="page-container">
+
+      {/* ── Global Visual Context Panel ──────────────────────────────────────── */}
+      <div className="panel" style={{ borderColor: globalCtx ? 'rgba(99,102,241,0.35)' : 'var(--border-subtle)' }}>
+        <div className="panel-header" style={{ cursor: 'pointer' }} onClick={() => setCtxExpanded(e => !e)}>
+          <div className="panel-title">
+            <span style={{ marginRight: 8 }}>🌐</span>
+            Global Visual Context
+            {globalCtx && (
+              <span style={{ marginLeft: 8, fontSize: '10px', color: 'var(--text-muted)', fontWeight: 400 }}>
+                v{globalCtx.version} · {globalCtx.primarySubject.slice(0, 60)}
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {!globalCtx && (
+              <span style={{ fontSize: '10px', color: 'var(--color-warning)' }}>⚠ No context — run Analyze to improve stock accuracy</span>
+            )}
+            <button
+              className="btn btn-secondary"
+              style={{ fontSize: '11px', padding: '4px 12px' }}
+              onClick={(e) => { e.stopPropagation(); void handleAnalyzeContext() }}
+              disabled={analyzingCtx}
+            >
+              {analyzingCtx ? '⟳ Analyzing...' : '🧠 Analyze Script'}
+            </button>
+            <span style={{ color: 'var(--text-muted)', fontSize: 12 }}>{ctxExpanded ? '▲' : '▼'}</span>
+          </div>
+        </div>
+
+        {analyzingCtx && ctxProgress && (
+          <div style={{ padding: '8px 20px', fontSize: '11px', color: 'var(--text-secondary)', background: 'var(--bg-overlay)' }}>
+            {ctxProgress}
+          </div>
+        )}
+
+        {ctxExpanded && globalCtx && (
+          <div className="panel-body" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+            <div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>PRIMARY SUBJECT</div>
+              <div style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: 12 }}>{globalCtx.primarySubject}</div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>CENTRAL THESIS</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.5 }}>{globalCtx.centralThesis}</div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>LOCATION</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: 12 }}>
+                {[globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(', ') || 'Not specified'}
+              </div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>TIME PERIOD</div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{globalCtx.timeContext.primaryPeriod}</div>
+            </div>
+            <div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: '#22c55e', marginBottom: 4 }}>✓ EXACT TOPIC ANCHORS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
+                {globalCtx.exactTopicAnchors.map((a) => (
+                  <span key={a} style={{ fontSize: '10px', background: 'rgba(34,197,94,0.1)', color: '#22c55e', padding: '2px 8px', borderRadius: 999 }}>{a}</span>
+                ))}
+              </div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: '#60a5fa', marginBottom: 4 }}>~ CONTEXTUAL ANCHORS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
+                {globalCtx.contextualAnchors.map((a) => (
+                  <span key={a} style={{ fontSize: '10px', background: 'rgba(96,165,250,0.1)', color: '#60a5fa', padding: '2px 8px', borderRadius: 999 }}>{a}</span>
+                ))}
+              </div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: '#f87171', marginBottom: 4 }}>✗ FORBIDDEN SUBSTITUTIONS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
+                {globalCtx.forbiddenSubstitutions.map((f) => (
+                  <span key={f} style={{ fontSize: '10px', background: 'rgba(248,113,113,0.1)', color: '#f87171', padding: '2px 8px', borderRadius: 999 }}>{f}</span>
+                ))}
+              </div>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: '#f59e0b', marginBottom: 4 }}>⊘ NEGATIVE KEYWORDS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                {globalCtx.negativeKeywords.map((n) => (
+                  <span key={n} style={{ fontSize: '10px', background: 'rgba(245,158,11,0.1)', color: '#f59e0b', padding: '2px 8px', borderRadius: 999 }}>{n}</span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
 
       {/* ── Header Panel ────────────────────────────────────────────────────── */}
       <div className="panel">

@@ -39,6 +39,11 @@ const IPC_CHANNELS = {
   STOCK_SCENE_REPLACE: "stock:scene-replace",
   STOCK_SCENE_LOCK: "stock:scene-lock",
   STOCK_SCENE_UPLOAD: "stock:scene-upload",
+  // Context-Aware Global Script Director
+  STOCK_CONTEXT_ANALYZE: "stock:context-analyze",
+  STOCK_CONTEXT_GET: "stock:context-get",
+  STOCK_CONTEXT_SAVE: "stock:context-save",
+  STOCK_CONTEXT_PROGRESS: "stock:context-progress",
   // Smart Audio Director
   AUDIO_SEARCH_START: "audio:search-start",
   AUDIO_SEARCH_PROGRESS: "audio:search-progress",
@@ -111,10 +116,19 @@ const api = {
     replaceScene: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_REPLACE, params),
     lockScene: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_LOCK, params),
     uploadOwnMedia: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_SCENE_UPLOAD, params),
+    // Context-Aware Global Script Director
+    analyzeContext: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_ANALYZE, params),
+    getContext: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_GET, projectDir),
+    saveContext: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_SAVE, params),
     onProgress: (callback) => {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler);
+    },
+    onContextProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, handler);
     }
   },
   getProjectsDir: () => electron.ipcRenderer.invoke(IPC_CHANNELS.GET_PROJECTS_DIR),
