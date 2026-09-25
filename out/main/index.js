@@ -87,7 +87,15 @@ const IPC_CHANNELS = {
   AUDIO_APPROVE_SECTION: "audio:approve-section",
   AUDIO_APPROVE_SFX: "audio:approve-sfx",
   AUDIO_DOWNLOAD_APPROVED: "audio:download-approved",
-  AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress"
+  AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress",
+  // Dynamic Kinetic Captions Engine
+  CAPTIONS_GENERATE_PLAN: "captions:generate-plan",
+  CAPTIONS_GET_PLAN: "captions:get-plan",
+  CAPTIONS_UPDATE_PHRASE: "captions:update-phrase",
+  CAPTIONS_TOGGLE_RANGE: "captions:toggle-range",
+  CAPTIONS_REGENERATE_ASS: "captions:regenerate-ass",
+  CAPTIONS_PREVIEW_RENDER: "captions:preview-render",
+  CAPTIONS_PROGRESS: "captions:progress"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -1331,10 +1339,130 @@ function registerPlannerHandlers(ipcMain) {
     }
   );
 }
-const ffmpegPath = require("ffmpeg-static");
-function ffmpegRun(args) {
+const PLAY_RES_X = 1920;
+const PLAY_RES_Y = 1080;
+const COLORS = {
+  white: "&H00FFFFFF&",
+  // trắng thuần
+  yellowLime: "&H0000E8FF&",
+  // vàng chanh (BGR: 00, E8, FF → RGB: FF, E8, 00)
+  yellowPale: "&H0088E8FF&",
+  // vàng nhạt (cho serif_italic)
+  red: "&H000000CC&",
+  // đỏ cho box highlight
+  black: "&H00000000&",
+  // viền đen
+  shadowBlack: "&H80000000&"
+};
+function toAssTime(secs) {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor(secs % 3600 / 60);
+  const s = Math.floor(secs % 60);
+  const cs = Math.round(secs % 1 * 100);
+  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
+}
+function escapeAssText(text) {
+  return text.replace(/\{/g, "\\{").replace(/\}/g, "\\}");
+}
+function buildTextWithHighlights(text, highlightWords, baseColorCode, prefixTags) {
+  if (!highlightWords || highlightWords.length === 0) {
+    return `${prefixTags}${escapeAssText(text.toUpperCase())}`;
+  }
+  const words = text.split(/(\s+)/);
+  const upperHighlights = highlightWords.map((w) => w.toUpperCase());
+  let result = prefixTags;
+  for (const token of words) {
+    const upperToken = token.trim().toUpperCase();
+    if (upperToken && upperHighlights.includes(upperToken)) {
+      result += `{\\c${COLORS.yellowLime}}${escapeAssText(token.toUpperCase())}{\\c${baseColorCode}}`;
+    } else {
+      result += escapeAssText(token.toUpperCase());
+    }
+  }
+  return result;
+}
+function buildAssHeader(fontsDir) {
+  return [
+    "[Script Info]",
+    "Title: Dynamic Kinetic Captions — Auto-Generated",
+    "ScriptType: v4.00+",
+    `PlayResX: ${PLAY_RES_X}`,
+    `PlayResY: ${PLAY_RES_Y}`,
+    "ScaledBorderAndShadow: yes",
+    "YCbCr Matrix: TV.601",
+    "",
+    "[V4+ Styles]",
+    // Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour,
+    //         Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,
+    //         Alignment, MarginL, MarginR, MarginV, Encoding
+    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
+    // SansBoldCaps: trắng, viền đen 3px, shadow, alignment=2 (bottom-center)
+    `Style: SansBoldCaps,Montserrat Black,96,${COLORS.white},${COLORS.white},${COLORS.black},${COLORS.shadowBlack},1,0,0,0,100,100,0,0,1,3,2,2,0,0,120,1`,
+    // SerifItalic: vàng nhạt, viền nhẹ, alignment=2
+    `Style: SerifItalic,Playfair Display,84,${COLORS.yellowPale},${COLORS.yellowPale},${COLORS.black},${COLORS.shadowBlack},0,1,0,0,100,100,0,0,1,2,2,2,0,0,120,1`,
+    // BoxRed: style ẩn dùng vẽ hình chữ nhật đỏ, không có text thật
+    `Style: BoxRed,Arial,1,${COLORS.red},${COLORS.red},${COLORS.red},${COLORS.red},0,0,0,0,100,100,0,0,3,0,0,2,0,0,0,1`,
+    "",
+    // Khai báo font directory để FFmpeg tìm font
+    `; FontsDir: ${fontsDir}`,
+    "",
+    "[Events]",
+    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+  ].join("\n");
+}
+function estimateBoxWidth(text) {
+  const charCount = text.length;
+  return Math.min(PLAY_RES_X - 100, Math.max(300, charCount * 58 + 80));
+}
+function buildBoxDialogue(phrase) {
+  const startT = toAssTime(phrase.startTime);
+  const endT = toAssTime(phrase.endTime);
+  const boxW = estimateBoxWidth(phrase.text);
+  const boxH = 120;
+  const boxX = Math.round((PLAY_RES_X - boxW) / 2);
+  const boxY = PLAY_RES_Y - 120 - 20;
+  const drawCmd = `m ${boxX} ${boxY} l ${boxX + boxW} ${boxY} l ${boxX + boxW} ${boxY + boxH} l ${boxX} ${boxY + boxH}`;
+  return `Dialogue: 0,${startT},${endT},BoxRed,,0,0,0,,{\\p1\\c${COLORS.red}\\bord0\\shad0\\pos(0,0)}${drawCmd}{\\p0}`;
+}
+function buildTextDialogue(phrase) {
+  const startT = toAssTime(phrase.startTime);
+  const endT = toAssTime(phrase.endTime);
+  const styleName = phrase.style.fontPreset === "serif_italic" ? "SerifItalic" : "SansBoldCaps";
+  const baseColor = phrase.style.fontPreset === "serif_italic" ? COLORS.yellowPale : COLORS.white;
+  const tagParts = [];
+  tagParts.push("\\fscx88\\fscy88\\t(0,80,\\fscx105\\fscy105)\\t(80,160,\\fscx100\\fscy100)");
+  if (phrase.style.skew) {
+    tagParts.push("\\fax0.3");
+  }
+  tagParts.push(`\\c${baseColor}`);
+  const prefixTags = `{${tagParts.join("")}}`;
+  const textContent = buildTextWithHighlights(
+    phrase.text,
+    phrase.highlightWords ?? [],
+    baseColor,
+    prefixTags
+  );
+  return `Dialogue: 1,${startT},${endT},${styleName},,0,0,0,,${textContent}`;
+}
+function generateAssFile(captionPlan, outputPath, fontsDir) {
+  logger.info(`[CaptionASS] Đang sinh file .ass: ${outputPath}`);
+  logger.info(`[CaptionASS] ${captionPlan.phrases.length} phrases | fontsDir: ${fontsDir}`);
+  fs__namespace.mkdirSync(path__namespace.dirname(outputPath), { recursive: true });
+  const lines = [buildAssHeader(fontsDir)];
+  for (const phrase of captionPlan.phrases) {
+    if (phrase.style.boxHighlight) {
+      lines.push(buildBoxDialogue(phrase));
+    }
+    lines.push(buildTextDialogue(phrase));
+  }
+  const assContent = lines.join("\n") + "\n";
+  fs__namespace.writeFileSync(outputPath, assContent, { encoding: "utf-8" });
+  logger.info(`[CaptionASS] Đã ghi ${captionPlan.phrases.length} phrases vào ${outputPath}`);
+}
+const ffmpegPath$1 = require("ffmpeg-static");
+function ffmpegRun$1(args) {
   return new Promise((resolve, reject) => {
-    const proc = child_process.spawn(ffmpegPath, args, { windowsHide: true });
+    const proc = child_process.spawn(ffmpegPath$1, args, { windowsHide: true });
     const stderr = [];
     proc.stderr.on("data", (d) => stderr.push(d.toString()));
     proc.on("close", (code) => {
@@ -1416,7 +1544,7 @@ async function renderVideo(params) {
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
     if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
       logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`);
-      await ffmpegRun([
+      await ffmpegRun$1([
         "-y",
         "-f",
         "lavfi",
@@ -1437,7 +1565,7 @@ async function renderVideo(params) {
     } else {
       const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === "image";
       if (isImage) {
-        await ffmpegRun([
+        await ffmpegRun$1([
           "-y",
           "-loop",
           "1",
@@ -1460,7 +1588,7 @@ async function renderVideo(params) {
           outClip
         ]);
       } else {
-        await ffmpegRun([
+        await ffmpegRun$1([
           "-y",
           "-i",
           mediaPath,
@@ -1495,7 +1623,7 @@ async function renderVideo(params) {
     "utf-8"
   );
   const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
-  await ffmpegRun([
+  await ffmpegRun$1([
     "-y",
     "-f",
     "concat",
@@ -1526,7 +1654,7 @@ async function renderVideo(params) {
   if (!hasAudio && !hasMusicOrSfx) {
     fs__namespace.copyFileSync(rawVideo, outputPath);
   } else if (!hasMusicOrSfx && hasAudio) {
-    await ffmpegRun([
+    await ffmpegRun$1([
       "-y",
       "-i",
       rawVideo,
@@ -1595,7 +1723,7 @@ async function renderVideo(params) {
     );
     const filterComplex = filterParts.join(";");
     logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`);
-    await ffmpegRun([
+    await ffmpegRun$1([
       ...ffArgs,
       "-filter_complex",
       filterComplex,
@@ -1612,6 +1740,45 @@ async function renderVideo(params) {
       "-shortest",
       outputPath
     ]);
+  }
+  if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
+    progress("Burn Dynamic Captions...", 0.93);
+    const captionsTmpDir = path__namespace.join(path__namespace.dirname(outputPath), "_captions_tmp");
+    fs__namespace.mkdirSync(captionsTmpDir, { recursive: true });
+    const assPath = path__namespace.join(captionsTmpDir, "captions.ass");
+    const captionedPath = path__namespace.join(captionsTmpDir, "captioned_output.mp4");
+    let fontsDir;
+    try {
+      fontsDir = path__namespace.join(electron.app.getAppPath(), "assets", "fonts");
+    } catch {
+      fontsDir = path__namespace.join(__dirname, "..", "..", "..", "assets", "fonts");
+    }
+    generateAssFile(params.captionPlan, assPath, fontsDir);
+    const assFilterPath = process.platform === "win32" ? assPath.replace(/\\/g, "/").replace(/:/g, "\\:") : assPath.replace(/:/g, "\\:");
+    logger.info(`[RENDER] Burn ASS: ${assPath} (${params.captionPlan.phrases.length} phrases)`);
+    await ffmpegRun$1([
+      "-y",
+      "-i",
+      outputPath,
+      "-vf",
+      `ass='${assFilterPath}':fontsdir='${fontsDir.replace(/'/g, "'\\''")}'`,
+      "-c:v",
+      "libx264",
+      "-preset",
+      "fast",
+      "-crf",
+      "20",
+      "-c:a",
+      "copy",
+      captionedPath
+    ]);
+    fs__namespace.renameSync(captionedPath, outputPath);
+    try {
+      fs__namespace.unlinkSync(assPath);
+      fs__namespace.rmdirSync(captionsTmpDir);
+    } catch {
+    }
+    logger.info("[RENDER] Burn captions hoàn thành");
   }
   progress("Cleaning up...", 0.97);
   try {
@@ -1639,8 +1806,27 @@ function registerRenderHandlers(ipcMain) {
         win?.webContents.send(IPC_CHANNELS.RENDER_PROGRESS, p);
       };
       try {
+        let captionPlan = void 0;
+        const captionPlanPath = path__namespace.join(params.projectDir, "analysis", "caption-plan.json");
+        if (fs__namespace.existsSync(captionPlanPath)) {
+          try {
+            const loaded = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+            if (loaded.enabled && loaded.phrases?.length > 0) {
+              captionPlan = loaded;
+              logger.info(`[RenderIPC] Caption plan loaded: ${loaded.phrases.length} phrases, enabled=${loaded.enabled}`);
+            } else {
+              logger.info(`[RenderIPC] Caption plan exists but disabled or empty (enabled=${loaded.enabled}, phrases=${loaded.phrases?.length ?? 0})`);
+            }
+          } catch (e) {
+            logger.warn(`[RenderIPC] Không đọc được caption-plan.json: ${String(e)}`);
+          }
+        } else {
+          logger.info("[RenderIPC] Không có caption-plan.json — bỏ qua burn captions");
+        }
         const result = await renderVideo({
           ...params,
+          captionPlan,
+          // truyền vào renderer — undefined = bỏ qua burn step
           onProgress: sendProgress
         });
         return { success: true, result };
@@ -2260,7 +2446,7 @@ Rules:
 - Map the storyArc per chapter.
 - Do NOT invent facts not in the script.
 - Return ONLY valid JSON. No markdown. No explanation.`;
-function buildGeminiPrompt(fullScriptText, projectId, language) {
+function buildGeminiPrompt$1(fullScriptText, projectId, language) {
   return `FULL SCRIPT (analyze completely before responding):
 ---
 ${fullScriptText.slice(0, 4e4)}
@@ -2326,7 +2512,7 @@ async function analyzeGlobalContext(params) {
     progress("Analyzing full script for global context...", 0.05);
     try {
       const ai = new genai.GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } });
-      const prompt = buildGeminiPrompt(fullText, projectId, language);
+      const prompt = buildGeminiPrompt$1(fullText, projectId, language);
       const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
       const maxRetries = 3;
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -4035,6 +4221,430 @@ function registerAudioHandlers(ipcMain) {
     }
   );
 }
+const SHOCK_STAT_REGEX = /\d+%|\$\d[\d,.]*|\d+[\d,.]* (năm|ngày|giờ|tháng|người|triệu|tỷ|billion|million|thousand|dollars|years|days)/i;
+function groupWordsIntoPhrases(words, sceneId, emphasisType, chunkSize = 3) {
+  const phrases = [];
+  let i = 0;
+  let phraseIndex = 0;
+  while (i < words.length) {
+    const chunk = words.slice(i, i + chunkSize);
+    if (chunk.length === 0) break;
+    const text = chunk.map((w) => w.word).join(" ").trim();
+    if (!text) {
+      i += chunkSize;
+      continue;
+    }
+    const startTime = chunk[0].start;
+    const endTime = chunk[chunk.length - 1].end;
+    const highlightWords = [];
+    for (const w of chunk) {
+      if (SHOCK_STAT_REGEX.test(w.word)) {
+        highlightWords.push(w.word);
+      }
+    }
+    const fontPreset = emphasisType === "punchline" ? "serif_italic" : "sans_bold_caps";
+    const baseColor = fontPreset === "serif_italic" ? "yellow_pale" : "white";
+    const boxHighlight = emphasisType === "shock_stat" && highlightWords.length > 0;
+    const skew = emphasisType === "list_transition";
+    phrases.push({
+      id: `cap_${sceneId}_${String(phraseIndex).padStart(3, "0")}`,
+      sceneId,
+      text,
+      startTime,
+      endTime,
+      emphasisType,
+      highlightWords,
+      style: { fontPreset, boxHighlight, skew, baseColor }
+    });
+    phraseIndex++;
+    const nextWord = words[i + chunkSize];
+    if (nextWord && nextWord.start - endTime > 0.6) {
+      i += chunkSize;
+      continue;
+    }
+    i += chunkSize;
+  }
+  return phrases;
+}
+function buildFallbackCaptionPlan(transcript, scenes) {
+  logger.warn("[CaptionPlanner] Dùng fallback thuật toán — caption sẽ cơ bản, nên rà lại thủ công");
+  const activeRanges = [];
+  const phrases = [];
+  const hookEnd = Math.min(25, transcript.duration);
+  activeRanges.push({ startTime: 0, endTime: hookEnd, reason: "hook" });
+  const seenChapters = /* @__PURE__ */ new Set();
+  for (const scene of scenes) {
+    if (!seenChapters.has(scene.chapterId)) {
+      seenChapters.add(scene.chapterId);
+      if (scene.startTime > hookEnd + 2) {
+        activeRanges.push({
+          startTime: scene.startTime,
+          endTime: Math.min(scene.startTime + 8, scene.endTime),
+          reason: "list_transition",
+          chapterId: scene.chapterId
+        });
+      }
+    }
+  }
+  const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
+  for (const range of activeRanges) {
+    const sceneInRange = scenes.find(
+      (s) => s.startTime <= range.endTime && s.endTime >= range.startTime
+    ) ?? scenes[0];
+    const wordsInRange = allWords.filter(
+      (w) => w.start >= range.startTime && w.end <= range.endTime
+    );
+    const rangeIdStr = `${range.reason}_${Math.round(range.startTime)}`;
+    const scenePhrases = groupWordsIntoPhrases(
+      wordsInRange,
+      sceneInRange?.sceneId ?? "scene_unknown",
+      range.reason
+    );
+    for (const p of scenePhrases) {
+      p.id = `cap_${rangeIdStr}_${p.id.split("_").pop()}`;
+      phrases.push(p);
+    }
+  }
+  return {
+    enabled: true,
+    activeRanges,
+    phrases,
+    generatedByFallback: true,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function buildGeminiPrompt(scenes, allWords) {
+  const scenePayload = scenes.map((scene) => ({
+    sceneId: scene.sceneId,
+    chapterId: scene.chapterId,
+    narrativeText: scene.narrativeText,
+    visualIntent: scene.visualIntent ?? "",
+    startTime: scene.startTime,
+    endTime: scene.endTime,
+    words: allWords.filter((w) => w.start >= scene.startTime && w.end <= scene.endTime + 0.5)
+  }));
+  return `Bạn là chuyên gia dựng "dynamic kinetic captions" cho video documentary/listicle theo phong cách giữ chân người xem cao (giống các kênh YouTube top-tier dạng "X Foods/Things Disappearing...").
+
+Nhiệm vụ: Với danh sách scene dưới đây (kèm narrativeText và khung thời gian), xác định:
+
+BƯỚC A — Chọn khoảng thời gian BẬT caption (activeRanges), CHỈ theo 4 loại lý do sau, không bật tùy tiện:
+1. "hook": 15-30 giây đầu tiên của toàn video (bất kể nội dung gì).
+2. "list_transition": ngay tại câu chuyển sang một mục/số thứ tự mới trong danh sách.
+3. "shock_stat": câu chứa số liệu, phần trăm, so sánh gây sốc, hoặc dữ kiện cốt lõi.
+4. "punchline": câu đúc kết, cảnh báo, hoặc câu thúc giục hành động.
+
+TUYỆT ĐỐI KHÔNG bật caption cho các đoạn giải thích sâu, phân tích nguyên nhân, mô tả lịch sử/bối cảnh dài dòng.
+
+BƯỚC B — Chia narrativeText thành cụm từ 2-4 chữ, đồng bộ với word timestamps đã cung cấp. Không tự bịa timestamp.
+
+BƯỚC C — Gán style cho mỗi phrase:
+- emphasisType: kế thừa từ activeRange chứa nó
+- highlightWords: từ khóa quan trọng nhất (số liệu, danh từ riêng, động từ mạnh) — tối đa 1-2 từ
+- fontPreset: "sans_bold_caps" mặc định; "serif_italic" nếu đoạn có giọng chậm/tâm sự
+- boxHighlight: true CHỈ khi emphasisType là "shock_stat" hoặc mang tính cảnh báo rõ rệt
+- skew: true CHỈ khi emphasisType là "list_transition"
+- baseColor: "white" mặc định, "yellow_pale" khi fontPreset là "serif_italic"
+
+Dữ liệu đầu vào:
+${JSON.stringify(scenePayload, null, 2)}
+
+Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
+{
+  "enabled": true,
+  "activeRanges": [
+    { "startTime": 0, "endTime": 28.5, "reason": "hook" }
+  ],
+  "phrases": [
+    {
+      "id": "cap_001",
+      "sceneId": "...",
+      "text": "RIGHT NOW",
+      "startTime": 0.0,
+      "endTime": 0.6,
+      "emphasisType": "hook",
+      "highlightWords": [],
+      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": false, "skew": false, "baseColor": "white" }
+    }
+  ]
+}`;
+}
+async function generateCaptionPlan(params) {
+  const { projectDir, apiKey, forceRegenerate = false } = params;
+  const progress = params.onProgress ?? (() => {
+  });
+  const modelId = params.model ?? "gemini-3.8-flash";
+  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!forceRegenerate && fs__namespace.existsSync(captionPlanPath)) {
+    logger.info("[CaptionPlanner] Dùng caption-plan.json đã cache");
+    return JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+  }
+  progress("Đang tải transcript...", 0.05);
+  const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
+  if (!fs__namespace.existsSync(transcriptPath)) {
+    throw new Error("Chưa có transcript.json — chạy bước Transcription trước");
+  }
+  const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+  progress("Đang tải edit plan...", 0.1);
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    throw new Error("Chưa có master-edit-plan.json — chạy bước Planning trước");
+  }
+  const editPlan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const scenes = [];
+  for (const chapter of editPlan.chapters ?? []) {
+    const chapterId = chapter.id ?? chapter.chapterId ?? `ch_${scenes.length}`;
+    const sequences = chapter.sequences ?? chapter.chapters_seq ?? [];
+    for (const seq of sequences) {
+      for (const scene of seq.scenes ?? []) {
+        scenes.push({
+          sceneId: scene.id ?? scene.sceneId ?? `scene_${scenes.length}`,
+          chapterId,
+          narrativeText: scene.narrativeText ?? scene.narration ?? "",
+          visualIntent: scene.visualIntent ?? "",
+          startTime: scene.startTime ?? 0,
+          endTime: scene.endTime ?? (scene.startTime ?? 0) + (scene.duration ?? 5),
+          isPatternInterrupt: scene.isPatternInterrupt ?? false
+        });
+      }
+    }
+  }
+  logger.info(`[CaptionPlanner] ${scenes.length} scenes, ${transcript.segments.length} segments`);
+  const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
+  const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
+  let plan = null;
+  for (let attempt = 0; attempt < fallbackModels.length; attempt++) {
+    const currentModel = fallbackModels[attempt];
+    try {
+      progress(
+        attempt === 0 ? `Đang gửi lên Gemini (${currentModel})...` : `Thử lại với ${currentModel}...`,
+        0.2 + attempt * 0.1
+      );
+      const ai = new genai.GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } });
+      const prompt = buildGeminiPrompt(scenes, allWords);
+      const response = await ai.models.generateContent({
+        model: currentModel,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: { responseMimeType: "application/json", temperature: 0.1, maxOutputTokens: 8192 }
+      });
+      const rawJson = response.text ?? "";
+      const parsed = JSON.parse(rawJson);
+      parsed.generatedByFallback = false;
+      parsed.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
+        throw new Error("Response JSON thiếu phrases hoặc activeRanges");
+      }
+      plan = parsed;
+      logger.info(`[CaptionPlanner] Gemini thành công với model ${currentModel}, ${plan.phrases.length} phrases`);
+      break;
+    } catch (err) {
+      logger.warn(`[CaptionPlanner] ${currentModel} thất bại: ${String(err)}`);
+    }
+  }
+  if (!plan) {
+    progress("Gemini không khả dụng — dùng fallback thuật toán...", 0.7);
+    plan = buildFallbackCaptionPlan(transcript, scenes);
+  }
+  progress("Đang lưu caption-plan.json...", 0.9);
+  fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(captionPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+  logger.info(`[CaptionPlanner] Đã lưu ${plan.phrases.length} phrases vào caption-plan.json`);
+  progress("Hoàn thành!", 1);
+  return plan;
+}
+function loadCaptionPlan(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!fs__namespace.existsSync(planPath)) return null;
+  try {
+    return JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function saveCaptionPlan(projectDir, plan) {
+  const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  fs__namespace.mkdirSync(path__namespace.dirname(planPath), { recursive: true });
+  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  logger.info(`[CaptionPlanner] Đã lưu thủ công caption-plan.json (${plan.phrases.length} phrases)`);
+}
+const ffmpegPath = require("ffmpeg-static");
+function ffmpegRun(args) {
+  return new Promise((resolve, reject) => {
+    const proc = child_process.spawn(ffmpegPath, args, { windowsHide: true });
+    const stderr = [];
+    proc.stderr.on("data", (d) => stderr.push(d.toString()));
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-3).join("")}`));
+    });
+    proc.on("error", reject);
+  });
+}
+function registerCaptionHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_GENERATE_PLAN, async (event, params) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const sendProgress = (msg, pct) => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
+    };
+    try {
+      const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
+      let apiKey = "";
+      if (fs__namespace.existsSync(configPath)) {
+        try {
+          const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
+          apiKey = cfg.geminiApiKey ?? "";
+        } catch {
+        }
+      }
+      if (!apiKey) apiKey = process.env.GEMINI_API_KEY ?? "";
+      const plan = await generateCaptionPlan({
+        projectDir: params.projectDir,
+        apiKey,
+        model: params.model,
+        forceRegenerate: params.forceRegenerate ?? false,
+        onProgress: sendProgress
+      });
+      return { success: true, plan };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[CaptionsIPC] generate-plan lỗi: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_GET_PLAN, async (_event, projectDir) => {
+    try {
+      const plan = loadCaptionPlan(projectDir);
+      return { success: true, plan };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_UPDATE_PHRASE, async (_event, params) => {
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      const idx = plan.phrases.findIndex((p) => p.id === params.phraseId);
+      if (idx === -1) return { success: false, error: `Không tìm thấy phrase id=${params.phraseId}` };
+      plan.phrases[idx] = { ...plan.phrases[idx], ...params.updates };
+      saveCaptionPlan(params.projectDir, plan);
+      logger.info(`[CaptionsIPC] Đã cập nhật phrase ${params.phraseId}`);
+      return { success: true, plan };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_TOGGLE_RANGE, async (_event, params) => {
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      if (params.captionEnabled !== void 0) {
+        plan.enabled = params.captionEnabled;
+      }
+      if (params.rangeIndex >= 0 && params.rangeIndex < plan.activeRanges.length) {
+        const range = plan.activeRanges[params.rangeIndex];
+        range.disabled = !params.enabled;
+      }
+      saveCaptionPlan(params.projectDir, plan);
+      return { success: true, plan };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (_event, params) => {
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      const assPath = path__namespace.join(params.projectDir, "assets", "captions", "captions.ass");
+      const fontsDir = path__namespace.join(__dirname, "..", "..", "..", "assets", "fonts");
+      generateAssFile(plan, assPath, fontsDir);
+      logger.info(`[CaptionsIPC] Đã tạo lại file .ass: ${assPath}`);
+      return { success: true, assPath };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_PREVIEW_RENDER, async (event, params) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const sendProgress = (msg, pct) => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
+    };
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      const outputDir = path__namespace.join(params.projectDir, "output");
+      const possibleVideos = ["final_output.mp4", "preview_source.mp4"];
+      let sourceVideo = null;
+      for (const v of possibleVideos) {
+        const vp = path__namespace.join(outputDir, v);
+        if (fs__namespace.existsSync(vp)) {
+          sourceVideo = vp;
+          break;
+        }
+      }
+      if (!sourceVideo) {
+        const tmpRaw = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${Buffer.from(params.projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)}`, "raw_video.mp4");
+        if (fs__namespace.existsSync(tmpRaw)) sourceVideo = tmpRaw;
+      }
+      if (!sourceVideo) {
+        return { success: false, error: "Chưa có video source để preview — render video trước" };
+      }
+      sendProgress("Đang cắt đoạn preview...", 0.1);
+      const previewDir = path__namespace.join(params.projectDir, "output", "_preview_tmp");
+      fs__namespace.mkdirSync(previewDir, { recursive: true });
+      const clipPath = path__namespace.join(previewDir, "preview_clip.mp4");
+      const duration = Math.min(params.endTime - params.startTime, 15);
+      await ffmpegRun([
+        "-y",
+        "-ss",
+        String(params.startTime),
+        "-i",
+        sourceVideo,
+        "-t",
+        String(duration),
+        "-c",
+        "copy",
+        clipPath
+      ]);
+      sendProgress("Đang burn captions vào preview...", 0.5);
+      const previewPhrases = plan.phrases.filter((p) => p.startTime >= params.startTime && p.endTime <= params.endTime + 1).map((p) => ({
+        ...p,
+        startTime: p.startTime - params.startTime,
+        endTime: p.endTime - params.startTime
+      }));
+      const previewPlan = {
+        ...plan,
+        phrases: previewPhrases
+      };
+      const assPath = path__namespace.join(previewDir, "preview_captions.ass");
+      const fontsDir = path__namespace.join(__dirname, "..", "..", "..", "assets", "fonts");
+      generateAssFile(previewPlan, assPath, fontsDir);
+      const previewOutput = path__namespace.join(previewDir, "preview_captioned.mp4");
+      const assFilterPath = process.platform === "win32" ? assPath.replace(/\\/g, "/").replace(/:/g, "\\:") : assPath.replace(/:/g, "\\:");
+      await ffmpegRun([
+        "-y",
+        "-i",
+        clipPath,
+        "-vf",
+        `ass='${assFilterPath}':fontsdir='${fontsDir}'`,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-c:a",
+        "copy",
+        previewOutput
+      ]);
+      sendProgress("Preview xong!", 1);
+      logger.info(`[CaptionsIPC] Preview render: ${previewOutput}`);
+      return { success: true, previewPath: previewOutput };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[CaptionsIPC] preview-render lỗi: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+}
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -4080,6 +4690,7 @@ electron.app.whenReady().then(() => {
   registerRenderHandlers(electron.ipcMain);
   registerStockHandlers(electron.ipcMain);
   registerAudioHandlers(electron.ipcMain);
+  registerCaptionHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {

@@ -566,7 +566,16 @@ export const IPC_CHANNELS = {
 
   // Retention Engine — Retention QA Pass
   RETENTION_QA_RUN: 'retention:qa-run',
-  RETENTION_QA_PROGRESS: 'retention:qa-progress'
+  RETENTION_QA_PROGRESS: 'retention:qa-progress',
+
+  // Dynamic Kinetic Captions Engine
+  CAPTIONS_GENERATE_PLAN: 'captions:generate-plan',
+  CAPTIONS_GET_PLAN: 'captions:get-plan',
+  CAPTIONS_UPDATE_PHRASE: 'captions:update-phrase',
+  CAPTIONS_TOGGLE_RANGE: 'captions:toggle-range',
+  CAPTIONS_REGENERATE_ASS: 'captions:regenerate-ass',
+  CAPTIONS_PREVIEW_RENDER: 'captions:preview-render',
+  CAPTIONS_PROGRESS: 'captions:progress'
 } as const
 
 // ─── Master Edit Plan Retention Extension ─────────────────────────────────────
@@ -605,4 +614,44 @@ export interface TranscriptResult {
   fullText: string
   wordCount: number
   generatedAt: string
+}
+
+// ─── Dynamic Kinetic Captions Engine ─────────────────────────────────────────
+// Hệ thống chữ nhảy theo cụm từ, animation, đồng bộ word timestamps
+
+/** Loại nhấn mạnh của cụm từ caption — quyết định style và animation */
+export type CaptionEmphasis = 'hook' | 'list_transition' | 'shock_stat' | 'punchline' | 'normal'
+
+/** Một cụm từ 2-4 chữ trong caption, kèm style và timing chính xác */
+export interface CaptionPhrase {
+  id: string
+  sceneId: string              // liên kết tới Scene trong master-edit-plan
+  text: string                 // cụm từ 2-4 chữ, viết hoa khi render
+  startTime: number            // giây, lấy từ word timestamps trong transcript
+  endTime: number
+  emphasisType: CaptionEmphasis
+  highlightWords?: string[]    // các từ trong "text" cần đổi màu vàng riêng
+  style: {
+    fontPreset: 'sans_bold_caps' | 'serif_italic'
+    boxHighlight: boolean      // dải đỏ phía sau chữ
+    skew: boolean              // bẻ góc 3D (shear trục X)
+    baseColor: 'white' | 'yellow_pale'
+  }
+}
+
+/** Khoảng thời gian caption được BẬT */
+export interface CaptionActiveRange {
+  startTime: number
+  endTime: number
+  reason: CaptionEmphasis
+  chapterId?: string
+}
+
+/** Toàn bộ kế hoạch caption cho 1 video */
+export interface CaptionPlan {
+  enabled: boolean
+  activeRanges: CaptionActiveRange[]  // các khoảng thời gian caption được BẬT
+  phrases: CaptionPhrase[]             // rỗng ngoài activeRanges
+  generatedByFallback?: boolean        // true nếu dùng thuật toán thay vì Gemini
+  generatedAt?: string
 }

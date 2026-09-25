@@ -12,12 +12,13 @@ import { RenderPage } from './pages/RenderPage'
 import { QAPage } from './pages/PlaceholderPages'
 import { StockPage } from './pages/StockPage'
 import { AudioDirectorPage } from './pages/AudioDirectorPage'
+import { CaptionsPage } from './pages/CaptionsPage'
 import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
 import { useStock } from './hooks/useStock'
 import { useAudioDirector } from './hooks/useAudioDirector'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'captions' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
@@ -151,6 +152,10 @@ export default function App(): React.ReactElement {
 
           {currentPage === 'planning' && project && (
             <PlanningPage project={project} />
+          )}
+
+          {currentPage === 'captions' && project && (
+            <CaptionsPage projectDir={project.projectDir} />
           )}
 
           {currentPage === 'stock' && project && (

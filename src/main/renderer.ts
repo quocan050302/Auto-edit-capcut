@@ -1,9 +1,11 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
+import { app } from 'electron'
 import { spawn } from 'child_process'
 import { logger } from './logger'
-import type { AudioPlan } from '../../shared/types'
+import { generateAssFile } from './captions/ass-generator'
+import type { AudioPlan, CaptionPlan } from '../../shared/types'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -123,6 +125,7 @@ export async function renderVideo(params: {
   outputName?: string
   resolution?: { width: number; height: number }
   fps?: number
+  captionPlan?: CaptionPlan   // optional — nếu null/undefined sẽ bỏ qua bước burn caption
   onProgress?: (p: RenderProgress) => void
 }): Promise<RenderResult> {
   const {
@@ -388,7 +391,56 @@ export async function renderVideo(params: {
     ])
   }
 
-  // ── 7. Cleanup temp files ─────────────────────────────────────────────────
+  // ── 7b. Burn Dynamic Kinetic Captions (nếu được bật) ────────────────────
+  if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
+    progress('Burn Dynamic Captions...', 0.93)
+    const captionsTmpDir = path.join(path.dirname(outputPath), '_captions_tmp')
+    fs.mkdirSync(captionsTmpDir, { recursive: true })
+
+    const assPath = path.join(captionsTmpDir, 'captions.ass')
+    const captionedPath = path.join(captionsTmpDir, 'captioned_output.mp4')
+
+    // Lấy thư mục fonts (bundle cùng app hoặc fallback system fonts)
+    let fontsDir: string
+    try {
+      fontsDir = path.join(app.getAppPath(), 'assets', 'fonts')
+    } catch {
+      fontsDir = path.join(__dirname, '..', '..', '..', 'assets', 'fonts')
+    }
+
+    // Sinh file .ass từ CaptionPlan
+    generateAssFile(params.captionPlan, assPath, fontsDir)
+
+    // Escape dấu `:` trong đường dẫn ASS cho Windows (FFmpeg filter syntax dùng `:` làm phân cách)
+    // Trên macOS không cần escape vì đường dẫn /absolute/path không có dấu `:` giữa đường dẫn.
+    const assFilterPath = process.platform === 'win32'
+      ? assPath.replace(/\\/g, '/').replace(/:/g, '\\:')
+      : assPath.replace(/:/g, '\\:')  // escape colon trong filter string
+
+    logger.info(`[RENDER] Burn ASS: ${assPath} (${params.captionPlan.phrases.length} phrases)`)
+
+    await ffmpegRun([
+      '-y',
+      '-i', outputPath,
+      '-vf', `ass='${assFilterPath}':fontsdir='${fontsDir.replace(/'/g, "'\\''")}'`,
+      '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+      '-c:a', 'copy',
+      captionedPath
+    ])
+
+    // Thay thế output final bằng bản đã có caption
+    fs.renameSync(captionedPath, outputPath)
+
+    // Dọn file tạm
+    try {
+      fs.unlinkSync(assPath)
+      fs.rmdirSync(captionsTmpDir)
+    } catch { /* bỏ qua lỗi dọn dẹp */ }
+
+    logger.info('[RENDER] Burn captions hoàn thành')
+  }
+
+  // ── 8. Cleanup temp files ─────────────────────────────────────────────────
   progress('Cleaning up...', 0.97)
   try {
     for (const clip of sceneClips) fs.unlinkSync(clip)

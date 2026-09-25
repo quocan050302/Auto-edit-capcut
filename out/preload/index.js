@@ -52,7 +52,15 @@ const IPC_CHANNELS = {
   AUDIO_APPROVE_SECTION: "audio:approve-section",
   AUDIO_APPROVE_SFX: "audio:approve-sfx",
   AUDIO_DOWNLOAD_APPROVED: "audio:download-approved",
-  AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress"
+  AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress",
+  // Dynamic Kinetic Captions Engine
+  CAPTIONS_GENERATE_PLAN: "captions:generate-plan",
+  CAPTIONS_GET_PLAN: "captions:get-plan",
+  CAPTIONS_UPDATE_PHRASE: "captions:update-phrase",
+  CAPTIONS_TOGGLE_RANGE: "captions:toggle-range",
+  CAPTIONS_REGENERATE_ASS: "captions:regenerate-ass",
+  CAPTIONS_PREVIEW_RENDER: "captions:preview-render",
+  CAPTIONS_PROGRESS: "captions:progress"
 };
 const api = {
   window: {
@@ -149,6 +157,19 @@ const api = {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler);
+    }
+  },
+  captions: {
+    generatePlan: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_GENERATE_PLAN, params),
+    getPlan: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_GET_PLAN, projectDir),
+    updatePhrase: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_UPDATE_PHRASE, params),
+    toggleRange: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_TOGGLE_RANGE, params),
+    regenerateAss: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, params),
+    previewRender: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_PREVIEW_RENDER, params),
+    onProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.CAPTIONS_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.CAPTIONS_PROGRESS, handler);
     }
   }
 };

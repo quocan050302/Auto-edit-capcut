@@ -11,7 +11,9 @@ import type {
   StockAsset,
   AudioPlan,
   AudioRunResult,
-  GlobalScriptContext
+  GlobalScriptContext,
+  CaptionPlan,
+  CaptionPhrase
 } from '../../shared/types'
 
 const api = {
@@ -228,6 +230,33 @@ const api = {
         callback(data)
       ipcRenderer.on(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, handler)
+    }
+  },
+
+  captions: {
+    generatePlan: (params: { projectDir: string; forceRegenerate?: boolean; model?: string }): Promise<{ success: boolean; plan?: CaptionPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_GENERATE_PLAN, params),
+
+    getPlan: (projectDir: string): Promise<{ success: boolean; plan?: CaptionPlan | null; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_GET_PLAN, projectDir),
+
+    updatePhrase: (params: { projectDir: string; phraseId: string; updates: Partial<CaptionPhrase> }): Promise<{ success: boolean; plan?: CaptionPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_UPDATE_PHRASE, params),
+
+    toggleRange: (params: { projectDir: string; rangeIndex: number; enabled: boolean; captionEnabled?: boolean }): Promise<{ success: boolean; plan?: CaptionPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_TOGGLE_RANGE, params),
+
+    regenerateAss: (params: { projectDir: string }): Promise<{ success: boolean; assPath?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, params),
+
+    previewRender: (params: { projectDir: string; startTime: number; endTime: number }): Promise<{ success: boolean; previewPath?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_PREVIEW_RENDER, params),
+
+    onProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.CAPTIONS_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.CAPTIONS_PROGRESS, handler)
     }
   }
 }

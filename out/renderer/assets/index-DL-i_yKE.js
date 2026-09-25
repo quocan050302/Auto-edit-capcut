@@ -7033,6 +7033,12 @@ const NAV_ITEMS = [
     icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M9 4.804A7.968 7.968 0 005.5 4c-1.255 0-2.443.29-3.5.804v10A7.969 7.969 0 015.5 14c1.669 0 3.218.51 4.5 1.385A7.962 7.962 0 0114.5 14c1.255 0 2.443.29 3.5.804v-10A7.968 7.968 0 0014.5 4c-1.255 0-2.443.29-3.5.804V12a1 1 0 11-2 0V4.804z" }) })
   },
   {
+    id: "captions",
+    label: "Captions",
+    requiresProject: true,
+    icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z", clipRule: "evenodd" }) })
+  },
+  {
     id: "stock",
     label: "Stock Media",
     requiresProject: true,
@@ -8499,17 +8505,30 @@ function fmt$2(secs) {
   const s = Math.floor(secs % 60);
   return `${m2}:${String(s).padStart(2, "0")}`;
 }
-function SceneRow({ scene, globalIdx }) {
+function SceneRow({ scene, globalIdx, isHighlighted }) {
   const [expanded, setExpanded] = reactExports.useState(false);
+  const rowRef = reactExports.useRef(null);
   const mediaLabel = scene.mediaFile || (scene.localPath ? scene.localPath.split(/[/\\]/).pop() : scene.visualIntent || scene.localAsset || "Stock media pending");
+  reactExports.useEffect(() => {
+    if (isHighlighted && rowRef.current) {
+      rowRef.current.scrollIntoView({ behavior: "smooth", block: "center" });
+      setExpanded(true);
+    }
+  }, [isHighlighted]);
+  const energyColor = scene.energyLevel === "high" ? "#f87171" : scene.energyLevel === "low" ? "#94a3b8" : "#fb923c";
+  const energyBg = scene.energyLevel === "high" ? "rgba(248,113,113,0.12)" : scene.energyLevel === "low" ? "rgba(148,163,184,0.12)" : "rgba(251,146,60,0.12)";
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
     {
+      ref: rowRef,
       style: {
-        borderLeft: `3px solid ${scene.mediaType === "video" ? "var(--color-info)" : "var(--color-warning)"}`,
+        borderLeft: `3px solid ${isHighlighted ? "#f59e0b" : scene.mediaType === "video" ? "var(--color-info)" : "var(--color-warning)"}`,
         paddingLeft: "12px",
         marginBottom: "6px",
-        cursor: "pointer"
+        cursor: "pointer",
+        background: isHighlighted ? "rgba(245,158,11,0.06)" : "transparent",
+        borderRadius: "0 4px 4px 0",
+        transition: "background 0.3s"
       },
       onClick: () => setExpanded(!expanded),
       children: [
@@ -8532,6 +8551,30 @@ function SceneRow({ scene, globalIdx }) {
             scene.duration.toFixed(1),
             "s"
           ] }),
+          scene.isPatternInterrupt && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "Pattern interrupt — pacing-guard flagged this scene", style: {
+            fontSize: "10px",
+            padding: "1px 5px",
+            borderRadius: "999px",
+            background: "rgba(245,158,11,0.15)",
+            color: "#f59e0b",
+            fontWeight: 700
+          }, children: "⚡ PI" }),
+          scene.energyLevel && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: `Energy: ${scene.energyLevel}`, style: {
+            fontSize: "9px",
+            padding: "1px 5px",
+            borderRadius: "999px",
+            background: energyBg,
+            color: energyColor,
+            fontWeight: 600
+          }, children: scene.energyLevel?.toUpperCase() }),
+          scene.shotType && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: `Shot: ${scene.shotType}`, style: {
+            fontSize: "9px",
+            padding: "1px 5px",
+            borderRadius: "999px",
+            background: "rgba(99,102,241,0.12)",
+            color: "#a5b4fc",
+            fontWeight: 600
+          }, children: scene.shotType }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
             fontSize: "11px",
             color: scene.localPath || scene.mediaFile ? "var(--text-secondary)" : "var(--text-muted)",
@@ -8563,7 +8606,7 @@ function SceneRow({ scene, globalIdx }) {
     }
   );
 }
-function ChapterCard({ chapter, sceneOffset }) {
+function ChapterCard({ chapter, sceneOffset, highlightedSceneId }) {
   const [open, setOpen] = reactExports.useState(true);
   const allScenes = chapter.sequences.flatMap((s) => s.scenes);
   const videoCount = allScenes.filter((s) => s.mediaType === "video").length;
@@ -8648,12 +8691,118 @@ function ChapterCard({ chapter, sceneOffset }) {
           SceneRow,
           {
             scene,
-            globalIdx: sceneOffset + si2 + 1
+            globalIdx: sceneOffset + si2 + 1,
+            isHighlighted: highlightedSceneId === String(scene.sceneIndex)
           },
           scene.sceneIndex
         ))
       ] }, seq.sequenceIndex))
     ] })
+  ] });
+}
+function RetentionFlagsPanel({
+  flags,
+  onJumpToScene
+}) {
+  const [collapsed, setCollapsed] = reactExports.useState(false);
+  if (flags.length === 0) return null;
+  const highCount = flags.filter((f2) => f2.severity === "high").length;
+  const medCount = flags.filter((f2) => f2.severity === "medium").length;
+  const severityColor = (s) => s === "high" ? "#f87171" : s === "medium" ? "#fb923c" : "#94a3b8";
+  const severityBg = (s) => s === "high" ? "rgba(248,113,113,0.12)" : s === "medium" ? "rgba(251,146,60,0.12)" : "rgba(148,163,184,0.08)";
+  const severityIcon = (s) => s === "high" ? "❌" : s === "medium" ? "⚠️" : "ℹ️";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { borderLeft: "3px solid #f59e0b" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: "panel-header",
+        onClick: () => setCollapsed(!collapsed),
+        style: { cursor: "pointer", userSelect: "none" },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { marginRight: "8px" }, children: "🕵️ Retention Lint" }),
+            highCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+              fontSize: "10px",
+              padding: "1px 6px",
+              borderRadius: "999px",
+              background: "rgba(248,113,113,0.15)",
+              color: "#f87171",
+              fontWeight: 700,
+              marginRight: "4px"
+            }, children: [
+              highCount,
+              " HIGH"
+            ] }),
+            medCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+              fontSize: "10px",
+              padding: "1px 6px",
+              borderRadius: "999px",
+              background: "rgba(251,146,60,0.15)",
+              color: "#fb923c",
+              fontWeight: 700
+            }, children: [
+              medCount,
+              " MED"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+              flags.length,
+              " warnings — click to jump"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: "12px" }, children: collapsed ? "▼" : "▲" })
+          ] })
+        ]
+      }
+    ),
+    !collapsed && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "8px 20px", display: "flex", flexDirection: "column", gap: "6px" }, children: flags.map((flag, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        onClick: () => onJumpToScene(flag.sceneId),
+        style: {
+          display: "flex",
+          gap: "10px",
+          alignItems: "flex-start",
+          padding: "8px 12px",
+          borderRadius: "var(--radius-sm)",
+          background: severityBg(flag.severity),
+          border: `1px solid ${severityColor(flag.severity)}33`,
+          cursor: "pointer",
+          transition: "opacity 0.15s"
+        },
+        title: "Click to jump to this scene",
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "14px", flexShrink: 0, marginTop: "1px" }, children: severityIcon(flag.severity) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginBottom: "3px", alignItems: "center" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+                fontSize: "10px",
+                fontFamily: "var(--font-mono)",
+                fontWeight: 700,
+                color: severityColor(flag.severity)
+              }, children: [
+                "SCENE ",
+                flag.sceneId
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+                fontSize: "10px",
+                padding: "0 5px",
+                borderRadius: "999px",
+                background: `${severityColor(flag.severity)}22`,
+                color: severityColor(flag.severity),
+                fontWeight: 600
+              }, children: flag.severity.toUpperCase() })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-primary)", marginBottom: "2px" }, children: flag.issue }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", fontStyle: "italic" }, children: [
+              "💡 ",
+              flag.suggestion
+            ] })
+          ] })
+        ]
+      },
+      i
+    )) })
   ] });
 }
 function PlanningPage({ project }) {
@@ -8663,6 +8812,13 @@ function PlanningPage({ project }) {
   const [error, setError] = reactExports.useState(null);
   const [hasKey, setHasKey] = reactExports.useState(null);
   const [selectedModel, setSelectedModel] = reactExports.useState("gemini-3.8-flash");
+  const [highlightedSceneId, setHighlightedSceneId] = reactExports.useState(null);
+  const highlightTimerRef = reactExports.useRef(null);
+  function handleJumpToScene(sceneId) {
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+    setHighlightedSceneId(sceneId);
+    highlightTimerRef.current = setTimeout(() => setHighlightedSceneId(null), 3e3);
+  }
   reactExports.useEffect(() => {
     window.api.plan.get(project.projectDir).then((p2) => {
       if (p2) setPlan(p2);
@@ -8837,13 +8993,25 @@ function PlanningPage({ project }) {
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$2(plan.totalDuration) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Duration" })
+      ] }),
+      (plan.retentionFlags?.length ?? 0) > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", style: { borderColor: "#f59e0b33" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value", style: { color: "#f59e0b" }, children: plan.retentionFlags?.length }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Pacing Flags" })
       ] })
     ] }),
+    plan && (plan.retentionFlags?.length ?? 0) > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      RetentionFlagsPanel,
+      {
+        flags: plan.retentionFlags ?? [],
+        onJumpToScene: handleJumpToScene
+      }
+    ),
     plan && plan.chapters.map((chapter, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx(
       ChapterCard,
       {
         chapter,
-        sceneOffset: sceneOffsets[idx] ?? 0
+        sceneOffset: sceneOffsets[idx] ?? 0,
+        highlightedSceneId
       },
       chapter.chapterIndex
     )),
@@ -10419,6 +10587,508 @@ function AudioDirectorPage({ project, audioDirector }) {
       ` })
   ] });
 }
+const EMPHASIS_COLORS = {
+  hook: { bg: "#7c3aed", text: "#f3e8ff", label: "🪝 Hook" },
+  list_transition: { bg: "#0369a1", text: "#e0f2fe", label: "📋 List" },
+  shock_stat: { bg: "#b91c1c", text: "#fee2e2", label: "⚡ Shock" },
+  punchline: { bg: "#d97706", text: "#fef3c7", label: "💥 Punch" },
+  normal: { bg: "#374151", text: "#f9fafb", label: "💬 Normal" }
+};
+function RangePill({ range, totalDuration, isSelected, onClick }) {
+  const colors = EMPHASIS_COLORS[range.reason];
+  const leftPct = range.startTime / totalDuration * 100;
+  const widthPct = Math.max(1, (range.endTime - range.startTime) / totalDuration * 100);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      onClick,
+      title: `${colors.label}: ${range.startTime.toFixed(1)}s – ${range.endTime.toFixed(1)}s`,
+      style: {
+        position: "absolute",
+        left: `${leftPct}%`,
+        width: `${widthPct}%`,
+        top: 0,
+        bottom: 0,
+        backgroundColor: colors.bg,
+        border: isSelected ? "2px solid #fff" : "1px solid rgba(255,255,255,0.2)",
+        borderRadius: 4,
+        cursor: "pointer",
+        transition: "opacity 0.2s",
+        opacity: isSelected ? 1 : 0.75,
+        zIndex: isSelected ? 10 : 5,
+        minWidth: 4,
+        boxSizing: "border-box"
+      }
+    }
+  );
+}
+function PhraseCard({ phrase, projectDir: _projectDir, onUpdate }) {
+  const colors = EMPHASIS_COLORS[phrase.emphasisType];
+  const [editText, setEditText] = reactExports.useState(phrase.text);
+  const [editing, setEditing] = reactExports.useState(false);
+  function handleSave() {
+    if (editText.trim() !== phrase.text) {
+      onUpdate(phrase.id, { text: editText.trim() });
+    }
+    setEditing(false);
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "rgba(255,255,255,0.05)",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 8,
+    padding: "10px 14px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    transition: "background 0.2s"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, justifyContent: "space-between" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, color: "#9ca3af" }, children: [
+        phrase.startTime.toFixed(2),
+        "s – ",
+        phrase.endTime.toFixed(2),
+        "s"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        fontSize: 10,
+        padding: "2px 7px",
+        borderRadius: 10,
+        backgroundColor: colors.bg,
+        color: colors.text,
+        fontWeight: 600
+      }, children: colors.label })
+    ] }),
+    editing ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          value: editText,
+          onChange: (e) => setEditText(e.target.value),
+          onKeyDown: (e) => {
+            if (e.key === "Enter") handleSave();
+            if (e.key === "Escape") setEditing(false);
+          },
+          style: {
+            flex: 1,
+            background: "rgba(255,255,255,0.1)",
+            border: "1px solid rgba(255,255,255,0.3)",
+            borderRadius: 4,
+            color: "#fff",
+            padding: "4px 8px",
+            fontSize: 14,
+            fontWeight: 700,
+            letterSpacing: 1,
+            outline: "none"
+          },
+          autoFocus: true
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleSave, style: { ...btnStyle, background: "#16a34a", padding: "4px 10px" }, children: "✓" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setEditing(false), style: { ...btnStyle, background: "#6b7280", padding: "4px 10px" }, children: "✗" })
+    ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        onClick: () => setEditing(true),
+        style: {
+          fontSize: 16,
+          fontWeight: 800,
+          letterSpacing: 1,
+          color: "#fff",
+          cursor: "text",
+          padding: "2px 4px",
+          borderRadius: 3,
+          border: "1px solid transparent",
+          transition: "border-color 0.2s"
+        },
+        onMouseEnter: (e) => e.currentTarget.style.borderColor = "rgba(255,255,255,0.3)",
+        onMouseLeave: (e) => e.currentTarget.style.borderColor = "transparent",
+        title: "Click để chỉnh sửa",
+        children: phrase.text.toUpperCase()
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6, flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ToggleBadge,
+        {
+          label: "📦 Box",
+          active: phrase.style.boxHighlight,
+          onChange: (v2) => onUpdate(phrase.id, { style: { ...phrase.style, boxHighlight: v2 } })
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ToggleBadge,
+        {
+          label: "↗ Skew",
+          active: phrase.style.skew,
+          onChange: (v2) => onUpdate(phrase.id, { style: { ...phrase.style, skew: v2 } })
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ToggleBadge,
+        {
+          label: "🔠 Serif",
+          active: phrase.style.fontPreset === "serif_italic",
+          onChange: (v2) => onUpdate(phrase.id, { style: { ...phrase.style, fontPreset: v2 ? "serif_italic" : "sans_bold_caps" } })
+        }
+      )
+    ] }),
+    (phrase.highlightWords ?? []).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#fbbf24" }, children: [
+      "★ Highlight: ",
+      phrase.highlightWords.join(", ")
+    ] })
+  ] });
+}
+function ToggleBadge({ label, active, onChange }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "button",
+    {
+      onClick: () => onChange(!active),
+      style: {
+        fontSize: 11,
+        padding: "2px 8px",
+        borderRadius: 10,
+        border: "1px solid",
+        borderColor: active ? "#7c3aed" : "rgba(255,255,255,0.2)",
+        background: active ? "rgba(124,58,237,0.3)" : "transparent",
+        color: active ? "#c4b5fd" : "#9ca3af",
+        cursor: "pointer",
+        transition: "all 0.2s"
+      },
+      children: label
+    }
+  );
+}
+const btnStyle = {
+  padding: "6px 14px",
+  borderRadius: 6,
+  border: "none",
+  cursor: "pointer",
+  fontSize: 13,
+  fontWeight: 600,
+  color: "#fff",
+  background: "#4b5563",
+  transition: "opacity 0.2s"
+};
+function CaptionsPage({ projectDir }) {
+  const [plan, setPlan] = reactExports.useState(null);
+  const [loading, setLoading] = reactExports.useState(false);
+  const [progress, setProgress] = reactExports.useState(null);
+  const [error, setError] = reactExports.useState(null);
+  const [selectedRangeIdx, setSelectedRangeIdx] = reactExports.useState(null);
+  const [previewPath, setPreviewPath] = reactExports.useState(null);
+  const totalDuration = plan ? Math.max(...plan.activeRanges.map((r2) => r2.endTime), 60) : 120;
+  reactExports.useEffect(() => {
+    let unsubProgress = null;
+    async function load() {
+      if (!projectDir) return;
+      try {
+        const res = await window.api.captions.getPlan(projectDir);
+        if (res.success && res.plan) setPlan(res.plan);
+      } catch {
+      }
+    }
+    unsubProgress = window.api.captions.onProgress((data) => {
+      setProgress({ message: data.message, pct: data.progress });
+    });
+    load();
+    return () => {
+      unsubProgress?.();
+    };
+  }, [projectDir]);
+  const handleGenerate = reactExports.useCallback(async (force = false) => {
+    setLoading(true);
+    setError(null);
+    setProgress(null);
+    try {
+      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: force });
+      if (res.success && res.plan) {
+        setPlan(res.plan);
+      } else {
+        setError(res.error ?? "Không thể tạo caption plan");
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+      setProgress(null);
+    }
+  }, [projectDir]);
+  const handleUpdatePhrase = reactExports.useCallback(async (phraseId, updates) => {
+    const res = await window.api.captions.updatePhrase({ projectDir, phraseId, updates });
+    if (res.success && res.plan) setPlan(res.plan);
+  }, [projectDir]);
+  const handleToggleEnabled = reactExports.useCallback(async (enabled) => {
+    const res = await window.api.captions.toggleRange({ projectDir, rangeIndex: -1, enabled: true, captionEnabled: enabled });
+    if (res.success && res.plan) setPlan(res.plan);
+    else if (plan) setPlan({ ...plan, enabled });
+  }, [projectDir, plan]);
+  const handleRegenerateAss = reactExports.useCallback(async () => {
+    setLoading(true);
+    const res = await window.api.captions.regenerateAss({ projectDir });
+    setLoading(false);
+    if (!res.success) setError(res.error ?? "Lỗi tạo file .ass");
+  }, [projectDir]);
+  const handlePreview = reactExports.useCallback(async (range) => {
+    setLoading(true);
+    setError(null);
+    const res = await window.api.captions.previewRender({
+      projectDir,
+      startTime: range.startTime,
+      endTime: Math.min(range.endTime, range.startTime + 12)
+    });
+    setLoading(false);
+    if (res.success && res.previewPath) {
+      setPreviewPath(res.previewPath);
+    } else {
+      setError(res.error ?? "Preview thất bại");
+    }
+  }, [projectDir]);
+  const selectedRange = selectedRangeIdx !== null ? plan?.activeRanges[selectedRangeIdx] : null;
+  const phrasesInRange = selectedRange && plan ? plan.phrases.filter(
+    (p2) => p2.startTime >= selectedRange.startTime && p2.endTime <= selectedRange.endTime + 1
+  ) : [];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    height: "100%",
+    overflowY: "auto",
+    padding: "24px 28px",
+    color: "#f1f5f9",
+    fontFamily: "Inter, system-ui, sans-serif",
+    background: "linear-gradient(160deg, #0a0a1a 0%, #0f1629 100%)"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 24 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { style: { margin: 0, fontSize: 22, fontWeight: 800, letterSpacing: -0.5, color: "#f8fafc" }, children: "🎬 Dynamic Kinetic Captions" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: "4px 0 0", fontSize: 13, color: "#94a3b8" }, children: "Chữ nhảy theo nhịp giọng đọc — tự động sinh từ transcript" })
+      ] }),
+      plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, color: plan.enabled ? "#86efac" : "#9ca3af" }, children: plan.enabled ? "✅ Đang bật" : "⬜ Đang tắt" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => handleToggleEnabled(!plan.enabled),
+            style: {
+              ...btnStyle,
+              background: plan.enabled ? "#16a34a" : "#374151",
+              padding: "8px 16px"
+            },
+            children: plan.enabled ? "Tắt Captions" : "Bật Captions"
+          }
+        )
+      ] })
+    ] }),
+    error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      padding: "10px 14px",
+      borderRadius: 8,
+      background: "rgba(185,28,28,0.2)",
+      border: "1px solid rgba(239,68,68,0.4)",
+      color: "#fca5a5",
+      fontSize: 13,
+      marginBottom: 16
+    }, children: [
+      "⚠️ ",
+      error
+    ] }),
+    progress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 16 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 12, color: "#94a3b8", marginBottom: 4 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: progress.message }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+          Math.round(progress.pct * 100),
+          "%"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: 4, borderRadius: 2, background: "rgba(255,255,255,0.1)", overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        height: "100%",
+        width: `${progress.pct * 100}%`,
+        background: "linear-gradient(90deg, #7c3aed, #2563eb)",
+        transition: "width 0.3s",
+        borderRadius: 2
+      } }) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => handleGenerate(false),
+          disabled: loading,
+          style: { ...btnStyle, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
+          children: loading ? "⏳ Đang xử lý..." : plan ? "🔄 Tạo lại Plan" : "✨ Tạo Caption Plan"
+        }
+      ),
+      plan && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => handleGenerate(true),
+            disabled: loading,
+            style: { ...btnStyle, background: "#0369a1", opacity: loading ? 0.6 : 1 },
+            children: "🔄 Force Regenerate (Gemini)"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: handleRegenerateAss,
+            disabled: loading,
+            style: { ...btnStyle, background: "#065f46", opacity: loading ? 0.6 : 1 },
+            children: "📄 Tạo lại file .ass"
+          }
+        )
+      ] })
+    ] }),
+    plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(255,255,255,0.04)",
+      border: "1px solid rgba(255,255,255,0.08)",
+      borderRadius: 10,
+      padding: "14px 18px",
+      marginBottom: 20,
+      display: "flex",
+      gap: 24,
+      flexWrap: "wrap"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Phrases", value: plan.phrases.length }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Active Ranges", value: plan.activeRanges.length }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Tổng thời gian BẬT", value: `${plan.activeRanges.reduce((a, r2) => a + r2.endTime - r2.startTime, 0).toFixed(0)}s` }),
+      plan.generatedByFallback && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#fbbf24", padding: "2px 8px", background: "rgba(251,191,36,0.1)", borderRadius: 4, alignSelf: "center" }, children: "⚠️ Fallback — chưa qua Gemini" })
+    ] }),
+    plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap" }, children: [
+      Object.entries(EMPHASIS_COLORS).map(([key, c]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 5, fontSize: 12 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: 12, height: 12, borderRadius: 2, background: c.bg } }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#94a3b8" }, children: c.label })
+      ] }, key)),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 5, fontSize: 12 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: 12, height: 12, borderRadius: 2, background: "#1e293b", border: "1px solid #334155" } }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#94a3b8" }, children: "Tắt" })
+      ] })
+    ] }),
+    plan && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          position: "relative",
+          height: 40,
+          borderRadius: 8,
+          background: "#1e293b",
+          border: "1px solid rgba(255,255,255,0.07)",
+          marginBottom: 24,
+          overflow: "hidden",
+          cursor: "pointer"
+        },
+        children: [
+          plan.activeRanges.map((range, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+            RangePill,
+            {
+              range,
+              totalDuration,
+              isSelected: selectedRangeIdx === idx,
+              onClick: () => setSelectedRangeIdx(selectedRangeIdx === idx ? null : idx)
+            },
+            idx
+          )),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { position: "absolute", bottom: 0, left: 0, right: 0, height: 1, background: "rgba(255,255,255,0.05)" } })
+        ]
+      }
+    ),
+    selectedRange && plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(255,255,255,0.03)",
+      border: `1px solid ${EMPHASIS_COLORS[selectedRange.reason].bg}44`,
+      borderRadius: 10,
+      padding: 18,
+      marginBottom: 24
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            padding: "4px 10px",
+            borderRadius: 10,
+            background: EMPHASIS_COLORS[selectedRange.reason].bg,
+            color: EMPHASIS_COLORS[selectedRange.reason].text,
+            fontSize: 12,
+            fontWeight: 700
+          }, children: EMPHASIS_COLORS[selectedRange.reason].label }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 13, color: "#94a3b8" }, children: [
+            selectedRange.startTime.toFixed(1),
+            "s – ",
+            selectedRange.endTime.toFixed(1),
+            "s  • ",
+            phrasesInRange.length,
+            " phrases"
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: () => handlePreview(selectedRange),
+            disabled: loading,
+            style: { ...btnStyle, background: "#b45309", padding: "6px 14px", fontSize: 12, opacity: loading ? 0.6 : 1 },
+            children: "👁 Xem trước đoạn này"
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(240px, 1fr))", gap: 10 }, children: [
+        phrasesInRange.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#6b7280", fontSize: 13 }, children: "Không có phrases trong range này" }),
+        phrasesInRange.map((phrase) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+          PhraseCard,
+          {
+            phrase,
+            projectDir,
+            onUpdate: handleUpdatePhrase
+          },
+          phrase.id
+        ))
+      ] })
+    ] }),
+    previewPath && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(255,255,255,0.04)",
+      border: "1px solid rgba(255,255,255,0.1)",
+      borderRadius: 10,
+      padding: 18
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 13, color: "#86efac", marginBottom: 10 }, children: [
+        "✅ Preview đã render: ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontSize: 11 }, children: previewPath })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setPreviewPath(null),
+          style: { ...btnStyle, background: "#374151", fontSize: 12 },
+          children: "✕ Đóng"
+        }
+      )
+    ] }),
+    !plan && !loading && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: 14,
+      padding: "60px 0",
+      color: "#64748b"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 48 }, children: "🎬" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 15, textAlign: "center" }, children: [
+        "Chưa có Caption Plan cho project này.",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+        "Bấm ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Tạo Caption Plan" }),
+        " để phân tích script với AI."
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "#475569", textAlign: "center", maxWidth: 400 }, children: [
+        "Cần có ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "transcript.json" }),
+        " và ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "master-edit-plan.json" }),
+        " trước. Nếu Gemini không khả dụng, hệ thống sẽ tự động dùng thuật toán fallback."
+      ] })
+    ] })
+  ] });
+}
+function Stat({ label, value }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 20, fontWeight: 800, color: "#f8fafc" }, children: value }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#94a3b8", marginTop: 2 }, children: label })
+  ] });
+}
 function useProject() {
   const [project, setProject] = reactExports.useState(null);
   const [logs, setLogs] = reactExports.useState([]);
@@ -10968,6 +11638,7 @@ function App() {
           }
         ),
         currentPage === "planning" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(PlanningPage, { project }),
+        currentPage === "captions" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(CaptionsPage, { projectDir: project.projectDir }),
         currentPage === "stock" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
           StockPage,
           {
