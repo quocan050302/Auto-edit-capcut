@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react'
-import type { ProjectState } from '../../../../shared/types'
+import React, { useState, useEffect, useRef } from 'react'
+import type { ProjectState, RetentionFlag } from '../../../../shared/types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,6 +17,11 @@ interface ScenePlan {
   localPath?: string
   visualIntent?: string
   localAsset?: string
+  // Retention Engine fields
+  energyLevel?: 'low' | 'medium' | 'high'
+  shotType?: 'wide' | 'medium' | 'close-up' | 'abstract'
+  isPatternInterrupt?: boolean
+  motifIds?: string[]
 }
 
 interface SequencePlan {
@@ -43,6 +48,11 @@ interface MasterEditPlan {
   chapters: ChapterPlan[]
   generatedAt: string
   modelUsed: string
+  // Retention Engine extension fields (all optional)
+  retentionFlags?: RetentionFlag[]
+  openLoops?: unknown[]
+  motifRegistry?: unknown[]
+  coldOpen?: unknown
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -55,16 +65,32 @@ function fmt(secs: number): string {
 
 // ─── Scene Row ────────────────────────────────────────────────────────────────
 
-function SceneRow({ scene, globalIdx }: { scene: ScenePlan; globalIdx: number }): React.ReactElement {
+function SceneRow({ scene, globalIdx, isHighlighted }: { scene: ScenePlan; globalIdx: number; isHighlighted?: boolean }): React.ReactElement {
   const [expanded, setExpanded] = useState(false)
+  const rowRef = useRef<HTMLDivElement>(null)
   const mediaLabel = scene.mediaFile || (scene.localPath ? scene.localPath.split(/[/\\]/).pop() : (scene.visualIntent || scene.localAsset || 'Stock media pending'))
+
+  useEffect(() => {
+    if (isHighlighted && rowRef.current) {
+      rowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      setExpanded(true)
+    }
+  }, [isHighlighted])
+
+  const energyColor = scene.energyLevel === 'high' ? '#f87171' : scene.energyLevel === 'low' ? '#94a3b8' : '#fb923c'
+  const energyBg = scene.energyLevel === 'high' ? 'rgba(248,113,113,0.12)' : scene.energyLevel === 'low' ? 'rgba(148,163,184,0.12)' : 'rgba(251,146,60,0.12)'
+
   return (
     <div
+      ref={rowRef}
       style={{
-        borderLeft: `3px solid ${scene.mediaType === 'video' ? 'var(--color-info)' : 'var(--color-warning)'}`,
+        borderLeft: `3px solid ${isHighlighted ? '#f59e0b' : scene.mediaType === 'video' ? 'var(--color-info)' : 'var(--color-warning)'}`,
         paddingLeft: '12px',
         marginBottom: '6px',
-        cursor: 'pointer'
+        cursor: 'pointer',
+        background: isHighlighted ? 'rgba(245,158,11,0.06)' : 'transparent',
+        borderRadius: '0 4px 4px 0',
+        transition: 'background 0.3s'
       }}
       onClick={() => setExpanded(!expanded)}
     >
@@ -85,6 +111,25 @@ function SceneRow({ scene, globalIdx }: { scene: ScenePlan; globalIdx: number })
         <span style={{ fontSize: '11px', color: 'var(--text-muted)', minWidth: '38px' }}>
           {scene.duration.toFixed(1)}s
         </span>
+        {/* Retention Engine badges */}
+        {scene.isPatternInterrupt && (
+          <span title="Pattern interrupt — pacing-guard flagged this scene" style={{
+            fontSize: '10px', padding: '1px 5px', borderRadius: '999px',
+            background: 'rgba(245,158,11,0.15)', color: '#f59e0b', fontWeight: 700
+          }}>⚡ PI</span>
+        )}
+        {scene.energyLevel && (
+          <span title={`Energy: ${scene.energyLevel}`} style={{
+            fontSize: '9px', padding: '1px 5px', borderRadius: '999px',
+            background: energyBg, color: energyColor, fontWeight: 600
+          }}>{scene.energyLevel?.toUpperCase()}</span>
+        )}
+        {scene.shotType && (
+          <span title={`Shot: ${scene.shotType}`} style={{
+            fontSize: '9px', padding: '1px 5px', borderRadius: '999px',
+            background: 'rgba(99,102,241,0.12)', color: '#a5b4fc', fontWeight: 600
+          }}>{scene.shotType}</span>
+        )}
         <span style={{
           fontSize: '11px', color: scene.localPath || scene.mediaFile ? 'var(--text-secondary)' : 'var(--text-muted)',
           flex: 1, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
@@ -114,7 +159,7 @@ function SceneRow({ scene, globalIdx }: { scene: ScenePlan; globalIdx: number })
 
 // ─── Chapter Card ─────────────────────────────────────────────────────────────
 
-function ChapterCard({ chapter, sceneOffset }: { chapter: ChapterPlan; sceneOffset: number }): React.ReactElement {
+function ChapterCard({ chapter, sceneOffset, highlightedSceneId }: { chapter: ChapterPlan; sceneOffset: number; highlightedSceneId?: string | null }): React.ReactElement {
   const [open, setOpen] = useState(true)
   const allScenes = chapter.sequences.flatMap(s => s.scenes)
   const videoCount = allScenes.filter(s => s.mediaType === 'video').length
@@ -172,8 +217,102 @@ function ChapterCard({ chapter, sceneOffset }: { chapter: ChapterPlan; sceneOffs
                   key={scene.sceneIndex}
                   scene={scene}
                   globalIdx={sceneOffset + si + 1}
+                  isHighlighted={highlightedSceneId === String(scene.sceneIndex)}
                 />
               ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Retention Flags Panel ──────────────────────────────────────────────────
+
+function RetentionFlagsPanel({
+  flags,
+  onJumpToScene
+}: {
+  flags: RetentionFlag[]
+  onJumpToScene: (sceneId: string) => void
+}): React.ReactElement | null {
+  const [collapsed, setCollapsed] = useState(false)
+  if (flags.length === 0) return null
+
+  const highCount = flags.filter(f => f.severity === 'high').length
+  const medCount = flags.filter(f => f.severity === 'medium').length
+
+  const severityColor = (s: RetentionFlag['severity']): string =>
+    s === 'high' ? '#f87171' : s === 'medium' ? '#fb923c' : '#94a3b8'
+  const severityBg = (s: RetentionFlag['severity']): string =>
+    s === 'high' ? 'rgba(248,113,113,0.12)' : s === 'medium' ? 'rgba(251,146,60,0.12)' : 'rgba(148,163,184,0.08)'
+  const severityIcon = (s: RetentionFlag['severity']): string =>
+    s === 'high' ? '❌' : s === 'medium' ? '⚠️' : 'ℹ️'
+
+  return (
+    <div className="panel" style={{ borderLeft: '3px solid #f59e0b' }}>
+      <div
+        className="panel-header"
+        onClick={() => setCollapsed(!collapsed)}
+        style={{ cursor: 'pointer', userSelect: 'none' }}
+      >
+        <div className="panel-title">
+          <span style={{ marginRight: '8px' }}>🕵️ Retention Lint</span>
+          {highCount > 0 && (
+            <span style={{
+              fontSize: '10px', padding: '1px 6px', borderRadius: '999px',
+              background: 'rgba(248,113,113,0.15)', color: '#f87171', fontWeight: 700, marginRight: '4px'
+            }}>{highCount} HIGH</span>
+          )}
+          {medCount > 0 && (
+            <span style={{
+              fontSize: '10px', padding: '1px 6px', borderRadius: '999px',
+              background: 'rgba(251,146,60,0.15)', color: '#fb923c', fontWeight: 700
+            }}>{medCount} MED</span>
+          )}
+        </div>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{flags.length} warnings — click to jump</span>
+          <span style={{ color: 'var(--text-muted)', fontSize: '12px' }}>{collapsed ? '▼' : '▲'}</span>
+        </div>
+      </div>
+      {!collapsed && (
+        <div style={{ padding: '8px 20px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          {flags.map((flag, i) => (
+            <div
+              key={i}
+              onClick={() => onJumpToScene(flag.sceneId)}
+              style={{
+                display: 'flex', gap: '10px', alignItems: 'flex-start',
+                padding: '8px 12px', borderRadius: 'var(--radius-sm)',
+                background: severityBg(flag.severity),
+                border: `1px solid ${severityColor(flag.severity)}33`,
+                cursor: 'pointer',
+                transition: 'opacity 0.15s'
+              }}
+              title="Click to jump to this scene"
+            >
+              <span style={{ fontSize: '14px', flexShrink: 0, marginTop: '1px' }}>{severityIcon(flag.severity)}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '3px', alignItems: 'center' }}>
+                  <span style={{
+                    fontSize: '10px', fontFamily: 'var(--font-mono)', fontWeight: 700,
+                    color: severityColor(flag.severity)
+                  }}>SCENE {flag.sceneId}</span>
+                  <span style={{
+                    fontSize: '10px', padding: '0 5px', borderRadius: '999px',
+                    background: `${severityColor(flag.severity)}22`,
+                    color: severityColor(flag.severity), fontWeight: 600
+                  }}>{flag.severity.toUpperCase()}</span>
+                </div>
+                <div style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: '2px' }}>
+                  {flag.issue}
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                  💡 {flag.suggestion}
+                </div>
+              </div>
             </div>
           ))}
         </div>
@@ -195,6 +334,16 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
   const [error, setError] = useState<string | null>(null)
   const [hasKey, setHasKey] = useState<boolean | null>(null)
   const [selectedModel, setSelectedModel] = useState('gemini-3.8-flash')
+  // Retention Engine: tracks which scene ID is highlighted for click-to-jump
+  const [highlightedSceneId, setHighlightedSceneId] = useState<string | null>(null)
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function handleJumpToScene(sceneId: string): void {
+    if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current)
+    setHighlightedSceneId(sceneId)
+    // Auto-clear highlight after 3s
+    highlightTimerRef.current = setTimeout(() => setHighlightedSceneId(null), 3000)
+  }
 
   useEffect(() => {
     // Load cached plan
@@ -395,7 +544,21 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
             <div className="stat-value accent">{fmt(plan.totalDuration)}</div>
             <div className="stat-label">Duration</div>
           </div>
+          {(plan.retentionFlags?.length ?? 0) > 0 && (
+            <div className="stat-card" style={{ borderColor: '#f59e0b33' }}>
+              <div className="stat-value" style={{ color: '#f59e0b' }}>{plan.retentionFlags?.length}</div>
+              <div className="stat-label">Pacing Flags</div>
+            </div>
+          )}
         </div>
+      )}
+
+      {/* Retention Flags Panel — Pacing Lint warnings */}
+      {plan && (plan.retentionFlags?.length ?? 0) > 0 && (
+        <RetentionFlagsPanel
+          flags={plan.retentionFlags ?? []}
+          onJumpToScene={handleJumpToScene}
+        />
       )}
 
       {/* Chapter breakdown */}
@@ -404,6 +567,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
           key={chapter.chapterIndex}
           chapter={chapter}
           sceneOffset={sceneOffsets[idx] ?? 0}
+          highlightedSceneId={highlightedSceneId}
         />
       ))}
 

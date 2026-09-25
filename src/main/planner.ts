@@ -3,6 +3,9 @@ import * as fs from 'fs'
 import { join } from 'path'
 import { logger } from './logger'
 import type { TranscriptResult } from '../../shared/types'
+import type { MasterEditPlanRetentionExt } from '../../shared/types'
+import { analyzePacing, flattenPlanScenes } from './pacing-guard'
+import type { PacingScene } from './pacing-guard'
 
 // ─── Edit Plan Types ──────────────────────────────────────────────────────────
 
@@ -29,6 +32,13 @@ export interface ScenePlan {
   visualNote?: string         // AI suggestion for what to show
   visualIntent?: string
   searchQueries?: string[]
+  // ─── Retention Engine fields (optional, added by pacing-guard) ───────────
+  energyLevel?: 'low' | 'medium' | 'high'          // used by pacing-guard & audio intensity
+  shotType?: 'wide' | 'medium' | 'close-up' | 'abstract' // used by pattern interrupt detection
+  motifIds?: string[]                               // links to MasterEditPlan.motifRegistry
+  isPatternInterrupt?: boolean                       // marked by pacing-guard
+  localPath?: string                                // set by stock engine or user upload
+  localAsset?: string
 }
 
 export interface SequencePlan {
@@ -47,7 +57,7 @@ export interface ChapterPlan {
   sequences: SequencePlan[]
 }
 
-export interface MasterEditPlan {
+export interface MasterEditPlan extends MasterEditPlanRetentionExt {
   projectName: string
   totalDuration: number
   totalScenes: number
@@ -469,6 +479,31 @@ export async function buildEditPlan(params: {
   const totalScenes = allScenes.length
   const totalDuration = transcript.duration
 
+  // ── 5b. Run pacing-guard (algorithmic, no AI, fully synchronous) ──────────
+  // Annotates scenes in-place with energyLevel, shotType, isPatternInterrupt.
+  // Any failure is non-fatal: plan continues without pacing annotations.
+  progress('Running Pacing Guard analysis...', 0.88)
+  let pacingIssues: import('../../shared/types').PacingIssue[] = []
+  try {
+    const flatScenes = flattenPlanScenes(planData as { chapters: Array<{ sequences?: Array<{ scenes?: PacingScene[] }>; chapters_seq?: Array<{ scenes?: PacingScene[] }> }> })
+    pacingIssues = analyzePacing(flatScenes)
+    logger.info(`[PLAN] Pacing Guard: ${pacingIssues.length} issues found, scenes annotated in-place`)
+  } catch (pgErr: unknown) {
+    logger.warn(`[PLAN] Pacing Guard error (non-fatal): ${pgErr instanceof Error ? pgErr.message : String(pgErr)}`)
+  }
+
+  // Convert pacing issues into initial retention flags (severity heuristic)
+  const initialFlags: import('../../shared/types').RetentionFlag[] = pacingIssues.map((issue) => ({
+    sceneId: issue.sceneId,
+    severity: issue.accumulatedMonotoneSeconds > 240 ? 'high' : issue.accumulatedMonotoneSeconds > 150 ? 'medium' : 'low',
+    issue: `${issue.suggestion === 'vary_shot_type' ? 'Monotone shot type' : 'Monotone energy level'} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
+    suggestion: issue.suggestion === 'insert_broll'
+      ? 'Insert a B-roll cutaway or add a stock clip with high motion/contrast'
+      : issue.suggestion === 'insert_text_overlay'
+        ? 'Add a text overlay (keyword callout) at this scene to break visual monotony'
+        : `Change shot type to "${(allScenes[Number(issue.sceneId) - 1] as ScenePlan | undefined)?.shotType ?? 'wide'}" for visual variety`
+  }))
+
   const plan: MasterEditPlan = {
     projectName: projectName,
     totalDuration,
@@ -476,15 +511,20 @@ export async function buildEditPlan(params: {
     language: transcript.language,
     chapters: planData.chapters,
     generatedAt: new Date().toISOString(),
-    modelUsed: finalModelUsed
+    modelUsed: finalModelUsed,
+    // Retention Engine fields — pacing-guard populates retentionFlags here;
+    // Gemini QA pass (runRetentionQAPass) will add/replace them with AI analysis.
+    openLoops: [],
+    motifRegistry: [],
+    retentionFlags: initialFlags
   }
 
   // 6. Save
   progress('Saving edit plan...', 0.95)
   const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
-  logger.info('Edit plan saved', { chapters: plan.chapters.length, scenes: totalScenes })
+  logger.info('Edit plan saved', { chapters: plan.chapters.length, scenes: totalScenes, pacingIssues: pacingIssues.length })
 
-  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes`, 1.0)
+  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes, ${initialFlags.length} pacing flags`, 1.0)
   return plan
 }

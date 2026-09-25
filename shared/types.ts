@@ -2,6 +2,63 @@
 // SHARED TYPES — used by both main and renderer process
 // ==================================================
 
+// ─── Retention Engine Types ──────────────────────────────────────────────────
+// Added for the Retention Engine upgrade — all optional, backward compatible
+
+/** Open loop (Zeigarnik effect): a teaser opened at one scene, paid off at another */
+export interface OpenLoop {
+  id: string
+  type: 'cold_open_tease' | 'mid_chapter_question' | 'teased_info'
+  teaserText: string           // The teaser sentence injected at openedAtSceneId
+  openedAtSceneId: string
+  payoffSceneId: string        // The scene that "closes" the loop
+  payoffText?: string
+}
+
+/** Recurring visual/narrative element that creates continuity across scenes */
+export interface Motif {
+  id: string
+  label: string                // e.g. "the pocket watch", "Harold the farmer"
+  firstSeenSceneId: string
+  recurringSceneIds: string[]
+  preferredAssetId?: string    // Stock asset ID to reuse for visual consistency
+}
+
+/** Output of the Retention QA Pass — a lint-like warning for the editor */
+export interface RetentionFlag {
+  sceneId: string
+  severity: 'low' | 'medium' | 'high'
+  issue: string                // e.g. "3 consecutive minutes without shot type change"
+  suggestion: string           // Specific, actionable fix suggestion
+}
+
+/** Pacing issue detected by the algorithmic pacing-guard module */
+export interface PacingIssue {
+  sceneId: string
+  accumulatedMonotoneSeconds: number
+  suggestion: 'insert_broll' | 'insert_text_overlay' | 'vary_shot_type'
+  affectedField: 'energyLevel' | 'shotType' | 'both'
+}
+
+/** Cold open: a sneak-peek of the most compelling scenes shown before Chapter 1 */
+export interface ColdOpen {
+  sourceSceneIds: string[]     // Scene IDs to extract into the cold open
+  reasoning?: string
+  scriptOverlayText?: string   // Short text to overlay (e.g. "What really happened?")
+}
+
+/** Script Doctor result: revised script proposal, must be reviewed before use */
+export interface ScriptDoctorResult {
+  revisedScript: string
+  openLoopsInjected: Array<{
+    teaserText: string
+    approxPosition: string
+    suggestedPayoffPosition: string
+  }>
+  changesSummary: string
+  generatedAt: string
+}
+
 export type ProjectStatus =
   | 'NEW'
   | 'ANALYZING_AUDIO'
@@ -105,6 +162,16 @@ export interface ScanResult {
   sfx: MediaItem[]
   errors: Array<{ path: string; error: string }>
 }
+
+// ─── Extended Scene Plan (Retention Engine fields) ───────────────────────────
+// NOTE: ScenePlan lives in planner.ts (Main) and PlanningPage.tsx (Renderer).
+// These shared types are re-exported so both sides can use them without duplication.
+
+/** Energy level of a scene — used by pacing-guard and audio intensity decisions */
+export type SceneEnergyLevel = 'low' | 'medium' | 'high'
+
+/** Shot type — used by pattern interrupt detection and stock query weighting */
+export type SceneShotType = 'wide' | 'medium' | 'close-up' | 'abstract'
 
 // ─── Global Script Context (Phase 1) ────────────────────────────────────────
 
@@ -492,8 +559,26 @@ export const IPC_CHANNELS = {
   AUDIO_APPROVE_SECTION: 'audio:approve-section',
   AUDIO_APPROVE_SFX: 'audio:approve-sfx',
   AUDIO_DOWNLOAD_APPROVED: 'audio:download-approved',
-  AUDIO_DOWNLOAD_PROGRESS: 'audio:download-progress'
+  AUDIO_DOWNLOAD_PROGRESS: 'audio:download-progress',
+
+  // Retention Engine — Script Doctor
+  SCRIPT_DOCTOR_RUN: 'script:doctor-run',
+
+  // Retention Engine — Retention QA Pass
+  RETENTION_QA_RUN: 'retention:qa-run',
+  RETENTION_QA_PROGRESS: 'retention:qa-progress'
 } as const
+
+// ─── Master Edit Plan Retention Extension ─────────────────────────────────────
+// Extends the MasterEditPlan (defined in planner.ts) with Retention Engine output.
+// All fields are optional so existing plan files load without migration.
+export interface MasterEditPlanRetentionExt {
+  openLoops?: OpenLoop[]
+  motifRegistry?: Motif[]
+  coldOpen?: ColdOpen
+  retentionFlags?: RetentionFlag[]
+  retentionQAAssessment?: string  // Overall assessment text from Gemini Retention QA
+}
 
 // ─── Transcript types (shared between main and renderer) ─────────────────────
 

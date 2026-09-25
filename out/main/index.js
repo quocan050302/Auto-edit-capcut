@@ -747,6 +747,164 @@ function registerTranscribeHandlers(ipcMain) {
     }
   );
 }
+const DEFAULT_CONFIG = {
+  maxMonotoneEnergySeconds: 150,
+  // 2.5 minutes — documentary standard
+  maxMonotoneShotSeconds: 90,
+  // 1.5 minutes — for shot variation
+  requireShotTypeVariety: true
+};
+function inferEnergyLevel(scene) {
+  const text = `${scene.narrativeText ?? ""} ${scene.visualIntent ?? ""}`.toLowerCase();
+  const highCues = [
+    "conflict",
+    "battle",
+    "crisis",
+    "explosion",
+    "urgent",
+    "reveal",
+    "shocking",
+    "protest",
+    "riot",
+    "disaster",
+    "fire",
+    "attack",
+    "death",
+    "murder",
+    "crash",
+    "breakthrough",
+    "victory",
+    "defeat",
+    "climax",
+    "confrontation"
+  ];
+  if (highCues.some((c) => text.includes(c))) return "high";
+  const lowCues = [
+    "peaceful",
+    "quiet",
+    "meditation",
+    "reflection",
+    "landscape",
+    "sunrise",
+    "slow",
+    "history",
+    "archive",
+    "document",
+    "explain",
+    "background",
+    "context",
+    "meanwhile",
+    "tradition",
+    "ceremony",
+    "ritual",
+    "daily life",
+    "routine"
+  ];
+  if (lowCues.some((c) => text.includes(c))) return "low";
+  return "medium";
+}
+function inferShotType(scene) {
+  const text = `${scene.visualIntent ?? ""} ${(scene.searchQueries ?? []).join(" ")}`.toLowerCase();
+  if (text.includes("close") || text.includes("portrait") || text.includes("face") || text.includes("detail") || text.includes("hand") || text.includes("eye")) {
+    return "close-up";
+  }
+  if (text.includes("aerial") || text.includes("wide") || text.includes("landscape") || text.includes("establishing") || text.includes("panorama") || text.includes("horizon")) {
+    return "wide";
+  }
+  if (text.includes("abstract") || text.includes("concept") || text.includes("metaphor") || text.includes("symbol") || text.includes("silhouette") || text.includes("blur")) {
+    return "abstract";
+  }
+  return "medium";
+}
+function nextShotType(current) {
+  const cycle = ["wide", "medium", "close-up", "abstract"];
+  const idx = cycle.indexOf(current);
+  return cycle[(idx + 1) % cycle.length];
+}
+function analyzePacing(scenes, config = {}) {
+  const cfg = { ...DEFAULT_CONFIG, ...config };
+  const issues = [];
+  for (const scene of scenes) {
+    if (!scene.energyLevel) {
+      scene.energyLevel = inferEnergyLevel(scene);
+    }
+    if (!scene.shotType) {
+      scene.shotType = inferShotType(scene);
+    }
+  }
+  logger.info(`[PacingGuard] Analyzing ${scenes.length} scenes for monotone stretches...`);
+  let energyRunSeconds = 0;
+  let currentEnergy = scenes[0]?.energyLevel ?? "medium";
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const sceneEnergy = scene.energyLevel;
+    if (sceneEnergy === currentEnergy) {
+      energyRunSeconds += scene.duration;
+      if (energyRunSeconds > cfg.maxMonotoneEnergySeconds) {
+        const suggestion = sceneEnergy === "low" ? "insert_broll" : "insert_text_overlay";
+        issues.push({
+          sceneId: String(scene.sceneIndex),
+          accumulatedMonotoneSeconds: Math.round(energyRunSeconds),
+          suggestion,
+          affectedField: "energyLevel"
+        });
+        logger.info(
+          `[PacingGuard] Monotone energy "${sceneEnergy}" for ${Math.round(energyRunSeconds)}s at scene ${scene.sceneIndex} → ${suggestion}`
+        );
+        scene.isPatternInterrupt = true;
+        energyRunSeconds = scene.duration;
+      }
+    } else {
+      currentEnergy = sceneEnergy;
+      energyRunSeconds = scene.duration;
+    }
+  }
+  if (cfg.requireShotTypeVariety) {
+    let shotRunSeconds = 0;
+    let currentShot = scenes[0]?.shotType ?? "medium";
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      const sceneShot = scene.shotType;
+      if (sceneShot === currentShot) {
+        shotRunSeconds += scene.duration;
+        if (shotRunSeconds > cfg.maxMonotoneShotSeconds) {
+          const suggestedNext = nextShotType(currentShot);
+          issues.push({
+            sceneId: String(scene.sceneIndex),
+            accumulatedMonotoneSeconds: Math.round(shotRunSeconds),
+            suggestion: "vary_shot_type",
+            affectedField: "shotType"
+          });
+          logger.info(
+            `[PacingGuard] Monotone shot "${currentShot}" for ${Math.round(shotRunSeconds)}s at scene ${scene.sceneIndex} → suggest "${suggestedNext}" next`
+          );
+          if (i + 1 < scenes.length) {
+            const nextScene = scenes[i + 1];
+            if (!nextScene.isPatternInterrupt) {
+              nextScene.shotType = suggestedNext;
+              nextScene.isPatternInterrupt = true;
+            }
+          }
+          shotRunSeconds = scene.duration;
+        }
+      } else {
+        currentShot = sceneShot;
+        shotRunSeconds = scene.duration;
+      }
+    }
+  }
+  const breakCount = scenes.filter((s) => s.isPatternInterrupt).length;
+  logger.info(
+    `[PacingGuard] Analysis complete: ${issues.length} issues found, ${breakCount} scenes annotated as pattern-interrupt candidates.`
+  );
+  return issues;
+}
+function flattenPlanScenes(plan) {
+  return plan.chapters.flatMap((ch) => {
+    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+    return seqs.flatMap((seq) => seq.scenes ?? []);
+  });
+}
 function buildPrompt(transcript, scriptText, mediaFiles) {
   const videoFiles = mediaFiles.filter((m) => m.type === "video");
   const imageFiles = mediaFiles.filter((m) => m.type === "image");
@@ -1071,6 +1229,21 @@ async function buildEditPlan(params) {
   );
   const totalScenes = allScenes.length;
   const totalDuration = transcript.duration;
+  progress("Running Pacing Guard analysis...", 0.88);
+  let pacingIssues = [];
+  try {
+    const flatScenes = flattenPlanScenes(planData);
+    pacingIssues = analyzePacing(flatScenes);
+    logger.info(`[PLAN] Pacing Guard: ${pacingIssues.length} issues found, scenes annotated in-place`);
+  } catch (pgErr) {
+    logger.warn(`[PLAN] Pacing Guard error (non-fatal): ${pgErr instanceof Error ? pgErr.message : String(pgErr)}`);
+  }
+  const initialFlags = pacingIssues.map((issue) => ({
+    sceneId: issue.sceneId,
+    severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
+    issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
+    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type to "${allScenes[Number(issue.sceneId) - 1]?.shotType ?? "wide"}" for visual variety`
+  }));
   const plan = {
     projectName,
     totalDuration,
@@ -1078,13 +1251,18 @@ async function buildEditPlan(params) {
     language: transcript.language,
     chapters: planData.chapters,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: finalModelUsed
+    modelUsed: finalModelUsed,
+    // Retention Engine fields — pacing-guard populates retentionFlags here;
+    // Gemini QA pass (runRetentionQAPass) will add/replace them with AI analysis.
+    openLoops: [],
+    motifRegistry: [],
+    retentionFlags: initialFlags
   };
   progress("Saving edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  logger.info("Edit plan saved", { chapters: plan.chapters.length, scenes: totalScenes });
-  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes`, 1);
+  logger.info("Edit plan saved", { chapters: plan.chapters.length, scenes: totalScenes, pacingIssues: pacingIssues.length });
+  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes, ${initialFlags.length} pacing flags`, 1);
   return plan;
 }
 const CONFIG_PATH = path.join(electron.app.getPath("userData"), "app-config.json");
