@@ -1,12 +1,19 @@
 /**
- * CaptionsPage.tsx
+ * CaptionsPage.tsx (UPGRADED)
  *
- * Trang quản lý Dynamic Kinetic Captions Engine:
- *  - Toggle bật/tắt toàn bộ captions
- *  - Timeline ngang hiển thị activeRanges theo màu
- *  - Click vào range → xem & sửa phrases bên trong
- *  - Preview render nhanh 5-10s
- *  - Nút "Tạo lại Caption Plan" (Gemini + fallback)
+ * Trang quản lý Dynamic Kinetic Captions Engine.
+ *
+ * FIX so với version cũ:
+ * 1. totalDuration từ sourceDuration thật, không từ max(activeRanges)
+ * 2. "Tạo lại Plan" thực sự regenerate (forceRegenerate: true)
+ * 3. Button labels rõ ràng hơn
+ * 4. Timeline có ruler tick marks
+ * 5. Summary có Coverage metrics + Hook Coverage
+ * 6. Fallback status badge rõ hơn (source, model)
+ * 7. Tooltip trên RangePill có đủ thông tin
+ * 8. Animation controls cho từng phrase (animationPreset, intensity, keyword)
+ * 9. Không crash nếu activeRanges rỗng
+ * 10. Generation badge (Gemini/Fallback)
  */
 
 import React, { useState, useEffect, useCallback } from 'react'
@@ -22,7 +29,20 @@ const EMPHASIS_COLORS: Record<CaptionEmphasis, { bg: string; text: string; label
   normal:          { bg: '#374151', text: '#f9fafb', label: '💬 Normal' }
 }
 
-// ─── Component: ActiveRange pill trên timeline ───────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+function fmtTime(secs: number): string {
+  const m = Math.floor(secs / 60)
+  const s = Math.floor(secs % 60)
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+function pct(n: number, total: number): string {
+  if (total <= 0) return '0%'
+  return ((n / total) * 100).toFixed(1) + '%'
+}
+
+// ─── Component: RangePill ────────────────────────────────────────────────────
 
 interface RangePillProps {
   range: CaptionActiveRange
@@ -34,12 +54,13 @@ interface RangePillProps {
 function RangePill({ range, totalDuration, isSelected, onClick }: RangePillProps): React.ReactElement {
   const colors = EMPHASIS_COLORS[range.reason]
   const leftPct = (range.startTime / totalDuration) * 100
-  const widthPct = Math.max(1, ((range.endTime - range.startTime) / totalDuration) * 100)
+  const widthPct = Math.max(0.5, ((range.endTime - range.startTime) / totalDuration) * 100)
+  const dur = (range.endTime - range.startTime).toFixed(1)
 
   return (
     <div
       onClick={onClick}
-      title={`${colors.label}: ${range.startTime.toFixed(1)}s – ${range.endTime.toFixed(1)}s`}
+      title={`${colors.label}\n${fmtTime(range.startTime)} → ${fmtTime(range.endTime)}\nDuration: ${dur}s`}
       style={{
         position: 'absolute',
         left: `${leftPct}%`,
@@ -57,6 +78,149 @@ function RangePill({ range, totalDuration, isSelected, onClick }: RangePillProps
         boxSizing: 'border-box'
       }}
     />
+  )
+}
+
+// ─── Component: Timeline Ruler ────────────────────────────────────────────────
+
+function TimelineRuler({ totalDuration }: { totalDuration: number }): React.ReactElement {
+  const ticks = [0, 0.25, 0.5, 0.75, 1]
+  return (
+    <div style={{ position: 'relative', height: 16, marginBottom: 2 }}>
+      {ticks.map(t => (
+        <div key={t} style={{
+          position: 'absolute',
+          left: `${t * 100}%`,
+          transform: 'translateX(-50%)',
+          fontSize: 10,
+          color: '#64748b',
+          whiteSpace: 'nowrap'
+        }}>
+          {fmtTime(t * totalDuration)}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// ─── Component: AnimationControls ─────────────────────────────────────────────
+
+interface AnimationControlsProps {
+  phrase: CaptionPhrase
+  onUpdate: (phraseId: string, updates: Partial<CaptionPhrase>) => void
+}
+
+const ANIMATION_PRESETS = [
+  { value: undefined, label: 'Auto' },
+  { value: 'smooth_kinetic', label: 'Smooth' },
+  { value: 'punch', label: 'Punch' },
+  { value: 'swipe_reveal', label: 'Swipe' },
+  { value: 'blur_focus', label: 'Blur' },
+  { value: 'impact_keyword', label: 'Impact' },
+  { value: 'type_pop', label: 'Pop' },
+] as const
+
+const INTENSITIES = [
+  { value: undefined, label: 'Auto' },
+  { value: 'subtle', label: 'Subtle' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'strong', label: 'Strong' },
+] as const
+
+const KEYWORD_EFFECTS = [
+  { value: undefined, label: 'Auto' },
+  { value: 'none', label: 'None' },
+  { value: 'spring', label: 'Spring' },
+  { value: 'impact', label: 'Impact' },
+  { value: 'highlight', label: 'Highlight' },
+] as const
+
+function AnimationControls({ phrase, onUpdate }: AnimationControlsProps): React.ReactElement {
+  const [open, setOpen] = useState(false)
+
+  function chipStyle(active: boolean): React.CSSProperties {
+    return {
+      padding: '2px 7px',
+      borderRadius: 8,
+      fontSize: 10,
+      border: '1px solid',
+      borderColor: active ? '#7c3aed' : 'rgba(255,255,255,0.15)',
+      background: active ? 'rgba(124,58,237,0.25)' : 'transparent',
+      color: active ? '#c4b5fd' : '#94a3b8',
+      cursor: 'pointer',
+    }
+  }
+
+  return (
+    <div style={{ marginTop: 4 }}>
+      <button
+        onClick={() => setOpen(!open)}
+        style={{
+          fontSize: 10,
+          padding: '2px 8px',
+          borderRadius: 6,
+          border: '1px solid rgba(255,255,255,0.15)',
+          background: 'transparent',
+          color: '#94a3b8',
+          cursor: 'pointer',
+        }}
+      >
+        🎞 Animation {open ? '▲' : '▼'}
+        {phrase.animationPreset && <span style={{ color: '#c4b5fd', marginLeft: 4 }}>● {phrase.animationPreset}</span>}
+      </button>
+
+      {open && (
+        <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {/* Preset row */}
+          <div>
+            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3 }}>PRESET</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3 }}>
+              {ANIMATION_PRESETS.map(p => (
+                <button
+                  key={String(p.value)}
+                  style={chipStyle(phrase.animationPreset === p.value)}
+                  onClick={() => onUpdate(phrase.id, { animationPreset: p.value as CaptionPhrase['animationPreset'] })}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Intensity row */}
+          <div>
+            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3 }}>INTENSITY</div>
+            <div style={{ display: 'flex', gap: 3 }}>
+              {INTENSITIES.map(p => (
+                <button
+                  key={String(p.value)}
+                  style={chipStyle(phrase.animationIntensity === p.value)}
+                  onClick={() => onUpdate(phrase.id, { animationIntensity: p.value as CaptionPhrase['animationIntensity'] })}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Keyword effect row */}
+          <div>
+            <div style={{ fontSize: 9, color: '#64748b', marginBottom: 3 }}>KEYWORD</div>
+            <div style={{ display: 'flex', gap: 3 }}>
+              {KEYWORD_EFFECTS.map(p => (
+                <button
+                  key={String(p.value)}
+                  style={chipStyle(phrase.keywordAnimation === p.value)}
+                  onClick={() => onUpdate(phrase.id, { keywordAnimation: p.value as CaptionPhrase['keywordAnimation'] })}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -179,6 +343,9 @@ function PhraseCard({ phrase, projectDir: _projectDir, onUpdate }: PhraseCardPro
           ★ Highlight: {phrase.highlightWords!.join(', ')}
         </div>
       )}
+
+      {/* Animation controls */}
+      <AnimationControls phrase={phrase} onUpdate={onUpdate} />
     </div>
   )
 }
@@ -231,17 +398,21 @@ interface CaptionsPageProps {
 export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElement {
   const [plan, setPlan] = useState<CaptionPlan | null>(null)
   const [loading, setLoading] = useState(false)
+  const [previewLoading, setPreviewLoading] = useState(false)
   const [progress, setProgress] = useState<{ message: string; pct: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [selectedRangeIdx, setSelectedRangeIdx] = useState<number | null>(null)
   const [previewPath, setPreviewPath] = useState<string | null>(null)
 
-  // Tổng duration ước tính từ range cuối cùng
+  // ── Duration: dùng sourceDuration từ plan nếu có, fallback an toàn ─────────
   const totalDuration = plan
-    ? Math.max(...plan.activeRanges.map(r => r.endTime), 60)
+    ? (plan.sourceDuration ??
+       (plan.activeRanges.length > 0
+         ? Math.max(...plan.activeRanges.map(r => r.endTime), 60)
+         : 120))
     : 120
 
-  // Load plan lúc mount
+  // Load plan lúc mount (KHÔNG regenerate — chỉ load nếu file tồn tại)
   useEffect(() => {
     let unsubProgress: (() => void) | null = null
 
@@ -253,23 +424,44 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
       } catch { /* chưa có plan */ }
     }
 
-    // Subscribe progress
     unsubProgress = window.api.captions.onProgress(data => {
       setProgress({ message: data.message, pct: data.progress })
     })
 
     load()
-
     return () => { unsubProgress?.() }
   }, [projectDir])
 
-  // Generate plan
-  const handleGenerate = useCallback(async (force = false) => {
+  // "Tạo lại Plan" → THỰC SỰ regenerate (forceRegenerate: true)
+  const handleRegenerate = useCallback(async () => {
     setLoading(true)
     setError(null)
     setProgress(null)
     try {
-      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: force })
+      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: true })
+      if (res.success && res.plan) {
+        setPlan(res.plan)
+        setSelectedRangeIdx(null)
+        setPreviewPath(null)
+      } else {
+        setError(res.error ?? 'Không thể tạo caption plan')
+        // Giữ plan cũ — không set null
+      }
+    } catch (e) {
+      setError('Regenerate thất bại — vẫn giữ plan trước đó: ' + String(e))
+    } finally {
+      setLoading(false)
+      setProgress(null)
+    }
+  }, [projectDir])
+
+  // "Tạo mới lần đầu" → load cache nếu có (forceRegenerate: false)
+  const handleGenerateFirst = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    setProgress(null)
+    try {
+      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: false })
       if (res.success && res.plan) {
         setPlan(res.plan)
       } else {
@@ -293,7 +485,7 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
   const handleToggleEnabled = useCallback(async (enabled: boolean) => {
     const res = await window.api.captions.toggleRange({ projectDir, rangeIndex: -1, enabled: true, captionEnabled: enabled })
     if (res.success && res.plan) setPlan(res.plan)
-    else if (plan) setPlan({ ...plan, enabled })  // optimistic update
+    else if (plan) setPlan({ ...plan, enabled })
   }, [projectDir, plan])
 
   // Regenerate ASS
@@ -306,14 +498,14 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
 
   // Preview render
   const handlePreview = useCallback(async (range: CaptionActiveRange) => {
-    setLoading(true)
+    setPreviewLoading(true)
     setError(null)
     const res = await window.api.captions.previewRender({
       projectDir,
       startTime: range.startTime,
       endTime: Math.min(range.endTime, range.startTime + 12)
     })
-    setLoading(false)
+    setPreviewLoading(false)
     if (res.success && res.previewPath) {
       setPreviewPath(res.previewPath)
     } else {
@@ -328,6 +520,29 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
         p.startTime >= selectedRange.startTime && p.endTime <= selectedRange.endTime + 1
       )
     : []
+
+  // ── Coverage metrics ──────────────────────────────────────────────────────
+  const captionTimeSecs = plan?.activeRanges.reduce((a, r) => a + r.endTime - r.startTime, 0) ?? 0
+  const hookWindowSecs = plan?.hookWindowSeconds ?? 30
+  const hookRange = plan?.activeRanges.find(r => r.reason === 'hook')
+  const hookCoveredSecs = hookRange ? (hookRange.endTime - hookRange.startTime) : 0
+  const hookTargetSecs = Math.min(hookWindowSecs, totalDuration)
+
+  // ── Generation badge ──────────────────────────────────────────────────────
+  const isGemini = plan?.generationSource === 'gemini' || (!plan?.generatedByFallback && plan?.generationSource === undefined && plan?.generatedAt)
+  const genLabel = plan?.generationSource === 'gemini'
+    ? `🤖 Gemini${plan.generationModel ? ` (${plan.generationModel.replace('gemini-', '')})` : ''}`
+    : plan?.generatedByFallback || plan?.generationSource === 'fallback'
+    ? '⚙ Fallback'
+    : null
+
+  // ── Emphasis breakdown ────────────────────────────────────────────────────
+  const emphasisCount = plan ? Object.fromEntries(
+    (['hook', 'list_transition', 'shock_stat', 'punchline', 'normal'] as CaptionEmphasis[]).map(k => [
+      k,
+      plan.phrases.filter(p => p.emphasisType === k).length
+    ])
+  ) : {}
 
   return (
     <div style={{
@@ -405,21 +620,25 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
 
       {/* Action buttons */}
       <div style={{ display: 'flex', gap: 10, marginBottom: 24, flexWrap: 'wrap' }}>
-        <button
-          onClick={() => handleGenerate(false)}
-          disabled={loading}
-          style={{ ...btnStyle, background: loading ? '#374151' : '#7c3aed', opacity: loading ? 0.6 : 1 }}
-        >
-          {loading ? '⏳ Đang xử lý...' : plan ? '🔄 Tạo lại Plan' : '✨ Tạo Caption Plan'}
-        </button>
-        {plan && (
+        {!plan ? (
+          /* Lần đầu — load cache hoặc generate */
+          <button
+            onClick={handleGenerateFirst}
+            disabled={loading}
+            style={{ ...btnStyle, background: loading ? '#374151' : '#7c3aed', opacity: loading ? 0.6 : 1 }}
+          >
+            {loading ? '⏳ Đang xử lý...' : '✨ Tạo Caption Plan'}
+          </button>
+        ) : (
           <>
+            {/* "Tạo lại Plan" → THỰC SỰ regenerate */}
             <button
-              onClick={() => handleGenerate(true)}
+              onClick={handleRegenerate}
               disabled={loading}
-              style={{ ...btnStyle, background: '#0369a1', opacity: loading ? 0.6 : 1 }}
+              title="Chạy lại planner — bỏ qua cache. Dùng Gemini nếu có API key, fallback nếu không."
+              style={{ ...btnStyle, background: loading ? '#374151' : '#7c3aed', opacity: loading ? 0.6 : 1 }}
             >
-              🔄 Force Regenerate (Gemini)
+              {loading ? '⏳ Đang xử lý...' : '🔄 Tạo lại Plan'}
             </button>
             <button
               onClick={handleRegenerateAss}
@@ -440,24 +659,71 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
           borderRadius: 10,
           padding: '14px 18px',
           marginBottom: 20,
-          display: 'flex',
-          gap: 24,
-          flexWrap: 'wrap'
         }}>
-          <Stat label="Phrases" value={plan.phrases.length} />
-          <Stat label="Active Ranges" value={plan.activeRanges.length} />
-          <Stat label="Tổng thời gian BẬT" value={`${plan.activeRanges.reduce((a, r) => a + r.endTime - r.startTime, 0).toFixed(0)}s`} />
-          {plan.generatedByFallback && (
-            <div style={{ fontSize: 11, color: '#fbbf24', padding: '2px 8px', background: 'rgba(251,191,36,0.1)', borderRadius: 4, alignSelf: 'center' }}>
-              ⚠️ Fallback — chưa qua Gemini
+          {/* Row 1: metrics */}
+          <div style={{ display: 'flex', gap: 20, flexWrap: 'wrap', marginBottom: 12 }}>
+            <Stat label="Phrases" value={plan.phrases.length} />
+            <Stat label="Active Ranges" value={plan.activeRanges.length} />
+            <Stat label="Caption Time" value={`${captionTimeSecs.toFixed(0)}s`} />
+            <Stat
+              label="Coverage"
+              value={`${pct(captionTimeSecs, totalDuration)}`}
+              sub={`${captionTimeSecs.toFixed(0)}s / ${totalDuration.toFixed(0)}s`}
+            />
+            <Stat
+              label="Hook Coverage"
+              value={`${pct(hookCoveredSecs, hookTargetSecs)}`}
+              sub={`${hookCoveredSecs.toFixed(0)}s / ${hookTargetSecs.toFixed(0)}s`}
+              highlight={hookCoveredSecs >= hookTargetSecs - 0.5}
+            />
+          </div>
+
+          {/* Row 2: generation badge + emphasis breakdown */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            {/* Generation badge */}
+            {genLabel && (
+              <div style={{
+                fontSize: 11,
+                padding: '3px 10px',
+                borderRadius: 6,
+                background: isGemini ? 'rgba(37,99,235,0.15)' : 'rgba(251,191,36,0.12)',
+                border: `1px solid ${isGemini ? 'rgba(96,165,250,0.3)' : 'rgba(251,191,36,0.3)'}`,
+                color: isGemini ? '#93c5fd' : '#fbbf24',
+              }}>
+                {genLabel}
+              </div>
+            )}
+            {/* Fallback reason if any */}
+            {plan.generationReason && plan.generationSource === 'fallback' && (
+              <div style={{ fontSize: 11, color: '#9ca3af' }}>
+                {plan.generationReason.includes('No API') ? 'No API key' :
+                 plan.generationReason.includes('Quota') ? 'Quota exhausted' :
+                 plan.generationReason.includes('unavailable') ? 'Model unavailable' :
+                 'Local algorithm'}
+              </div>
+            )}
+            {/* Emphasis breakdown */}
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              {Object.entries(emphasisCount).filter(([, c]) => (c as number) > 0).map(([key, count]) => {
+                const c = EMPHASIS_COLORS[key as CaptionEmphasis]
+                return (
+                  <span key={key} style={{
+                    fontSize: 10, padding: '2px 7px', borderRadius: 8,
+                    background: `${c.bg}33`, color: c.text,
+                    border: `1px solid ${c.bg}55`
+                  }}>
+                    {c.label.split(' ')[1]} {count as number}
+                  </span>
+                )
+              })}
             </div>
-          )}
+          </div>
         </div>
       )}
 
       {/* Legend */}
       {plan && (
-        <div style={{ display: 'flex', gap: 10, marginBottom: 10, flexWrap: 'wrap' }}>
+        <div style={{ display: 'flex', gap: 10, marginBottom: 8, flexWrap: 'wrap' }}>
           {(Object.entries(EMPHASIS_COLORS) as Array<[CaptionEmphasis, typeof EMPHASIS_COLORS[CaptionEmphasis]]>).map(([key, c]) => (
             <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 12 }}>
               <div style={{ width: 12, height: 12, borderRadius: 2, background: c.bg }} />
@@ -469,6 +735,11 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
             <span style={{ color: '#94a3b8' }}>Tắt</span>
           </div>
         </div>
+      )}
+
+      {/* Timeline ruler */}
+      {plan && totalDuration > 0 && (
+        <TimelineRuler totalDuration={totalDuration} />
       )}
 
       {/* Timeline */}
@@ -494,7 +765,11 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
               onClick={() => setSelectedRangeIdx(selectedRangeIdx === idx ? null : idx)}
             />
           ))}
-          {/* Thước thời gian */}
+          {plan.activeRanges.length === 0 && (
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, color: '#475569' }}>
+              Không có active ranges
+            </div>
+          )}
           <div style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: 1, background: 'rgba(255,255,255,0.05)' }} />
         </div>
       )}
@@ -521,16 +796,23 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
                 {EMPHASIS_COLORS[selectedRange.reason].label}
               </span>
               <span style={{ fontSize: 13, color: '#94a3b8' }}>
-                {selectedRange.startTime.toFixed(1)}s – {selectedRange.endTime.toFixed(1)}s
+                {fmtTime(selectedRange.startTime)} – {fmtTime(selectedRange.endTime)}
+                &nbsp;•&nbsp;{(selectedRange.endTime - selectedRange.startTime).toFixed(1)}s
                 &nbsp;•&nbsp;{phrasesInRange.length} phrases
               </span>
             </div>
             <button
               onClick={() => handlePreview(selectedRange)}
-              disabled={loading}
-              style={{ ...btnStyle, background: '#b45309', padding: '6px 14px', fontSize: 12, opacity: loading ? 0.6 : 1 }}
+              disabled={previewLoading || loading}
+              style={{
+                ...btnStyle,
+                background: previewLoading ? '#374151' : '#b45309',
+                padding: '6px 14px',
+                fontSize: 12,
+                opacity: (previewLoading || loading) ? 0.6 : 1
+              }}
             >
-              👁 Xem trước đoạn này
+              {previewLoading ? '⏳ Đang render...' : '👁 Xem trước đoạn này'}
             </button>
           </div>
 
@@ -557,14 +839,20 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
           background: 'rgba(255,255,255,0.04)',
           border: '1px solid rgba(255,255,255,0.1)',
           borderRadius: 10,
-          padding: 18
+          padding: 18,
+          marginBottom: 24
         }}>
           <div style={{ fontSize: 13, color: '#86efac', marginBottom: 10 }}>
             ✅ Preview đã render: <code style={{ fontSize: 11 }}>{previewPath}</code>
           </div>
+          <video
+            src={`file://${previewPath}`}
+            controls
+            style={{ width: '100%', maxHeight: 240, borderRadius: 6, background: '#000' }}
+          />
           <button
             onClick={() => setPreviewPath(null)}
-            style={{ ...btnStyle, background: '#374151', fontSize: 12 }}
+            style={{ ...btnStyle, background: '#374151', fontSize: 12, marginTop: 10 }}
           >
             ✕ Đóng
           </button>
@@ -599,10 +887,16 @@ export function CaptionsPage({ projectDir }: CaptionsPageProps): React.ReactElem
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-function Stat({ label, value }: { label: string; value: string | number }): React.ReactElement {
+function Stat({ label, value, sub, highlight }: {
+  label: string
+  value: string | number
+  sub?: string
+  highlight?: boolean
+}): React.ReactElement {
   return (
-    <div style={{ textAlign: 'center' }}>
-      <div style={{ fontSize: 20, fontWeight: 800, color: '#f8fafc' }}>{value}</div>
+    <div style={{ textAlign: 'center', minWidth: 60 }}>
+      <div style={{ fontSize: 18, fontWeight: 800, color: highlight ? '#86efac' : '#f8fafc' }}>{value}</div>
+      {sub && <div style={{ fontSize: 10, color: '#64748b', marginTop: 1 }}>{sub}</div>}
       <div style={{ fontSize: 11, color: '#94a3b8', marginTop: 2 }}>{label}</div>
     </div>
   )

@@ -683,6 +683,12 @@ export interface CaptionPlan {
   enabled: boolean
   activeRanges: CaptionActiveRange[]  // các khoảng thời gian caption được BẬT
   phrases: CaptionPhrase[]             // rỗng ngoài activeRanges
-  generatedByFallback?: boolean        // true nếu dùng thuật toán thay vì Gemini
+  generatedByFallback?: boolean        // true nếu dùng thuật toán thay vì Gemini (backward compat)
   generatedAt?: string
+  // ── Optional metadata (new — backward compatible) ─────────────────────────
+  generationSource?: 'gemini' | 'fallback'   // nguồn generation
+  generationModel?: string                    // Gemini model đã dùng
+  generationReason?: string                   // lý do fallback nếu có
+  hookWindowSeconds?: number                  // hook window đã dùng khi generate
+  sourceDuration?: number                     // transcript.duration — dùng cho timeline UI
 }

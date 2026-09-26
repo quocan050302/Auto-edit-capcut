@@ -42,45 +42,56 @@ interface SceneRef {
 const SHOCK_STAT_REGEX = /\d+%|\$\d[\d,.]*|\d+[\d,.]* (năm|ngày|giờ|tháng|người|triệu|tỷ|billion|million|thousand|dollars|years|days)/i
 
 /**
- * Nhóm words[] thành cụm 2-4 từ theo khoảng thời gian.
- * Không nhóm qua dấu ngắt câu lớn (khoảng cách > 0.6s = nghỉ tự nhiên).
+ * Hook window: first N seconds always have caption ON, maximum retention.
+ * Used in both fallback algorithm AND Gemini prompt — must be the same value.
+ */
+export const HOOK_WINDOW_SECONDS = 30
+
+// ─── Fallback thuật toán ─────────────────────────────────────────────────────────────
+
+const SENTENCE_END_REGEX = /[.!?]$/
+const PHRASE_BREAK_REGEX = /[,;:]$/
+const MIN_PAUSE_FOR_SPLIT = 0.5  // giây
+const MAX_WORDS_PER_PHRASE = 5
+const DEFAULT_WORDS_PER_PHRASE = 3
+
+/**
+ * Nhóm words[] thành phrases theo pause, punctuation và readability.
+ *
+ * Rules (theo thứ tự ưu tiên):
+ * 1. Kết thúc câu (.!?) → luôn split
+ * 2. Pause > MIN_PAUSE_FOR_SPLIT → split
+ * 3. Dấu phẩy/chấm phẩy → split nếu đã >= 2 words
+ * 4. Max MAX_WORDS_PER_PHRASE words → force split
+ *
+ * KHÔNG rewrite text, KHÔNG bịa timestamp.
  */
 function groupWordsIntoPhrases(
   words: TranscriptWord[],
   sceneId: string,
-  emphasisType: CaptionEmphasis,
-  chunkSize: number = 3
+  emphasisType: CaptionEmphasis
 ): CaptionPhrase[] {
   const phrases: CaptionPhrase[] = []
-  let i = 0
+  if (words.length === 0) return phrases
+
   let phraseIndex = 0
+  let currentChunk: TranscriptWord[] = []
 
-  while (i < words.length) {
-    // Lấy chunk 2-4 từ
-    const chunk = words.slice(i, i + chunkSize)
-    if (chunk.length === 0) break
+  const commitChunk = () => {
+    if (currentChunk.length === 0) return
 
-    const text = chunk.map(w => w.word).join(' ').trim()
-    if (!text) { i += chunkSize; continue }
+    const text = currentChunk.map(w => w.word).join(' ').trim()
+    if (!text) { currentChunk = []; return }
 
-    const startTime = chunk[0].start
-    const endTime = chunk[chunk.length - 1].end
-
-    // Tìm highlight words: từ nào là số liệu hoặc từ khóa
     const highlightWords: string[] = []
-    for (const w of chunk) {
-      if (SHOCK_STAT_REGEX.test(w.word)) {
-        highlightWords.push(w.word)
-      }
+    for (const w of currentChunk) {
+      if (SHOCK_STAT_REGEX.test(w.word)) highlightWords.push(w.word)
     }
 
-    // Style mặc định: sans_bold_caps, trừ punchline dùng serif_italic
     const fontPreset = emphasisType === 'punchline' ? 'serif_italic' : 'sans_bold_caps'
     const baseColor = fontPreset === 'serif_italic' ? 'yellow_pale' : 'white'
     const boxHighlight = emphasisType === 'shock_stat' && highlightWords.length > 0
     const skew = emphasisType === 'list_transition'
-
-    // Gán presetType mặc định theo emphasisType (cho Remotion overlay)
     const presetType =
       emphasisType === 'hook' || emphasisType === 'punchline' ? 'big_statement' :
       emphasisType === 'list_transition' ? 'news_chyron' :
@@ -91,26 +102,39 @@ function groupWordsIntoPhrases(
       id: `cap_${sceneId}_${String(phraseIndex).padStart(3, '0')}`,
       sceneId,
       text,
-      startTime,
-      endTime,
+      startTime: currentChunk[0].start,
+      endTime: currentChunk[currentChunk.length - 1].end,
       emphasisType,
       highlightWords,
       presetType,
       style: { fontPreset, boxHighlight, skew, baseColor }
     })
-
     phraseIndex++
-
-    // Nếu khoảng cách giữa từ cuối chunk và từ tiếp theo > 0.6s → break chunk tự nhiên
-    const nextWord = words[i + chunkSize]
-    if (nextWord && nextWord.start - endTime > 0.6) {
-      i += chunkSize
-      continue
-    }
-
-    i += chunkSize
+    currentChunk = []
   }
 
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i]
+    const nextWord = words[i + 1]
+
+    currentChunk.push(word)
+
+    const hasSentenceEnd = SENTENCE_END_REGEX.test(word.word)
+    const hasPhraseBreak = PHRASE_BREAK_REGEX.test(word.word)
+    const pauseToNext = nextWord ? nextWord.start - word.end : 999
+    const atMaxWords = currentChunk.length >= MAX_WORDS_PER_PHRASE
+    const atDefaultWords = currentChunk.length >= DEFAULT_WORDS_PER_PHRASE
+    const isLast = !nextWord
+
+    if (isLast || hasSentenceEnd || pauseToNext >= MIN_PAUSE_FOR_SPLIT ||
+        (hasPhraseBreak && currentChunk.length >= 2) ||
+        atMaxWords ||
+        (atDefaultWords && pauseToNext >= 0.25)) {
+      commitChunk()
+    }
+  }
+
+  commitChunk()  // flush any remaining
   return phrases
 }
 
@@ -128,8 +152,8 @@ function buildFallbackCaptionPlan(
   const activeRanges: CaptionActiveRange[] = []
   const phrases: CaptionPhrase[] = []
 
-  // Luôn có hook ở 0-25s đầu
-  const hookEnd = Math.min(25, transcript.duration)
+  // Luôn có hook ở 0-HOOK_WINDOW_SECONDS đầu
+  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, transcript.duration)
   activeRanges.push({ startTime: 0, endTime: hookEnd, reason: 'hook' })
 
   // Thêm list_transition ở đầu mỗi chapter (scene đầu tiên của chapter)
@@ -181,6 +205,10 @@ function buildFallbackCaptionPlan(
     activeRanges,
     phrases,
     generatedByFallback: true,
+    generationSource: 'fallback',
+    generationReason: 'No Gemini API key or all Gemini models unavailable',
+    hookWindowSeconds: HOOK_WINDOW_SECONDS,
+    sourceDuration: transcript.duration,
     generatedAt: new Date().toISOString()
   }
 }
@@ -367,12 +395,20 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
       const rawJson = response.text ?? ''
       const parsed = JSON.parse(rawJson) as CaptionPlan
       parsed.generatedByFallback = false
+      parsed.generationSource = 'gemini'
+      parsed.generationModel = currentModel
+      parsed.hookWindowSeconds = HOOK_WINDOW_SECONDS
+      parsed.sourceDuration = transcript.duration
       parsed.generatedAt = new Date().toISOString()
 
       // Validate tối thiểu
       if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
         throw new Error('Response JSON thiếu phrases hoặc activeRanges')
       }
+
+      // Sanitize: clamp timestamps, dedup IDs, sort, ensure hook range
+      progress('Đang validate kết quả Gemini...', 0.60 + attempt * 0.05)
+      sanitizePlan(parsed, transcript.duration)
 
       plan = parsed
       logger.info(`[CaptionPlanner] Gemini thành công với model ${currentModel}, ${plan.phrases.length} phrases`)
@@ -388,15 +424,74 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
     plan = buildFallbackCaptionPlan(transcript, scenes)
   }
 
-  // Lưu file
+  // Lưu file (atomic: write temp then rename để tránh corrupt)
   progress('Đang lưu caption-plan.json...', 0.90)
   fs.mkdirSync(path.join(projectDir, 'analysis'), { recursive: true })
-  fs.writeFileSync(captionPlanPath, JSON.stringify(plan, null, 2), 'utf-8')
+  const tmpPath = captionPlanPath + '.tmp'
+  fs.writeFileSync(tmpPath, JSON.stringify(plan, null, 2), 'utf-8')
+  fs.renameSync(tmpPath, captionPlanPath)
 
   logger.info(`[CaptionPlanner] Đã lưu ${plan.phrases.length} phrases vào caption-plan.json`)
   progress('Hoàn thành!', 1.0)
 
   return plan
+}
+
+// ─── Sanitize helper ──────────────────────────────────────────────────────────
+
+/**
+ * sanitizePlan — post-process plan sau Gemini:
+ * - Clamp timestamps vào [0, sourceDuration]
+ * - Dedup phrase IDs
+ * - Remove invalid ranges (endTime <= startTime)
+ * - Sort ranges và phrases theo startTime
+ * - Ensure hook range covers 0→min(HOOK_WINDOW_SECONDS, sourceDuration)
+ */
+function sanitizePlan(plan: CaptionPlan, sourceDuration: number): void {
+  const dur = sourceDuration
+
+  // 1. Clamp + deduplicate phrase IDs
+  const seenIds = new Set<string>()
+  let autoIdx = 0
+  for (const p of plan.phrases) {
+    p.startTime = Math.max(0, Math.min(p.startTime, dur))
+    p.endTime = Math.max(p.startTime + 0.1, Math.min(p.endTime, dur))
+    if (!p.id || seenIds.has(p.id)) {
+      p.id = `cap_${String(++autoIdx).padStart(4, '0')}`
+      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed → ${p.id}`)
+    }
+    seenIds.add(p.id)
+  }
+
+  // 2. Remove invalid ranges
+  const validRanges = plan.activeRanges.filter(r => {
+    const valid = r.endTime > r.startTime && r.startTime >= 0 && r.endTime <= dur + 1
+    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime}→${r.endTime}`)
+    return valid
+  })
+  plan.activeRanges = validRanges
+
+  // 3. Clamp range boundaries
+  for (const r of plan.activeRanges) {
+    r.startTime = Math.max(0, r.startTime)
+    r.endTime = Math.min(r.endTime, dur)
+  }
+
+  // 4. Sort
+  plan.activeRanges.sort((a, b) => a.startTime - b.startTime)
+  plan.phrases.sort((a, b) => a.startTime - b.startTime)
+
+  // 5. Ensure hook range covers 0→hookEnd
+  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, dur)
+  const hookRange = plan.activeRanges.find(r => r.reason === 'hook')
+  if (!hookRange) {
+    logger.warn('[CaptionPlanner] Gemini missing hook range — adding default 0→' + hookEnd)
+    plan.activeRanges.unshift({ startTime: 0, endTime: hookEnd, reason: 'hook' })
+    plan.activeRanges.sort((a, b) => a.startTime - b.startTime)
+  } else if (hookRange.endTime < hookEnd - 0.5) {
+    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s — extending to ${hookEnd}s`)
+    hookRange.endTime = hookEnd
+  }
 }
 
 /**

@@ -4831,25 +4831,27 @@ function registerAudioHandlers(ipcMain) {
   );
 }
 const SHOCK_STAT_REGEX = /\d+%|\$\d[\d,.]*|\d+[\d,.]* (năm|ngày|giờ|tháng|người|triệu|tỷ|billion|million|thousand|dollars|years|days)/i;
-function groupWordsIntoPhrases(words, sceneId, emphasisType, chunkSize = 3) {
+const HOOK_WINDOW_SECONDS = 30;
+const SENTENCE_END_REGEX = /[.!?]$/;
+const PHRASE_BREAK_REGEX = /[,;:]$/;
+const MIN_PAUSE_FOR_SPLIT = 0.5;
+const MAX_WORDS_PER_PHRASE = 5;
+const DEFAULT_WORDS_PER_PHRASE = 3;
+function groupWordsIntoPhrases(words, sceneId, emphasisType) {
   const phrases = [];
-  let i = 0;
+  if (words.length === 0) return phrases;
   let phraseIndex = 0;
-  while (i < words.length) {
-    const chunk = words.slice(i, i + chunkSize);
-    if (chunk.length === 0) break;
-    const text = chunk.map((w) => w.word).join(" ").trim();
+  let currentChunk = [];
+  const commitChunk = () => {
+    if (currentChunk.length === 0) return;
+    const text = currentChunk.map((w) => w.word).join(" ").trim();
     if (!text) {
-      i += chunkSize;
-      continue;
+      currentChunk = [];
+      return;
     }
-    const startTime = chunk[0].start;
-    const endTime = chunk[chunk.length - 1].end;
     const highlightWords = [];
-    for (const w of chunk) {
-      if (SHOCK_STAT_REGEX.test(w.word)) {
-        highlightWords.push(w.word);
-      }
+    for (const w of currentChunk) {
+      if (SHOCK_STAT_REGEX.test(w.word)) highlightWords.push(w.word);
     }
     const fontPreset = emphasisType === "punchline" ? "serif_italic" : "sans_bold_caps";
     const baseColor = fontPreset === "serif_italic" ? "yellow_pale" : "white";
@@ -4860,28 +4862,38 @@ function groupWordsIntoPhrases(words, sceneId, emphasisType, chunkSize = 3) {
       id: `cap_${sceneId}_${String(phraseIndex).padStart(3, "0")}`,
       sceneId,
       text,
-      startTime,
-      endTime,
+      startTime: currentChunk[0].start,
+      endTime: currentChunk[currentChunk.length - 1].end,
       emphasisType,
       highlightWords,
       presetType,
       style: { fontPreset, boxHighlight, skew, baseColor }
     });
     phraseIndex++;
-    const nextWord = words[i + chunkSize];
-    if (nextWord && nextWord.start - endTime > 0.6) {
-      i += chunkSize;
-      continue;
+    currentChunk = [];
+  };
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const nextWord = words[i + 1];
+    currentChunk.push(word);
+    const hasSentenceEnd = SENTENCE_END_REGEX.test(word.word);
+    const hasPhraseBreak = PHRASE_BREAK_REGEX.test(word.word);
+    const pauseToNext = nextWord ? nextWord.start - word.end : 999;
+    const atMaxWords = currentChunk.length >= MAX_WORDS_PER_PHRASE;
+    const atDefaultWords = currentChunk.length >= DEFAULT_WORDS_PER_PHRASE;
+    const isLast = !nextWord;
+    if (isLast || hasSentenceEnd || pauseToNext >= MIN_PAUSE_FOR_SPLIT || hasPhraseBreak && currentChunk.length >= 2 || atMaxWords || atDefaultWords && pauseToNext >= 0.25) {
+      commitChunk();
     }
-    i += chunkSize;
   }
+  commitChunk();
   return phrases;
 }
 function buildFallbackCaptionPlan(transcript, scenes) {
   logger.warn("[CaptionPlanner] Dùng fallback thuật toán — caption sẽ cơ bản, nên rà lại thủ công");
   const activeRanges = [];
   const phrases = [];
-  const hookEnd = Math.min(25, transcript.duration);
+  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, transcript.duration);
   activeRanges.push({ startTime: 0, endTime: hookEnd, reason: "hook" });
   const seenChapters = /* @__PURE__ */ new Set();
   for (const scene of scenes) {
@@ -4921,6 +4933,10 @@ function buildFallbackCaptionPlan(transcript, scenes) {
     activeRanges,
     phrases,
     generatedByFallback: true,
+    generationSource: "fallback",
+    generationReason: "No Gemini API key or all Gemini models unavailable",
+    hookWindowSeconds: HOOK_WINDOW_SECONDS,
+    sourceDuration: transcript.duration,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString()
   };
 }
@@ -5061,10 +5077,16 @@ async function generateCaptionPlan(params) {
       const rawJson = response.text ?? "";
       const parsed = JSON.parse(rawJson);
       parsed.generatedByFallback = false;
+      parsed.generationSource = "gemini";
+      parsed.generationModel = currentModel;
+      parsed.hookWindowSeconds = HOOK_WINDOW_SECONDS;
+      parsed.sourceDuration = transcript.duration;
       parsed.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
       if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
         throw new Error("Response JSON thiếu phrases hoặc activeRanges");
       }
+      progress("Đang validate kết quả Gemini...", 0.6 + attempt * 0.05);
+      sanitizePlan(parsed, transcript.duration);
       plan = parsed;
       logger.info(`[CaptionPlanner] Gemini thành công với model ${currentModel}, ${plan.phrases.length} phrases`);
       break;
@@ -5078,10 +5100,48 @@ async function generateCaptionPlan(params) {
   }
   progress("Đang lưu caption-plan.json...", 0.9);
   fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(captionPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+  const tmpPath = captionPlanPath + ".tmp";
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(plan, null, 2), "utf-8");
+  fs__namespace.renameSync(tmpPath, captionPlanPath);
   logger.info(`[CaptionPlanner] Đã lưu ${plan.phrases.length} phrases vào caption-plan.json`);
   progress("Hoàn thành!", 1);
   return plan;
+}
+function sanitizePlan(plan, sourceDuration) {
+  const dur = sourceDuration;
+  const seenIds = /* @__PURE__ */ new Set();
+  let autoIdx = 0;
+  for (const p of plan.phrases) {
+    p.startTime = Math.max(0, Math.min(p.startTime, dur));
+    p.endTime = Math.max(p.startTime + 0.1, Math.min(p.endTime, dur));
+    if (!p.id || seenIds.has(p.id)) {
+      p.id = `cap_${String(++autoIdx).padStart(4, "0")}`;
+      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed → ${p.id}`);
+    }
+    seenIds.add(p.id);
+  }
+  const validRanges = plan.activeRanges.filter((r) => {
+    const valid = r.endTime > r.startTime && r.startTime >= 0 && r.endTime <= dur + 1;
+    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime}→${r.endTime}`);
+    return valid;
+  });
+  plan.activeRanges = validRanges;
+  for (const r of plan.activeRanges) {
+    r.startTime = Math.max(0, r.startTime);
+    r.endTime = Math.min(r.endTime, dur);
+  }
+  plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
+  plan.phrases.sort((a, b) => a.startTime - b.startTime);
+  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, dur);
+  const hookRange = plan.activeRanges.find((r) => r.reason === "hook");
+  if (!hookRange) {
+    logger.warn("[CaptionPlanner] Gemini missing hook range — adding default 0→" + hookEnd);
+    plan.activeRanges.unshift({ startTime: 0, endTime: hookEnd, reason: "hook" });
+    plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
+  } else if (hookRange.endTime < hookEnd - 0.5) {
+    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s — extending to ${hookEnd}s`);
+    hookRange.endTime = hookEnd;
+  }
 }
 function loadCaptionPlan(projectDir) {
   const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
