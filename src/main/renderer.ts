@@ -5,6 +5,16 @@ import { spawn } from 'child_process'
 import { logger } from './logger'
 import { renderCaptionsOverlay } from './captions/remotion-renderer'
 import type { AudioPlan, CaptionPlan } from '../../shared/types'
+import {
+  resolveSceneRetention,
+  updateRetentionContext,
+  createDefaultContext,
+  type SceneRetentionInput
+} from './retention/retention-engine'
+import { cropToZoomFilter } from './retention/visual-beat-engine'
+import { runRetentionQA } from './retention/retention-qa'
+import type { RetentionSettings, VisualBeat } from './retention/retention-types'
+import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -118,6 +128,129 @@ function resolveSceneMedia(
 
 // ─── Main render function ─────────────────────────────────────────────────────
 
+/**
+ * renderVisualBeatsToClip — render nhiều visual beats thành một scene clip.
+ *
+ * Mỗi beat là một đoạn trim riêng từ cùng asset, với crop tùy chọn.
+ * Sau đó concat tất cả beats thành outClip.
+ *
+ * FALLBACK: nếu lỗi bất kỳ beat nào → render legacy single clip.
+ */
+async function renderVisualBeatsToClip(params: {
+  beats: VisualBeat[]
+  mediaPath: string
+  isImage: boolean
+  outClip: string
+  width: number
+  height: number
+  fps: number
+  scaleFilt: string
+  tmpDir: string
+  sceneIndex: number
+}): Promise<void> {
+  const { beats, mediaPath, isImage, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params
+
+  const beatClips: string[] = []
+
+  try {
+    for (let bi = 0; bi < beats.length; bi++) {
+      const beat = beats[bi]
+      const beatDuration = beat.relativeEnd - beat.relativeStart
+      const beatClip = path.join(tmpDir, `beat_${String(sceneIndex).padStart(4, '0')}_${bi}.mp4`)
+
+      // Compute video filter — base scale + optional crop
+      let vfFilter = scaleFilt
+      if (beat.crop && beat.crop.scale > 1.005) {
+        const zf = cropToZoomFilter(beat.crop, width, height, beatDuration, fps)
+        if (zf) vfFilter = `${scaleFilt},${zf}`
+      }
+
+      if (isImage) {
+        await ffmpegRun([
+          '-y', '-loop', '1', '-i', mediaPath,
+          '-vf', vfFilter,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+          '-t', String(beatDuration),
+          '-r', String(fps),
+          '-pix_fmt', 'yuv420p',
+          beatClip
+        ])
+      } else {
+        // Trim from asset — use ss for beat start offset (approximate)
+        const ssOffset = beat.relativeStart
+        await ffmpegRun([
+          '-y',
+          '-ss', String(ssOffset),
+          '-i', mediaPath,
+          '-vf', vfFilter,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+          '-t', String(beatDuration),
+          '-r', String(fps),
+          '-an',
+          '-pix_fmt', 'yuv420p',
+          beatClip
+        ])
+      }
+
+      beatClips.push(beatClip)
+    }
+
+    // Concat beats into scene clip
+    if (beatClips.length === 1) {
+      // Just rename
+      fs.renameSync(beatClips[0], outClip)
+    } else {
+      const beatConcatList = path.join(tmpDir, `beat_concat_${sceneIndex}.txt`)
+      fs.writeFileSync(
+        beatConcatList,
+        beatClips.map(f => `file '${process.platform === 'win32' ? f.replace(/\\/g, '/') : f}'`).join('\n'),
+        'utf-8'
+      )
+      await ffmpegRun([
+        '-y', '-f', 'concat', '-safe', '0',
+        '-i', beatConcatList,
+        '-c', 'copy',
+        outClip
+      ])
+      // Cleanup beat clips + concat list
+      try {
+        for (const bc of beatClips) fs.unlinkSync(bc)
+        fs.unlinkSync(beatConcatList)
+      } catch { /* ignore */ }
+    }
+
+    logger.info(`[RetentionEngine] scene ${sceneIndex}: ${beats.length} beats rendered and concatenated`)
+
+  } catch (err) {
+    logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${String(err)}), falling back to legacy`)
+
+    // Cleanup partial beat clips
+    for (const bc of beatClips) {
+      try { fs.unlinkSync(bc) } catch { /* ignore */ }
+    }
+
+    // FALLBACK: legacy single clip
+    const baseFilt = scaleFilt
+    if (isImage) {
+      await ffmpegRun([
+        '-y', '-loop', '1', '-i', mediaPath,
+        '-vf', baseFilt,
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+        '-t', String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        '-r', String(fps), '-pix_fmt', 'yuv420p', outClip
+      ])
+    } else {
+      await ffmpegRun([
+        '-y', '-i', mediaPath,
+        '-vf', baseFilt,
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+        '-t', String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        '-r', String(fps), '-an', '-pix_fmt', 'yuv420p', outClip
+      ])
+    }
+  }
+}
+
 export async function renderVideo(params: {
   projectDir: string
   voiceoverPath: string
@@ -174,6 +307,54 @@ export async function renderVideo(params: {
   const sceneClips: string[] = []
   const { width, height } = resolution
 
+  // ── Retention Engine setup ─────────────────────────────────────────────────
+  const retentionSettings: RetentionSettings = DEFAULT_RETENTION_SETTINGS
+  const retCtx = createDefaultContext()
+
+  // Pre-compute retention decisions for all scenes (sequential context tracking)
+  const retentionDecisions = new Map<number, import('./retention/retention-types').RetentionDecision>()
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i]
+    const sceneInput: SceneRetentionInput = {
+      sceneId: String(scene.sceneIndex),
+      sceneIndex: i,
+      duration: scene.duration,
+      energyLevel: (scene as any).energyLevel,
+      shotType: (scene as any).shotType,
+      narrativeText: (scene as any).narrativeText,
+      visualIntent: scene.visualIntent,
+      isPatternInterrupt: (scene as any).isPatternInterrupt,
+      localPath: scene.localPath,
+      isNewChapter: i === 0 || (scene as any).isFirstInChapter,
+    }
+    const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings)
+    retentionDecisions.set(i, decision)
+    updateRetentionContext(retCtx, sceneInput, decision)
+  }
+
+  // Run retention QA (flags only — does NOT block render)
+  try {
+    const qaScenes = scenes.map((s, i) => ({
+      sceneIndex: i,
+      sceneId: String(s.sceneIndex),
+      duration: s.duration,
+      energyLevel: (s as any).energyLevel,
+      shotType: (s as any).shotType,
+      narrativeText: (s as any).narrativeText,
+      visualIntent: s.visualIntent,
+      isPatternInterrupt: (s as any).isPatternInterrupt,
+      visualBeats: retentionDecisions.get(i)?.visualBeats,
+    }))
+    const qaFlags = runRetentionQA(qaScenes)
+    if (qaFlags.length > 0) {
+      const qaPath = path.join(projectDir, 'analysis', 'retention-qa.json')
+      fs.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), 'utf-8')
+      logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`)
+    }
+  } catch (err) {
+    logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`)
+  }
+
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i]
     const mediaName = scene.localPath
@@ -204,32 +385,63 @@ export async function renderVideo(params: {
       ])
     } else {
       const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === 'image'
-      if (isImage) {
-        // Image → loop for duration
-        await ffmpegRun([
-          '-y',
-          '-loop', '1',
-          '-i', mediaPath,
-          '-vf', scaleFilt,
-          '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-          '-t', String(scene.duration),
-          '-r', String(fps),
-          '-pix_fmt', 'yuv420p',
-          outClip
-        ])
+      const decision = retentionDecisions.get(i)
+      const beats = decision?.visualBeats ?? []
+      const hasMultipleBeats = beats.length > 1
+
+      if (hasMultipleBeats && retentionSettings.enabled) {
+        // ── ENHANCED: render visual beats then concat into scene clip ──────────
+        await renderVisualBeatsToClip({
+          beats,
+          mediaPath,
+          isImage,
+          outClip,
+          width,
+          height,
+          fps,
+          scaleFilt,
+          tmpDir,
+          sceneIndex: i,
+        })
       } else {
-        // Video → trim + scale
-        await ffmpegRun([
-          '-y',
-          '-i', mediaPath,
-          '-vf', scaleFilt,
-          '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-          '-t', String(scene.duration),
-          '-r', String(fps),
-          '-an',                // strip audio from source video (voiceover added later)
-          '-pix_fmt', 'yuv420p',
-          outClip
-        ])
+        // ── LEGACY: single clip render (unchanged behavior) ─────────────────
+        // Apply crop if single beat has semantic crop
+        const singleBeat = beats[0]
+        let vfFilter = scaleFilt
+        if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
+          const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps)
+          if (zf) {
+            // Apply scale first then zoompan
+            vfFilter = `${scaleFilt},${zf}`
+            logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`)
+          }
+        }
+
+        if (isImage) {
+          await ffmpegRun([
+            '-y',
+            '-loop', '1',
+            '-i', mediaPath,
+            '-vf', vfFilter,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+            '-t', String(scene.duration),
+            '-r', String(fps),
+            '-pix_fmt', 'yuv420p',
+            outClip
+          ])
+        } else {
+          await ffmpegRun([
+            '-y',
+            '-i', mediaPath,
+            '-vf', vfFilter,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+            '-t', String(scene.duration),
+            '-r', String(fps),
+            '-an',
+            '-pix_fmt', 'yuv420p',
+            outClip
+          ])
+        }
       }
     }
 

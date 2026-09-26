@@ -1405,6 +1405,436 @@ async function renderCaptionsOverlay(options) {
   });
   logger.info(`[RemotionRenderer] Overlay xong: ${outputPath}`);
 }
+const LEVEL_CONFIG = {
+  low: {
+    maxBeatsPerScene: 2,
+    minBeatDuration: 4,
+    maxBeatDuration: 10,
+    cropAllowed: true,
+    proofVisualAllowed: true,
+    patternInterruptCooldown: 45,
+    strongEffectCooldown: 30
+  },
+  balanced: {
+    maxBeatsPerScene: 3,
+    minBeatDuration: 2.5,
+    maxBeatDuration: 7,
+    cropAllowed: true,
+    proofVisualAllowed: true,
+    patternInterruptCooldown: 25,
+    strongEffectCooldown: 20
+  },
+  high: {
+    maxBeatsPerScene: 4,
+    minBeatDuration: 1.8,
+    maxBeatDuration: 5,
+    cropAllowed: true,
+    proofVisualAllowed: true,
+    patternInterruptCooldown: 15,
+    strongEffectCooldown: 12
+  }
+};
+const PROOF_PATTERNS = [
+  { type: "number_card", regex: /\$[\d,]+(\.\d+)?[kKmMbBtT]?/, label: "Dollar figure" },
+  { type: "stat_emphasis", regex: /\d+\.?\d*\s*%/, label: "Percentage" },
+  { type: "number_card", regex: /\d{1,3}(,\d{3})+/, label: "Large number" },
+  { type: "date_card", regex: /\b(1[0-9]{3}|20[0-9]{2})\b/, label: "Year" },
+  { type: "stat_emphasis", regex: /\b\d+\s*(million|billion|thousand|hundred)\b/i, label: "Big stat" }
+];
+function seedInt(sceneIndex, variant) {
+  return (sceneIndex * 2654435761 + variant * 40503 >>> 0) % 100;
+}
+function computeBeatDurations(sceneDuration, beatCount, sceneIndex, cfg) {
+  if (beatCount <= 1) return [sceneDuration];
+  const weights = [];
+  for (let i = 0; i < beatCount; i++) {
+    const seed = seedInt(sceneIndex, i);
+    weights.push(0.7 + seed / 100 * 0.6);
+  }
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const durations = weights.map((w) => {
+    const raw = w / totalWeight * sceneDuration;
+    return Math.max(cfg.minBeatDuration, Math.min(cfg.maxBeatDuration, raw));
+  });
+  const total = durations.reduce((a, b) => a + b, 0);
+  const ratio = sceneDuration / total;
+  return durations.map((d) => Math.round(d * ratio * 100) / 100);
+}
+function detectProofVisual(narrativeText, sceneId, relativeTime, durationSecs) {
+  for (const pattern of PROOF_PATTERNS) {
+    const match = narrativeText.match(pattern.regex);
+    if (match) {
+      return {
+        type: pattern.type,
+        primaryText: match[0].trim(),
+        subLabel: void 0,
+        // không tự bịa sub-label
+        sourceField: "narrativeText",
+        relativeTime,
+        durationSecs: Math.min(durationSecs, 2.5)
+      };
+    }
+  }
+  return null;
+}
+function computeSemanticCrop(visualIntent, sceneIndex, beatIndex) {
+  if (!visualIntent) return void 0;
+  const text = visualIntent.toLowerCase();
+  const hasClearSubject = text.includes("person") || text.includes("face") || text.includes("hand") || text.includes("worker") || text.includes("machine") || text.includes("farm") || text.includes("equipment") || text.includes("animal") || text.includes("detail") || text.includes("close") || text.includes("operator");
+  if (!hasClearSubject) return void 0;
+  const seed = seedInt(sceneIndex, beatIndex + 10);
+  const scale = 1.06 + seed / 100 * 0.09;
+  const roundedScale = Math.round(scale * 100) / 100;
+  const offsetSeed = seedInt(sceneIndex, beatIndex + 20);
+  const x = (offsetSeed / 100 - 0.5) * 0.08;
+  return { x, y: 0, scale: roundedScale };
+}
+function cropToZoomFilter(crop, width, height, duration, fps) {
+  if (!crop || crop.scale <= 1.005) return void 0;
+  const s = crop.scale;
+  const frames = Math.round(duration * fps);
+  const xExtraPixels = Math.round((s - 1) * width * 0.5 + crop.x * width * (s - 1));
+  const yExtraPixels = Math.round((s - 1) * height * 0.5 + crop.y * height * (s - 1));
+  const xClamp = Math.max(0, Math.min(Math.round((s - 1) * width), xExtraPixels));
+  const yClamp = Math.max(0, Math.min(Math.round((s - 1) * height), yExtraPixels));
+  return `zoompan=z='${s.toFixed(3)}':x='${xClamp}':y='${yClamp}':d=${frames}:s=${width}x${height}:fps=${fps}`;
+}
+function resolveVisualBeats(scene, ctx, level) {
+  const cfg = LEVEL_CONFIG[level];
+  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  const energy = scene.energyLevel ?? "medium";
+  const duration = scene.duration;
+  let targetBeats = 1;
+  const isLongEnough = duration >= cfg.minBeatDuration * 2.5;
+  const isDramatic = energy === "low";
+  const isFast = energy === "high";
+  if (!isLongEnough) {
+    targetBeats = 1;
+  } else if (isDramatic) {
+    targetBeats = duration >= 8 ? 2 : 1;
+  } else if (isFast) {
+    const seed = seedInt(scene.sceneIndex, 1);
+    targetBeats = Math.min(cfg.maxBeatsPerScene, seed < 40 ? 2 : 3);
+  } else {
+    const seed = seedInt(scene.sceneIndex, 2);
+    targetBeats = seed < 60 ? 1 : 2;
+  }
+  targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
+  if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
+    targetBeats = Math.min(targetBeats, 1);
+  }
+  const beatDurations = computeBeatDurations(duration, targetBeats, scene.sceneIndex, cfg);
+  let cursor = 0;
+  const beats = [];
+  let proofVisualFound = null;
+  for (let i = 0; i < targetBeats; i++) {
+    const beatDuration = beatDurations[i];
+    const relStart = parseFloat(cursor.toFixed(3));
+    const relEnd = parseFloat((cursor + beatDuration).toFixed(3));
+    let beatType = "main_shot";
+    let beatPurpose = "establish";
+    let crop;
+    if (i === 0) {
+      beatType = "main_shot";
+      beatPurpose = "establish";
+    } else if (i === 1) {
+      const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
+      if (hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+        const pv = detectProofVisual(
+          scene.narrativeText,
+          sceneId,
+          relStart,
+          Math.min(beatDuration, 2.5)
+        );
+        if (pv) {
+          proofVisualFound = pv;
+          beatType = "proof_visual";
+          beatPurpose = "emphasize";
+        }
+      }
+      if (beatType === "main_shot") {
+        {
+          const cropParams = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i);
+          if (cropParams) {
+            beatType = "detail_crop";
+            beatPurpose = "explain";
+            crop = cropParams;
+          }
+        }
+      }
+    } else {
+      const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
+      if (scene.isPatternInterrupt && timeSinceInterrupt >= cfg.patternInterruptCooldown) {
+        beatType = "pattern_interrupt";
+        beatPurpose = "reset_attention";
+      } else {
+        beatType = "secondary_asset";
+        beatPurpose = "explain";
+        {
+          crop = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i + 5);
+        }
+      }
+    }
+    beats.push({
+      id: `beat_${sceneId}_${i}`,
+      sceneId,
+      relativeStart: relStart,
+      relativeEnd: relEnd,
+      type: beatType,
+      purpose: beatPurpose,
+      sourceAssetId: scene.localPath,
+      crop
+    });
+    cursor += beatDuration;
+  }
+  logger.info(
+    `[RetentionEngine] scene ${sceneId}: ${targetBeats} beat(s), energy=${energy}, dur=${duration.toFixed(1)}s` + (proofVisualFound ? `, proof=${proofVisualFound.primaryText}` : "")
+  );
+  return { beats, proofVisual: proofVisualFound };
+}
+function computeVisualLoad(params) {
+  let score = 0;
+  if (params.hasActiveCaption) score += 1;
+  if (params.hasStrongCaption) score += 1;
+  if (params.beatCount > 2) score += 1;
+  if (params.hasProofVisual) score += 2;
+  if (params.hasSfx) score += 1;
+  if (params.hasPatternInterrupt) score += 2;
+  return score;
+}
+const MAX_VISUAL_LOAD = 6;
+function resolveTransition(currentEnergy, previousEnergy, isNewChapter, isPatternInterrupt, prevTransition) {
+  if (isNewChapter) return "fade";
+  if (isPatternInterrupt) return "cut";
+  if (currentEnergy === "low" && previousEnergy !== "low") return "dissolve";
+  if (prevTransition === "dissolve") return "cut";
+  return "cut";
+}
+function createDefaultContext() {
+  return {
+    previousShotType: "wide",
+    previousTransitionType: "cut",
+    previousPatternInterruptType: null,
+    previousCropScale: 1,
+    timeSinceLastHumanShot: 999,
+    timeSinceLastProofVisual: 999,
+    timeSinceLastStrongEffect: 999,
+    consecutiveSameShot: 0,
+    consecutiveStrongEffect: 0,
+    accumulatedVisualLoad: 0,
+    sceneIndex: 0
+  };
+}
+function resolveSceneRetention(scene, ctx, settings) {
+  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  try {
+    return _resolveRetention(scene, ctx, settings);
+  } catch (err) {
+    logger.warn(`[RetentionEngine] scene ${sceneId} fallback: ${String(err)}`);
+    return makeSingleBeatDecision(sceneId, scene);
+  }
+}
+function _resolveRetention(scene, ctx, settings) {
+  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  const level = settings.level;
+  const notes = [];
+  const { beats, proofVisual } = resolveVisualBeats(scene, ctx, level);
+  const rawVisualLoad = computeVisualLoad({
+    hasActiveCaption: scene.hasCaptionInRange ?? false,
+    hasStrongCaption: scene.hasStrongCaption ?? false,
+    beatCount: beats.length,
+    hasProofVisual: proofVisual !== null && settings.proofVisualsEnabled,
+    hasSfx: scene.hasSfxInRange ?? false,
+    hasPatternInterrupt: scene.isPatternInterrupt ?? false
+  });
+  let finalBeats = beats;
+  let finalProof = proofVisual && settings.proofVisualsEnabled ? proofVisual : null;
+  if (rawVisualLoad > MAX_VISUAL_LOAD) {
+    notes.push(`Visual load ${rawVisualLoad} > ${MAX_VISUAL_LOAD} — reducing to single beat`);
+    logger.info(`[RetentionEngine] scene ${sceneId}: overload guard triggered (load=${rawVisualLoad})`);
+    finalBeats = [beats[0]];
+    finalProof = null;
+  }
+  for (const beat of finalBeats) {
+    if (beat.crop && beat.crop.scale > 1.005) {
+      beat.zoomFilter = `__crop_${beat.crop.scale}_${beat.crop.x}_${beat.crop.y}__`;
+    }
+  }
+  const transitionType = resolveTransition(
+    scene.energyLevel ?? "medium",
+    ctx.previousShotType === "wide" ? "medium" : "medium",
+    scene.isNewChapter ?? false,
+    scene.isPatternInterrupt ?? false,
+    ctx.previousTransitionType
+  );
+  const finalVisualLoad = computeVisualLoad({
+    hasActiveCaption: scene.hasCaptionInRange ?? false,
+    hasStrongCaption: scene.hasStrongCaption ?? false,
+    beatCount: finalBeats.length,
+    hasProofVisual: finalProof !== null,
+    hasSfx: scene.hasSfxInRange ?? false,
+    hasPatternInterrupt: scene.isPatternInterrupt ?? false
+  });
+  return {
+    sceneId,
+    visualBeats: finalBeats,
+    proofVisual: finalProof ?? void 0,
+    transitionType,
+    visualLoadScore: finalVisualLoad,
+    audioLoadScore: (scene.hasSfxInRange ? 1 : 0) + (scene.hasCaptionInRange ? 0.5 : 0),
+    notes
+  };
+}
+function makeSingleBeatDecision(sceneId, scene) {
+  return {
+    sceneId,
+    visualBeats: [{
+      id: `beat_${sceneId}_0`,
+      sceneId,
+      relativeStart: 0,
+      relativeEnd: scene.duration,
+      type: "main_shot",
+      purpose: "establish",
+      sourceAssetId: scene.localPath
+    }],
+    visualLoadScore: 0,
+    audioLoadScore: 0,
+    transitionType: "cut",
+    notes: ["legacy single-beat"]
+  };
+}
+function updateRetentionContext(ctx, scene, decision) {
+  ctx.sceneIndex++;
+  ctx.previousShotType = scene.shotType ?? "medium";
+  ctx.previousTransitionType = decision.transitionType ?? "cut";
+  ctx.timeSinceLastStrongEffect += scene.duration;
+  ctx.timeSinceLastProofVisual += scene.duration;
+  ctx.timeSinceLastHumanShot += scene.duration;
+  if (decision.proofVisual) {
+    ctx.timeSinceLastProofVisual = 0;
+  }
+  if (scene.isPatternInterrupt) {
+    ctx.timeSinceLastStrongEffect = 0;
+    ctx.previousPatternInterruptType = "pattern_interrupt";
+  }
+  if (decision.visualBeats.length > 2) {
+    ctx.timeSinceLastStrongEffect = 0;
+  }
+}
+const QA_CONFIG = {
+  longStaticThresholdHigh: 7,
+  // giây — high energy scene không nên tĩnh lâu hơn
+  longStaticThresholdMedium: 12,
+  // giây — medium energy
+  longStaticThresholdLow: 20,
+  // giây — low energy OK để dài hơn
+  repeatedShotTypeWindow: 4
+};
+const PROOF_REGEX = /\$[\d,]+|\d+\.?\d*\s*%|\b(1[0-9]{3}|20[0-9]{2})\b|\d{1,3}(,\d{3})+|\b\d+\s*(million|billion|thousand)\b/i;
+function makeFlag(sceneId, flagType, severity, description, suggestion) {
+  return { sceneId, flagType, severity, description, suggestion };
+}
+function runRetentionQA(scenes) {
+  const flags = [];
+  for (const scene of scenes) {
+    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+    const energy = scene.energyLevel ?? "medium";
+    const beats = scene.visualBeats;
+    let longestBeat = scene.duration;
+    if (beats && beats.length > 0) {
+      longestBeat = Math.max(...beats.map((b) => b.relativeEnd - b.relativeStart));
+    }
+    const threshold = energy === "high" ? QA_CONFIG.longStaticThresholdHigh : energy === "low" ? QA_CONFIG.longStaticThresholdLow : QA_CONFIG.longStaticThresholdMedium;
+    if (longestBeat > threshold) {
+      flags.push(makeFlag(
+        sceneId,
+        "LONG_STATIC_VISUAL",
+        energy === "high" ? "warning" : "info",
+        `Longest beat ${longestBeat.toFixed(1)}s exceeds threshold ${threshold}s for ${energy} energy`,
+        energy === "high" ? "Add detail crop or secondary visual" : "Consider subtle crop for variety"
+      ));
+    }
+  }
+  if (scenes.length >= QA_CONFIG.repeatedShotTypeWindow) {
+    for (let i = 0; i <= scenes.length - QA_CONFIG.repeatedShotTypeWindow; i++) {
+      const window = scenes.slice(i, i + QA_CONFIG.repeatedShotTypeWindow);
+      const firstShot = window[0].shotType;
+      if (firstShot && window.every((s) => s.shotType === firstShot)) {
+        const sceneId = window[QA_CONFIG.repeatedShotTypeWindow - 1].sceneId ?? String(window[QA_CONFIG.repeatedShotTypeWindow - 1].sceneIndex);
+        flags.push(makeFlag(
+          sceneId,
+          "REPEATED_SHOT_TYPE",
+          "warning",
+          `${QA_CONFIG.repeatedShotTypeWindow} consecutive "${firstShot}" shot type scenes`,
+          "Try detail crop or secondary asset with different framing"
+        ));
+        i += QA_CONFIG.repeatedShotTypeWindow - 1;
+      }
+    }
+  }
+  let windowProofCount = 0;
+  let windowHasStatCount = 0;
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+    const hasStatInNarration = scene.narrativeText ? PROOF_REGEX.test(scene.narrativeText) : false;
+    if (hasStatInNarration) windowHasStatCount++;
+    const hasPvBeat = scene.visualBeats?.some((b) => b.type === "proof_visual") ?? false;
+    if (hasPvBeat) windowProofCount++;
+    if ((i + 1) % 5 === 0) {
+      if (windowHasStatCount >= 2 && windowProofCount === 0) {
+        flags.push(makeFlag(
+          sceneId,
+          "MISSING_PROOF_OPPORTUNITY",
+          "info",
+          `${windowHasStatCount} stat references in last 5 scenes with no proof visuals`,
+          "Enable proofVisualsEnabled in retention settings"
+        ));
+      }
+      windowProofCount = 0;
+      windowHasStatCount = 0;
+    }
+  }
+  let noResetSeconds = 0;
+  const NO_RESET_THRESHOLD = 30;
+  for (const scene of scenes) {
+    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+    const hasReset = scene.isPatternInterrupt || (scene.visualBeats ?? []).some(
+      (b) => b.type === "pattern_interrupt" || b.type === "proof_visual"
+    );
+    if (!hasReset) {
+      noResetSeconds += scene.duration;
+      if (noResetSeconds > NO_RESET_THRESHOLD) {
+        flags.push(makeFlag(
+          sceneId,
+          "NO_VISUAL_RESET",
+          "warning",
+          `${Math.round(noResetSeconds)}s without visual reset or pattern interrupt`,
+          "Add proof visual or detail crop in this stretch"
+        ));
+        noResetSeconds = 0;
+      }
+    } else {
+      noResetSeconds = 0;
+    }
+  }
+  const bySeverity = {
+    error: flags.filter((f) => f.severity === "error").length,
+    warning: flags.filter((f) => f.severity === "warning").length,
+    info: flags.filter((f) => f.severity === "info").length
+  };
+  logger.info(
+    `[RetentionQA] ${flags.length} flags: ${bySeverity.error} errors, ${bySeverity.warning} warnings, ${bySeverity.info} info`
+  );
+  return flags;
+}
+const DEFAULT_RETENTION_SETTINGS = {
+  enabled: true,
+  level: "balanced",
+  proofVisualsEnabled: true,
+  semanticCropEnabled: true,
+  patternInterruptEnabled: true
+};
 const ffmpegPath$1 = require("ffmpeg-static");
 function ffmpegRun$1(args) {
   return new Promise((resolve, reject) => {
@@ -1447,6 +1877,155 @@ function resolveSceneMedia(scene, mediaIndex) {
   }
   return null;
 }
+async function renderVisualBeatsToClip(params) {
+  const { beats, mediaPath, isImage, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params;
+  const beatClips = [];
+  try {
+    for (let bi = 0; bi < beats.length; bi++) {
+      const beat = beats[bi];
+      const beatDuration = beat.relativeEnd - beat.relativeStart;
+      const beatClip = path__namespace.join(tmpDir, `beat_${String(sceneIndex).padStart(4, "0")}_${bi}.mp4`);
+      let vfFilter = scaleFilt;
+      if (beat.crop && beat.crop.scale > 1.005) {
+        const zf = cropToZoomFilter(beat.crop, width, height, beatDuration, fps);
+        if (zf) vfFilter = `${scaleFilt},${zf}`;
+      }
+      if (isImage) {
+        await ffmpegRun$1([
+          "-y",
+          "-loop",
+          "1",
+          "-i",
+          mediaPath,
+          "-vf",
+          vfFilter,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "20",
+          "-t",
+          String(beatDuration),
+          "-r",
+          String(fps),
+          "-pix_fmt",
+          "yuv420p",
+          beatClip
+        ]);
+      } else {
+        const ssOffset = beat.relativeStart;
+        await ffmpegRun$1([
+          "-y",
+          "-ss",
+          String(ssOffset),
+          "-i",
+          mediaPath,
+          "-vf",
+          vfFilter,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "20",
+          "-t",
+          String(beatDuration),
+          "-r",
+          String(fps),
+          "-an",
+          "-pix_fmt",
+          "yuv420p",
+          beatClip
+        ]);
+      }
+      beatClips.push(beatClip);
+    }
+    if (beatClips.length === 1) {
+      fs__namespace.renameSync(beatClips[0], outClip);
+    } else {
+      const beatConcatList = path__namespace.join(tmpDir, `beat_concat_${sceneIndex}.txt`);
+      fs__namespace.writeFileSync(
+        beatConcatList,
+        beatClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
+        "utf-8"
+      );
+      await ffmpegRun$1([
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        beatConcatList,
+        "-c",
+        "copy",
+        outClip
+      ]);
+      try {
+        for (const bc of beatClips) fs__namespace.unlinkSync(bc);
+        fs__namespace.unlinkSync(beatConcatList);
+      } catch {
+      }
+    }
+    logger.info(`[RetentionEngine] scene ${sceneIndex}: ${beats.length} beats rendered and concatenated`);
+  } catch (err) {
+    logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${String(err)}), falling back to legacy`);
+    for (const bc of beatClips) {
+      try {
+        fs__namespace.unlinkSync(bc);
+      } catch {
+      }
+    }
+    const baseFilt = scaleFilt;
+    if (isImage) {
+      await ffmpegRun$1([
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        mediaPath,
+        "-vf",
+        baseFilt,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-t",
+        String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        "-r",
+        String(fps),
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ]);
+    } else {
+      await ffmpegRun$1([
+        "-y",
+        "-i",
+        mediaPath,
+        "-vf",
+        baseFilt,
+        "-c:v",
+        "libx264",
+        "-preset",
+        "fast",
+        "-crf",
+        "20",
+        "-t",
+        String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        "-r",
+        String(fps),
+        "-an",
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ]);
+    }
+  }
+}
 async function renderVideo(params) {
   const {
     outputName = "final_output",
@@ -1477,6 +2056,48 @@ async function renderVideo(params) {
   fs__namespace.mkdirSync(tmpDir, { recursive: true });
   const sceneClips = [];
   const { width, height } = resolution;
+  const retentionSettings = DEFAULT_RETENTION_SETTINGS;
+  const retCtx = createDefaultContext();
+  const retentionDecisions = /* @__PURE__ */ new Map();
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const sceneInput = {
+      sceneId: String(scene.sceneIndex),
+      sceneIndex: i,
+      duration: scene.duration,
+      energyLevel: scene.energyLevel,
+      shotType: scene.shotType,
+      narrativeText: scene.narrativeText,
+      visualIntent: scene.visualIntent,
+      isPatternInterrupt: scene.isPatternInterrupt,
+      localPath: scene.localPath,
+      isNewChapter: i === 0 || scene.isFirstInChapter
+    };
+    const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings);
+    retentionDecisions.set(i, decision);
+    updateRetentionContext(retCtx, sceneInput, decision);
+  }
+  try {
+    const qaScenes = scenes.map((s, i) => ({
+      sceneIndex: i,
+      sceneId: String(s.sceneIndex),
+      duration: s.duration,
+      energyLevel: s.energyLevel,
+      shotType: s.shotType,
+      narrativeText: s.narrativeText,
+      visualIntent: s.visualIntent,
+      isPatternInterrupt: s.isPatternInterrupt,
+      visualBeats: retentionDecisions.get(i)?.visualBeats
+    }));
+    const qaFlags = runRetentionQA(qaScenes);
+    if (qaFlags.length > 0) {
+      const qaPath = path__namespace.join(projectDir, "analysis", "retention-qa.json");
+      fs__namespace.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), "utf-8");
+      logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`);
+    }
+  } catch (err) {
+    logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`);
+  }
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i];
     const mediaName = scene.localPath ? path__namespace.basename(scene.localPath) : scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`;
@@ -1510,52 +2131,78 @@ async function renderVideo(params) {
       ]);
     } else {
       const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === "image";
-      if (isImage) {
-        await ffmpegRun$1([
-          "-y",
-          "-loop",
-          "1",
-          "-i",
+      const decision = retentionDecisions.get(i);
+      const beats = decision?.visualBeats ?? [];
+      const hasMultipleBeats = beats.length > 1;
+      if (hasMultipleBeats && retentionSettings.enabled) {
+        await renderVisualBeatsToClip({
+          beats,
           mediaPath,
-          "-vf",
+          isImage,
+          outClip,
+          width,
+          height,
+          fps,
           scaleFilt,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "20",
-          "-t",
-          String(scene.duration),
-          "-r",
-          String(fps),
-          "-pix_fmt",
-          "yuv420p",
-          outClip
-        ]);
+          tmpDir,
+          sceneIndex: i
+        });
       } else {
-        await ffmpegRun$1([
-          "-y",
-          "-i",
-          mediaPath,
-          "-vf",
-          scaleFilt,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "20",
-          "-t",
-          String(scene.duration),
-          "-r",
-          String(fps),
-          "-an",
-          // strip audio from source video (voiceover added later)
-          "-pix_fmt",
-          "yuv420p",
-          outClip
-        ]);
+        const singleBeat = beats[0];
+        let vfFilter = scaleFilt;
+        if (singleBeat?.crop && singleBeat.crop.scale > 1.005) {
+          const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps);
+          if (zf) {
+            vfFilter = `${scaleFilt},${zf}`;
+            logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`);
+          }
+        }
+        if (isImage) {
+          await ffmpegRun$1([
+            "-y",
+            "-loop",
+            "1",
+            "-i",
+            mediaPath,
+            "-vf",
+            vfFilter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "20",
+            "-t",
+            String(scene.duration),
+            "-r",
+            String(fps),
+            "-pix_fmt",
+            "yuv420p",
+            outClip
+          ]);
+        } else {
+          await ffmpegRun$1([
+            "-y",
+            "-i",
+            mediaPath,
+            "-vf",
+            vfFilter,
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            "-crf",
+            "20",
+            "-t",
+            String(scene.duration),
+            "-r",
+            String(fps),
+            "-an",
+            "-pix_fmt",
+            "yuv420p",
+            outClip
+          ]);
+        }
       }
     }
     sceneClips.push(outClip);
