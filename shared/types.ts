@@ -662,6 +662,12 @@ export interface CaptionPhrase {
     label: string                          // bản rút gọn số liệu dưới 8 từ
     position: 'bottom_left' | 'bottom_right' | 'top_right'
   }
+  // ── Animation metadata (OPTIONAL — backward compatible) ───────────────────
+  // Nếu không có → CaptionsOverlay tự infer từ emphasisType + phraseIndex
+  animationPreset?: 'smooth_kinetic' | 'punch' | 'swipe_reveal' | 'blur_focus' | 'impact_keyword' | 'type_pop'
+  animationIntensity?: 'subtle' | 'medium' | 'strong'
+  keywordAnimation?: 'none' | 'spring' | 'impact' | 'highlight'
+  wordStaggerFrames?: number
 }
 
 /** Khoảng thời gian caption được BẬT */
