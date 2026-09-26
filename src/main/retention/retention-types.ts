@@ -59,6 +59,13 @@ export interface VisualBeat {
  * ProofVisual — graphic thể hiện số liệu/ngày tháng/địa điểm từ narration.
  * CHỈ dùng data có trong source — không bịa.
  */
+export type ProofVisualPosition = 'top_left' | 'top_right' | 'bottom_left' | 'bottom_right'
+export type ProofVisualStylePreset = 'date_card' | 'money_card' | 'stat_card' | 'location_tag' | 'doc_callout'
+
+/**
+ * ProofVisual — graphic thể hiện số liệu/ngày tháng/địa điểm từ narration.
+ * CHỈ dùng data có trong source — không bịa.
+ */
 export interface ProofVisual {
   type: 'number_card' | 'date_card' | 'location_label' | 'stat_emphasis' | 'document_callout'
   primaryText: string     // Ví dụ: "$12,000" | "1963" | "Montana"
@@ -66,6 +73,14 @@ export interface ProofVisual {
   sourceField: string     // Field nào trong narration/context cung cấp data này
   relativeTime: number    // Relative start seconds trong scene
   durationSecs: number    // Bao lâu hiện
+  // ── Optional extended fields (backward compatible) ─────────────────────────
+  position?: ProofVisualPosition     // Corner position — default bottom_right
+  stylePreset?: ProofVisualStylePreset
+  icon?: 'location' | 'calendar' | 'money' | 'stat' | 'none'
+  confidence?: number                 // 0–1, dùng cho QA flags
+  // ── Absolute timing (computed at render time) ──────────────────────────────
+  absoluteStartTime?: number          // scene.startTime + relativeTime
+  absoluteEndTime?: number            // absoluteStartTime + durationSecs
 }
 
 // ─── Pattern Interrupt ────────────────────────────────────────────────────────
@@ -116,6 +131,11 @@ export type RetentionQaFlagType =
   | 'TOO_MANY_STRONG_CUTS'
   | 'LOW_RELEVANCE_SECONDARY_ASSET'
   | 'MISSING_PROOF_OPPORTUNITY'
+  | 'DUPLICATE_PROOF_CAPTION'
+  | 'PROOF_OVERLAPS_STRONG_CAPTION'
+  | 'PROOF_TOO_FREQUENT'
+  | 'PROOF_TEXT_TOO_LONG'
+  | 'LOCATION_LOW_CONFIDENCE'
 
 export interface RetentionQaFlag {
   sceneId: string

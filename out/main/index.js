@@ -1365,6 +1365,7 @@ async function getBundle(onProgress) {
 async function renderCaptionsOverlay(options) {
   const {
     captionPlan,
+    proofVisuals,
     videoDurationInSeconds,
     outputPath,
     fps = 30,
@@ -1378,10 +1379,15 @@ async function renderCaptionsOverlay(options) {
   logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)`);
   logger.info(`[RemotionRenderer] Resolution: ${resolution.width}×${resolution.height}`);
   logger.info(`[RemotionRenderer] Phrases: ${captionPlan.phrases.length}`);
+  logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`);
+  const inputProps = {
+    captionPlan,
+    proofVisuals: proofVisuals ?? []
+  };
   const composition = await renderer.selectComposition({
     serveUrl: bundleUrl,
     id: "CaptionsOverlay",
-    inputProps: { captionPlan }
+    inputProps
   });
   await renderer.renderMedia({
     composition: {
@@ -1393,10 +1399,8 @@ async function renderCaptionsOverlay(options) {
     },
     serveUrl: bundleUrl,
     codec: "h264",
-    // H264 MP4 — không cần alpha, dùng green screen
-    // Không cần pixelFormat/imageFormat — mặc định yuv420p là đủ
     outputLocation: outputPath,
-    inputProps: { captionPlan },
+    inputProps,
     onProgress: ({ progress }) => {
       const pct = Math.round(progress * 100);
       onRenderProgress?.(progress);
@@ -1434,13 +1438,221 @@ const LEVEL_CONFIG = {
     strongEffectCooldown: 12
   }
 };
+const ADDRESS_REGEX = /\b\d+\s+\w[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Highway|Hwy|Way|Place|Pl|Court|Ct)(?:[,.\s]+[\w\s]+)*/i;
+const UNIT_NUMBER_REGEX = /\b(\d{1,3}(?:,\d{3})+|\d{4,})\s+(people|persons|individuals|colonies|farms|states|acres|miles|kilometers|km|counties|homes|families|workers|companies|factories|ships|aircraft|troops|soldiers|nations|countries|tribes|reserves|parks)\b/i;
 const PROOF_PATTERNS = [
-  { type: "number_card", regex: /\$[\d,]+(\.\d+)?[kKmMbBtT]?/, label: "Dollar figure" },
-  { type: "stat_emphasis", regex: /\d+\.?\d*\s*%/, label: "Percentage" },
-  { type: "number_card", regex: /\d{1,3}(,\d{3})+/, label: "Large number" },
-  { type: "date_card", regex: /\b(1[0-9]{3}|20[0-9]{2})\b/, label: "Year" },
-  { type: "stat_emphasis", regex: /\b\d+\s*(million|billion|thousand|hundred)\b/i, label: "Big stat" }
+  // Priority 1 — Dollar amounts (most impactful)
+  {
+    type: "number_card",
+    priority: 1,
+    regex: /\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|thousand|M|B|K))?|\b\d+(?:\.\d+)?\s*(?:million|billion)\s+dollars?\b/i,
+    label: "Dollar figure",
+    icon: "money",
+    position: "bottom_right"
+  },
+  // Priority 2 — Percentage
+  {
+    type: "stat_emphasis",
+    priority: 2,
+    regex: /\d+(?:\.\d+)?\s*(?:%|percent)\b/i,
+    label: "Percentage",
+    icon: "stat",
+    position: "bottom_left"
+  },
+  // Priority 3 — Million/billion/thousand (no dollar sign)
+  {
+    type: "stat_emphasis",
+    priority: 3,
+    regex: /\b\d+(?:\.\d+)?\s+(?:million|billion|thousand)\b(?!\s+dollars?)/i,
+    label: "Big stat",
+    icon: "stat",
+    position: "bottom_right"
+  },
+  // Priority 4 — Unit number (60,000 people etc.)
+  {
+    type: "number_card",
+    priority: 4,
+    regex: UNIT_NUMBER_REGEX,
+    label: "Unit number",
+    icon: "stat",
+    position: "bottom_right"
+  },
+  // Priority 5 — Large bare number
+  {
+    type: "number_card",
+    priority: 5,
+    regex: /\b\d{1,3}(?:,\d{3}){2,}\b/,
+    label: "Large number",
+    icon: "none",
+    position: "bottom_right"
+  },
+  // Priority 6 — Year (with context word nearby)
+  {
+    type: "date_card",
+    priority: 6,
+    regex: /\b(?:in|during|by|since|from|after|before|around|until|as of)\s+(1[0-9]{3}|20[0-9]{2})\b|(1[0-9]{3}|20[0-9]{2})\s+(?:to|through|until|–|-)\s+(?:1[0-9]{3}|20[0-9]{2})/i,
+    label: "Year",
+    icon: "calendar",
+    position: "top_right"
+  }
 ];
+const KNOWN_LOCATIONS = [
+  // US States
+  { name: "Montana", canonical: "MONTANA", confidence: 0.95 },
+  { name: "South Dakota", canonical: "SOUTH DAKOTA", confidence: 0.95 },
+  { name: "North Dakota", canonical: "NORTH DAKOTA", confidence: 0.95 },
+  { name: "Wyoming", canonical: "WYOMING", confidence: 0.95 },
+  { name: "Colorado", canonical: "COLORADO", confidence: 0.9 },
+  { name: "Minnesota", canonical: "MINNESOTA", confidence: 0.9 },
+  { name: "Wisconsin", canonical: "WISCONSIN", confidence: 0.9 },
+  { name: "Iowa", canonical: "IOWA", confidence: 0.9 },
+  { name: "Kansas", canonical: "KANSAS", confidence: 0.9 },
+  { name: "Nebraska", canonical: "NEBRASKA", confidence: 0.9 },
+  { name: "Texas", canonical: "TEXAS", confidence: 0.9 },
+  { name: "California", canonical: "CALIFORNIA", confidence: 0.9 },
+  { name: "New York", canonical: "NEW YORK", confidence: 0.9 },
+  { name: "Pennsylvania", canonical: "PENNSYLVANIA", confidence: 0.9 },
+  { name: "Ohio", canonical: "OHIO", confidence: 0.9 },
+  { name: "Illinois", canonical: "ILLINOIS", confidence: 0.9 },
+  { name: "Michigan", canonical: "MICHIGAN", confidence: 0.9 },
+  { name: "Indiana", canonical: "INDIANA", confidence: 0.9 },
+  { name: "Missouri", canonical: "MISSOURI", confidence: 0.9 },
+  { name: "Washington", canonical: "WASHINGTON", confidence: 0.85 },
+  { name: "Oregon", canonical: "OREGON", confidence: 0.9 },
+  { name: "Idaho", canonical: "IDAHO", confidence: 0.9 },
+  { name: "Utah", canonical: "UTAH", confidence: 0.9 },
+  { name: "Nevada", canonical: "NEVADA", confidence: 0.9 },
+  { name: "Arizona", canonical: "ARIZONA", confidence: 0.9 },
+  { name: "New Mexico", canonical: "NEW MEXICO", confidence: 0.9 },
+  { name: "Oklahoma", canonical: "OKLAHOMA", confidence: 0.9 },
+  { name: "Arkansas", canonical: "ARKANSAS", confidence: 0.9 },
+  { name: "Louisiana", canonical: "LOUISIANA", confidence: 0.9 },
+  { name: "Mississippi", canonical: "MISSISSIPPI", confidence: 0.9 },
+  { name: "Alabama", canonical: "ALABAMA", confidence: 0.9 },
+  { name: "Georgia", canonical: "GEORGIA", confidence: 0.85 },
+  { name: "Florida", canonical: "FLORIDA", confidence: 0.9 },
+  { name: "Tennessee", canonical: "TENNESSEE", confidence: 0.9 },
+  { name: "Kentucky", canonical: "KENTUCKY", confidence: 0.9 },
+  { name: "Virginia", canonical: "VIRGINIA", confidence: 0.85 },
+  { name: "West Virginia", canonical: "WEST VIRGINIA", confidence: 0.9 },
+  { name: "North Carolina", canonical: "NORTH CAROLINA", confidence: 0.9 },
+  { name: "South Carolina", canonical: "SOUTH CAROLINA", confidence: 0.9 },
+  { name: "Maryland", canonical: "MARYLAND", confidence: 0.85 },
+  { name: "Delaware", canonical: "DELAWARE", confidence: 0.85 },
+  { name: "Connecticut", canonical: "CONNECTICUT", confidence: 0.85 },
+  { name: "Massachusetts", canonical: "MASSACHUSETTS", confidence: 0.9 },
+  { name: "Vermont", canonical: "VERMONT", confidence: 0.85 },
+  { name: "New Hampshire", canonical: "NEW HAMPSHIRE", confidence: 0.85 },
+  { name: "Maine", canonical: "MAINE", confidence: 0.85 },
+  { name: "Rhode Island", canonical: "RHODE ISLAND", confidence: 0.85 },
+  { name: "New Jersey", canonical: "NEW JERSEY", confidence: 0.85 },
+  { name: "Alaska", canonical: "ALASKA", confidence: 0.9 },
+  { name: "Hawaii", canonical: "HAWAII", confidence: 0.9 },
+  // Canadian Provinces
+  { name: "Manitoba", canonical: "MANITOBA, CANADA", confidence: 0.95 },
+  { name: "Saskatchewan", canonical: "SASKATCHEWAN, CANADA", confidence: 0.95 },
+  { name: "Alberta", canonical: "ALBERTA, CANADA", confidence: 0.95 },
+  { name: "British Columbia", canonical: "BRITISH COLUMBIA, CANADA", confidence: 0.9 },
+  { name: "Ontario", canonical: "ONTARIO, CANADA", confidence: 0.85 },
+  { name: "Quebec", canonical: "QUEBEC, CANADA", confidence: 0.9 },
+  // Major cities (high confidence)
+  { name: "Chicago", canonical: "CHICAGO", confidence: 0.9 },
+  { name: "Los Angeles", canonical: "LOS ANGELES", confidence: 0.9 },
+  { name: "Houston", canonical: "HOUSTON", confidence: 0.9 },
+  { name: "Phoenix", canonical: "PHOENIX", confidence: 0.9 },
+  { name: "Philadelphia", canonical: "PHILADELPHIA", confidence: 0.9 },
+  { name: "San Antonio", canonical: "SAN ANTONIO", confidence: 0.9 },
+  { name: "San Diego", canonical: "SAN DIEGO", confidence: 0.9 },
+  { name: "Dallas", canonical: "DALLAS", confidence: 0.9 },
+  { name: "San Francisco", canonical: "SAN FRANCISCO", confidence: 0.9 },
+  { name: "Seattle", canonical: "SEATTLE", confidence: 0.9 },
+  { name: "Denver", canonical: "DENVER", confidence: 0.9 },
+  { name: "Boston", canonical: "BOSTON", confidence: 0.9 },
+  { name: "Detroit", canonical: "DETROIT", confidence: 0.9 },
+  { name: "Minneapolis", canonical: "MINNEAPOLIS", confidence: 0.9 },
+  { name: "Winnipeg", canonical: "WINNIPEG, CANADA", confidence: 0.9 },
+  // Countries
+  { name: "Canada", canonical: "CANADA", confidence: 0.9 },
+  { name: "United States", canonical: "UNITED STATES", confidence: 0.85 },
+  { name: "Mexico", canonical: "MEXICO", confidence: 0.85 }
+];
+function detectLocationInText(text, contextLocations) {
+  const prioritized = KNOWN_LOCATIONS;
+  const sorted = [...prioritized].sort((a, b) => b.name.length - a.name.length);
+  for (const loc of sorted) {
+    const escaped = loc.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`\\b${escaped}\\b`, "i");
+    if (regex.test(text)) {
+      {
+        const withCountryMatch = text.match(
+          new RegExp(`\\b${escaped}\\s*,\\s*(Canada|USA|US|United States|Mexico)\\b`, "i")
+        );
+        if (withCountryMatch) {
+          return {
+            canonical: `${loc.name.toUpperCase()}, ${withCountryMatch[1].toUpperCase()}`,
+            confidence: 0.99
+          };
+        }
+      }
+      return { canonical: loc.canonical, confidence: loc.confidence };
+    }
+  }
+  return null;
+}
+function detectProofVisual(narrativeText, sceneId, relativeTime, durationSecs, contextLocations) {
+  if (!narrativeText || narrativeText.trim().length === 0) return null;
+  const addressMatch = narrativeText.match(ADDRESS_REGEX);
+  if (addressMatch) {
+    const text = addressMatch[0].trim().slice(0, 48);
+    return {
+      type: "location_label",
+      primaryText: text.toUpperCase(),
+      sourceField: "narrativeText",
+      relativeTime,
+      durationSecs: Math.min(durationSecs, 2.5),
+      position: "top_right",
+      stylePreset: "location_tag",
+      icon: "location",
+      confidence: 0.85
+    };
+  }
+  for (const pattern of PROOF_PATTERNS) {
+    const match = narrativeText.match(pattern.regex);
+    if (match) {
+      let primaryText = match[0].trim();
+      if (pattern.type === "date_card") {
+        const yearMatch = primaryText.match(/\b(1[0-9]{3}|20[0-9]{2})\b/);
+        if (yearMatch) primaryText = yearMatch[1];
+      }
+      if (primaryText.length > 32) primaryText = primaryText.slice(0, 32);
+      return {
+        type: pattern.type,
+        primaryText,
+        sourceField: "narrativeText",
+        relativeTime,
+        durationSecs: Math.min(durationSecs, 2.5),
+        position: pattern.position,
+        icon: pattern.icon,
+        confidence: 0.9
+      };
+    }
+  }
+  const locationResult = detectLocationInText(narrativeText);
+  if (locationResult && locationResult.confidence >= 0.8) {
+    return {
+      type: "location_label",
+      primaryText: locationResult.canonical.slice(0, 48),
+      sourceField: "narrativeText",
+      relativeTime,
+      durationSecs: Math.min(durationSecs, 2),
+      position: "top_left",
+      stylePreset: "location_tag",
+      icon: "location",
+      confidence: locationResult.confidence
+    };
+  }
+  return null;
+}
 function seedInt(sceneIndex, variant) {
   return (sceneIndex * 2654435761 + variant * 40503 >>> 0) % 100;
 }
@@ -1459,23 +1671,6 @@ function computeBeatDurations(sceneDuration, beatCount, sceneIndex, cfg) {
   const total = durations.reduce((a, b) => a + b, 0);
   const ratio = sceneDuration / total;
   return durations.map((d) => Math.round(d * ratio * 100) / 100);
-}
-function detectProofVisual(narrativeText, sceneId, relativeTime, durationSecs) {
-  for (const pattern of PROOF_PATTERNS) {
-    const match = narrativeText.match(pattern.regex);
-    if (match) {
-      return {
-        type: pattern.type,
-        primaryText: match[0].trim(),
-        subLabel: void 0,
-        // không tự bịa sub-label
-        sourceField: "narrativeText",
-        relativeTime,
-        durationSecs: Math.min(durationSecs, 2.5)
-      };
-    }
-  }
-  return null;
 }
 function computeSemanticCrop(visualIntent, sceneIndex, beatIndex) {
   if (!visualIntent) return void 0;
@@ -2335,6 +2530,27 @@ async function renderVideo(params) {
     ]);
   }
   if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
+    let proofVisuals = [];
+    if (retentionSettings.proofVisualsEnabled) {
+      try {
+        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan);
+        logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
+        try {
+          const pvPlanPath = path__namespace.join(projectDir, "analysis", "proof-visual-plan.json");
+          fs__namespace.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map((pv) => ({
+            type: pv.type,
+            text: pv.primaryText,
+            startTime: pv.absoluteStartTime,
+            endTime: pv.absoluteEndTime,
+            position: pv.position
+          })), null, 2), "utf-8");
+        } catch {
+        }
+      } catch (err) {
+        logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`);
+        proofVisuals = [];
+      }
+    }
     progress("Rendering caption overlay (Remotion)...", 0.91);
     const captionsDir = path__namespace.join(projectDir, "assets", "captions");
     fs__namespace.mkdirSync(captionsDir, { recursive: true });
@@ -2342,6 +2558,7 @@ async function renderVideo(params) {
     const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
     await renderCaptionsOverlay({
       captionPlan: params.captionPlan,
+      proofVisuals,
       videoDurationInSeconds: videoDurationSecs,
       outputPath: overlayPath,
       fps,
@@ -2355,7 +2572,7 @@ async function renderVideo(params) {
     });
     progress("Compositing captions overlay...", 0.93);
     const captionedPath = path__namespace.join(path__namespace.dirname(outputPath), "_captioned_tmp.mp4");
-    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases)`);
+    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`);
     await ffmpegRun$1([
       "-y",
       "-i",
@@ -2405,6 +2622,89 @@ async function renderVideo(params) {
     fileSizeMB: (stat.size / 1024 / 1024).toFixed(1)
   });
   return { outputPath, durationSecs, fileSizeBytes: stat.size };
+}
+function buildProofVisualList(scenes, retentionDecisions, captionPlan) {
+  const result = [];
+  let sceneStartCursor = 0;
+  const seenKeys = /* @__PURE__ */ new Set();
+  for (let i = 0; i < scenes.length; i++) {
+    scenes[i];
+    const decision = retentionDecisions.get(i);
+    sceneStartCursor += i === 0 ? 0 : scenes[i - 1].duration;
+    if (!decision?.proofVisual) continue;
+    const pv = decision.proofVisual;
+    let cumStart = 0;
+    for (let j = 0; j < i; j++) cumStart += scenes[j].duration;
+    const absStart = cumStart + pv.relativeTime;
+    const absEnd = absStart + pv.durationSecs;
+    if (!pv.primaryText || pv.primaryText.trim().length === 0 || pv.primaryText.length > 48) continue;
+    const normText = pv.primaryText.replace(/[\s,.$%]/g, "").toUpperCase();
+    const dedupKey = `${normText}_${Math.floor(absStart / 15)}`;
+    if (seenKeys.has(dedupKey)) {
+      logger.debug(`[ProofVisual] scene ${i} skipped — duplicate: ${pv.primaryText}`);
+      continue;
+    }
+    if (isDuplicateOfDataNote(pv.primaryText, captionPlan, absStart, absEnd)) {
+      logger.info(`[ProofVisual] scene ${i} skipped — duplicate DataNote: ${pv.primaryText}`);
+      continue;
+    }
+    const captionState = getCaptionStateAt(absStart, absEnd, captionPlan);
+    if (captionState === "strong") {
+      logger.info(`[ProofVisual] scene ${i} skipped — overlaps big_statement caption`);
+      continue;
+    }
+    const resolvedPosition = resolveProofPosition(pv, captionState, i);
+    seenKeys.add(dedupKey);
+    result.push({
+      ...pv,
+      absoluteStartTime: parseFloat(absStart.toFixed(3)),
+      absoluteEndTime: parseFloat(absEnd.toFixed(3)),
+      position: resolvedPosition
+    });
+    logger.info(`[ProofVisual] scene ${i} → ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`);
+  }
+  return result;
+}
+function getCaptionStateAt(start, end, captionPlan) {
+  const stateOrder = ["none", "normal", "data_note", "news_chyron", "strong"];
+  let maxState = "none";
+  for (const phrase of captionPlan.phrases) {
+    if (phrase.startTime >= end || phrase.endTime <= start) continue;
+    let state = "normal";
+    if (phrase.presetType === "big_statement") state = "strong";
+    else if (phrase.presetType === "data_note") state = "data_note";
+    else if (phrase.presetType === "news_chyron") state = "news_chyron";
+    if (stateOrder.indexOf(state) > stateOrder.indexOf(maxState)) maxState = state;
+  }
+  return maxState;
+}
+function isDuplicateOfDataNote(pvText, captionPlan, absStart, absEnd) {
+  const normPv = pvText.replace(/[$,\s.%]/g, "").replace(/million/i, "M").replace(/billion/i, "B").toUpperCase();
+  for (const phrase of captionPlan.phrases) {
+    if (phrase.presetType !== "data_note" && phrase.emphasisType !== "shock_stat") continue;
+    if (phrase.startTime >= absEnd || phrase.endTime <= absStart) continue;
+    const src = phrase.dataNote?.label ?? phrase.text;
+    const normSrc = src.replace(/[$,\s.%]/g, "").replace(/million/i, "M").replace(/billion/i, "B").toUpperCase();
+    if (normSrc.includes(normPv) || normPv.includes(normSrc)) return true;
+    const pvNums = pvText.match(/\d+/g) ?? [];
+    const srcNums = src.match(/\d+/g) ?? [];
+    if (pvNums.length > 0 && pvNums.some((n) => srcNums.includes(n))) return true;
+  }
+  return false;
+}
+function resolveProofPosition(pv, captionState, sceneIndex) {
+  if (pv.position) {
+    if (captionState === "strong" || captionState === "news_chyron") {
+      if (pv.position === "bottom_right") return "top_right";
+      if (pv.position === "bottom_left") return "top_left";
+    }
+    return pv.position;
+  }
+  if (pv.type === "date_card") return "top_right";
+  if (pv.type === "location_label") return "top_left";
+  if (pv.type === "stat_emphasis") return captionState === "strong" ? "top_left" : "bottom_left";
+  const corners = ["bottom_right", "top_right", "bottom_right", "top_right"];
+  return corners[sceneIndex % corners.length];
 }
 function registerRenderHandlers(ipcMain) {
   ipcMain.handle(

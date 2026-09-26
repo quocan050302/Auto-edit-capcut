@@ -13,7 +13,7 @@ import {
 } from './retention/retention-engine'
 import { cropToZoomFilter } from './retention/visual-beat-engine'
 import { runRetentionQA } from './retention/retention-qa'
-import type { RetentionSettings, VisualBeat } from './retention/retention-types'
+import type { RetentionSettings, VisualBeat, ProofVisual } from './retention/retention-types'
 import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
@@ -604,7 +604,29 @@ export async function renderVideo(params: {
 
   // ── 7b. Render Dynamic Kinetic Captions via Remotion (nếu được bật) ────────
   if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-    // — 7b-i. Render lớp overlay WebM alpha bằng Remotion ——————————————————————
+    // ── 7b-i. Build proof visuals list với absolute timing ───────────────────
+    let proofVisuals: ProofVisual[] = []
+
+    if (retentionSettings.proofVisualsEnabled) {
+      try {
+        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan)
+        logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`)
+        // Save debug plan (non-blocking)
+        try {
+          const pvPlanPath = path.join(projectDir, 'analysis', 'proof-visual-plan.json')
+          fs.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map(pv => ({
+            type: pv.type, text: pv.primaryText,
+            startTime: pv.absoluteStartTime, endTime: pv.absoluteEndTime,
+            position: pv.position
+          })), null, 2), 'utf-8')
+        } catch { /* non-blocking */ }
+      } catch (err) {
+        logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`)
+        proofVisuals = []
+      }
+    }
+
+    // ── 7b-ii. Render lớp overlay bằng Remotion ─────────────────────────────
     progress('Rendering caption overlay (Remotion)...', 0.91)
     const captionsDir = path.join(projectDir, 'assets', 'captions')
     fs.mkdirSync(captionsDir, { recursive: true })
@@ -614,6 +636,7 @@ export async function renderVideo(params: {
 
     await renderCaptionsOverlay({
       captionPlan: params.captionPlan,
+      proofVisuals,
       videoDurationInSeconds: videoDurationSecs,
       outputPath: overlayPath,
       fps,
@@ -626,11 +649,11 @@ export async function renderVideo(params: {
       },
     })
 
-    // — 7b-ii. Merge overlay lên video gốc bằng FFmpeg ————————————————————————
+    // ── 7b-iii. Merge overlay lên video gốc bằng FFmpeg ─────────────────────
     progress('Compositing captions overlay...', 0.93)
     const captionedPath = path.join(path.dirname(outputPath), '_captioned_tmp.mp4')
 
-    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases)`)
+    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
 
     await ffmpegRun([
       '-y',
@@ -674,3 +697,142 @@ export async function renderVideo(params: {
 
   return { outputPath, durationSecs, fileSizeBytes: stat.size }
 }
+
+// ─── Proof Visual helpers ─────────────────────────────────────────────────────
+
+/**
+ * buildProofVisualList — collect RetentionDecision.proofVisual từ tất cả scenes,
+ * compute absolute timing, dedup vs captions, resolve smart position.
+ *
+ * KHÔNG thay đổi scene timing. Chỉ tính absolute timing để Remotion render đúng frame.
+ */
+function buildProofVisualList(
+  scenes: ScenePlan[],
+  retentionDecisions: Map<number, import('./retention/retention-types').RetentionDecision>,
+  captionPlan: import('../../shared/types').CaptionPlan
+): ProofVisual[] {
+  const result: ProofVisual[] = []
+  let sceneStartCursor = 0
+  const seenKeys = new Set<string>()
+
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i]
+    const decision = retentionDecisions.get(i)
+
+    sceneStartCursor += (i === 0 ? 0 : scenes[i - 1].duration)
+    if (i > 0) {
+      // already added scenes[i-1].duration above; reset to recompute
+    }
+
+    if (!decision?.proofVisual) continue
+
+    const pv = decision.proofVisual
+
+    // Compute absolute start using cumulative cursor
+    let cumStart = 0
+    for (let j = 0; j < i; j++) cumStart += scenes[j].duration
+    const absStart = cumStart + pv.relativeTime
+    const absEnd = absStart + pv.durationSecs
+
+    if (!pv.primaryText || pv.primaryText.trim().length === 0 || pv.primaryText.length > 48) continue
+
+    // Dedup by normalized text in 15s buckets
+    const normText = pv.primaryText.replace(/[\s,.$%]/g, '').toUpperCase()
+    const dedupKey = `${normText}_${Math.floor(absStart / 15)}`
+    if (seenKeys.has(dedupKey)) {
+      logger.debug(`[ProofVisual] scene ${i} skipped — duplicate: ${pv.primaryText}`)
+      continue
+    }
+
+    // Dedup vs DataNote captions
+    if (isDuplicateOfDataNote(pv.primaryText, captionPlan, absStart, absEnd)) {
+      logger.info(`[ProofVisual] scene ${i} skipped — duplicate DataNote: ${pv.primaryText}`)
+      continue
+    }
+
+    // Check caption state at this timestamp
+    const captionState = getCaptionStateAt(absStart, absEnd, captionPlan)
+    if (captionState === 'strong') {
+      logger.info(`[ProofVisual] scene ${i} skipped — overlaps big_statement caption`)
+      continue
+    }
+
+    // Smart position
+    const resolvedPosition = resolveProofPosition(pv, captionState, i)
+
+    seenKeys.add(dedupKey)
+
+    result.push({
+      ...pv,
+      absoluteStartTime: parseFloat(absStart.toFixed(3)),
+      absoluteEndTime:   parseFloat(absEnd.toFixed(3)),
+      position: resolvedPosition,
+    })
+
+    logger.info(`[ProofVisual] scene ${i} → ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`)
+  }
+
+  return result
+}
+
+type CaptionStateType = 'none' | 'normal' | 'strong' | 'data_note' | 'news_chyron'
+
+function getCaptionStateAt(
+  start: number,
+  end: number,
+  captionPlan: import('../../shared/types').CaptionPlan
+): CaptionStateType {
+  const stateOrder: CaptionStateType[] = ['none', 'normal', 'data_note', 'news_chyron', 'strong']
+  let maxState: CaptionStateType = 'none'
+
+  for (const phrase of captionPlan.phrases) {
+    if (phrase.startTime >= end || phrase.endTime <= start) continue
+    let state: CaptionStateType = 'normal'
+    if (phrase.presetType === 'big_statement') state = 'strong'
+    else if (phrase.presetType === 'data_note') state = 'data_note'
+    else if (phrase.presetType === 'news_chyron') state = 'news_chyron'
+    if (stateOrder.indexOf(state) > stateOrder.indexOf(maxState)) maxState = state
+  }
+
+  return maxState
+}
+
+function isDuplicateOfDataNote(
+  pvText: string,
+  captionPlan: import('../../shared/types').CaptionPlan,
+  absStart: number,
+  absEnd: number
+): boolean {
+  const normPv = pvText.replace(/[$,\s.%]/g, '').replace(/million/i, 'M').replace(/billion/i, 'B').toUpperCase()
+  for (const phrase of captionPlan.phrases) {
+    if (phrase.presetType !== 'data_note' && phrase.emphasisType !== 'shock_stat') continue
+    if (phrase.startTime >= absEnd || phrase.endTime <= absStart) continue
+    const src = phrase.dataNote?.label ?? phrase.text
+    const normSrc = src.replace(/[$,\s.%]/g, '').replace(/million/i, 'M').replace(/billion/i, 'B').toUpperCase()
+    if (normSrc.includes(normPv) || normPv.includes(normSrc)) return true
+    const pvNums = pvText.match(/\d+/g) ?? []
+    const srcNums = src.match(/\d+/g) ?? []
+    if (pvNums.length > 0 && pvNums.some(n => srcNums.includes(n))) return true
+  }
+  return false
+}
+
+function resolveProofPosition(
+  pv: ProofVisual,
+  captionState: CaptionStateType,
+  sceneIndex: number
+): ProofVisual['position'] {
+  if (pv.position) {
+    if (captionState === 'strong' || captionState === 'news_chyron') {
+      if (pv.position === 'bottom_right') return 'top_right'
+      if (pv.position === 'bottom_left') return 'top_left'
+    }
+    return pv.position
+  }
+  if (pv.type === 'date_card') return 'top_right'
+  if (pv.type === 'location_label') return 'top_left'
+  if (pv.type === 'stat_emphasis') return (captionState === 'strong') ? 'top_left' : 'bottom_left'
+  const corners: ProofVisual['position'][] = ['bottom_right', 'top_right', 'bottom_right', 'top_right']
+  return corners[sceneIndex % corners.length]
+}
+

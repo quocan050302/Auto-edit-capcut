@@ -9,6 +9,7 @@
  * - resolveCaptionAnimation() cho BigStatementCaption (word-level anim)
  * - Truyền phraseIndex để variation rule hoạt động
  * - inferPreset() giữ nguyên để backward compat
+ * - ProofVisualOverlay render (optional — absent = backward compat)
  *
  * KHÔNG THAY ĐỔI:
  * - Logic filter activeRanges (handled ở caption-planner, không phải đây)
@@ -22,14 +23,17 @@ import { useCurrentFrame, useVideoConfig, AbsoluteFill } from 'remotion'
 import { BigStatementCaption } from './components/BigStatementCaption'
 import { NewsChyronCaption } from './components/NewsChyronCaption'
 import { DataNoteCallout } from './components/DataNoteCallout'
+import { ProofVisualOverlay } from './components/ProofVisualOverlay'
 import { resolveCaptionAnimation } from './animations/presets'
 import type { CaptionPlan } from '../../shared/types'
+import type { ProofVisual } from '../../src/main/retention/retention-types'
 
 interface Props {
   captionPlan: CaptionPlan
+  proofVisuals?: ProofVisual[]  // optional — absent = caption-only (backward compat)
 }
 
-export const CaptionsOverlay: React.FC<Props> = ({ captionPlan }) => {
+export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
   const currentTime = frame / fps
@@ -41,7 +45,7 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan }) => {
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#00FF00' }}>
-      {activePhrases.map((phrase, renderIdx) => {
+      {activePhrases.map((phrase) => {
         const entranceFrame = Math.round(phrase.startTime * fps)
         const exitFrame = Math.round(phrase.endTime * fps)
         const preset = phrase.presetType ?? inferPreset(phrase.emphasisType)
@@ -108,6 +112,21 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan }) => {
               />
             )
         }
+      })}
+
+      {/* Proof Visual overlays — rendered on top of captions, below UI */}
+      {(proofVisuals ?? []).map((proof, idx) => {
+        if (proof.absoluteStartTime == null || proof.absoluteEndTime == null) return null
+        const entranceFrame = Math.round(proof.absoluteStartTime * fps)
+        const exitFrame = Math.round(proof.absoluteEndTime * fps)
+        return (
+          <ProofVisualOverlay
+            key={`pv_${idx}_${proof.primaryText}`}
+            proof={proof}
+            entranceFrame={entranceFrame}
+            exitFrame={exitFrame}
+          />
+        )
       })}
     </AbsoluteFill>
   )
