@@ -1,10 +1,9 @@
 import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
-import { app } from 'electron'
 import { spawn } from 'child_process'
 import { logger } from './logger'
-import { generateAssFile } from './captions/ass-generator'
+import { renderCaptionsOverlay } from './captions/remotion-renderer'
 import type { AudioPlan, CaptionPlan } from '../../shared/types'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
@@ -391,53 +390,56 @@ export async function renderVideo(params: {
     ])
   }
 
-  // ── 7b. Burn Dynamic Kinetic Captions (nếu được bật) ────────────────────
+  // ── 7b. Render Dynamic Kinetic Captions via Remotion (nếu được bật) ────────
   if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-    progress('Burn Dynamic Captions...', 0.93)
-    const captionsTmpDir = path.join(path.dirname(outputPath), '_captions_tmp')
-    fs.mkdirSync(captionsTmpDir, { recursive: true })
+    // — 7b-i. Render lớp overlay WebM alpha bằng Remotion ——————————————————————
+    progress('Rendering caption overlay (Remotion)...', 0.91)
+    const captionsDir = path.join(projectDir, 'assets', 'captions')
+    fs.mkdirSync(captionsDir, { recursive: true })
+    const overlayPath = path.join(captionsDir, 'overlay.mp4')  // H264 green screen
 
-    const assPath = path.join(captionsTmpDir, 'captions.ass')
-    const captionedPath = path.join(captionsTmpDir, 'captioned_output.mp4')
+    const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0)
 
-    // Lấy thư mục fonts (bundle cùng app hoặc fallback system fonts)
-    let fontsDir: string
-    try {
-      fontsDir = path.join(app.getAppPath(), 'assets', 'fonts')
-    } catch {
-      fontsDir = path.join(__dirname, '..', '..', '..', 'assets', 'fonts')
-    }
+    await renderCaptionsOverlay({
+      captionPlan: params.captionPlan,
+      videoDurationInSeconds: videoDurationSecs,
+      outputPath: overlayPath,
+      fps,
+      resolution,
+      onBundleProgress: (pct) => {
+        progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 0.002)
+      },
+      onRenderProgress: (pct) => {
+        progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01)
+      },
+    })
 
-    // Sinh file .ass từ CaptionPlan
-    generateAssFile(params.captionPlan, assPath, fontsDir)
+    // — 7b-ii. Merge overlay lên video gốc bằng FFmpeg ————————————————————————
+    progress('Compositing captions overlay...', 0.93)
+    const captionedPath = path.join(path.dirname(outputPath), '_captioned_tmp.mp4')
 
-    // Escape dấu `:` trong đường dẫn ASS cho Windows (FFmpeg filter syntax dùng `:` làm phân cách)
-    // Trên macOS không cần escape vì đường dẫn /absolute/path không có dấu `:` giữa đường dẫn.
-    const assFilterPath = process.platform === 'win32'
-      ? assPath.replace(/\\/g, '/').replace(/:/g, '\\:')
-      : assPath.replace(/:/g, '\\:')  // escape colon trong filter string
-
-    logger.info(`[RENDER] Burn ASS: ${assPath} (${params.captionPlan.phrases.length} phrases)`)
+    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases)`)
 
     await ffmpegRun([
       '-y',
-      '-i', outputPath,
-      '-vf', `ass='${assFilterPath}':fontsdir='${fontsDir.replace(/'/g, "'\\''")}'`,
+      '-i', outputPath,              // [0] video có audio
+      '-i', overlayPath,             // [1] caption MP4 green screen từ Remotion
+      '-filter_complex', '[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]',
+      '-map', '[outv]',
+      '-map', '0:a',
       '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
       '-c:a', 'copy',
+      '-pix_fmt', 'yuv420p',
       captionedPath
     ])
 
     // Thay thế output final bằng bản đã có caption
     fs.renameSync(captionedPath, outputPath)
 
-    // Dọn file tạm
-    try {
-      fs.unlinkSync(assPath)
-      fs.rmdirSync(captionsTmpDir)
-    } catch { /* bỏ qua lỗi dọn dẹp */ }
+    // Dọn overlay tạm
+    try { fs.unlinkSync(overlayPath) } catch { /* ignore */ }
 
-    logger.info('[RENDER] Burn captions hoàn thành')
+    logger.info('[RENDER] Caption overlay composited')
   }
 
   // ── 8. Cleanup temp files ─────────────────────────────────────────────────

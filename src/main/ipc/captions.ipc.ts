@@ -17,7 +17,7 @@ import { spawn } from 'child_process'
 import { IpcMain, BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../../shared/types'
 import { generateCaptionPlan, loadCaptionPlan, saveCaptionPlan } from '../captions/caption-planner'
-import { generateAssFile } from '../captions/ass-generator'
+import { renderCaptionsOverlay } from '../captions/remotion-renderer'
 import { logger } from '../logger'
 import type { CaptionPlan, CaptionPhrase, CaptionActiveRange } from '../../../shared/types'
 
@@ -144,22 +144,41 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  // ── regenerate-ass ─────────────────────────────────────────────────────────
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (_event, params: {
+  // ── regenerate-overlay (Remotion) — channel name kept for backward compat ────
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (event, params: {
     projectDir: string
+    videoDurationInSeconds?: number
   }) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+
+    const sendProgress = (msg: string, pct: number): void => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct })
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, { message: msg, progress: pct })
+    }
+
     try {
       const plan = loadCaptionPlan(params.projectDir)
       if (!plan) return { success: false, error: 'Chưa có caption-plan.json' }
 
-      const assPath = path.join(params.projectDir, 'assets', 'captions', 'captions.ass')
-      const fontsDir = path.join(__dirname, '..', '..', '..', 'assets', 'fonts')
-      generateAssFile(plan, assPath, fontsDir)
+      const overlayPath = path.join(params.projectDir, 'assets', 'captions', 'overlay.mp4')
+      const duration = params.videoDurationInSeconds ?? 600  // fallback 10 phút
 
-      logger.info(`[CaptionsIPC] Đã tạo lại file .ass: ${assPath}`)
-      return { success: true, assPath }
+      sendProgress('Bundling Remotion composition...', 0.05)
+
+      await renderCaptionsOverlay({
+        captionPlan: plan,
+        videoDurationInSeconds: duration,
+        outputPath: overlayPath,
+        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.05 + pct * 0.004),
+        onRenderProgress: (pct) => sendProgress(`Render: ${Math.round(pct * 100)}%`, 0.50 + pct * 0.48),
+      })
+
+      logger.info(`[CaptionsIPC] Đã tạo lại overlay Remotion: ${overlayPath}`)
+      return { success: true, overlayPath }
     } catch (err) {
-      return { success: false, error: String(err) }
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error(`[CaptionsIPC] regenerate-overlay lỗi: ${msg}`)
+      return { success: false, error: msg }
     }
   })
 
@@ -216,7 +235,7 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
         clipPath
       ])
 
-      sendProgress('Đang burn captions vào preview...', 0.50)
+      sendProgress('Đang render caption overlay (Remotion)...', 0.30)
 
       // Lọc phrases trong khoảng preview, chỉnh lại thời gian tương đối
       const previewPhrases = plan.phrases
@@ -227,28 +246,37 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
           endTime: p.endTime - params.startTime
         }))
 
-      const previewPlan: CaptionPlan = {
-        ...plan,
-        phrases: previewPhrases
-      }
+      const previewPlan: CaptionPlan = { ...plan, phrases: previewPhrases }
 
-      const assPath = path.join(previewDir, 'preview_captions.ass')
-      const fontsDir = path.join(__dirname, '..', '..', '..', 'assets', 'fonts')
-      generateAssFile(previewPlan, assPath, fontsDir)
+      const overlayPath = path.join(previewDir, 'preview_overlay.mp4')
+
+      await renderCaptionsOverlay({
+        captionPlan: previewPlan,
+        videoDurationInSeconds: duration,
+        outputPath: overlayPath,
+        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.30 + pct * 0.002),
+        onRenderProgress: (pct) => sendProgress(`Caption overlay: ${Math.round(pct * 100)}%`, 0.35 + pct * 0.40),
+      })
+
+      sendProgress('Compositing preview...', 0.80)
 
       const previewOutput = path.join(previewDir, 'preview_captioned.mp4')
-      const assFilterPath = process.platform === 'win32'
-        ? assPath.replace(/\\/g, '/').replace(/:/g, '\\:')
-        : assPath.replace(/:/g, '\\:')
 
       await ffmpegRun([
         '-y',
         '-i', clipPath,
-        '-vf', `ass='${assFilterPath}':fontsdir='${fontsDir}'`,
+        '-i', overlayPath,
+        '-filter_complex', '[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]',
+        '-map', '[outv]',
+        '-map', '0:a?',
         '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28',
         '-c:a', 'copy',
+        '-pix_fmt', 'yuv420p',
         previewOutput
       ])
+
+      // Dọn overlay tạm
+      try { fs.unlinkSync(overlayPath) } catch { /* ignore */ }
 
       sendProgress('Preview xong!', 1.0)
       logger.info(`[CaptionsIPC] Preview render: ${previewOutput}`)

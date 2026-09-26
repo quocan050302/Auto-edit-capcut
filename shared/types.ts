@@ -573,9 +573,11 @@ export const IPC_CHANNELS = {
   CAPTIONS_GET_PLAN: 'captions:get-plan',
   CAPTIONS_UPDATE_PHRASE: 'captions:update-phrase',
   CAPTIONS_TOGGLE_RANGE: 'captions:toggle-range',
-  CAPTIONS_REGENERATE_ASS: 'captions:regenerate-ass',
+  CAPTIONS_REGENERATE_ASS: 'captions:regenerate-ass',   // kept for backward compat
   CAPTIONS_PREVIEW_RENDER: 'captions:preview-render',
-  CAPTIONS_PROGRESS: 'captions:progress'
+  CAPTIONS_PROGRESS: 'captions:progress',
+  // Remotion caption overlay render progress (separate from main FFmpeg render)
+  CAPTIONS_RENDER_PROGRESS: 'captions:render-progress'
 } as const
 
 // ─── Master Edit Plan Retention Extension ─────────────────────────────────────
@@ -622,6 +624,22 @@ export interface TranscriptResult {
 /** Loại nhấn mạnh của cụm từ caption — quyết định style và animation */
 export type CaptionEmphasis = 'hook' | 'list_transition' | 'shock_stat' | 'punchline' | 'normal'
 
+/**
+ * Remotion render preset — quyết định component nào được dùng khi render overlay.
+ * - big_statement : chữ to chiếm trọn màn hình, ô đỏ ôm sát từ được nhấn
+ * - news_chyron   : 2 khối màu nối liền (kiểu bản tin), đổi font giữa 2 khối
+ * - data_note     : callout nhỏ góc màn hình, không che B-roll
+ */
+export type CaptionPreset = 'big_statement' | 'news_chyron' | 'data_note'
+
+/** Một segment trong News Chyron (mỗi khối màu riêng) */
+export interface ChyronSegment {
+  text: string
+  background: string          // hex color, vd '#E8352B' hoặc '#F5F0E6'
+  textColor: string           // hex color
+  fontPreset: 'sans_bold_caps' | 'serif'
+}
+
 /** Một cụm từ 2-4 chữ trong caption, kèm style và timing chính xác */
 export interface CaptionPhrase {
   id: string
@@ -636,6 +654,13 @@ export interface CaptionPhrase {
     boxHighlight: boolean      // dải đỏ phía sau chữ
     skew: boolean              // bẻ góc 3D (shear trục X)
     baseColor: 'white' | 'yellow_pale'
+  }
+  // ── Remotion preset fields (NEW) ──────────────────────────────────────────
+  presetType?: CaptionPreset              // quyết định component Remotion nào render
+  chyronSegments?: ChyronSegment[]        // chỉ dùng khi presetType === 'news_chyron'
+  dataNote?: {
+    label: string                          // bản rút gọn số liệu dưới 8 từ
+    position: 'bottom_left' | 'bottom_right' | 'top_right'
   }
 }
 

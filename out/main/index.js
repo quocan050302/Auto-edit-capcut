@@ -10,6 +10,8 @@ const ffprobeStatic = require("ffprobe-static");
 const os = require("os");
 const child_process = require("child_process");
 const genai = require("@google/genai");
+const bundler = require("@remotion/bundler");
+const renderer = require("@remotion/renderer");
 const https = require("https");
 const http = require("http");
 const url = require("url");
@@ -94,8 +96,11 @@ const IPC_CHANNELS = {
   CAPTIONS_UPDATE_PHRASE: "captions:update-phrase",
   CAPTIONS_TOGGLE_RANGE: "captions:toggle-range",
   CAPTIONS_REGENERATE_ASS: "captions:regenerate-ass",
+  // kept for backward compat
   CAPTIONS_PREVIEW_RENDER: "captions:preview-render",
-  CAPTIONS_PROGRESS: "captions:progress"
+  CAPTIONS_PROGRESS: "captions:progress",
+  // Remotion caption overlay render progress (separate from main FFmpeg render)
+  CAPTIONS_RENDER_PROGRESS: "captions:render-progress"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -1339,125 +1344,66 @@ function registerPlannerHandlers(ipcMain) {
     }
   );
 }
-const PLAY_RES_X = 1920;
-const PLAY_RES_Y = 1080;
-const COLORS = {
-  white: "&H00FFFFFF&",
-  // trắng thuần
-  yellowLime: "&H0000E8FF&",
-  // vàng chanh (BGR: 00, E8, FF → RGB: FF, E8, 00)
-  yellowPale: "&H0088E8FF&",
-  // vàng nhạt (cho serif_italic)
-  red: "&H000000CC&",
-  // đỏ cho box highlight
-  black: "&H00000000&",
-  // viền đen
-  shadowBlack: "&H80000000&"
-};
-function toAssTime(secs) {
-  const h = Math.floor(secs / 3600);
-  const m = Math.floor(secs % 3600 / 60);
-  const s = Math.floor(secs % 60);
-  const cs = Math.round(secs % 1 * 100);
-  return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}.${String(cs).padStart(2, "0")}`;
-}
-function escapeAssText(text) {
-  return text.replace(/\{/g, "\\{").replace(/\}/g, "\\}");
-}
-function buildTextWithHighlights(text, highlightWords, baseColorCode, prefixTags) {
-  if (!highlightWords || highlightWords.length === 0) {
-    return `${prefixTags}${escapeAssText(text.toUpperCase())}`;
+let cachedBundleUrl = null;
+async function getBundle(onProgress) {
+  if (cachedBundleUrl) {
+    logger.info("[RemotionRenderer] Dùng bundle cache");
+    return cachedBundleUrl;
   }
-  const words = text.split(/(\s+)/);
-  const upperHighlights = highlightWords.map((w) => w.toUpperCase());
-  let result = prefixTags;
-  for (const token of words) {
-    const upperToken = token.trim().toUpperCase();
-    if (upperToken && upperHighlights.includes(upperToken)) {
-      result += `{\\c${COLORS.yellowLime}}${escapeAssText(token.toUpperCase())}{\\c${baseColorCode}}`;
-    } else {
-      result += escapeAssText(token.toUpperCase());
+  logger.info("[RemotionRenderer] Đang bundle Remotion composition...");
+  const entryPoint = path__namespace.join(__dirname, "../../src/remotion/index.ts");
+  cachedBundleUrl = await bundler.bundle({
+    entryPoint,
+    onProgress: (progress) => {
+      onProgress?.(progress);
+      logger.debug(`[RemotionRenderer] Bundle: ${progress}%`);
     }
-  }
-  return result;
+  });
+  logger.info(`[RemotionRenderer] Bundle xong: ${cachedBundleUrl}`);
+  return cachedBundleUrl;
 }
-function buildAssHeader(fontsDir) {
-  return [
-    "[Script Info]",
-    "Title: Dynamic Kinetic Captions — Auto-Generated",
-    "ScriptType: v4.00+",
-    `PlayResX: ${PLAY_RES_X}`,
-    `PlayResY: ${PLAY_RES_Y}`,
-    "ScaledBorderAndShadow: yes",
-    "YCbCr Matrix: TV.601",
-    "",
-    "[V4+ Styles]",
-    // Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour,
-    //         Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow,
-    //         Alignment, MarginL, MarginR, MarginV, Encoding
-    "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-    // SansBoldCaps: trắng, viền đen 3px, shadow, alignment=2 (bottom-center)
-    `Style: SansBoldCaps,Montserrat Black,96,${COLORS.white},${COLORS.white},${COLORS.black},${COLORS.shadowBlack},1,0,0,0,100,100,0,0,1,3,2,2,0,0,120,1`,
-    // SerifItalic: vàng nhạt, viền nhẹ, alignment=2
-    `Style: SerifItalic,Playfair Display,84,${COLORS.yellowPale},${COLORS.yellowPale},${COLORS.black},${COLORS.shadowBlack},0,1,0,0,100,100,0,0,1,2,2,2,0,0,120,1`,
-    // BoxRed: style ẩn dùng vẽ hình chữ nhật đỏ, không có text thật
-    `Style: BoxRed,Arial,1,${COLORS.red},${COLORS.red},${COLORS.red},${COLORS.red},0,0,0,0,100,100,0,0,3,0,0,2,0,0,0,1`,
-    "",
-    // Khai báo font directory để FFmpeg tìm font
-    `; FontsDir: ${fontsDir}`,
-    "",
-    "[Events]",
-    "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
-  ].join("\n");
-}
-function estimateBoxWidth(text) {
-  const charCount = text.length;
-  return Math.min(PLAY_RES_X - 100, Math.max(300, charCount * 58 + 80));
-}
-function buildBoxDialogue(phrase) {
-  const startT = toAssTime(phrase.startTime);
-  const endT = toAssTime(phrase.endTime);
-  const boxW = estimateBoxWidth(phrase.text);
-  const boxH = 120;
-  const boxX = Math.round((PLAY_RES_X - boxW) / 2);
-  const boxY = PLAY_RES_Y - 120 - 20;
-  const drawCmd = `m ${boxX} ${boxY} l ${boxX + boxW} ${boxY} l ${boxX + boxW} ${boxY + boxH} l ${boxX} ${boxY + boxH}`;
-  return `Dialogue: 0,${startT},${endT},BoxRed,,0,0,0,,{\\p1\\c${COLORS.red}\\bord0\\shad0\\pos(0,0)}${drawCmd}{\\p0}`;
-}
-function buildTextDialogue(phrase) {
-  const startT = toAssTime(phrase.startTime);
-  const endT = toAssTime(phrase.endTime);
-  const styleName = phrase.style.fontPreset === "serif_italic" ? "SerifItalic" : "SansBoldCaps";
-  const baseColor = phrase.style.fontPreset === "serif_italic" ? COLORS.yellowPale : COLORS.white;
-  const tagParts = [];
-  tagParts.push("\\fscx88\\fscy88\\t(0,80,\\fscx105\\fscy105)\\t(80,160,\\fscx100\\fscy100)");
-  if (phrase.style.skew) {
-    tagParts.push("\\fax0.3");
-  }
-  tagParts.push(`\\c${baseColor}`);
-  const prefixTags = `{${tagParts.join("")}}`;
-  const textContent = buildTextWithHighlights(
-    phrase.text,
-    phrase.highlightWords ?? [],
-    baseColor,
-    prefixTags
-  );
-  return `Dialogue: 1,${startT},${endT},${styleName},,0,0,0,,${textContent}`;
-}
-function generateAssFile(captionPlan, outputPath, fontsDir) {
-  logger.info(`[CaptionASS] Đang sinh file .ass: ${outputPath}`);
-  logger.info(`[CaptionASS] ${captionPlan.phrases.length} phrases | fontsDir: ${fontsDir}`);
+async function renderCaptionsOverlay(options) {
+  const {
+    captionPlan,
+    videoDurationInSeconds,
+    outputPath,
+    fps = 30,
+    resolution = { width: 1920, height: 1080 },
+    onBundleProgress,
+    onRenderProgress
+  } = options;
   fs__namespace.mkdirSync(path__namespace.dirname(outputPath), { recursive: true });
-  const lines = [buildAssHeader(fontsDir)];
-  for (const phrase of captionPlan.phrases) {
-    if (phrase.style.boxHighlight) {
-      lines.push(buildBoxDialogue(phrase));
+  const bundleUrl = await getBundle(onBundleProgress);
+  const durationInFrames = Math.ceil(videoDurationInSeconds * fps);
+  logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)`);
+  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}×${resolution.height}`);
+  logger.info(`[RemotionRenderer] Phrases: ${captionPlan.phrases.length}`);
+  const composition = await renderer.selectComposition({
+    serveUrl: bundleUrl,
+    id: "CaptionsOverlay",
+    inputProps: { captionPlan }
+  });
+  await renderer.renderMedia({
+    composition: {
+      ...composition,
+      durationInFrames,
+      fps,
+      width: resolution.width,
+      height: resolution.height
+    },
+    serveUrl: bundleUrl,
+    codec: "h264",
+    // H264 MP4 — không cần alpha, dùng green screen
+    // Không cần pixelFormat/imageFormat — mặc định yuv420p là đủ
+    outputLocation: outputPath,
+    inputProps: { captionPlan },
+    onProgress: ({ progress }) => {
+      const pct = Math.round(progress * 100);
+      onRenderProgress?.(progress);
+      logger.debug(`[RemotionRenderer] Render: ${pct}%`);
     }
-    lines.push(buildTextDialogue(phrase));
-  }
-  const assContent = lines.join("\n") + "\n";
-  fs__namespace.writeFileSync(outputPath, assContent, { encoding: "utf-8" });
-  logger.info(`[CaptionASS] Đã ghi ${captionPlan.phrases.length} phrases vào ${outputPath}`);
+  });
+  logger.info(`[RemotionRenderer] Overlay xong: ${outputPath}`);
 }
 const ffmpegPath$1 = require("ffmpeg-static");
 function ffmpegRun$1(args) {
@@ -1742,26 +1688,41 @@ async function renderVideo(params) {
     ]);
   }
   if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-    progress("Burn Dynamic Captions...", 0.93);
-    const captionsTmpDir = path__namespace.join(path__namespace.dirname(outputPath), "_captions_tmp");
-    fs__namespace.mkdirSync(captionsTmpDir, { recursive: true });
-    const assPath = path__namespace.join(captionsTmpDir, "captions.ass");
-    const captionedPath = path__namespace.join(captionsTmpDir, "captioned_output.mp4");
-    let fontsDir;
-    try {
-      fontsDir = path__namespace.join(electron.app.getAppPath(), "assets", "fonts");
-    } catch {
-      fontsDir = path__namespace.join(__dirname, "..", "..", "..", "assets", "fonts");
-    }
-    generateAssFile(params.captionPlan, assPath, fontsDir);
-    const assFilterPath = process.platform === "win32" ? assPath.replace(/\\/g, "/").replace(/:/g, "\\:") : assPath.replace(/:/g, "\\:");
-    logger.info(`[RENDER] Burn ASS: ${assPath} (${params.captionPlan.phrases.length} phrases)`);
+    progress("Rendering caption overlay (Remotion)...", 0.91);
+    const captionsDir = path__namespace.join(projectDir, "assets", "captions");
+    fs__namespace.mkdirSync(captionsDir, { recursive: true });
+    const overlayPath = path__namespace.join(captionsDir, "overlay.mp4");
+    const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
+    await renderCaptionsOverlay({
+      captionPlan: params.captionPlan,
+      videoDurationInSeconds: videoDurationSecs,
+      outputPath: overlayPath,
+      fps,
+      resolution,
+      onBundleProgress: (pct) => {
+        progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 2e-3);
+      },
+      onRenderProgress: (pct) => {
+        progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01);
+      }
+    });
+    progress("Compositing captions overlay...", 0.93);
+    const captionedPath = path__namespace.join(path__namespace.dirname(outputPath), "_captioned_tmp.mp4");
+    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases)`);
     await ffmpegRun$1([
       "-y",
       "-i",
       outputPath,
-      "-vf",
-      `ass='${assFilterPath}':fontsdir='${fontsDir.replace(/'/g, "'\\''")}'`,
+      // [0] video có audio
+      "-i",
+      overlayPath,
+      // [1] caption MP4 green screen từ Remotion
+      "-filter_complex",
+      "[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]",
+      "-map",
+      "[outv]",
+      "-map",
+      "0:a",
       "-c:v",
       "libx264",
       "-preset",
@@ -1770,15 +1731,16 @@ async function renderVideo(params) {
       "20",
       "-c:a",
       "copy",
+      "-pix_fmt",
+      "yuv420p",
       captionedPath
     ]);
     fs__namespace.renameSync(captionedPath, outputPath);
     try {
-      fs__namespace.unlinkSync(assPath);
-      fs__namespace.rmdirSync(captionsTmpDir);
+      fs__namespace.unlinkSync(overlayPath);
     } catch {
     }
-    logger.info("[RENDER] Burn captions hoàn thành");
+    logger.info("[RENDER] Caption overlay composited");
   }
   progress("Cleaning up...", 0.97);
   try {
@@ -4246,6 +4208,7 @@ function groupWordsIntoPhrases(words, sceneId, emphasisType, chunkSize = 3) {
     const baseColor = fontPreset === "serif_italic" ? "yellow_pale" : "white";
     const boxHighlight = emphasisType === "shock_stat" && highlightWords.length > 0;
     const skew = emphasisType === "list_transition";
+    const presetType = emphasisType === "hook" || emphasisType === "punchline" ? "big_statement" : emphasisType === "list_transition" ? "news_chyron" : emphasisType === "shock_stat" ? "data_note" : "big_statement";
     phrases.push({
       id: `cap_${sceneId}_${String(phraseIndex).padStart(3, "0")}`,
       sceneId,
@@ -4254,6 +4217,7 @@ function groupWordsIntoPhrases(words, sceneId, emphasisType, chunkSize = 3) {
       endTime,
       emphasisType,
       highlightWords,
+      presetType,
       style: { fontPreset, boxHighlight, skew, baseColor }
     });
     phraseIndex++;
@@ -4348,6 +4312,14 @@ BƯỚC C — Gán style cho mỗi phrase:
 Dữ liệu đầu vào:
 ${JSON.stringify(scenePayload, null, 2)}
 
+BƯỚC D — Với mỗi phrase, chọn presetType theo quy tắc:
+- "hook" hoặc "punchline" → presetType = "big_statement" (chiếm trọn màn hình, tạo sức nặng tối đa)
+- "list_transition" → presetType = "news_chyron" (cảm giác như 1 bản tin/headline mở màn cho mục mới), chia text thành 2 chyronSegments: segment đầu là mệnh đề chính (nền đỏ #E8352B, chữ trắng, font sans_bold_caps), segment sau là phần bổ nghĩa (nền trắng ngà #F5F0E6, chữ đen, font serif)
+- "shock_stat" → MẶC ĐỊNH presetType = "data_note" (note nhỏ góc màn hình, không che B-roll đang phát) TRỪ KHI số liệu đó là luận điểm trung tâm của cả video thì mới dùng "big_statement". Với data_note, điền field "dataNote.label" là bản rút gọn số liệu dưới 8 từ.
+
+QUY TẮC RIÊNG CHO 30 GIÂY ĐẦU (hook window, 0-30s):
+Trong khoảng này, coi MỌI cụm từ được nói ra đều đáng hiện caption (không chỉ áp dụng 4 trigger như phần còn lại video) để tối đa hoá pattern interrupt. Luân phiên presetType giữa "big_statement" và "news_chyron" theo nhịp câu (không dùng "data_note" trong hook window — hook cần chiếm trọn màn hình, không phải note nhỏ). Ngoài hook window, áp dụng đúng 4 trigger đã nêu và cho phép nhiều khoảng trống hoàn toàn tắt caption.
+
 Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
 {
   "enabled": true,
@@ -4362,8 +4334,21 @@ Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
       "startTime": 0.0,
       "endTime": 0.6,
       "emphasisType": "hook",
-      "highlightWords": [],
+      "highlightWords": ["NOW"],
+      "presetType": "big_statement",
       "style": { "fontPreset": "sans_bold_caps", "boxHighlight": false, "skew": false, "baseColor": "white" }
+    },
+    {
+      "id": "cap_002",
+      "sceneId": "...",
+      "text": "40% tăng mỗi năm",
+      "startTime": 45.0,
+      "endTime": 47.5,
+      "emphasisType": "shock_stat",
+      "highlightWords": ["40%"],
+      "presetType": "data_note",
+      "dataNote": { "label": "Tăng 40% từ 2023", "position": "bottom_right" },
+      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": true, "skew": false, "baseColor": "white" }
     }
   ]
 }`;
@@ -4549,17 +4534,31 @@ function registerCaptionHandlers(ipcMain) {
       return { success: false, error: String(err) };
     }
   });
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (_event, params) => {
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (event, params) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const sendProgress = (msg, pct) => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, { message: msg, progress: pct });
+    };
     try {
       const plan = loadCaptionPlan(params.projectDir);
       if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
-      const assPath = path__namespace.join(params.projectDir, "assets", "captions", "captions.ass");
-      const fontsDir = path__namespace.join(__dirname, "..", "..", "..", "assets", "fonts");
-      generateAssFile(plan, assPath, fontsDir);
-      logger.info(`[CaptionsIPC] Đã tạo lại file .ass: ${assPath}`);
-      return { success: true, assPath };
+      const overlayPath = path__namespace.join(params.projectDir, "assets", "captions", "overlay.mp4");
+      const duration = params.videoDurationInSeconds ?? 600;
+      sendProgress("Bundling Remotion composition...", 0.05);
+      await renderCaptionsOverlay({
+        captionPlan: plan,
+        videoDurationInSeconds: duration,
+        outputPath: overlayPath,
+        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.05 + pct * 4e-3),
+        onRenderProgress: (pct) => sendProgress(`Render: ${Math.round(pct * 100)}%`, 0.5 + pct * 0.48)
+      });
+      logger.info(`[CaptionsIPC] Đã tạo lại overlay Remotion: ${overlayPath}`);
+      return { success: true, overlayPath };
     } catch (err) {
-      return { success: false, error: String(err) };
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[CaptionsIPC] regenerate-overlay lỗi: ${msg}`);
+      return { success: false, error: msg };
     }
   });
   ipcMain.handle(IPC_CHANNELS.CAPTIONS_PREVIEW_RENDER, async (event, params) => {
@@ -4604,27 +4603,35 @@ function registerCaptionHandlers(ipcMain) {
         "copy",
         clipPath
       ]);
-      sendProgress("Đang burn captions vào preview...", 0.5);
+      sendProgress("Đang render caption overlay (Remotion)...", 0.3);
       const previewPhrases = plan.phrases.filter((p) => p.startTime >= params.startTime && p.endTime <= params.endTime + 1).map((p) => ({
         ...p,
         startTime: p.startTime - params.startTime,
         endTime: p.endTime - params.startTime
       }));
-      const previewPlan = {
-        ...plan,
-        phrases: previewPhrases
-      };
-      const assPath = path__namespace.join(previewDir, "preview_captions.ass");
-      const fontsDir = path__namespace.join(__dirname, "..", "..", "..", "assets", "fonts");
-      generateAssFile(previewPlan, assPath, fontsDir);
+      const previewPlan = { ...plan, phrases: previewPhrases };
+      const overlayPath = path__namespace.join(previewDir, "preview_overlay.mp4");
+      await renderCaptionsOverlay({
+        captionPlan: previewPlan,
+        videoDurationInSeconds: duration,
+        outputPath: overlayPath,
+        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.3 + pct * 2e-3),
+        onRenderProgress: (pct) => sendProgress(`Caption overlay: ${Math.round(pct * 100)}%`, 0.35 + pct * 0.4)
+      });
+      sendProgress("Compositing preview...", 0.8);
       const previewOutput = path__namespace.join(previewDir, "preview_captioned.mp4");
-      const assFilterPath = process.platform === "win32" ? assPath.replace(/\\/g, "/").replace(/:/g, "\\:") : assPath.replace(/:/g, "\\:");
       await ffmpegRun([
         "-y",
         "-i",
         clipPath,
-        "-vf",
-        `ass='${assFilterPath}':fontsdir='${fontsDir}'`,
+        "-i",
+        overlayPath,
+        "-filter_complex",
+        "[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]",
+        "-map",
+        "[outv]",
+        "-map",
+        "0:a?",
         "-c:v",
         "libx264",
         "-preset",
@@ -4633,8 +4640,14 @@ function registerCaptionHandlers(ipcMain) {
         "28",
         "-c:a",
         "copy",
+        "-pix_fmt",
+        "yuv420p",
         previewOutput
       ]);
+      try {
+        fs__namespace.unlinkSync(overlayPath);
+      } catch {
+      }
       sendProgress("Preview xong!", 1);
       logger.info(`[CaptionsIPC] Preview render: ${previewOutput}`);
       return { success: true, previewPath: previewOutput };

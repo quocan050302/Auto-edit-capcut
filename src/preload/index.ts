@@ -246,7 +246,7 @@ const api = {
     toggleRange: (params: { projectDir: string; rangeIndex: number; enabled: boolean; captionEnabled?: boolean }): Promise<{ success: boolean; plan?: CaptionPlan; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_TOGGLE_RANGE, params),
 
-    regenerateAss: (params: { projectDir: string }): Promise<{ success: boolean; assPath?: string; error?: string }> =>
+    regenerateAss: (params: { projectDir: string; videoDurationInSeconds?: number }): Promise<{ success: boolean; overlayPath?: string; assPath?: string; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, params),
 
     previewRender: (params: { projectDir: string; startTime: number; endTime: number }): Promise<{ success: boolean; previewPath?: string; error?: string }> =>
@@ -257,6 +257,14 @@ const api = {
         callback(data)
       ipcRenderer.on(IPC_CHANNELS.CAPTIONS_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.CAPTIONS_PROGRESS, handler)
+    },
+
+    // Separate listener for Remotion caption overlay render phase (used by RenderPage)
+    onRenderProgress: (callback: (data: { message: string; progress: number }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler)
     }
   }
 }

@@ -80,6 +80,13 @@ function groupWordsIntoPhrases(
     const boxHighlight = emphasisType === 'shock_stat' && highlightWords.length > 0
     const skew = emphasisType === 'list_transition'
 
+    // Gán presetType mặc định theo emphasisType (cho Remotion overlay)
+    const presetType =
+      emphasisType === 'hook' || emphasisType === 'punchline' ? 'big_statement' :
+      emphasisType === 'list_transition' ? 'news_chyron' :
+      emphasisType === 'shock_stat' ? 'data_note' :
+      'big_statement'
+
     phrases.push({
       id: `cap_${sceneId}_${String(phraseIndex).padStart(3, '0')}`,
       sceneId,
@@ -88,6 +95,7 @@ function groupWordsIntoPhrases(
       endTime,
       emphasisType,
       highlightWords,
+      presetType,
       style: { fontPreset, boxHighlight, skew, baseColor }
     })
 
@@ -220,6 +228,14 @@ BƯỚC C — Gán style cho mỗi phrase:
 Dữ liệu đầu vào:
 ${JSON.stringify(scenePayload, null, 2)}
 
+BƯỚC D — Với mỗi phrase, chọn presetType theo quy tắc:
+- "hook" hoặc "punchline" → presetType = "big_statement" (chiếm trọn màn hình, tạo sức nặng tối đa)
+- "list_transition" → presetType = "news_chyron" (cảm giác như 1 bản tin/headline mở màn cho mục mới), chia text thành 2 chyronSegments: segment đầu là mệnh đề chính (nền đỏ #E8352B, chữ trắng, font sans_bold_caps), segment sau là phần bổ nghĩa (nền trắng ngà #F5F0E6, chữ đen, font serif)
+- "shock_stat" → MẶC ĐỊNH presetType = "data_note" (note nhỏ góc màn hình, không che B-roll đang phát) TRỪ KHI số liệu đó là luận điểm trung tâm của cả video thì mới dùng "big_statement". Với data_note, điền field "dataNote.label" là bản rút gọn số liệu dưới 8 từ.
+
+QUY TẮC RIÊNG CHO 30 GIÂY ĐẦU (hook window, 0-30s):
+Trong khoảng này, coi MỌI cụm từ được nói ra đều đáng hiện caption (không chỉ áp dụng 4 trigger như phần còn lại video) để tối đa hoá pattern interrupt. Luân phiên presetType giữa "big_statement" và "news_chyron" theo nhịp câu (không dùng "data_note" trong hook window — hook cần chiếm trọn màn hình, không phải note nhỏ). Ngoài hook window, áp dụng đúng 4 trigger đã nêu và cho phép nhiều khoảng trống hoàn toàn tắt caption.
+
 Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
 {
   "enabled": true,
@@ -234,8 +250,21 @@ Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
       "startTime": 0.0,
       "endTime": 0.6,
       "emphasisType": "hook",
-      "highlightWords": [],
+      "highlightWords": ["NOW"],
+      "presetType": "big_statement",
       "style": { "fontPreset": "sans_bold_caps", "boxHighlight": false, "skew": false, "baseColor": "white" }
+    },
+    {
+      "id": "cap_002",
+      "sceneId": "...",
+      "text": "40% tăng mỗi năm",
+      "startTime": 45.0,
+      "endTime": 47.5,
+      "emphasisType": "shock_stat",
+      "highlightWords": ["40%"],
+      "presetType": "data_note",
+      "dataNote": { "label": "Tăng 40% từ 2023", "position": "bottom_right" },
+      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": true, "skew": false, "baseColor": "white" }
     }
   ]
 }`

@@ -59,8 +59,11 @@ const IPC_CHANNELS = {
   CAPTIONS_UPDATE_PHRASE: "captions:update-phrase",
   CAPTIONS_TOGGLE_RANGE: "captions:toggle-range",
   CAPTIONS_REGENERATE_ASS: "captions:regenerate-ass",
+  // kept for backward compat
   CAPTIONS_PREVIEW_RENDER: "captions:preview-render",
-  CAPTIONS_PROGRESS: "captions:progress"
+  CAPTIONS_PROGRESS: "captions:progress",
+  // Remotion caption overlay render progress (separate from main FFmpeg render)
+  CAPTIONS_RENDER_PROGRESS: "captions:render-progress"
 };
 const api = {
   window: {
@@ -170,6 +173,12 @@ const api = {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.CAPTIONS_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.CAPTIONS_PROGRESS, handler);
+    },
+    // Separate listener for Remotion caption overlay render phase (used by RenderPage)
+    onRenderProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler);
     }
   }
 };

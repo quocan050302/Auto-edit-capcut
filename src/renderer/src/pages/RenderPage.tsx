@@ -37,6 +37,7 @@ function fmtBytes(bytes: number): string {
 export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [isRendering, setIsRendering] = useState(false)
   const [progress, setProgress] = useState<RenderProgress | null>(null)
+  const [captionProgress, setCaptionProgress] = useState<{ message: string; progress: number } | null>(null)
   const [result, setResult] = useState<RenderResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [hasPlan, setHasPlan] = useState(false)
@@ -101,10 +102,16 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
     setIsRendering(true)
     setError(null)
     setResult(null)
+    setCaptionProgress(null)
     setProgress({ stage: 'Starting...', progress: 0 })
     startTimer()
 
     const unsub = window.api.render.onProgress((data) => setProgress(data))
+
+    // Subscribe to Remotion caption overlay progress (separate phase)
+    const unsubCaption = window.api.captions?.onRenderProgress?.(
+      (data: { message: string; progress: number }) => setCaptionProgress(data)
+    )
 
     try {
       const res = resolution as keyof typeof resMap
@@ -126,8 +133,10 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
     } finally {
       setIsRendering(false)
       setProgress(null)
+      setCaptionProgress(null)
       stopTimer()
       unsub()
+      unsubCaption?.()
     }
   }
 
@@ -294,6 +303,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
             </span>
           </div>
           <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* FFmpeg main pipeline bar */}
             <div className="progress-bar-wrap" style={{ height: '10px' }}>
               <div
                 className="progress-bar-fill"
@@ -303,6 +313,33 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
             <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
               {progress.stage}
             </div>
+            {/* Remotion caption overlay sub-bar (shown only when active) */}
+            {captionProgress && (
+              <div style={{ marginTop: 4 }}>
+                <div style={{
+                  display: 'flex', justifyContent: 'space-between',
+                  fontSize: '11px', color: 'var(--text-muted)', marginBottom: 4
+                }}>
+                  <span>🎬 Caption Overlay (Remotion)</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', color: '#a5b4fc' }}>
+                    {Math.round(captionProgress.progress * 100)}%
+                  </span>
+                </div>
+                <div className="progress-bar-wrap" style={{ height: '6px' }}>
+                  <div
+                    className="progress-bar-fill"
+                    style={{
+                      width: `${Math.max(1, Math.round(captionProgress.progress * 100))}%`,
+                      background: 'linear-gradient(90deg, #6366f1, #a5b4fc)',
+                      transition: 'width 0.4s ease'
+                    }}
+                  />
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 4 }}>
+                  {captionProgress.message}
+                </div>
+              </div>
+            )}
             {progress.sceneIndex && progress.totalScenes && (
               <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
                 {Array.from({ length: progress.totalScenes }, (_, i) => (
