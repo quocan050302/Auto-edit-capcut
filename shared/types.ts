@@ -513,6 +513,34 @@ export interface ApiKeyVerifyResult {
   modelTested?: string
 }
 
+// ─── Scene Transition Types ──────────────────────────────────────────────────
+export type VideoTransitionType =
+  | 'cut'
+  | 'fade'
+  | 'dissolve'
+  | 'wipeleft'
+  | 'wiperight'
+  | 'slideleft'
+  | 'slideright'
+  | 'smoothleft'
+  | 'smoothright'
+  | 'circleopen'
+  | 'circleclose'
+  | 'pixelize'
+  | 'zoomin'
+
+export type TransitionRenderMode =
+  | 'smart'
+  | 'single'
+
+export interface RenderTransitionSettings {
+  enabled: boolean
+  mode: TransitionRenderMode
+  singleType?: VideoTransitionType
+  defaultDuration: number
+  chapterDuration: number
+}
+
 // IPC channel names
 export const IPC_CHANNELS = {
   // File dialogs

@@ -9268,6 +9268,11 @@ function RenderPage({ project }) {
   const [resolution, setResolution] = reactExports.useState("1920x1080");
   const [fps, setFps] = reactExports.useState(30);
   const [outputName, setOutputName] = reactExports.useState("final_output");
+  const [transitionEnabled, setTransitionEnabled] = reactExports.useState(true);
+  const [transitionMode, setTransitionMode] = reactExports.useState("smart");
+  const [selectedTransition, setSelectedTransition] = reactExports.useState("dissolve");
+  const [transitionDuration, setTransitionDuration] = reactExports.useState(0.35);
+  const [chapterDuration, setChapterDuration] = reactExports.useState(0.65);
   const voiceoverPath = project.inputs?.voiceoverPath ?? "";
   const resMap = {
     "1920x1080": { width: 1920, height: 1080 },
@@ -9275,7 +9280,7 @@ function RenderPage({ project }) {
     "3840x2160": { width: 3840, height: 2160 }
   };
   reactExports.useEffect(() => {
-    window.api.plan.get(project.projectDir).then((p2) => {
+    window.api.plan.get(project.projectDir).then(async (p2) => {
       if (p2) {
         setHasPlan(true);
         const plan = p2;
@@ -9283,7 +9288,18 @@ function RenderPage({ project }) {
           (ch2) => (ch2.sequences ?? ch2.chapters_seq ?? []).flatMap((seq) => seq.scenes ?? [])
         );
         setSceneCount(allScenes.length);
-        const ready = allScenes.filter((s) => !!(s.localPath || s.mediaFile || s.localAsset)).length;
+        let stockAssignments = [];
+        try {
+          const review = await window.api.stock?.getReview?.(project.projectDir);
+          stockAssignments = review?.assignments ?? [];
+        } catch {
+        }
+        const ready = allScenes.filter((s) => {
+          if (s.localPath || s.mediaFile || s.localAsset) return true;
+          return stockAssignments.some(
+            (a) => (a.sceneIndex === s.sceneIndex || a.sceneId === `scene_${s.sceneIndex}`) && a.status === "assigned" && !!a.asset?.localPath
+          );
+        }).length;
         setMediaReadyCount(ready);
       }
     });
@@ -9322,7 +9338,14 @@ function RenderPage({ project }) {
         voiceoverPath,
         outputName,
         resolution: resMap[res],
-        fps
+        fps,
+        transitionSettings: {
+          enabled: transitionEnabled,
+          mode: transitionMode,
+          singleType: transitionMode === "single" ? selectedTransition : void 0,
+          defaultDuration: transitionDuration,
+          chapterDuration
+        }
       });
       if (response.success && response.result) {
         setResult(response.result);
@@ -9457,6 +9480,156 @@ function RenderPage({ project }) {
                 placeholder: "final_output"
               }
             )
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          marginBottom: "20px",
+          padding: "14px 16px",
+          background: "var(--bg-elevated)",
+          borderRadius: "var(--radius-md)",
+          border: "1px solid var(--border-default)"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            marginBottom: transitionEnabled ? "14px" : "0"
+          }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "6px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🎬" }),
+                " Scene Transitions"
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }, children: "Cinematic FFmpeg transitions between scenes" })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: {
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              cursor: isRendering ? "not-allowed" : "pointer",
+              fontSize: "12px",
+              fontWeight: 600,
+              color: transitionEnabled ? "var(--brand-accent)" : "var(--text-secondary)"
+            }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: "checkbox",
+                  checked: transitionEnabled,
+                  onChange: (e) => setTransitionEnabled(e.target.checked),
+                  disabled: isRendering,
+                  style: {
+                    width: "16px",
+                    height: "16px",
+                    accentColor: "var(--brand-primary)",
+                    cursor: isRendering ? "not-allowed" : "pointer"
+                  }
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Enable scene transitions" })
+            ] })
+          ] }),
+          transitionEnabled && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "16px", alignItems: "flex-end", flexWrap: "wrap" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", style: { flex: 1, minWidth: "180px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", children: "Transition mode" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "select",
+                {
+                  className: "settings-select",
+                  value: transitionMode,
+                  onChange: (e) => setTransitionMode(e.target.value),
+                  disabled: isRendering,
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "smart", children: "Smart / Follow edit plan" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "single", children: "Single transition" })
+                  ]
+                }
+              )
+            ] }),
+            transitionMode === "single" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", style: { flex: 1, minWidth: "160px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", children: "Transition type" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "select",
+                {
+                  className: "settings-select",
+                  value: selectedTransition,
+                  onChange: (e) => setSelectedTransition(e.target.value),
+                  disabled: isRendering,
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "fade", children: "Fade" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "dissolve", children: "Dissolve" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "wipeleft", children: "Wipe Left" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "wiperight", children: "Wipe Right" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "slideleft", children: "Slide Left" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "slideright", children: "Slide Right" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "smoothleft", children: "Smooth Left" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "smoothright", children: "Smooth Right" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "circleopen", children: "Circle Open" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "circleclose", children: "Circle Close" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "pixelize", children: "Pixelize" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "zoomin", children: "Zoom In" })
+                  ]
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", style: { flex: 1, minWidth: "130px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", children: "Default duration" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", display: "flex", alignItems: "center" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    type: "number",
+                    min: 0.15,
+                    max: 1,
+                    step: 0.05,
+                    value: transitionDuration,
+                    onChange: (e) => setTransitionDuration(parseFloat(e.target.value) || 0.35),
+                    disabled: isRendering,
+                    style: {
+                      background: "var(--bg-base)",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: "var(--radius-sm)",
+                      color: "var(--text-primary)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "12px",
+                      padding: "9px 12px",
+                      outline: "none",
+                      width: "100%"
+                    }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { position: "absolute", right: "10px", fontSize: "11px", color: "var(--text-muted)", pointerEvents: "none" }, children: "s" })
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", style: { flex: 1, minWidth: "140px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", children: "Chapter transition duration" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", display: "flex", alignItems: "center" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    type: "number",
+                    min: 0.25,
+                    max: 1.2,
+                    step: 0.05,
+                    value: chapterDuration,
+                    onChange: (e) => setChapterDuration(parseFloat(e.target.value) || 0.65),
+                    disabled: isRendering,
+                    style: {
+                      background: "var(--bg-base)",
+                      border: "1px solid var(--border-default)",
+                      borderRadius: "var(--radius-sm)",
+                      color: "var(--text-primary)",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: "12px",
+                      padding: "9px 12px",
+                      outline: "none",
+                      width: "100%"
+                    }
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { position: "absolute", right: "10px", fontSize: "11px", color: "var(--text-muted)", pointerEvents: "none" }, children: "s" })
+              ] })
+            ] })
           ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "16px" }, children: [

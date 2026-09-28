@@ -1550,6 +1550,353 @@ async function renderCaptionsOverlay(options) {
   });
   logger.info(`[RemotionRenderer] Overlay xong: ${outputPath}`);
 }
+const ffmpegPath$2 = require("ffmpeg-static");
+function normalizeTransitionType(raw) {
+  if (!raw || typeof raw !== "string") return "dissolve";
+  const clean = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
+  switch (clean) {
+    case "none":
+    case "hard-cut":
+    case "hardcut":
+    case "cut":
+      return "cut";
+    case "crossfade":
+    case "cross-fade":
+    case "fade":
+      return "fade";
+    case "dissolve":
+      return "dissolve";
+    case "wipe-left":
+    case "wipeleft":
+      return "wipeleft";
+    case "wipe-right":
+    case "wiperight":
+      return "wiperight";
+    case "slide-left":
+    case "slideleft":
+      return "slideleft";
+    case "slide-right":
+    case "slideright":
+      return "slideright";
+    case "smooth-left":
+    case "smoothleft":
+      return "smoothleft";
+    case "smooth-right":
+    case "smoothright":
+      return "smoothright";
+    case "circle-open":
+    case "circleopen":
+      return "circleopen";
+    case "circle-close":
+    case "circleclose":
+      return "circleclose";
+    case "pixelize":
+    case "pixelate":
+      return "pixelize";
+    case "zoom":
+    case "zoom-in":
+    case "zoomin":
+      return "zoomin";
+    default:
+      return "dissolve";
+  }
+}
+function validateTransitionSettings(raw) {
+  if (!raw || typeof raw !== "object") return void 0;
+  if (!raw.enabled) {
+    return {
+      enabled: false,
+      mode: "smart",
+      defaultDuration: 0.35,
+      chapterDuration: 0.65
+    };
+  }
+  const mode = raw.mode === "single" ? "single" : "smart";
+  let singleType = void 0;
+  if (mode === "single") {
+    singleType = normalizeTransitionType(raw.singleType);
+  }
+  const defaultDuration = typeof raw.defaultDuration === "number" && Number.isFinite(raw.defaultDuration) ? Math.max(0.15, Math.min(1, raw.defaultDuration)) : 0.35;
+  const chapterDuration = typeof raw.chapterDuration === "number" && Number.isFinite(raw.chapterDuration) ? Math.max(0.25, Math.min(1.2, raw.chapterDuration)) : 0.65;
+  return {
+    enabled: true,
+    mode,
+    singleType,
+    defaultDuration: Math.round(defaultDuration * 1e3) / 1e3,
+    chapterDuration: Math.round(chapterDuration * 1e3) / 1e3
+  };
+}
+function resolveAllTransitions(sceneEntries, settings) {
+  const count = sceneEntries.length;
+  if (count <= 1) return [];
+  const result = [];
+  for (let i = 0; i < count - 1; i++) {
+    const fromEntry = sceneEntries[i];
+    const toEntry = sceneEntries[i + 1];
+    const fromScene = fromEntry.scene;
+    const toScene = toEntry.scene;
+    let type = "dissolve";
+    let duration = settings.defaultDuration;
+    let reason = "";
+    if (settings.mode === "single") {
+      type = settings.singleType ?? "dissolve";
+      if (type === "cut") {
+        duration = 0;
+        reason = "single mode cut";
+      } else if (toEntry.isFirstInChapter) {
+        duration = settings.chapterDuration;
+        reason = "single mode chapter boundary";
+      } else {
+        duration = settings.defaultDuration;
+        reason = "single mode normal boundary";
+      }
+    } else {
+      if (toScene.transitionIn) {
+        type = normalizeTransitionType(toScene.transitionIn);
+        if (type === "cut") {
+          duration = 0;
+          reason = "smart mode plan requested cut";
+        } else if (toEntry.isFirstInChapter) {
+          duration = settings.chapterDuration;
+          reason = "smart mode plan requested transition at chapter start";
+        } else if (toEntry.isFirstInSequence) {
+          duration = Math.min(settings.defaultDuration + 0.1, 0.6);
+          reason = "smart mode plan requested transition at sequence start";
+        } else {
+          duration = settings.defaultDuration;
+          reason = "smart mode plan requested transition";
+        }
+      } else {
+        if (toEntry.isFirstInChapter) {
+          type = "fade";
+          duration = settings.chapterDuration;
+          reason = "smart mode default new chapter fade";
+        } else if (toEntry.isFirstInSequence) {
+          type = "dissolve";
+          duration = Math.min(settings.defaultDuration + 0.1, 0.6);
+          reason = "smart mode default new sequence dissolve";
+        } else {
+          type = "dissolve";
+          duration = settings.defaultDuration;
+          reason = "smart mode default scene dissolve";
+        }
+      }
+    }
+    if (type !== "cut" && duration > 0) {
+      const fromDur = fromScene.duration;
+      const toDur = toScene.duration;
+      if (typeof fromDur !== "number" || !Number.isFinite(fromDur) || fromDur <= 0 || typeof toDur !== "number" || !Number.isFinite(toDur) || toDur <= 0) {
+        type = "cut";
+        duration = 0;
+        reason += " (invalid scene duration -> fallback cut)";
+      } else {
+        const maxSafe = Math.min(fromDur * 0.35, toDur * 0.35);
+        const safeDuration = Math.min(duration, maxSafe);
+        if (safeDuration < 0.12 || !Number.isFinite(safeDuration)) {
+          type = "cut";
+          duration = 0;
+          reason += ` (safe duration ${safeDuration.toFixed(3)}s < 0.12s threshold -> fallback cut)`;
+        } else {
+          duration = Math.round(safeDuration * 1e4) / 1e4;
+        }
+      }
+    } else {
+      duration = 0;
+    }
+    result.push({
+      fromSceneIndex: fromScene.sceneIndex,
+      toSceneIndex: toScene.sceneIndex,
+      type,
+      duration,
+      reason
+    });
+  }
+  return result;
+}
+function buildTransitionFilterGraph(scenes, transitions, fps) {
+  const count = scenes.length;
+  if (count <= 1) {
+    throw new Error("At least 2 scenes required to build transition filter graph");
+  }
+  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0);
+  const inputDurations = [];
+  const filterParts = [];
+  for (let i = 0; i < count; i++) {
+    const origDuration = scenes[i].duration;
+    const outgoingTrans = i < count - 1 ? transitions[i] : void 0;
+    const outgoingPadding = outgoingTrans && outgoingTrans.type !== "cut" && outgoingTrans.duration > 0 ? outgoingTrans.duration : 0;
+    const totalInputDuration = Math.round((origDuration + outgoingPadding) * 1e4) / 1e4;
+    inputDurations.push(totalInputDuration);
+    if (outgoingPadding > 0) {
+      filterParts.push(
+        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p,tpad=stop_mode=clone:stop_duration=${outgoingPadding.toFixed(4)}[v${i}]`
+      );
+    } else {
+      filterParts.push(
+        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[v${i}]`
+      );
+    }
+  }
+  let currentStream = "[v0]";
+  let currentEncodedDuration = inputDurations[0];
+  for (let i = 0; i < count - 1; i++) {
+    const trans = transitions[i];
+    const nextStream = `[v${i + 1}]`;
+    const nextInputDuration = inputDurations[i + 1];
+    if (trans.type !== "cut" && trans.duration > 0) {
+      const xfadeOffset = Math.round((currentEncodedDuration - trans.duration) * 1e4) / 1e4;
+      const outLabel = `[x${i}]`;
+      filterParts.push(
+        `${currentStream}${nextStream}xfade=transition=${trans.type}:duration=${trans.duration.toFixed(4)}:offset=${xfadeOffset.toFixed(4)}${outLabel}`
+      );
+      currentEncodedDuration = Math.round((currentEncodedDuration + nextInputDuration - trans.duration) * 1e4) / 1e4;
+      currentStream = outLabel;
+    } else {
+      const outLabel = `[c${i}]`;
+      filterParts.push(
+        `${currentStream}${nextStream}concat=n=2:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS,fps=${fps}${outLabel}`
+      );
+      currentEncodedDuration = Math.round((currentEncodedDuration + nextInputDuration) * 1e4) / 1e4;
+      currentStream = outLabel;
+    }
+  }
+  const finalTrimDur = Math.round(expectedDuration * 1e4) / 1e4;
+  filterParts.push(
+    `${currentStream}trim=duration=${finalTrimDur.toFixed(4)},setpts=PTS-STARTPTS[vout]`
+  );
+  return {
+    filterComplex: filterParts.join(";\n"),
+    expectedDuration: finalTrimDur,
+    inputDurations
+  };
+}
+async function probeVideoDuration(filePath) {
+  try {
+    const ffp = require("ffprobe-static");
+    if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
+    return new Promise((resolve) => {
+      const proc = child_process.spawn(
+        ffp.path,
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          filePath
+        ],
+        { windowsHide: true }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("close", (code) => {
+        if (code === 0) {
+          const val = parseFloat(stdout.trim());
+          resolve(Number.isFinite(val) ? val : null);
+        } else {
+          resolve(null);
+        }
+      });
+      proc.on("error", () => resolve(null));
+    });
+  } catch {
+    return null;
+  }
+}
+function ffmpegRun$2(args) {
+  return new Promise((resolve, reject) => {
+    const proc = child_process.spawn(ffmpegPath$2, args, { windowsHide: true });
+    const stderr = [];
+    proc.stderr.on("data", (d) => stderr.push(d.toString()));
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join("")}`));
+    });
+    proc.on("error", reject);
+  });
+}
+async function concatSceneClipsWithTransitions(params) {
+  const {
+    sceneEntries,
+    sceneClips,
+    settings,
+    fps,
+    rawVideoPath,
+    onProgress
+  } = params;
+  if (sceneEntries.length <= 1 || sceneClips.length <= 1) {
+    return false;
+  }
+  const transitions = resolveAllTransitions(sceneEntries, settings);
+  const cutCount = transitions.filter((t) => t.type === "cut").length;
+  const fadeCount = transitions.filter((t) => t.type === "fade").length;
+  const dissolveCount = transitions.filter((t) => t.type === "dissolve").length;
+  const otherCount = transitions.length - cutCount - fadeCount - dissolveCount;
+  const scenes = sceneEntries.map((e) => e.scene);
+  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0);
+  logger.info(
+    `[Transitions] enabled=true mode=${settings.mode} boundaries=${transitions.length}`
+  );
+  logger.info(
+    `[Transitions] cut=${cutCount} fade=${fadeCount} dissolve=${dissolveCount} other=${otherCount}`
+  );
+  logger.info(`[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s`);
+  if (cutCount === transitions.length) {
+    logger.info("[Transitions] All boundaries are hard cuts — skipping xfade filter_complex");
+    return false;
+  }
+  onProgress?.("Applying scene transitions...", 0.78);
+  const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps);
+  logger.debug(`[Transitions] FFmpeg filter_complex:
+${filterComplex}`);
+  const inputArgs = [];
+  for (const clip of sceneClips) {
+    inputArgs.push("-i", clip);
+  }
+  const args = [
+    "-y",
+    ...inputArgs,
+    "-filter_complex",
+    filterComplex,
+    "-map",
+    "[vout]",
+    "-c:v",
+    "libx264",
+    "-preset",
+    "fast",
+    "-crf",
+    "20",
+    "-pix_fmt",
+    "yuv420p",
+    "-r",
+    String(fps),
+    "-movflags",
+    "+faststart",
+    rawVideoPath
+  ];
+  await ffmpegRun$2(args);
+  const outputDuration = await probeVideoDuration(rawVideoPath);
+  if (outputDuration !== null) {
+    const diff = Math.abs(outputDuration - expectedDuration);
+    logger.info(
+      `[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s, outputDuration=${outputDuration.toFixed(3)}s, diff=${diff.toFixed(3)}s`
+    );
+    const maxAllowedDiff = 1 / fps + 0.03;
+    if (diff > maxAllowedDiff) {
+      logger.warn(
+        `[Transitions] Duration deviation ${diff.toFixed(3)}s exceeds tolerance ${maxAllowedDiff.toFixed(3)}s`
+      );
+    }
+  } else {
+    logger.warn(
+      `[Transitions] Could not probe output duration, expectedDuration=${expectedDuration.toFixed(3)}s`
+    );
+  }
+  return true;
+}
 const LEVEL_CONFIG = {
   low: {
     maxBeatsPerScene: 2,
@@ -2184,6 +2531,27 @@ function ffmpegRun$1(args) {
     proc.on("error", reject);
   });
 }
+async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath) {
+  const concatList2 = path__namespace.join(tmpDir, "concat.txt");
+  fs__namespace.writeFileSync(
+    concatList2,
+    // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
+    sceneClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
+    "utf-8"
+  );
+  await ffmpegRun$1([
+    "-y",
+    "-f",
+    "concat",
+    "-safe",
+    "0",
+    "-i",
+    concatList2,
+    "-c",
+    "copy",
+    rawVideoPath
+  ]);
+}
 function normalizePathForFFmpeg(p) {
   if (!p) return p;
   if (p.startsWith("/")) return p;
@@ -2194,7 +2562,7 @@ function resolveMediaPath(filename, mediaIndex) {
   const item = mediaIndex.find((m) => m.filename === filename || path__namespace.basename(m.path) === filename);
   return item ? normalizePathForFFmpeg(item.path) : null;
 }
-function resolveSceneMedia(scene, mediaIndex) {
+function resolveSceneMedia(scene, mediaIndex, projectDir) {
   if (scene.localPath) {
     const p = normalizePathForFFmpeg(scene.localPath);
     if (fs__namespace.existsSync(p)) return p;
@@ -2210,6 +2578,40 @@ function resolveSceneMedia(scene, mediaIndex) {
   if (scene.localAsset) {
     const found = resolveMediaPath(scene.localAsset, mediaIndex);
     if (found) return found;
+  }
+  if (projectDir) {
+    try {
+      const assignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+      if (fs__namespace.existsSync(assignmentsPath)) {
+        const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+        if (Array.isArray(assignments)) {
+          const matched = assignments.find(
+            (a) => (a.sceneIndex === scene.sceneIndex || a.sceneId === `scene_${scene.sceneIndex}`) && a.asset?.localPath
+          );
+          if (matched?.asset?.localPath) {
+            const p = normalizePathForFFmpeg(matched.asset.localPath);
+            if (fs__namespace.existsSync(p)) return p;
+          }
+        }
+      }
+    } catch {
+    }
+    try {
+      const stockDir = path__namespace.join(projectDir, "assets", "stock");
+      if (fs__namespace.existsSync(stockDir)) {
+        const files = fs__namespace.readdirSync(stockDir);
+        const prefix3 = `S${String(scene.sceneIndex).padStart(3, "0")}_`;
+        const prefix4 = `S${String(scene.sceneIndex).padStart(4, "0")}_`;
+        const match = files.find(
+          (f) => (f.startsWith(prefix3) || f.startsWith(prefix4)) && /\.(mp4|mov|webm|mkv|avi|jpg|jpeg|png|webp)$/i.test(f)
+        );
+        if (match) {
+          const p = path__namespace.join(stockDir, match);
+          if (fs__namespace.existsSync(p)) return p;
+        }
+      }
+    } catch {
+    }
   }
   return null;
 }
@@ -2382,11 +2784,40 @@ async function renderVideo(params) {
   progress("Loading media index...", 0.04);
   const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
   const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
-  const scenes = plan.chapters.flatMap(
-    (ch) => (ch.sequences ?? ch.chapters_seq ?? []).flatMap((seq) => seq.scenes ?? [])
-  );
+  const sceneEntries = [];
+  plan.chapters.forEach((ch, chIdx) => {
+    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+    let isFirstInCh = true;
+    seqs.forEach((seq, seqIdx) => {
+      let isFirstInSeq = true;
+      const scList = seq.scenes ?? [];
+      scList.forEach((scene) => {
+        sceneEntries.push({
+          scene,
+          chapterIndex: chIdx,
+          sequenceIndex: seqIdx,
+          isFirstInChapter: isFirstInCh,
+          isFirstInSequence: isFirstInSeq
+        });
+        isFirstInCh = false;
+        isFirstInSeq = false;
+      });
+    });
+  });
+  const scenes = sceneEntries.map((entry) => entry.scene);
   const totalScenes = scenes.length;
   progress(`Processing ${totalScenes} scenes...`, 0.06);
+  for (const scene of scenes) {
+    if (!scene.localPath || !fs__namespace.existsSync(normalizePathForFFmpeg(scene.localPath))) {
+      const resolved = resolveSceneMedia(scene, mediaIndex, projectDir);
+      if (resolved) {
+        scene.localPath = resolved;
+        if (!scene.mediaFile) {
+          scene.mediaFile = path__namespace.basename(resolved);
+        }
+      }
+    }
+  }
   const projectHash = Buffer.from(projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
   const tmpDir = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${projectHash}`);
   fs__namespace.mkdirSync(tmpDir, { recursive: true });
@@ -2442,7 +2873,7 @@ async function renderVideo(params) {
       sceneIndex: i + 1,
       totalScenes
     });
-    const mediaPath = resolveSceneMedia(scene, mediaIndex);
+    const mediaPath = resolveSceneMedia(scene, mediaIndex, projectDir);
     const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
     if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
@@ -2544,26 +2975,37 @@ async function renderVideo(params) {
     sceneClips.push(outClip);
   }
   progress("Concatenating scenes...", 0.78);
-  const concatList = path__namespace.join(tmpDir, "concat.txt");
-  fs__namespace.writeFileSync(
-    concatList,
-    // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
-    sceneClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
-    "utf-8"
-  );
   const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
-  await ffmpegRun$1([
-    "-y",
-    "-f",
-    "concat",
-    "-safe",
-    "0",
-    "-i",
-    concatList,
-    "-c",
-    "copy",
-    rawVideo
-  ]);
+  const validSettings = validateTransitionSettings(params.transitionSettings);
+  const shouldAttemptTransitions = validSettings && validSettings.enabled && sceneEntries.length > 1;
+  let usedTransitions = false;
+  if (shouldAttemptTransitions) {
+    try {
+      progress("Resolving scene transitions...", 0.78);
+      usedTransitions = await concatSceneClipsWithTransitions({
+        sceneEntries,
+        sceneClips,
+        settings: validSettings,
+        fps,
+        tmpDir,
+        rawVideoPath: rawVideo,
+        onProgress: (stage, pct) => progress(stage, pct)
+      });
+    } catch (err) {
+      logger.warn(
+        `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
+      );
+      progress("Transitions failed — using standard cuts...", 0.79);
+      try {
+        if (fs__namespace.existsSync(rawVideo)) fs__namespace.unlinkSync(rawVideo);
+      } catch {
+      }
+      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo);
+    }
+  }
+  if (!usedTransitions && !fs__namespace.existsSync(rawVideo)) {
+    await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo);
+  }
   progress("Loading audio plan…", 0.86);
   const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
   const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;

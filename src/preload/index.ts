@@ -14,7 +14,8 @@ import type {
   GlobalScriptContext,
   CaptionPlan,
   CaptionPhrase,
-  ApiKeyVerifyResult
+  ApiKeyVerifyResult,
+  RenderTransitionSettings
 } from '../../shared/types'
 
 const api = {
@@ -135,6 +136,7 @@ const api = {
       outputName?: string
       resolution?: { width: number; height: number }
       fps?: number
+      transitionSettings?: RenderTransitionSettings
     }): Promise<{ success: boolean; result?: unknown; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.RENDER_START, params),
 

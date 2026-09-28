@@ -1,0 +1,527 @@
+import * as fs from 'fs'
+import { spawn } from 'child_process'
+import { logger } from '../logger'
+import type {
+  VideoTransitionType,
+  TransitionRenderMode,
+  RenderTransitionSettings
+} from '../../../shared/types'
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const ffmpegPath: string = require('ffmpeg-static')
+
+export interface RenderSceneEntry {
+  scene: {
+    sceneIndex: number
+    duration: number
+    transitionIn?: string
+    [key: string]: unknown
+  }
+  chapterIndex: number
+  sequenceIndex: number
+  isFirstInChapter: boolean
+  isFirstInSequence: boolean
+}
+
+export interface ResolvedSceneTransition {
+  fromSceneIndex: number
+  toSceneIndex: number
+  type: VideoTransitionType
+  duration: number
+  reason: string
+}
+
+export const VALID_TRANSITIONS: readonly VideoTransitionType[] = [
+  'cut',
+  'fade',
+  'dissolve',
+  'wipeleft',
+  'wiperight',
+  'slideleft',
+  'slideright',
+  'smoothleft',
+  'smoothright',
+  'circleopen',
+  'circleclose',
+  'pixelize',
+  'zoomin'
+] as const
+
+/**
+ * Normalizes user/plan transition string to a valid VideoTransitionType.
+ * Fallback is always 'dissolve'.
+ */
+export function normalizeTransitionType(raw?: string): VideoTransitionType {
+  if (!raw || typeof raw !== 'string') return 'dissolve'
+  const clean = raw.trim().toLowerCase().replace(/[_\s]+/g, '-')
+
+  switch (clean) {
+    case 'none':
+    case 'hard-cut':
+    case 'hardcut':
+    case 'cut':
+      return 'cut'
+
+    case 'crossfade':
+    case 'cross-fade':
+    case 'fade':
+      return 'fade'
+
+    case 'dissolve':
+      return 'dissolve'
+
+    case 'wipe-left':
+    case 'wipeleft':
+      return 'wipeleft'
+
+    case 'wipe-right':
+    case 'wiperight':
+      return 'wiperight'
+
+    case 'slide-left':
+    case 'slideleft':
+      return 'slideleft'
+
+    case 'slide-right':
+    case 'slideright':
+      return 'slideright'
+
+    case 'smooth-left':
+    case 'smoothleft':
+      return 'smoothleft'
+
+    case 'smooth-right':
+    case 'smoothright':
+      return 'smoothright'
+
+    case 'circle-open':
+    case 'circleopen':
+      return 'circleopen'
+
+    case 'circle-close':
+    case 'circleclose':
+      return 'circleclose'
+
+    case 'pixelize':
+    case 'pixelate':
+      return 'pixelize'
+
+    case 'zoom':
+    case 'zoom-in':
+    case 'zoomin':
+      return 'zoomin'
+
+    default:
+      return 'dissolve'
+  }
+}
+
+/**
+ * Validates and clamps transition settings passed from renderer process.
+ */
+export function validateTransitionSettings(
+  raw?: RenderTransitionSettings
+): RenderTransitionSettings | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+
+  if (!raw.enabled) {
+    return {
+      enabled: false,
+      mode: 'smart',
+      defaultDuration: 0.35,
+      chapterDuration: 0.65
+    }
+  }
+
+  const mode: TransitionRenderMode = raw.mode === 'single' ? 'single' : 'smart'
+  let singleType: VideoTransitionType | undefined = undefined
+
+  if (mode === 'single') {
+    singleType = normalizeTransitionType(raw.singleType)
+  }
+
+  const defaultDuration =
+    typeof raw.defaultDuration === 'number' && Number.isFinite(raw.defaultDuration)
+      ? Math.max(0.15, Math.min(1.0, raw.defaultDuration))
+      : 0.35
+
+  const chapterDuration =
+    typeof raw.chapterDuration === 'number' && Number.isFinite(raw.chapterDuration)
+      ? Math.max(0.25, Math.min(1.2, raw.chapterDuration))
+      : 0.65
+
+  return {
+    enabled: true,
+    mode,
+    singleType,
+    defaultDuration: Math.round(defaultDuration * 1000) / 1000,
+    chapterDuration: Math.round(chapterDuration * 1000) / 1000
+  }
+}
+
+/**
+ * Resolves transitions for all boundaries between consecutive scenes.
+ * Boundary i is between sceneEntries[i] and sceneEntries[i+1].
+ */
+export function resolveAllTransitions(
+  sceneEntries: RenderSceneEntry[],
+  settings: RenderTransitionSettings
+): ResolvedSceneTransition[] {
+  const count = sceneEntries.length
+  if (count <= 1) return []
+
+  const result: ResolvedSceneTransition[] = []
+
+  for (let i = 0; i < count - 1; i++) {
+    const fromEntry = sceneEntries[i]
+    const toEntry = sceneEntries[i + 1]
+    const fromScene = fromEntry.scene
+    const toScene = toEntry.scene
+
+    let type: VideoTransitionType = 'dissolve'
+    let duration = settings.defaultDuration
+    let reason = ''
+
+    if (settings.mode === 'single') {
+      type = settings.singleType ?? 'dissolve'
+      if (type === 'cut') {
+        duration = 0
+        reason = 'single mode cut'
+      } else if (toEntry.isFirstInChapter) {
+        duration = settings.chapterDuration
+        reason = 'single mode chapter boundary'
+      } else {
+        duration = settings.defaultDuration
+        reason = 'single mode normal boundary'
+      }
+    } else {
+      // Smart mode
+      if (toScene.transitionIn) {
+        type = normalizeTransitionType(toScene.transitionIn)
+        if (type === 'cut') {
+          duration = 0
+          reason = 'smart mode plan requested cut'
+        } else if (toEntry.isFirstInChapter) {
+          duration = settings.chapterDuration
+          reason = 'smart mode plan requested transition at chapter start'
+        } else if (toEntry.isFirstInSequence) {
+          duration = Math.min(settings.defaultDuration + 0.1, 0.6)
+          reason = 'smart mode plan requested transition at sequence start'
+        } else {
+          duration = settings.defaultDuration
+          reason = 'smart mode plan requested transition'
+        }
+      } else {
+        // No explicit transitionIn
+        if (toEntry.isFirstInChapter) {
+          type = 'fade'
+          duration = settings.chapterDuration
+          reason = 'smart mode default new chapter fade'
+        } else if (toEntry.isFirstInSequence) {
+          type = 'dissolve'
+          duration = Math.min(settings.defaultDuration + 0.1, 0.6)
+          reason = 'smart mode default new sequence dissolve'
+        } else {
+          type = 'dissolve'
+          duration = settings.defaultDuration
+          reason = 'smart mode default scene dissolve'
+        }
+      }
+    }
+
+    // Protect short scenes: clamp duration
+    if (type !== 'cut' && duration > 0) {
+      const fromDur = fromScene.duration
+      const toDur = toScene.duration
+
+      if (
+        typeof fromDur !== 'number' ||
+        !Number.isFinite(fromDur) ||
+        fromDur <= 0 ||
+        typeof toDur !== 'number' ||
+        !Number.isFinite(toDur) ||
+        toDur <= 0
+      ) {
+        type = 'cut'
+        duration = 0
+        reason += ' (invalid scene duration -> fallback cut)'
+      } else {
+        const maxSafe = Math.min(fromDur * 0.35, toDur * 0.35)
+        const safeDuration = Math.min(duration, maxSafe)
+
+        if (safeDuration < 0.12 || !Number.isFinite(safeDuration)) {
+          type = 'cut'
+          duration = 0
+          reason += ` (safe duration ${safeDuration.toFixed(3)}s < 0.12s threshold -> fallback cut)`
+        } else {
+          duration = Math.round(safeDuration * 10000) / 10000
+        }
+      }
+    } else {
+      duration = 0
+    }
+
+    result.push({
+      fromSceneIndex: fromScene.sceneIndex,
+      toSceneIndex: toScene.sceneIndex,
+      type,
+      duration,
+      reason
+    })
+  }
+
+  return result
+}
+
+/**
+ * Builds the FFmpeg filter_complex graph for concatenating scene clips with xfade.
+ * Uses tpad clone padding on outgoing scenes to preserve exact video duration.
+ */
+export function buildTransitionFilterGraph(
+  scenes: Array<{ duration: number }>,
+  transitions: ResolvedSceneTransition[],
+  fps: number
+): {
+  filterComplex: string
+  expectedDuration: number
+  inputDurations: number[]
+} {
+  const count = scenes.length
+  if (count <= 1) {
+    throw new Error('At least 2 scenes required to build transition filter graph')
+  }
+
+  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0)
+  const inputDurations: number[] = []
+  const filterParts: string[] = []
+
+  // 1. Prepare normalized inputs with outgoing tpad padding if needed
+  for (let i = 0; i < count; i++) {
+    const origDuration = scenes[i].duration
+    const outgoingTrans = i < count - 1 ? transitions[i] : undefined
+    const outgoingPadding =
+      outgoingTrans && outgoingTrans.type !== 'cut' && outgoingTrans.duration > 0
+        ? outgoingTrans.duration
+        : 0
+
+    const totalInputDuration = Math.round((origDuration + outgoingPadding) * 10000) / 10000
+    inputDurations.push(totalInputDuration)
+
+    if (outgoingPadding > 0) {
+      filterParts.push(
+        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p,tpad=stop_mode=clone:stop_duration=${outgoingPadding.toFixed(4)}[v${i}]`
+      )
+    } else {
+      filterParts.push(
+        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[v${i}]`
+      )
+    }
+  }
+
+  // 2. Chain boundaries
+  let currentStream = '[v0]'
+  let currentEncodedDuration = inputDurations[0]
+
+  for (let i = 0; i < count - 1; i++) {
+    const trans = transitions[i]
+    const nextStream = `[v${i + 1}]`
+    const nextInputDuration = inputDurations[i + 1]
+
+    if (trans.type !== 'cut' && trans.duration > 0) {
+      const xfadeOffset = Math.round((currentEncodedDuration - trans.duration) * 10000) / 10000
+      const outLabel = `[x${i}]`
+      filterParts.push(
+        `${currentStream}${nextStream}xfade=transition=${trans.type}:duration=${trans.duration.toFixed(4)}:offset=${xfadeOffset.toFixed(4)}${outLabel}`
+      )
+      currentEncodedDuration =
+        Math.round((currentEncodedDuration + nextInputDuration - trans.duration) * 10000) / 10000
+      currentStream = outLabel
+    } else {
+      // Hard cut between accumulated stream and next input
+      const outLabel = `[c${i}]`
+      filterParts.push(
+        `${currentStream}${nextStream}concat=n=2:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS,fps=${fps}${outLabel}`
+      )
+      currentEncodedDuration =
+        Math.round((currentEncodedDuration + nextInputDuration) * 10000) / 10000
+      currentStream = outLabel
+    }
+  }
+
+  // 3. Final trim to guarantee exact expected video duration
+  const finalTrimDur = Math.round(expectedDuration * 10000) / 10000
+  filterParts.push(
+    `${currentStream}trim=duration=${finalTrimDur.toFixed(4)},setpts=PTS-STARTPTS[vout]`
+  )
+
+  return {
+    filterComplex: filterParts.join(';\n'),
+    expectedDuration: finalTrimDur,
+    inputDurations
+  }
+}
+
+/**
+ * Uses ffprobe-static to probe the actual duration of a video file.
+ * Returns duration in seconds or null if probe fails.
+ */
+export async function probeVideoDuration(filePath: string): Promise<number | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ffp = require('ffprobe-static')
+    if (!ffp?.path || !fs.existsSync(ffp.path)) return null
+
+    return new Promise((resolve) => {
+      const proc = spawn(
+        ffp.path,
+        [
+          '-v',
+          'error',
+          '-show_entries',
+          'format=duration',
+          '-of',
+          'default=noprint_wrappers=1:nokey=1',
+          filePath
+        ],
+        { windowsHide: true }
+      )
+      let stdout = ''
+      proc.stdout.on('data', (d: Buffer) => {
+        stdout += d.toString()
+      })
+      proc.on('close', (code) => {
+        if (code === 0) {
+          const val = parseFloat(stdout.trim())
+          resolve(Number.isFinite(val) ? val : null)
+        } else {
+          resolve(null)
+        }
+      })
+      proc.on('error', () => resolve(null))
+    })
+  } catch {
+    return null
+  }
+}
+
+function ffmpegRun(args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(ffmpegPath, args, { windowsHide: true })
+    const stderr: string[] = []
+    proc.stderr.on('data', (d: Buffer) => stderr.push(d.toString()))
+    proc.on('close', (code) => {
+      if (code === 0) resolve()
+      else reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join('')}`))
+    })
+    proc.on('error', reject)
+  })
+}
+
+/**
+ * Concatenates scene clips with transitions using FFmpeg filter_complex xfade.
+ * Returns true if transitions were applied, or false if no xfade was needed (all cuts).
+ */
+export async function concatSceneClipsWithTransitions(params: {
+  sceneEntries: RenderSceneEntry[]
+  sceneClips: string[]
+  settings: RenderTransitionSettings
+  fps: number
+  tmpDir: string
+  rawVideoPath: string
+  onProgress?: (stage: string, pct: number) => void
+}): Promise<boolean> {
+  const {
+    sceneEntries,
+    sceneClips,
+    settings,
+    fps,
+    rawVideoPath,
+    onProgress
+  } = params
+
+  if (sceneEntries.length <= 1 || sceneClips.length <= 1) {
+    return false
+  }
+
+  // 1. Resolve transitions
+  const transitions = resolveAllTransitions(sceneEntries, settings)
+  const cutCount = transitions.filter((t) => t.type === 'cut').length
+  const fadeCount = transitions.filter((t) => t.type === 'fade').length
+  const dissolveCount = transitions.filter((t) => t.type === 'dissolve').length
+  const otherCount = transitions.length - cutCount - fadeCount - dissolveCount
+
+  const scenes = sceneEntries.map((e) => e.scene)
+  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0)
+
+  logger.info(
+    `[Transitions] enabled=true mode=${settings.mode} boundaries=${transitions.length}`
+  )
+  logger.info(
+    `[Transitions] cut=${cutCount} fade=${fadeCount} dissolve=${dissolveCount} other=${otherCount}`
+  )
+  logger.info(`[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s`)
+
+  // If all boundaries are hard cuts, skip xfade re-encode and let legacy concat handle it
+  if (cutCount === transitions.length) {
+    logger.info('[Transitions] All boundaries are hard cuts — skipping xfade filter_complex')
+    return false
+  }
+
+  onProgress?.('Applying scene transitions...', 0.78)
+
+  // 2. Build filter graph
+  const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps)
+  logger.debug(`[Transitions] FFmpeg filter_complex:\n${filterComplex}`)
+
+  // 3. Assemble FFmpeg args
+  const inputArgs: string[] = []
+  for (const clip of sceneClips) {
+    inputArgs.push('-i', clip)
+  }
+
+  const args = [
+    '-y',
+    ...inputArgs,
+    '-filter_complex',
+    filterComplex,
+    '-map',
+    '[vout]',
+    '-c:v',
+    'libx264',
+    '-preset',
+    'fast',
+    '-crf',
+    '20',
+    '-pix_fmt',
+    'yuv420p',
+    '-r',
+    String(fps),
+    '-movflags',
+    '+faststart',
+    rawVideoPath
+  ]
+
+  // 4. Run FFmpeg
+  await ffmpegRun(args)
+
+  // 5. Verify duration with probe
+  const outputDuration = await probeVideoDuration(rawVideoPath)
+  if (outputDuration !== null) {
+    const diff = Math.abs(outputDuration - expectedDuration)
+    logger.info(
+      `[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s, outputDuration=${outputDuration.toFixed(3)}s, diff=${diff.toFixed(3)}s`
+    )
+    const maxAllowedDiff = 1 / fps + 0.03
+    if (diff > maxAllowedDiff) {
+      logger.warn(
+        `[Transitions] Duration deviation ${diff.toFixed(3)}s exceeds tolerance ${maxAllowedDiff.toFixed(3)}s`
+      )
+    }
+  } else {
+    logger.warn(
+      `[Transitions] Could not probe output duration, expectedDuration=${expectedDuration.toFixed(3)}s`
+    )
+  }
+
+  return true
+}

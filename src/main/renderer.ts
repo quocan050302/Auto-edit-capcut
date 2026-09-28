@@ -4,7 +4,12 @@ import * as path from 'path'
 import { spawn } from 'child_process'
 import { logger } from './logger'
 import { renderCaptionsOverlay } from './captions/remotion-renderer'
-import type { AudioPlan, CaptionPlan } from '../../shared/types'
+import type { AudioPlan, CaptionPlan, RenderTransitionSettings } from '../../shared/types'
+import {
+  concatSceneClipsWithTransitions,
+  validateTransitionSettings,
+  type RenderSceneEntry
+} from './transitions/scene-transition-engine'
 import {
   resolveSceneRetention,
   updateRetentionContext,
@@ -75,6 +80,27 @@ function ffmpegRun(args: string[]): Promise<void> {
   })
 }
 
+async function concatSceneClipsLegacy(
+  sceneClips: string[],
+  tmpDir: string,
+  rawVideoPath: string
+): Promise<void> {
+  const concatList = path.join(tmpDir, 'concat.txt')
+  fs.writeFileSync(
+    concatList,
+    // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
+    sceneClips.map(f => `file '${process.platform === 'win32' ? f.replace(/\\/g, '/') : f}'`).join('\n'),
+    'utf-8'
+  )
+  await ffmpegRun([
+    '-y',
+    '-f', 'concat', '-safe', '0',
+    '-i', concatList,
+    '-c', 'copy',
+    rawVideoPath
+  ])
+}
+
 /**
  * On macOS, paths stored as Windows-style (e.g. "D:\\Video_factory..." relative to CWD) must
  * be resolved to a valid absolute path. FFmpeg interprets "D:" as a protocol and fails.
@@ -103,7 +129,8 @@ function resolveMediaPath(
 /** Resolve the actual media path for a scene — prefers localPath (stock downloads) over mediaFile lookup */
 function resolveSceneMedia(
   scene: ScenePlan,
-  mediaIndex: Array<{ filename: string; path: string }>
+  mediaIndex: Array<{ filename: string; path: string }>,
+  projectDir?: string
 ): string | null {
   // 1. Direct local path (set by stock engine or user upload)
   if (scene.localPath) {
@@ -114,6 +141,7 @@ function resolveSceneMedia(
     const p = normalizePathForFFmpeg(scene.localAsset)
     if (fs.existsSync(p)) return p
   }
+
   // 2. Look up by filename in media index
   if (scene.mediaFile) {
     const found = resolveMediaPath(scene.mediaFile, mediaIndex)
@@ -123,6 +151,47 @@ function resolveSceneMedia(
     const found = resolveMediaPath(scene.localAsset, mediaIndex)
     if (found) return found
   }
+
+  // 3. Fallback: look up in stock-assignments.json if available
+  if (projectDir) {
+    try {
+      const assignmentsPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
+      if (fs.existsSync(assignmentsPath)) {
+        const assignments = JSON.parse(fs.readFileSync(assignmentsPath, 'utf-8'))
+        if (Array.isArray(assignments)) {
+          const matched = assignments.find(
+            (a: { sceneIndex?: number; sceneId?: string; asset?: { localPath?: string } }) =>
+              (a.sceneIndex === scene.sceneIndex || a.sceneId === `scene_${scene.sceneIndex}`) &&
+              a.asset?.localPath
+          )
+          if (matched?.asset?.localPath) {
+            const p = normalizePathForFFmpeg(matched.asset.localPath)
+            if (fs.existsSync(p)) return p
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    // 4. Fallback: scan assets/stock/ folder by scene prefix (e.g. S001_, S010_)
+    try {
+      const stockDir = path.join(projectDir, 'assets', 'stock')
+      if (fs.existsSync(stockDir)) {
+        const files = fs.readdirSync(stockDir)
+        const prefix3 = `S${String(scene.sceneIndex).padStart(3, '0')}_`
+        const prefix4 = `S${String(scene.sceneIndex).padStart(4, '0')}_`
+        const match = files.find(
+          (f) =>
+            (f.startsWith(prefix3) || f.startsWith(prefix4)) &&
+            /\.(mp4|mov|webm|mkv|avi|jpg|jpeg|png|webp)$/i.test(f)
+        )
+        if (match) {
+          const p = path.join(stockDir, match)
+          if (fs.existsSync(p)) return p
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
   return null
 }
 
@@ -258,6 +327,7 @@ export async function renderVideo(params: {
   resolution?: { width: number; height: number }
   fps?: number
   captionPlan?: CaptionPlan   // optional — nếu null/undefined sẽ bỏ qua bước burn caption
+  transitionSettings?: RenderTransitionSettings
   onProgress?: (p: RenderProgress) => void
 }): Promise<RenderResult> {
   const {
@@ -290,12 +360,43 @@ export async function renderVideo(params: {
       ? JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8'))
       : []
 
-  // ── 3. Flatten scenes ─────────────────────────────────────────────────────
-  const scenes: ScenePlan[] = plan.chapters.flatMap(ch =>
-    (ch.sequences ?? ch.chapters_seq ?? []).flatMap(seq => seq.scenes ?? [])
-  )
+  // ── 3. Flatten scenes (preserving chapter and sequence info) ─────────────
+  const sceneEntries: RenderSceneEntry[] = []
+  plan.chapters.forEach((ch, chIdx) => {
+    const seqs = ch.sequences ?? ch.chapters_seq ?? []
+    let isFirstInCh = true
+    seqs.forEach((seq, seqIdx) => {
+      let isFirstInSeq = true
+      const scList = seq.scenes ?? []
+      scList.forEach((scene) => {
+        sceneEntries.push({
+          scene,
+          chapterIndex: chIdx,
+          sequenceIndex: seqIdx,
+          isFirstInChapter: isFirstInCh,
+          isFirstInSequence: isFirstInSeq
+        })
+        isFirstInCh = false
+        isFirstInSeq = false
+      })
+    })
+  })
+  const scenes: ScenePlan[] = sceneEntries.map(entry => entry.scene)
   const totalScenes = scenes.length
   progress(`Processing ${totalScenes} scenes...`, 0.06)
+
+  // Pre-resolve media for any scene missing localPath in memory (e.g. from stock-assignments or assets/stock)
+  for (const scene of scenes) {
+    if (!scene.localPath || !fs.existsSync(normalizePathForFFmpeg(scene.localPath))) {
+      const resolved = resolveSceneMedia(scene, mediaIndex, projectDir)
+      if (resolved) {
+        scene.localPath = resolved
+        if (!scene.mediaFile) {
+          scene.mediaFile = path.basename(resolved)
+        }
+      }
+    }
+  }
 
   // ── 4. Render each scene to a temp clip ───────────────────────────────────
   // Use OS temp dir to avoid issues with special characters (colons, backslashes)
@@ -367,7 +468,7 @@ export async function renderVideo(params: {
       totalScenes
     })
 
-    const mediaPath = resolveSceneMedia(scene, mediaIndex)
+    const mediaPath = resolveSceneMedia(scene, mediaIndex, projectDir)
     const outClip = path.join(tmpDir, `scene_${String(i + 1).padStart(4, '0')}.mp4`)
 
     const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`
@@ -450,22 +551,45 @@ export async function renderVideo(params: {
 
   // ── 5. Concatenate all scene clips ────────────────────────────────────────
   progress('Concatenating scenes...', 0.78)
-  const concatList = path.join(tmpDir, 'concat.txt')
-  fs.writeFileSync(
-    concatList,
-    // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
-    sceneClips.map(f => `file '${process.platform === 'win32' ? f.replace(/\\/g, '/') : f}'`).join('\n'),
-    'utf-8'
-  )
-
   const rawVideo = path.join(tmpDir, 'raw_video.mp4')
-  await ffmpegRun([
-    '-y',
-    '-f', 'concat', '-safe', '0',
-    '-i', concatList,
-    '-c', 'copy',
-    rawVideo
-  ])
+
+  const validSettings = validateTransitionSettings(params.transitionSettings)
+  const shouldAttemptTransitions =
+    validSettings &&
+    validSettings.enabled &&
+    sceneEntries.length > 1
+
+  let usedTransitions = false
+
+  if (shouldAttemptTransitions) {
+    try {
+      progress('Resolving scene transitions...', 0.78)
+      usedTransitions = await concatSceneClipsWithTransitions({
+        sceneEntries,
+        sceneClips,
+        settings: validSettings,
+        fps,
+        tmpDir,
+        rawVideoPath: rawVideo,
+        onProgress: (stage, pct) => progress(stage, pct)
+      })
+    } catch (err: unknown) {
+      logger.warn(
+        `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
+      )
+      progress('Transitions failed — using standard cuts...', 0.79)
+      try {
+        if (fs.existsSync(rawVideo)) fs.unlinkSync(rawVideo)
+      } catch { /* ignore */ }
+
+      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo)
+    }
+  }
+
+  // If transitions were not attempted or resolved to all cuts
+  if (!usedTransitions && !fs.existsSync(rawVideo)) {
+    await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo)
+  }
 
   // ── 6. Load audio plan (Smart Audio Director) ─────────────────────────────
   progress('Loading audio plan…', 0.86)

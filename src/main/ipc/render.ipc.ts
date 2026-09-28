@@ -4,7 +4,7 @@ import { IpcMain, BrowserWindow } from 'electron'
 import { IPC_CHANNELS } from '../../../shared/types'
 import { renderVideo } from '../renderer'
 import { logger } from '../logger'
-import type { CaptionPlan } from '../../../shared/types'
+import type { CaptionPlan, RenderTransitionSettings } from '../../../shared/types'
 
 export function registerRenderHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(
@@ -15,6 +15,7 @@ export function registerRenderHandlers(ipcMain: IpcMain): void {
       outputName?: string
       resolution?: { width: number; height: number }
       fps?: number
+      transitionSettings?: RenderTransitionSettings
     }) => {
       const win = BrowserWindow.fromWebContents(event.sender)
 

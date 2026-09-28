@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react'
-import type { ProjectState } from '../../../../shared/types'
+import type { ProjectState, VideoTransitionType, TransitionRenderMode } from '../../../../shared/types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -53,6 +53,13 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [fps, setFps] = useState<30 | 24 | 60>(30)
   const [outputName, setOutputName] = useState('final_output')
 
+  // Scene transition settings
+  const [transitionEnabled, setTransitionEnabled] = useState(true)
+  const [transitionMode, setTransitionMode] = useState<TransitionRenderMode>('smart')
+  const [selectedTransition, setSelectedTransition] = useState<VideoTransitionType>('dissolve')
+  const [transitionDuration, setTransitionDuration] = useState(0.35)
+  const [chapterDuration, setChapterDuration] = useState(0.65)
+
   const voiceoverPath = project.inputs?.voiceoverPath ?? ''
   const resMap = {
     '1920x1080': { width: 1920, height: 1080 },
@@ -61,20 +68,35 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   }
 
   useEffect(() => {
-    window.api.plan.get(project.projectDir).then((p) => {
+    window.api.plan.get(project.projectDir).then(async (p) => {
       if (p) {
         setHasPlan(true)
         const plan = p as {
           chapters: Array<{
-            sequences?: Array<{ scenes?: Array<{ localPath?: string; mediaFile?: string; localAsset?: string }> }>
-            chapters_seq?: Array<{ scenes?: Array<{ localPath?: string; mediaFile?: string; localAsset?: string }> }>
+            sequences?: Array<{ scenes?: Array<{ sceneIndex?: number; localPath?: string; mediaFile?: string; localAsset?: string }> }>
+            chapters_seq?: Array<{ scenes?: Array<{ sceneIndex?: number; localPath?: string; mediaFile?: string; localAsset?: string }> }>
           }>
         }
         const allScenes = (plan.chapters || []).flatMap(
           (ch) => (ch.sequences ?? ch.chapters_seq ?? []).flatMap((seq) => seq.scenes ?? [])
         )
         setSceneCount(allScenes.length)
-        const ready = allScenes.filter((s) => !!(s.localPath || s.mediaFile || s.localAsset)).length
+
+        let stockAssignments: Array<{ sceneIndex?: number; sceneId?: string; status?: string; asset?: { localPath?: string } }> = []
+        try {
+          const review = await window.api.stock?.getReview?.(project.projectDir)
+          stockAssignments = review?.assignments ?? []
+        } catch { /* ignore */ }
+
+        const ready = allScenes.filter((s) => {
+          if (s.localPath || s.mediaFile || s.localAsset) return true
+          return stockAssignments.some(
+            (a) =>
+              (a.sceneIndex === s.sceneIndex || a.sceneId === `scene_${s.sceneIndex}`) &&
+              a.status === 'assigned' &&
+              !!a.asset?.localPath
+          )
+        }).length
         setMediaReadyCount(ready)
       }
     })
@@ -120,7 +142,14 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
         voiceoverPath,
         outputName,
         resolution: resMap[res],
-        fps
+        fps,
+        transitionSettings: {
+          enabled: transitionEnabled,
+          mode: transitionMode,
+          singleType: transitionMode === 'single' ? selectedTransition : undefined,
+          defaultDuration: transitionDuration,
+          chapterDuration
+        }
       })
 
       if (response.success && response.result) {
@@ -261,6 +290,150 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
                 placeholder="final_output"
               />
             </div>
+          </div>
+
+          {/* Scene Transitions Section */}
+          <div style={{
+            marginBottom: '20px',
+            padding: '14px 16px',
+            background: 'var(--bg-elevated)',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--border-default)'
+          }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              marginBottom: transitionEnabled ? '14px' : '0'
+            }}>
+              <div>
+                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>🎬</span> Scene Transitions
+                </div>
+                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                  Cinematic FFmpeg transitions between scenes
+                </div>
+              </div>
+              <label style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                cursor: isRendering ? 'not-allowed' : 'pointer',
+                fontSize: '12px',
+                fontWeight: 600,
+                color: transitionEnabled ? 'var(--brand-accent)' : 'var(--text-secondary)'
+              }}>
+                <input
+                  type="checkbox"
+                  checked={transitionEnabled}
+                  onChange={(e) => setTransitionEnabled(e.target.checked)}
+                  disabled={isRendering}
+                  style={{
+                    width: '16px',
+                    height: '16px',
+                    accentColor: 'var(--brand-primary)',
+                    cursor: isRendering ? 'not-allowed' : 'pointer'
+                  }}
+                />
+                <span>Enable scene transitions</span>
+              </label>
+            </div>
+
+            {transitionEnabled && (
+              <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
+                <div className="settings-field" style={{ flex: 1, minWidth: '180px' }}>
+                  <label className="settings-label">Transition mode</label>
+                  <select
+                    className="settings-select"
+                    value={transitionMode}
+                    onChange={(e) => setTransitionMode(e.target.value as TransitionRenderMode)}
+                    disabled={isRendering}
+                  >
+                    <option value="smart">Smart / Follow edit plan</option>
+                    <option value="single">Single transition</option>
+                  </select>
+                </div>
+
+                {transitionMode === 'single' && (
+                  <div className="settings-field" style={{ flex: 1, minWidth: '160px' }}>
+                    <label className="settings-label">Transition type</label>
+                    <select
+                      className="settings-select"
+                      value={selectedTransition}
+                      onChange={(e) => setSelectedTransition(e.target.value as VideoTransitionType)}
+                      disabled={isRendering}
+                    >
+                      <option value="fade">Fade</option>
+                      <option value="dissolve">Dissolve</option>
+                      <option value="wipeleft">Wipe Left</option>
+                      <option value="wiperight">Wipe Right</option>
+                      <option value="slideleft">Slide Left</option>
+                      <option value="slideright">Slide Right</option>
+                      <option value="smoothleft">Smooth Left</option>
+                      <option value="smoothright">Smooth Right</option>
+                      <option value="circleopen">Circle Open</option>
+                      <option value="circleclose">Circle Close</option>
+                      <option value="pixelize">Pixelize</option>
+                      <option value="zoomin">Zoom In</option>
+                    </select>
+                  </div>
+                )}
+
+                <div className="settings-field" style={{ flex: 1, minWidth: '130px' }}>
+                  <label className="settings-label">Default duration</label>
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <input
+                      type="number"
+                      min={0.15}
+                      max={1.0}
+                      step={0.05}
+                      value={transitionDuration}
+                      onChange={(e) => setTransitionDuration(parseFloat(e.target.value) || 0.35)}
+                      disabled={isRendering}
+                      style={{
+                        background: 'var(--bg-base)',
+                        border: '1px solid var(--border-default)',
+                        borderRadius: 'var(--radius-sm)',
+                        color: 'var(--text-primary)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '12px',
+                        padding: '9px 12px',
+                        outline: 'none',
+                        width: '100%'
+                      }}
+                    />
+                    <span style={{ position: 'absolute', right: '10px', fontSize: '11px', color: 'var(--text-muted)', pointerEvents: 'none' }}>s</span>
+                  </div>
+                </div>
+
+                <div className="settings-field" style={{ flex: 1, minWidth: '140px' }}>
+                  <label className="settings-label">Chapter transition duration</label>
+                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
+                    <input
+                      type="number"
+                      min={0.25}
+                      max={1.2}
+                      step={0.05}
+                      value={chapterDuration}
+                      onChange={(e) => setChapterDuration(parseFloat(e.target.value) || 0.65)}
+                      disabled={isRendering}
+                      style={{
+                        background: 'var(--bg-base)',
+                        border: '1px solid var(--border-default)',
+                        borderRadius: 'var(--radius-sm)',
+                        color: 'var(--text-primary)',
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: '12px',
+                        padding: '9px 12px',
+                        outline: 'none',
+                        width: '100%'
+                      }}
+                    />
+                    <span style={{ position: 'absolute', right: '10px', fontSize: '11px', color: 'var(--text-muted)', pointerEvents: 'none' }}>s</span>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Action button */}
