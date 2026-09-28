@@ -1,5 +1,13 @@
-import React, { useState, useEffect } from 'react'
-import type { ProjectState, StockSceneAssignment, StockAsset, StockReviewData, GlobalScriptContext } from '../../../../shared/types'
+import React, { useState, useEffect, useMemo } from 'react'
+import type {
+  ProjectState,
+  StockSceneAssignment,
+  StockAsset,
+  StockReviewData,
+  GlobalScriptContext,
+  StockCandidate,
+  StoryboardSummary
+} from '../../../../shared/types'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 
@@ -15,6 +23,8 @@ interface StockPageProps {
   onLoad: () => void
 }
 
+type FilterType = 'all' | 'needs_review' | 'low_score' | 'missing' | 'locked' | 'manual' | 'approved'
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function fmt(secs: number): string {
@@ -28,13 +38,20 @@ function providerBadge(provider: string): React.ReactElement {
     pexels: { bg: 'rgba(5, 193, 112, 0.15)', fg: '#05C170' },
     pixabay: { bg: 'rgba(43, 135, 217, 0.15)', fg: '#2B87D9' }
   }
-  const c = colors[provider] ?? { bg: 'rgba(255,255,255,0.08)', fg: '#a0a0c0' }
+  const c = colors[provider.toLowerCase()] ?? { bg: 'rgba(255,255,255,0.08)', fg: '#a0a0c0' }
   return (
-    <span style={{
-      fontSize: '10px', fontWeight: 700, padding: '2px 8px',
-      borderRadius: '999px', background: c.bg, color: c.fg,
-      letterSpacing: '0.05em', textTransform: 'uppercase'
-    }}>
+    <span
+      style={{
+        fontSize: '9px',
+        fontWeight: 700,
+        padding: '2px 6px',
+        borderRadius: '999px',
+        background: c.bg,
+        color: c.fg,
+        letterSpacing: '0.05em',
+        textTransform: 'uppercase'
+      }}
+    >
       {provider}
     </span>
   )
@@ -49,8 +66,58 @@ function statusBadge(status: string): React.ReactElement {
     disabled: { label: '⊘ Disabled', color: 'var(--text-muted)' }
   }
   const s = map[status] ?? map.pending
+  return <span style={{ fontSize: '10px', fontWeight: 600, color: s.color }}>{s.label}</span>
+}
+
+function approvalBadge(status?: 'auto_selected' | 'approved' | 'needs_review'): React.ReactElement {
+  if (status === 'approved') {
+    return (
+      <span
+        style={{
+          fontSize: '9px',
+          fontWeight: 700,
+          padding: '2px 7px',
+          borderRadius: '999px',
+          background: 'rgba(34,197,94,0.18)',
+          color: '#22c55e',
+          border: '1px solid rgba(34,197,94,0.4)'
+        }}
+      >
+        ★ APPROVED
+      </span>
+    )
+  }
+  if (status === 'needs_review') {
+    return (
+      <span
+        style={{
+          fontSize: '9px',
+          fontWeight: 700,
+          padding: '2px 7px',
+          borderRadius: '999px',
+          background: 'rgba(245,158,11,0.18)',
+          color: '#f59e0b',
+          border: '1px solid rgba(245,158,11,0.4)'
+        }}
+      >
+        ⚠ NEEDS REVIEW
+      </span>
+    )
+  }
   return (
-    <span style={{ fontSize: '10px', fontWeight: 600, color: s.color }}>{s.label}</span>
+    <span
+      style={{
+        fontSize: '9px',
+        fontWeight: 600,
+        padding: '2px 7px',
+        borderRadius: '999px',
+        background: 'rgba(99,102,241,0.15)',
+        color: 'var(--text-brand)',
+        border: '1px solid rgba(99,102,241,0.3)'
+      }}
+    >
+      AUTO SELECTED
+    </span>
   )
 }
 
@@ -58,17 +125,28 @@ function matchLabelBadge(label?: string): React.ReactElement | null {
   if (!label) return null
   const map: Record<string, { color: string; bg: string }> = {
     STRONG_MATCH: { color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+    EXACT_SUBJECT: { color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
     ACCEPTABLE: { color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
+    CONTEXTUAL_MATCH: { color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
     ILLUSTRATIVE: { color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
+    HISTORICAL: { color: '#c084fc', bg: 'rgba(192,132,252,0.12)' },
     REJECTED: { color: '#f87171', bg: 'rgba(248,113,113,0.12)' }
   }
   const c = map[label] ?? { color: 'var(--text-muted)', bg: 'transparent' }
   return (
-    <span style={{
-      fontSize: '9px', fontWeight: 700, padding: '2px 6px',
-      borderRadius: '999px', background: c.bg, color: c.color,
-      letterSpacing: '0.05em'
-    }}>{label.replace('_', ' ')}</span>
+    <span
+      style={{
+        fontSize: '9px',
+        fontWeight: 700,
+        padding: '2px 6px',
+        borderRadius: '999px',
+        background: c.bg,
+        color: c.color,
+        letterSpacing: '0.04em'
+      }}
+    >
+      {label.replace(/_/g, ' ')}
+    </span>
   )
 }
 
@@ -76,11 +154,125 @@ function tierBadge(tier?: string): React.ReactElement | null {
   if (!tier) return null
   const colors: Record<string, string> = { A: '#22c55e', B: '#60a5fa', C: '#f59e0b', D: '#f87171' }
   return (
-    <span style={{
-      fontSize: '9px', fontWeight: 700, padding: '2px 6px',
-      borderRadius: '4px', background: 'rgba(255,255,255,0.06)',
-      color: colors[tier] ?? '#a0a0c0'
-    }}>Tier {tier}</span>
+    <span
+      style={{
+        fontSize: '9px',
+        fontWeight: 700,
+        padding: '2px 6px',
+        borderRadius: '4px',
+        background: 'rgba(255,255,255,0.06)',
+        color: colors[tier] ?? '#a0a0c0'
+      }}
+    >
+      Tier {tier}
+    </span>
+  )
+}
+
+// ─── Candidate Preview Modal ──────────────────────────────────────────────────
+
+function PreviewModal({
+  candidate,
+  onClose
+}: {
+  candidate: StockCandidate
+  onClose: () => void
+}): React.ReactElement {
+  const isVideo = candidate.result.mediaType === 'video'
+  const src = candidate.result.previewUrl || candidate.result.downloadUrl
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 1000,
+        background: 'rgba(0,0,0,0.85)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: '20px'
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 'var(--radius-lg)',
+          overflow: 'hidden',
+          maxWidth: '720px',
+          width: '100%',
+          boxShadow: 'var(--shadow-lg)'
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div
+          style={{
+            padding: '12px 16px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            borderBottom: '1px solid var(--border-subtle)'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)' }}>
+              Candidate Preview
+            </span>
+            {providerBadge(candidate.result.provider)}
+            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+              {candidate.result.width}x{candidate.result.height} · Score: {candidate.score.totalScore}/100
+            </span>
+          </div>
+          <button className="btn btn-sm btn-secondary" onClick={onClose}>
+            ✕ Close
+          </button>
+        </div>
+
+        <div
+          style={{
+            background: '#000',
+            minHeight: '320px',
+            maxHeight: '480px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center'
+          }}
+        >
+          {isVideo && src ? (
+            <video
+              src={src}
+              controls
+              autoPlay
+              style={{ maxWidth: '100%', maxHeight: '480px', objectFit: 'contain' }}
+            />
+          ) : src ? (
+            <img
+              src={src}
+              alt={candidate.result.title}
+              style={{ maxWidth: '100%', maxHeight: '480px', objectFit: 'contain' }}
+            />
+          ) : (
+            <div style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Preview unavailable</div>
+          )}
+        </div>
+
+        <div style={{ padding: '12px 16px', background: 'var(--bg-void)' }}>
+          <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+            {candidate.result.title || 'Untitled Asset'}
+          </div>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+            Creator: {candidate.result.creator || 'Unknown'} · Duration: {candidate.result.durationSecs || 0}s
+          </div>
+          {candidate.score.reasons.length > 0 && (
+            <div style={{ marginTop: '6px', fontSize: '11px', color: '#22c55e' }}>
+              ✓ {candidate.score.reasons.join(' · ')}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -95,85 +287,84 @@ function ReplaceModal({
   onConfirm: (query: string) => void
   onClose: () => void
 }): React.ReactElement {
-  const [query, setQuery] = useState(assignment.searchQueries[0] ?? '')
-  const suggestions = assignment.searchQueries
+  const [query, setQuery] = useState(assignment.searchQueries?.[0] ?? assignment.usedQuery ?? '')
+  const suggestions = assignment.searchQueries ?? []
 
   return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 999,
-      background: 'rgba(0,0,0,0.7)',
-      display: 'flex', alignItems: 'center', justifyContent: 'center'
-    }}>
-      <div style={{
-        background: 'var(--bg-elevated)',
-        border: '1px solid var(--border-strong)',
-        borderRadius: 'var(--radius-lg)',
-        padding: '28px', width: '520px',
-        boxShadow: 'var(--shadow-lg)'
-      }}>
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        zIndex: 999,
+        background: 'rgba(0,0,0,0.7)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      }}
+    >
+      <div
+        style={{
+          background: 'var(--bg-elevated)',
+          border: '1px solid var(--border-strong)',
+          borderRadius: 'var(--radius-lg)',
+          padding: '24px',
+          width: '520px',
+          boxShadow: 'var(--shadow-lg)'
+        }}
+      >
         <div style={{ fontSize: '14px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '6px' }}>
-          Replace Scene {assignment.sceneIndex}
+          Replace Media for Scene {assignment.sceneIndex}
         </div>
-        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '20px', lineHeight: 1.5 }}>
-          {assignment.narrationText.slice(0, 120)}{assignment.narrationText.length > 120 ? '…' : ''}
+        <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '16px', lineHeight: 1.5 }}>
+          {assignment.narrationText?.slice(0, 120)}
+          {(assignment.narrationText?.length ?? 0) > 120 ? '…' : ''}
         </div>
 
-        <div style={{ marginBottom: '12px' }}>
+        <div style={{ marginBottom: '14px' }}>
           <label style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>
-            SEARCH QUERY
+            Custom Search Query
           </label>
           <input
+            className="input"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter') onConfirm(query) }}
-            placeholder="Enter a short, visual search query…"
-            style={{
-              width: '100%', background: 'var(--bg-base)',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
-              fontSize: '13px', padding: '10px 12px', outline: 'none'
+            placeholder="e.g. vintage steam train mountains"
+            style={{ width: '100%', fontSize: '12px' }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && query.trim()) onConfirm(query.trim())
             }}
           />
         </div>
 
-        <div style={{ marginBottom: '20px' }}>
-          <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '6px' }}>
-            SUGGESTED QUERIES (click to use)
+        {suggestions.length > 0 && (
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '6px' }}>AI Suggested Queries:</div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {suggestions.map((s, idx) => (
+                <button
+                  key={idx}
+                  type="button"
+                  className="btn btn-sm btn-secondary"
+                  style={{ fontSize: '10px', padding: '3px 8px' }}
+                  onClick={() => setQuery(s)}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </div>
-          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
-            {suggestions.map((q) => (
-              <button
-                key={q}
-                onClick={() => setQuery(q)}
-                style={{
-                  background: query === q ? 'var(--brand-gradient-subtle)' : 'var(--bg-overlay)',
-                  border: `1px solid ${query === q ? 'var(--border-brand)' : 'var(--border-subtle)'}`,
-                  color: query === q ? 'var(--text-brand)' : 'var(--text-secondary)',
-                  borderRadius: 'var(--radius-sm)', fontSize: '11px',
-                  padding: '4px 10px', cursor: 'pointer'
-                }}
-              >
-                {q}
-              </button>
-            ))}
-          </div>
-        </div>
+        )}
 
-        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-          <button
-            className="btn btn-secondary"
-            onClick={onClose}
-            style={{ minWidth: '80px' }}
-          >
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+          <button className="btn btn-secondary btn-sm" onClick={onClose}>
             Cancel
           </button>
           <button
-            className="btn btn-primary"
-            onClick={() => onConfirm(query)}
+            className="btn btn-primary btn-sm"
+            onClick={() => query.trim() && onConfirm(query.trim())}
             disabled={!query.trim()}
-            style={{ minWidth: '120px' }}
           >
-            🔍 Search & Replace
+            Search & Replace
           </button>
         </div>
       </div>
@@ -181,33 +372,47 @@ function ReplaceModal({
   )
 }
 
-// ─── Scene Card ───────────────────────────────────────────────────────────────
+// ─── Scene Card with Filmstrip ────────────────────────────────────────────────
 
-function SceneCard({
+function StoryboardSceneCard({
   assignment,
   projectDir,
+  candidates,
   onReplace,
   onLock,
-  onUpload
+  onUpload,
+  onCandidateSelected,
+  onCandidateApproved
 }: {
   assignment: StockSceneAssignment
   projectDir: string
+  candidates: StockCandidate[]
   onReplace: (sceneIndex: number, query: string) => Promise<StockAsset | null>
   onLock: (sceneIndex: number, locked: boolean) => Promise<void>
   onUpload: (sceneIndex: number) => Promise<void>
+  onCandidateSelected: (candidateId: string) => Promise<void>
+  onCandidateApproved: (candidateId?: string) => Promise<void>
 }): React.ReactElement {
   const [showReplace, setShowReplace] = useState(false)
   const [replacing, setReplacing] = useState(false)
   const [locking, setLocking] = useState(false)
-  const [thumbError, setThumbError] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  const [previewCandidate, setPreviewCandidate] = useState<StockCandidate | null>(null)
+  const [showReasons, setShowReasons] = useState(false)
+  const [narrationExpanded, setNarrationExpanded] = useState(false)
 
   const asset = assignment.asset
-  const isAssigned = assignment.status === 'assigned' && asset
+  const isAssigned = assignment.status === 'assigned' && !!asset
+  const sceneCandidates = candidates.length > 0 ? candidates : assignment.candidates ?? []
 
   async function handleReplace(query: string): Promise<void> {
     setShowReplace(false)
     setReplacing(true)
-    await onReplace(assignment.sceneIndex, query)
+    setActionError(null)
+    const res = await onReplace(assignment.sceneIndex, query)
+    if (!res) {
+      setActionError('Replace failed to find or download media.')
+    }
     setReplacing(false)
   }
 
@@ -217,223 +422,531 @@ function SceneCard({
     setLocking(false)
   }
 
+  async function handleSelect(candidateId: string): Promise<void> {
+    setActionError(null)
+    try {
+      const res = await window.api.stock.selectCandidate({
+        projectDir,
+        sceneIndex: assignment.sceneIndex,
+        candidateId
+      })
+      if (!res.success) {
+        setActionError(res.error || 'Failed to select candidate')
+      } else {
+        await onCandidateSelected(candidateId)
+      }
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  async function handleApprove(candidateId?: string): Promise<void> {
+    setActionError(null)
+    try {
+      const res = await window.api.stock.approveCandidate({
+        projectDir,
+        sceneIndex: assignment.sceneIndex,
+        candidateId
+      })
+      if (!res.success) {
+        setActionError(res.error || 'Failed to approve candidate')
+      } else {
+        await onCandidateApproved(candidateId)
+      }
+    } catch (e: unknown) {
+      setActionError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const duration = assignment.endTime - assignment.startTime
+
   return (
     <>
-      <div style={{
-        background: 'var(--bg-elevated)',
-        border: `1px solid ${isAssigned ? 'var(--border-default)' : assignment.status === 'failed' ? 'rgba(248,113,113,0.3)' : 'var(--border-subtle)'}`,
-        borderRadius: 'var(--radius-md)',
-        overflow: 'hidden',
-        transition: 'border-color 0.2s',
-        position: 'relative'
-      }}>
-        {/* Lock indicator */}
-        {assignment.locked && (
-          <div style={{
-            position: 'absolute', top: 8, right: 8, zIndex: 2,
-            background: 'rgba(251,191,36,0.2)',
-            border: '1px solid rgba(251,191,36,0.4)',
-            borderRadius: '999px', fontSize: '9px', padding: '2px 7px',
-            color: 'var(--color-warning)', fontWeight: 700
-          }}>
-            🔒 LOCKED
-          </div>
-        )}
-        {assignment.manualOverride && (
-          <div style={{
-            position: 'absolute', top: 8, right: assignment.locked ? 72 : 8, zIndex: 2,
-            background: 'rgba(96,165,250,0.2)',
-            border: '1px solid rgba(96,165,250,0.4)',
-            borderRadius: '999px', fontSize: '9px', padding: '2px 7px',
-            color: 'var(--color-info)', fontWeight: 700
-          }}>
-            📤 OWN
-          </div>
-        )}
-
-        {/* Thumbnail */}
-        <div style={{ height: '120px', background: 'var(--bg-void)', overflow: 'hidden', position: 'relative' }}>
-          {isAssigned && asset?.thumbnailUrl && !thumbError ? (
-            <img
-              src={asset.thumbnailUrl}
-              alt={`Scene ${assignment.sceneIndex}`}
-              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
-              onError={() => setThumbError(true)}
-            />
-          ) : isAssigned ? (
-            <div style={{
-              width: '100%', height: '100%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexDirection: 'column', gap: '6px',
-              background: 'linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(168,85,247,0.08) 100%)'
-            }}>
-              <span style={{ fontSize: '26px' }}>🎬</span>
-              <span style={{ fontSize: '10px', color: 'var(--text-brand)', fontWeight: 600, letterSpacing: '0.5px' }}>
-                {asset?.provider?.toUpperCase() || 'STOCK'} VIDEO
+      <div
+        style={{
+          background: 'var(--bg-elevated)',
+          border: `1px solid ${
+            assignment.locked
+              ? 'rgba(251,191,36,0.35)'
+              : assignment.approvalStatus === 'approved'
+                ? 'rgba(34,197,94,0.35)'
+                : isAssigned
+                  ? 'var(--border-default)'
+                  : 'rgba(248,113,113,0.3)'
+          }`,
+          borderRadius: 'var(--radius-md)',
+          padding: '16px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '12px',
+          boxShadow: 'var(--shadow-sm)',
+          position: 'relative'
+        }}
+      >
+        {/* Top Header Bar */}
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '11px', fontWeight: 700, color: 'var(--text-brand)' }}>
+              S{String(assignment.sceneIndex).padStart(3, '0')}
+            </span>
+            <span style={{ fontSize: '10px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+              ({assignment.sceneId})
+            </span>
+            {assignment.chapterTitle && (
+              <span
+                style={{
+                  fontSize: '10px',
+                  color: 'var(--text-secondary)',
+                  background: 'var(--bg-void)',
+                  padding: '2px 6px',
+                  borderRadius: '4px'
+                }}
+              >
+                {assignment.chapterTitle}
               </span>
-            </div>
-          ) : (
-            <div style={{
-              width: '100%', height: '100%',
-              display: 'flex', alignItems: 'center', justifyContent: 'center',
-              flexDirection: 'column', gap: '6px'
-            }}>
-              {assignment.status === 'failed' ? (
-                <>
-                  <span style={{ fontSize: '24px' }}>⚠️</span>
-                  <span style={{ fontSize: '10px', color: 'var(--color-error)' }}>No asset found</span>
-                </>
-              ) : (
-                <>
-                  <span style={{ fontSize: '24px', opacity: 0.3 }}>🎬</span>
-                  <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>Pending</span>
-                </>
-              )}
+            )}
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
+              {fmt(assignment.startTime)}–{fmt(assignment.endTime)} ({duration.toFixed(1)}s)
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            {tierBadge(assignment.tierUsed)}
+            {matchLabelBadge(assignment.matchLabel)}
+            {matchLabelBadge(assignment.visualTruthLabel)}
+            {statusBadge(assignment.status)}
+            {approvalBadge(assignment.approvalStatus)}
+            {assignment.locked && (
+              <span
+                style={{
+                  fontSize: '9px',
+                  padding: '2px 6px',
+                  borderRadius: '999px',
+                  background: 'rgba(251,191,36,0.15)',
+                  color: 'var(--color-warning)',
+                  fontWeight: 700
+                }}
+              >
+                🔒 LOCKED
+              </span>
+            )}
+            {assignment.manualOverride && (
+              <span
+                style={{
+                  fontSize: '9px',
+                  padding: '2px 6px',
+                  borderRadius: '999px',
+                  background: 'rgba(96,165,250,0.15)',
+                  color: 'var(--color-info)',
+                  fontWeight: 700
+                }}
+              >
+                📤 USER MEDIA
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Narration & Visual Intent */}
+        <div style={{ background: 'var(--bg-void)', borderRadius: 'var(--radius-sm)', padding: '10px' }}>
+          <div
+            style={{
+              fontSize: '11px',
+              color: 'var(--text-secondary)',
+              lineHeight: 1.5,
+              cursor: 'pointer'
+            }}
+            onClick={() => setNarrationExpanded(!narrationExpanded)}
+          >
+            <strong style={{ color: 'var(--text-primary)' }}>Narration:</strong>{' '}
+            {narrationExpanded || (assignment.narrationText?.length ?? 0) <= 140
+              ? assignment.narrationText || '(no narration)'
+              : `${assignment.narrationText.slice(0, 140)}…`}
+          </div>
+
+          {assignment.visualIntent && (
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '4px' }}>
+              <strong style={{ color: 'var(--text-secondary)' }}>Visual Intent:</strong> {assignment.visualIntent}
             </div>
           )}
 
-          {/* Score bar overlay */}
-          {isAssigned && (
-            <div style={{
-              position: 'absolute', bottom: 0, left: 0, right: 0, height: '3px',
-              background: 'rgba(0,0,0,0.5)'
-            }}>
-              <div style={{
-                height: '100%',
-                width: `${Math.round(assignment.score * 100)}%`,
-                background: assignment.score > 0.6
-                  ? 'var(--color-success)'
-                  : assignment.score > 0.35
-                    ? 'var(--color-warning)'
-                    : 'var(--color-error)',
-                transition: 'width 0.5s ease'
-              }} />
+          {assignment.usedQuery && (
+            <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px', fontFamily: 'var(--font-mono)' }}>
+              🔍 Search Query: "{assignment.usedQuery}"
             </div>
           )}
         </div>
 
-        {/* Info */}
-        <div style={{ padding: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+        {/* Selected Asset Header Overview */}
+        {isAssigned && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              padding: '6px 10px',
+              background: 'rgba(99,102,241,0.08)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '11px'
+            }}
+          >
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-muted)' }}>
-                S{String(assignment.sceneIndex).padStart(3, '0')}
+              <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>Active Media:</span>
+              {providerBadge(asset.provider)}
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {asset.mediaType.toUpperCase()} {asset.creator ? `· by ${asset.creator}` : ''}
               </span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-brand)' }}>
-                {fmt(assignment.startTime)}–{fmt(assignment.endTime)}
-              </span>
-              {statusBadge(assignment.status)}
             </div>
-            {isAssigned && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                {providerBadge(asset.provider)}
-                <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
-                  {Math.round(assignment.score * 100)}%
-                </span>
-              </div>
-            )}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontWeight: 700, color: assignment.score >= 70 ? '#22c55e' : '#f59e0b' }}>
+                Score: {Math.round(assignment.score * (assignment.score <= 1 ? 100 : 1))}/100
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* Filmstrip of Candidates (Top 3) */}
+        <div>
+          <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+            Candidate Storyboard {sceneCandidates.length > 0 ? `(${sceneCandidates.length} evaluated)` : ''}
           </div>
 
-          <div style={{
-            fontSize: '11px', color: 'var(--text-secondary)',
-            lineHeight: 1.4, marginBottom: '8px',
-            overflow: 'hidden', display: '-webkit-box',
-            WebkitLineClamp: 2, WebkitBoxOrient: 'vertical'
-          }}>
-            {assignment.narrationText || '(no narration)'}
-          </div>
+          {sceneCandidates.length === 0 ? (
+            <div
+              style={{
+                padding: '12px',
+                textAlign: 'center',
+                background: 'var(--bg-void)',
+                borderRadius: 'var(--radius-sm)',
+                fontSize: '11px',
+                color: 'var(--text-muted)'
+              }}
+            >
+              No candidate filmstrip available for this scene yet. Run Stock Search to generate ranked candidates.
+            </div>
+          ) : (
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(210px, 1fr))',
+                gap: '10px'
+              }}
+            >
+              {sceneCandidates.slice(0, 3).map((candidate, idx) => {
+                const isWinner = candidate.selected || (idx === 0 && !candidate.rejected && !assignment.selectedCandidateId)
+                const isCurrent = assignment.selectedCandidateId === candidate.candidateId || (isWinner && !assignment.selectedCandidateId)
 
-          {isAssigned && (
-            <div style={{
-              fontSize: '10px', color: 'var(--text-muted)',
-              fontFamily: 'var(--font-mono)', marginBottom: '8px'
-            }}>
-              🔍 "{assignment.usedQuery}" · by {asset.creator}
+                return (
+                  <div
+                    key={candidate.candidateId || idx}
+                    style={{
+                      background: 'var(--bg-void)',
+                      border: `1px solid ${
+                        isCurrent
+                          ? 'var(--color-brand)'
+                          : candidate.rejected
+                            ? 'rgba(248,113,113,0.3)'
+                            : 'var(--border-subtle)'
+                      }`,
+                      borderRadius: 'var(--radius-sm)',
+                      overflow: 'hidden',
+                      display: 'flex',
+                      flexDirection: 'column'
+                    }}
+                  >
+                    {/* Candidate Thumbnail Header */}
+                    <div style={{ height: '95px', background: '#090a0f', position: 'relative', overflow: 'hidden' }}>
+                      {candidate.result.thumbnailUrl ? (
+                        <img
+                          src={candidate.result.thumbnailUrl}
+                          alt={candidate.result.title}
+                          loading="lazy"
+                          style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                          onError={(e) => {
+                            ;(e.target as HTMLElement).style.display = 'none'
+                          }}
+                        />
+                      ) : (
+                        <div
+                          style={{
+                            width: '100%',
+                            height: '100%',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: 'var(--text-muted)',
+                            fontSize: '24px'
+                          }}
+                        >
+                          🎬
+                        </div>
+                      )}
+
+                      {/* Rank tag */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 6,
+                          left: 6,
+                          background: idx === 0 ? 'rgba(34,197,94,0.9)' : 'rgba(0,0,0,0.75)',
+                          color: '#fff',
+                          fontSize: '9px',
+                          fontWeight: 700,
+                          padding: '1px 6px',
+                          borderRadius: '3px'
+                        }}
+                      >
+                        {idx === 0 ? '1 · RECOMMENDED' : `Candidate ${idx + 1}`}
+                      </div>
+
+                      {/* Current Selection Marker */}
+                      {isCurrent && (
+                        <div
+                          style={{
+                            position: 'absolute',
+                            top: 6,
+                            right: 6,
+                            background: 'var(--color-brand)',
+                            color: '#fff',
+                            fontSize: '9px',
+                            fontWeight: 700,
+                            padding: '1px 6px',
+                            borderRadius: '3px'
+                          }}
+                        >
+                          ✓ ACTIVE
+                        </div>
+                      )}
+
+                      {/* Score Badge */}
+                      <div
+                        style={{
+                          position: 'absolute',
+                          bottom: 4,
+                          right: 6,
+                          background: 'rgba(0,0,0,0.8)',
+                          color: candidate.score.totalScore >= 70 ? '#22c55e' : '#f59e0b',
+                          fontSize: '10px',
+                          fontWeight: 700,
+                          padding: '2px 5px',
+                          borderRadius: '3px'
+                        }}
+                      >
+                        {candidate.score.totalScore}/100
+                      </div>
+                    </div>
+
+                    {/* Candidate Body */}
+                    <div style={{ padding: '8px', flex: 1, display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px' }}>
+                        <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
+                          {providerBadge(candidate.result.provider)}
+                          <span style={{ fontSize: '9px', color: 'var(--text-muted)', textTransform: 'uppercase' }}>
+                            {candidate.result.mediaType}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: '9px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                          {candidate.result.width}x{candidate.result.height}
+                          {candidate.result.durationSecs ? ` · ${candidate.result.durationSecs}s` : ''}
+                        </span>
+                      </div>
+
+                      {/* Score breakdown chips */}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '3px', fontSize: '8px', color: 'var(--text-muted)' }}>
+                        <span style={{ background: 'rgba(255,255,255,0.05)', padding: '1px 4px', borderRadius: '2px' }}>
+                          Loc: {candidate.score.localRelevance}
+                        </span>
+                        <span style={{ background: 'rgba(255,255,255,0.05)', padding: '1px 4px', borderRadius: '2px' }}>
+                          Glob: {candidate.score.globalContextFit}
+                        </span>
+                        <span style={{ background: 'rgba(255,255,255,0.05)', padding: '1px 4px', borderRadius: '2px' }}>
+                          Mot: {candidate.score.motionSuitability}
+                        </span>
+                        <span style={{ background: 'rgba(255,255,255,0.05)', padding: '1px 4px', borderRadius: '2px' }}>
+                          Div: {candidate.score.diversityScore}
+                        </span>
+                        {candidate.score.reusePenalty < 0 && (
+                          <span style={{ background: 'rgba(248,113,113,0.15)', color: '#f87171', padding: '1px 4px', borderRadius: '2px' }}>
+                            Pen: {candidate.score.reusePenalty}
+                          </span>
+                        )}
+                      </div>
+
+                      {/* Candidate Reason Snippet */}
+                      {candidate.score.reasons[0] && (
+                        <div
+                          style={{
+                            fontSize: '9px',
+                            color: '#22c55e',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          ✓ {candidate.score.reasons[0]}
+                        </div>
+                      )}
+
+                      {/* Action buttons inside card */}
+                      <div style={{ display: 'flex', gap: '4px', marginTop: 'auto', paddingTop: '4px' }}>
+                        <button
+                          type="button"
+                          className="btn btn-sm btn-secondary"
+                          style={{ fontSize: '9px', padding: '3px 6px', flex: 1 }}
+                          onClick={() => setPreviewCandidate(candidate)}
+                        >
+                          👁 Preview
+                        </button>
+
+                        {!isCurrent && (
+                          <button
+                            type="button"
+                            className="btn btn-sm btn-secondary"
+                            style={{ fontSize: '9px', padding: '3px 6px', flex: 1, borderColor: 'var(--color-brand)' }}
+                            onClick={() => handleSelect(candidate.candidateId)}
+                          >
+                            ✓ Select
+                          </button>
+                        )}
+
+                        <button
+                          type="button"
+                          className="btn btn-sm"
+                          style={{
+                            fontSize: '9px',
+                            padding: '3px 6px',
+                            flex: 1,
+                            background: candidate.approved ? 'rgba(34,197,94,0.2)' : 'var(--bg-overlay)',
+                            color: candidate.approved ? '#22c55e' : 'var(--text-muted)'
+                          }}
+                          onClick={() => handleApprove(candidate.candidateId)}
+                        >
+                          {candidate.approved ? '★ Done' : '★ Approve'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
+        </div>
 
-          {/* Context-aware debug info */}
-          {(assignment.tierUsed || assignment.matchLabel) && (
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8 }}>
-              {tierBadge(assignment.tierUsed)}
-              {matchLabelBadge(assignment.matchLabel)}
-              {assignment.chapterTitle && (
-                <span style={{ fontSize: '9px', color: 'var(--text-muted)', padding: '2px 6px', background: 'var(--bg-overlay)', borderRadius: 4 }}>
-                  {assignment.chapterTitle.slice(0, 30)}
-                </span>
-              )}
-            </div>
-          )}
-
-          {/* Score breakdown tooltip */}
-          {assignment.scoreBreakdown && (
-            <div style={{
-              fontSize: '9px', color: 'var(--text-muted)',
-              background: 'var(--bg-void)', borderRadius: 4,
-              padding: '6px 8px', marginBottom: 8,
+        {/* Explanation & Rejection Details (Collapsible) */}
+        {showReasons && (
+          <div
+            style={{
+              padding: '10px',
+              background: 'var(--bg-void)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '10px',
               lineHeight: 1.6
-            }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '2px 12px' }}>
-                <span>Local: {assignment.scoreBreakdown.localRelevance}/30</span>
-                <span>Global: {assignment.scoreBreakdown.globalSubjectRelevance}/25</span>
-                <span>Geo: {assignment.scoreBreakdown.geographyMatch}/15</span>
-                <span>Time: {assignment.scoreBreakdown.timePeriodMatch}/10</span>
+            }}
+          >
+            <div style={{ fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>
+              Scoring & Diversity Explanation:
+            </div>
+            {sceneCandidates[0]?.score?.reasons?.map((r, i) => (
+              <div key={i} style={{ color: '#22c55e' }}>
+                ✓ {r}
               </div>
-              {assignment.scoreBreakdown.penaltyReasons?.length > 0 && (
-                <div style={{ color: '#f87171', marginTop: 2 }}>
-                  ⚠ {assignment.scoreBreakdown.penaltyReasons[0].slice(0, 50)}
-                </div>
-              )}
-            </div>
-          )}
-
-          {assignment.status === 'failed' && assignment.errorMessage && (
-            <div style={{ fontSize: '10px', color: 'var(--color-error)', marginBottom: '8px' }}>
-              {assignment.errorMessage.slice(0, 80)}
-            </div>
-          )}
-
-          {/* Actions */}
-          <div style={{ display: 'flex', gap: '5px', flexWrap: 'wrap' }}>
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => setShowReplace(true)}
-              disabled={replacing || assignment.locked}
-              style={{ fontSize: '10px', padding: '4px 8px' }}
-              title={assignment.locked ? 'Unlock to replace' : 'Search for different asset'}
-            >
-              {replacing ? '⟳' : '🔄'} Replace
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={handleLock}
-              disabled={locking}
-              style={{
-                fontSize: '10px', padding: '4px 8px',
-                background: assignment.locked ? 'rgba(251,191,36,0.1)' : 'var(--bg-overlay)',
-                border: `1px solid ${assignment.locked ? 'rgba(251,191,36,0.4)' : 'var(--border-subtle)'}`,
-                color: assignment.locked ? 'var(--color-warning)' : 'var(--text-muted)',
-                cursor: 'pointer', borderRadius: 'var(--radius-sm)'
-              }}
-              title={assignment.locked ? 'Unlock this scene' : 'Lock this scene to prevent auto-replacement'}
-            >
-              {assignment.locked ? '🔓 Unlock' : '🔒 Lock'}
-            </button>
-            <button
-              className="btn btn-sm"
-              onClick={() => onUpload(assignment.sceneIndex)}
-              style={{
-                fontSize: '10px', padding: '4px 8px',
-                background: 'var(--bg-overlay)',
-                border: '1px solid var(--border-subtle)',
-                color: 'var(--text-muted)', cursor: 'pointer',
-                borderRadius: 'var(--radius-sm)'
-              }}
-              title="Upload your own media for this scene"
-            >
-              📤 Upload
-            </button>
+            ))}
+            {sceneCandidates[0]?.score?.rejectionReasons?.map((r, i) => (
+              <div key={i} style={{ color: '#f87171' }}>
+                ⚠ {r}
+              </div>
+            ))}
           </div>
+        )}
+
+        {/* Action Error Alert */}
+        {actionError && (
+          <div
+            style={{
+              padding: '8px 12px',
+              background: 'rgba(248,113,113,0.12)',
+              border: '1px solid rgba(248,113,113,0.3)',
+              borderRadius: 'var(--radius-sm)',
+              fontSize: '11px',
+              color: 'var(--color-error)'
+            }}
+          >
+            ⚠ {actionError}
+          </div>
+        )}
+
+        {/* Scene Footer Action Buttons */}
+        <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', alignItems: 'center', marginTop: '2px' }}>
+          <button
+            className="btn btn-sm btn-secondary"
+            onClick={() => handleApprove()}
+            style={{
+              fontSize: '10px',
+              padding: '4px 10px',
+              background: assignment.approvalStatus === 'approved' ? 'rgba(34,197,94,0.15)' : undefined,
+              color: assignment.approvalStatus === 'approved' ? '#22c55e' : undefined
+            }}
+          >
+            {assignment.approvalStatus === 'approved' ? '★ Approved' : '★ Approve Scene'}
+          </button>
+
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={() => setShowReplace(true)}
+            disabled={replacing || assignment.locked}
+            style={{ fontSize: '10px', padding: '4px 10px' }}
+          >
+            {replacing ? '⟳' : '🔄'} Replace
+          </button>
+
+          <button
+            className="btn btn-sm"
+            onClick={handleLock}
+            disabled={locking}
+            style={{
+              fontSize: '10px',
+              padding: '4px 10px',
+              background: assignment.locked ? 'rgba(251,191,36,0.1)' : 'var(--bg-overlay)',
+              border: `1px solid ${assignment.locked ? 'rgba(251,191,36,0.4)' : 'var(--border-subtle)'}`,
+              color: assignment.locked ? 'var(--color-warning)' : 'var(--text-muted)',
+              cursor: 'pointer',
+              borderRadius: 'var(--radius-sm)'
+            }}
+          >
+            {assignment.locked ? '🔓 Unlock' : '🔒 Lock'}
+          </button>
+
+          <button
+            className="btn btn-sm"
+            onClick={() => onUpload(assignment.sceneIndex)}
+            style={{
+              fontSize: '10px',
+              padding: '4px 10px',
+              background: 'var(--bg-overlay)',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              borderRadius: 'var(--radius-sm)'
+            }}
+          >
+            📤 Upload Media
+          </button>
+
+          <button
+            className="btn btn-sm"
+            onClick={() => setShowReasons(!showReasons)}
+            style={{
+              fontSize: '10px',
+              padding: '4px 10px',
+              background: 'transparent',
+              border: '1px solid var(--border-subtle)',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              borderRadius: 'var(--radius-sm)'
+            }}
+          >
+            {showReasons ? 'Hide Breakdown' : 'ℹ View Reasons'}
+          </button>
         </div>
       </div>
 
@@ -442,6 +955,13 @@ function SceneCard({
           assignment={assignment}
           onConfirm={handleReplace}
           onClose={() => setShowReplace(false)}
+        />
+      )}
+
+      {previewCandidate && (
+        <PreviewModal
+          candidate={previewCandidate}
+          onClose={() => setPreviewCandidate(null)}
         />
       )}
     </>
@@ -461,7 +981,6 @@ export function StockPage({
   onUpload,
   onLoad
 }: StockPageProps): React.ReactElement {
-
   useEffect(() => {
     onLoad()
   }, [])
@@ -471,12 +990,31 @@ export function StockPage({
   const [analyzingCtx, setAnalyzingCtx] = useState(false)
   const [ctxProgress, setCtxProgress] = useState<string | null>(null)
 
-  // Load existing GlobalContext on mount
-  useEffect(() => {
-    window.api.stock.getContext(project.projectDir).then((ctx) => {
+  const [filter, setFilter] = useState<FilterType>('all')
+  const [candidatesStore, setCandidatesStore] = useState<Record<string, StockCandidate[]>>({})
+  const [storyboardSummary, setStoryboardSummary] = useState<StoryboardSummary | null>(null)
+
+  // Load existing GlobalContext, candidates, and summary
+  const loadData = async (): Promise<void> => {
+    try {
+      const [ctx, cands, summary] = await Promise.all([
+        window.api.stock.getContext(project.projectDir),
+        window.api.stock.getCandidates({ projectDir: project.projectDir }),
+        window.api.stock.getStoryboardSummary(project.projectDir)
+      ])
       if (ctx) setGlobalCtx(ctx)
-    }).catch(() => {})
-  }, [project.projectDir])
+      if (cands && typeof cands === 'object') {
+        setCandidatesStore(cands as Record<string, StockCandidate[]>)
+      }
+      if (summary) setStoryboardSummary(summary)
+    } catch {
+      // Ignore background load errors
+    }
+  }
+
+  useEffect(() => {
+    void loadData()
+  }, [project.projectDir, review])
 
   async function handleAnalyzeContext(): Promise<void> {
     setAnalyzingCtx(true)
@@ -510,18 +1048,42 @@ export function StockPage({
     }
   }
 
+  // Filtered scenes
+  const assignments = review?.assignments ?? []
 
-  const assigned = review?.assignedScenes ?? 0
-  const total = review?.totalScenes ?? 0
-  const coverage = total > 0 ? Math.round((assigned / total) * 100) : 0
-  const hasPlan = true // will show useful empty state if no plan
+  const filteredAssignments = useMemo(() => {
+    switch (filter) {
+      case 'needs_review':
+        return assignments.filter((a) => a.approvalStatus === 'needs_review' || a.status === 'failed' || a.score < 50)
+      case 'low_score':
+        return assignments.filter((a) => a.score < 60)
+      case 'missing':
+        return assignments.filter((a) => !a.asset || a.status === 'failed')
+      case 'locked':
+        return assignments.filter((a) => a.locked)
+      case 'manual':
+        return assignments.filter((a) => a.manualOverride)
+      case 'approved':
+        return assignments.filter((a) => a.approvalStatus === 'approved')
+      case 'all':
+      default:
+        return assignments
+    }
+  }, [assignments, filter])
+
+  const total = assignments.length
+  const assigned = storyboardSummary?.assignedScenes ?? review?.assignedScenes ?? 0
+  const approved = storyboardSummary?.approvedScenes ?? assignments.filter((a) => a.approvalStatus === 'approved').length
+  const needsReview = storyboardSummary?.needsReviewScenes ?? assignments.filter((a) => a.approvalStatus === 'needs_review' || a.status === 'failed' || a.score < 50).length
+  const missing = storyboardSummary?.missingScenes ?? assignments.filter((a) => !a.asset || a.status === 'failed').length
+  const avgScore = storyboardSummary?.averageScore ?? (total > 0 ? Math.round(assignments.reduce((acc, a) => acc + (a.score > 1 ? a.score : a.score * 100), 0) / total) : 0)
+  const dedupAvoided = storyboardSummary?.duplicateAssetsAvoided ?? 0
 
   return (
     <div className="page-container">
-
       {/* ── Global Visual Context Panel ──────────────────────────────────────── */}
       <div className="panel" style={{ borderColor: globalCtx ? 'rgba(99,102,241,0.35)' : 'var(--border-subtle)' }}>
-        <div className="panel-header" style={{ cursor: 'pointer' }} onClick={() => setCtxExpanded(e => !e)}>
+        <div className="panel-header" style={{ cursor: 'pointer' }} onClick={() => setCtxExpanded((e) => !e)}>
           <div className="panel-title">
             <span style={{ marginRight: 8 }}>🌐</span>
             Global Visual Context
@@ -533,12 +1095,17 @@ export function StockPage({
           </div>
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {!globalCtx && (
-              <span style={{ fontSize: '10px', color: 'var(--color-warning)' }}>⚠ No context — run Analyze to improve stock accuracy</span>
+              <span style={{ fontSize: '10px', color: 'var(--color-warning)' }}>
+                ⚠ No context — run Analyze to improve stock accuracy
+              </span>
             )}
             <button
               className="btn btn-secondary"
               style={{ fontSize: '11px', padding: '4px 12px' }}
-              onClick={(e) => { e.stopPropagation(); void handleAnalyzeContext() }}
+              onClick={(e) => {
+                e.stopPropagation()
+                void handleAnalyzeContext()
+              }}
               disabled={analyzingCtx}
             >
               {analyzingCtx ? '⟳ Analyzing...' : '🧠 Analyze Script'}
@@ -548,252 +1115,220 @@ export function StockPage({
         </div>
 
         {ctxProgress && (
-          <div style={{
-            padding: '8px 20px',
-            fontSize: '11px',
-            color: ctxProgress.startsWith('⚠') ? '#f59e0b' : 'var(--text-secondary)',
-            background: 'var(--bg-overlay)',
-            borderTop: '1px solid var(--border-subtle)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between'
-          }}>
-            <span>{ctxProgress}</span>
-            {!analyzingCtx && (
-              <button
-                onClick={() => setCtxProgress(null)}
-                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '13px', padding: '0 4px' }}
-                title="Dismiss"
-              >
-                ✕
-              </button>
-            )}
+          <div
+            style={{
+              padding: '8px 16px',
+              fontSize: '11px',
+              color: ctxProgress.startsWith('⚠') ? 'var(--color-warning)' : 'var(--text-brand)',
+              background: 'var(--bg-void)',
+              borderBottom: '1px solid var(--border-subtle)'
+            }}
+          >
+            {ctxProgress}
           </div>
         )}
 
         {ctxExpanded && globalCtx && (
-          <div className="panel-body" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="panel-body" style={{ fontSize: '11px', display: 'flex', flexDirection: 'column', gap: 10 }}>
             <div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>PRIMARY SUBJECT</div>
-              <div style={{ fontSize: '12px', color: 'var(--text-primary)', marginBottom: 12 }}>{globalCtx.primarySubject}</div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>CENTRAL THESIS</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: 12, lineHeight: 1.5 }}>{globalCtx.centralThesis}</div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>LOCATION</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: 12 }}>
-                {[globalCtx.geography?.primaryCountry, globalCtx.geography?.primaryRegion, ...(globalCtx.geography?.secondaryLocations ?? [])].filter(Boolean).join(', ') || 'Not specified'}
-              </div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: 'var(--text-muted)', marginBottom: 4 }}>TIME PERIOD</div>
-              <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{globalCtx.timeContext?.primaryPeriod || 'Contemporary'}</div>
+              <strong style={{ color: 'var(--text-primary)' }}>Subject:</strong>{' '}
+              <span style={{ color: 'var(--text-secondary)' }}>{globalCtx.primarySubject}</span>
             </div>
             <div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: '#22c55e', marginBottom: 4 }}>✓ EXACT TOPIC ANCHORS</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
-                {globalCtx.exactTopicAnchors.map((a) => (
-                  <span key={a} style={{ fontSize: '10px', background: 'rgba(34,197,94,0.1)', color: '#22c55e', padding: '2px 8px', borderRadius: 999 }}>{a}</span>
-                ))}
-              </div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: '#60a5fa', marginBottom: 4 }}>~ CONTEXTUAL ANCHORS</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
-                {globalCtx.contextualAnchors.map((a) => (
-                  <span key={a} style={{ fontSize: '10px', background: 'rgba(96,165,250,0.1)', color: '#60a5fa', padding: '2px 8px', borderRadius: 999 }}>{a}</span>
-                ))}
-              </div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: '#f87171', marginBottom: 4 }}>✗ FORBIDDEN SUBSTITUTIONS</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 12 }}>
-                {globalCtx.forbiddenSubstitutions.map((f) => (
-                  <span key={f} style={{ fontSize: '10px', background: 'rgba(248,113,113,0.1)', color: '#f87171', padding: '2px 8px', borderRadius: 999 }}>{f}</span>
-                ))}
-              </div>
-              <div style={{ fontSize: '10px', fontWeight: 700, color: '#f59e0b', marginBottom: 4 }}>⊘ NEGATIVE KEYWORDS</div>
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4 }}>
-                {globalCtx.negativeKeywords.map((n) => (
-                  <span key={n} style={{ fontSize: '10px', background: 'rgba(245,158,11,0.1)', color: '#f59e0b', padding: '2px 8px', borderRadius: 999 }}>{n}</span>
-                ))}
-              </div>
+              <strong style={{ color: 'var(--text-primary)' }}>Central Thesis:</strong>{' '}
+              <span style={{ color: 'var(--text-secondary)' }}>{globalCtx.centralThesis}</span>
             </div>
-          </div>
-        )}
-      </div>
-
-      {/* ── Header Panel ────────────────────────────────────────────────────── */}
-      <div className="panel">
-        <div className="panel-header">
-          <div className="panel-title">
-            <div className="panel-title-icon">
-              <svg width="12" height="12" viewBox="0 0 20 20" fill="var(--brand-primary)">
-                <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z" clipRule="evenodd" />
-              </svg>
-            </div>
-            Stock Media Engine
-          </div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            {review && total > 0 && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <div style={{
-                  width: '80px', height: '6px', borderRadius: '999px',
-                  background: 'var(--bg-overlay)', overflow: 'hidden'
-                }}>
-                  <div style={{
-                    height: '100%', width: `${coverage}%`,
-                    background: coverage === 100
-                      ? 'var(--color-success)'
-                      : coverage > 60
-                        ? 'var(--color-warning)'
-                        : 'var(--color-info)',
-                    transition: 'width 0.4s ease'
-                  }} />
-                </div>
-                <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
-                  {assigned}/{total} scenes ({coverage}%)
-                </span>
-              </div>
-            )}
-            <button
-              className={`btn ${isRunning ? 'btn-secondary' : 'btn-primary'}`}
-              onClick={onRun}
-              disabled={isRunning}
-              id="btn-run-stock-search"
-              style={{ minWidth: '160px' }}
-            >
-              {isRunning ? '⟳ Running…' : review ? '🔄 Re-run Search' : '🎬 Run Stock Search'}
-            </button>
-          </div>
-        </div>
-
-        {/* Progress bar */}
-        {isRunning && progress && (
-          <div style={{ padding: '0 20px 16px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '6px' }}>
-              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>{progress.message}</span>
-              <span style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', color: 'var(--text-brand)' }}>
-                {Math.round(progress.progress * 100)}%
+            <div>
+              <strong style={{ color: 'var(--text-primary)' }}>Geography:</strong>{' '}
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {[globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations]
+                  .filter(Boolean)
+                  .join(', ')}
               </span>
             </div>
-            <div style={{ height: '4px', background: 'var(--bg-overlay)', borderRadius: '999px', overflow: 'hidden' }}>
-              <div style={{
-                height: '100%',
-                width: `${Math.round(progress.progress * 100)}%`,
-                background: 'var(--brand-gradient)',
-                transition: 'width 0.3s ease',
-                borderRadius: '999px'
-              }} />
+            <div>
+              <strong style={{ color: 'var(--text-primary)' }}>Time Period:</strong>{' '}
+              <span style={{ color: 'var(--text-secondary)' }}>
+                {globalCtx.timeContext.primaryPeriod}
+                {globalCtx.timeContext.historicalPeriods.length > 0 ? ` (${globalCtx.timeContext.historicalPeriods.join(', ')})` : ''}
+              </span>
             </div>
+            {globalCtx.forbiddenSubstitutions.length > 0 && (
+              <div>
+                <strong style={{ color: '#f87171' }}>Forbidden Substitutions:</strong>{' '}
+                <span style={{ color: 'var(--text-muted)' }}>{globalCtx.forbiddenSubstitutions.join(' · ')}</span>
+              </div>
+            )}
           </div>
         )}
       </div>
 
-      {/* ── Instructions / Info ──────────────────────────────────────────────── */}
-      {!review && !isRunning && (
-        <div className="panel" style={{ textAlign: 'center', padding: '48px 24px' }}>
-          <div style={{ fontSize: '48px', marginBottom: '16px' }}>🎬</div>
-          <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>
-            Automatic Stock Media Engine
-          </div>
-          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.8, maxWidth: '480px', margin: '0 auto 24px' }}>
-            After running AI Planning, click <strong>Run Stock Search</strong> to automatically find, rank, and download
-            the best matching stock footage from Pexels and Pixabay for each scene in your edit plan.
-          </div>
-          <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', flexWrap: 'wrap' }}>
-            {[
-              { icon: '🔍', label: 'AI-generated queries', desc: 'Short, visual search terms' },
-              { icon: '📊', label: 'Multi-factor ranking', desc: 'Relevance + quality + fit' },
-              { icon: '⬇️', label: 'Auto download', desc: 'Saved to project/assets/stock/' },
-              { icon: '🔒', label: 'User review', desc: 'Replace, lock, or upload own' }
-            ].map((f) => (
-              <div key={f.label} style={{
-                background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)',
-                borderRadius: 'var(--radius-md)', padding: '16px 20px', width: '160px', textAlign: 'center'
-              }}>
-                <div style={{ fontSize: '24px', marginBottom: '8px' }}>{f.icon}</div>
-                <div style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '4px' }}>{f.label}</div>
-                <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>{f.desc}</div>
-              </div>
-            ))}
-          </div>
-          <div style={{ marginTop: '24px', fontSize: '11px', color: 'var(--text-muted)' }}>
-            Make sure Pexels and/or Pixabay API keys are configured in{' '}
-            <strong style={{ color: 'var(--text-brand)' }}>Settings → API Providers</strong>
-          </div>
-        </div>
-      )}
-
-      {/* ── Stats Summary ────────────────────────────────────────────────────── */}
-      {review && total > 0 && !isRunning && (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px' }}>
+      {/* ── Storyboard Summary Bar ───────────────────────────────────────────── */}
+      {total > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(130px, 1fr))', gap: '10px' }}>
           {[
-            { label: 'Total Scenes', value: total, icon: '🎬' },
-            {
-              label: 'Assigned', value: assigned, icon: '✅',
-              color: 'var(--color-success)'
-            },
-            {
-              label: 'Failed', value: total - assigned, icon: '⚠️',
-              color: total - assigned > 0 ? 'var(--color-error)' : 'var(--text-muted)'
-            },
-            { label: 'Coverage', value: `${coverage}%`, icon: '📊' }
+            { label: 'Total Scenes', value: total, icon: '🎬', color: 'var(--text-primary)' },
+            { label: 'Assigned', value: assigned, icon: '✓', color: 'var(--color-success)' },
+            { label: 'Approved', value: approved, icon: '★', color: '#22c55e' },
+            { label: 'Needs Review', value: needsReview, icon: '⚠', color: needsReview > 0 ? '#f59e0b' : 'var(--text-muted)' },
+            { label: 'Missing', value: missing, icon: '✗', color: missing > 0 ? '#f87171' : 'var(--text-muted)' },
+            { label: 'Avg Score', value: `${avgScore}%`, icon: '📊', color: 'var(--text-brand)' },
+            { label: 'Dedup Avoided', value: dedupAvoided, icon: '🛡️', color: 'var(--color-info)' }
           ].map((s) => (
-            <div key={s.label} className="stat-card" style={{ textAlign: 'center' }}>
-              <div style={{ fontSize: '20px', marginBottom: '4px' }}>{s.icon}</div>
-              <div className="stat-value accent" style={{ color: s.color }}>{s.value}</div>
-              <div className="stat-label">{s.label}</div>
+            <div
+              key={s.label}
+              style={{
+                background: 'var(--bg-elevated)',
+                border: '1px solid var(--border-subtle)',
+                borderRadius: 'var(--radius-md)',
+                padding: '12px 14px',
+                textAlign: 'center'
+              }}
+            >
+              <div style={{ fontSize: '16px', marginBottom: '2px' }}>{s.icon}</div>
+              <div style={{ fontSize: '18px', fontWeight: 800, color: s.color, fontFamily: 'var(--font-mono)' }}>
+                {s.value}
+              </div>
+              <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
+                {s.label}
+              </div>
             </div>
           ))}
         </div>
       )}
 
-      {/* ── Scene Grid ───────────────────────────────────────────────────────── */}
-      {review && review.assignments.length > 0 && (
-        <div className="panel">
-          <div className="panel-header">
-            <div className="panel-title">Scene Assignments</div>
-            <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-              {review.assignments.length} scenes · click Replace to find alternatives
+      {/* ── Action / Filter Bar ──────────────────────────────────────────────── */}
+      <div
+        className="panel"
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          flexWrap: 'wrap',
+          gap: '12px',
+          padding: '12px 16px'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+          <span style={{ fontSize: '11px', fontWeight: 700, color: 'var(--text-muted)', marginRight: '4px' }}>
+            FILTER:
+          </span>
+          {[
+            { id: 'all', label: `All (${total})` },
+            { id: 'needs_review', label: `Needs Review (${needsReview})` },
+            { id: 'low_score', label: 'Low Score (<60)' },
+            { id: 'missing', label: `Missing (${missing})` },
+            { id: 'locked', label: 'Locked' },
+            { id: 'manual', label: 'Manual' },
+            { id: 'approved', label: `Approved (${approved})` }
+          ].map((btn) => (
+            <button
+              key={btn.id}
+              className="btn btn-sm"
+              style={{
+                fontSize: '10px',
+                padding: '4px 10px',
+                borderRadius: '999px',
+                background: filter === btn.id ? 'var(--color-brand)' : 'var(--bg-void)',
+                color: filter === btn.id ? '#fff' : 'var(--text-secondary)',
+                border: `1px solid ${filter === btn.id ? 'var(--color-brand)' : 'var(--border-subtle)'}`
+              }}
+              onClick={() => setFilter(btn.id as FilterType)}
+            >
+              {btn.label}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <button
+            className="btn btn-primary"
+            style={{ fontSize: '11px', padding: '6px 16px' }}
+            onClick={onRun}
+            disabled={isRunning}
+          >
+            {isRunning ? '⟳ Searching Stock...' : '⚡ Run Stock Search'}
+          </button>
+        </div>
+      </div>
+
+      {/* Progress Bar when running */}
+      {isRunning && progress && (
+        <div className="panel" style={{ padding: '16px' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px', fontSize: '11px' }}>
+            <span style={{ color: 'var(--text-primary)' }}>{progress.message}</span>
+            <span style={{ color: 'var(--text-brand)', fontFamily: 'var(--font-mono)' }}>
+              {Math.round(progress.progress * 100)}%
             </span>
           </div>
-          <div className="panel-body">
-            <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fill, minmax(230px, 1fr))',
-              gap: '14px'
-            }}>
-              {review.assignments.map((a) => (
-                <SceneCard
-                  key={a.sceneId}
-                  assignment={a}
-                  projectDir={project.projectDir}
-                  onReplace={onReplace}
-                  onLock={onLock}
-                  onUpload={onUpload}
-                />
-              ))}
-            </div>
+          <div style={{ height: '6px', background: 'var(--bg-void)', borderRadius: '3px', overflow: 'hidden' }}>
+            <div
+              style={{
+                height: '100%',
+                width: `${Math.round(progress.progress * 100)}%`,
+                background: 'var(--color-brand)',
+                transition: 'width 0.3s ease'
+              }}
+            />
           </div>
         </div>
       )}
 
-      {/* ── Provider Info ────────────────────────────────────────────────────── */}
-      {review && review.assignments.length > 0 && (
-        <div className="panel" style={{ background: 'var(--bg-elevated)' }}>
-          <div className="panel-body">
-            <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.7 }}>
-              <strong style={{ color: 'var(--text-secondary)' }}>Provider chain:</strong>{' '}
-              Pexels Video → Pixabay Video → Pexels Photo → Pixabay Photo → Manual Review
-              <br />
-              <strong style={{ color: 'var(--text-secondary)' }}>Downloads:</strong>{' '}
-              Saved to <code style={{ fontFamily: 'var(--font-mono)', fontSize: '10px', color: 'var(--text-brand)' }}>
-                {project.projectDir}/assets/stock/
-              </code>
-              <br />
-              <strong style={{ color: 'var(--text-secondary)' }}>License:</strong>{' '}
-              Pexels and Pixabay assets are free for commercial use under their respective licenses.
-            </div>
+      {/* ── Empty State ──────────────────────────────────────────────────────── */}
+      {!review && !isRunning && (
+        <div className="panel" style={{ textAlign: 'center', padding: '48px 24px' }}>
+          <div style={{ fontSize: '48px', marginBottom: '16px' }}>🎬</div>
+          <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '8px' }}>
+            Candidate Stock Engine & Storyboard Review
           </div>
+          <div style={{ fontSize: '12px', color: 'var(--text-secondary)', lineHeight: 1.8, maxWidth: '520px', margin: '0 auto 24px' }}>
+            Click <strong>Run Stock Search</strong> to evaluate Pexels and Pixabay candidates, rank them on 8 quality
+            dimensions, avoid duplicate repetitive clips, and inspect them in the Storyboard Filmstrip.
+          </div>
+          <button className="btn btn-primary" onClick={onRun} disabled={isRunning}>
+            ⚡ Run Stock Search
+          </button>
         </div>
       )}
 
-      <style>{`
-        @keyframes spin { to { transform: rotate(360deg); } }
-      `}</style>
+      {/* ── Storyboard Scenes List ────────────────────────────────────────────── */}
+      {assignments.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+          {filteredAssignments.map((a) => {
+            const key = a.sceneId || `scene_${a.sceneIndex}`
+            const cands = candidatesStore[key] || candidatesStore[String(a.sceneIndex)] || []
+            return (
+              <StoryboardSceneCard
+                key={a.sceneId || a.sceneIndex}
+                assignment={a}
+                projectDir={project.projectDir}
+                candidates={cands}
+                onReplace={onReplace}
+                onLock={onLock}
+                onUpload={onUpload}
+                onCandidateSelected={async () => {
+                  await loadData()
+                  onLoad()
+                }}
+                onCandidateApproved={async () => {
+                  await loadData()
+                  onLoad()
+                }}
+              />
+            )
+          })}
+        </div>
+      )}
+
+      {/* ── License & Provider Footer ────────────────────────────────────────── */}
+      {assignments.length > 0 && (
+        <div className="panel" style={{ background: 'var(--bg-elevated)', padding: '12px 16px' }}>
+          <div style={{ fontSize: '11px', color: 'var(--text-muted)', lineHeight: 1.7 }}>
+            <strong style={{ color: 'var(--text-secondary)' }}>Workflow note:</strong>{' '}
+            Candidate review is optional. If you proceed directly to render, top-ranked candidates (Rank 1) are used automatically.
+          </div>
+        </div>
+      )}
     </div>
   )
 }
