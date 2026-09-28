@@ -8897,11 +8897,11 @@ function ChapterCard({ chapter, sceneOffset, highlightedSceneId }) {
             fmt$2(seq.endTime)
           ] })
         ] }),
-        seq.scenes.map((scene, si2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        seq.scenes.map((scene) => /* @__PURE__ */ jsxRuntimeExports.jsx(
           SceneRow,
           {
             scene,
-            globalIdx: sceneOffset + si2 + 1,
+            globalIdx: scene.sceneIndex,
             isHighlighted: highlightedSceneId === String(scene.sceneIndex)
           },
           scene.sceneIndex
@@ -9203,6 +9203,13 @@ function PlanningPage({ project }) {
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$2(plan.totalDuration) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Duration" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-value accent", children: [
+          (plan.totalDuration / Math.max(1, plan.totalScenes)).toFixed(1),
+          "s"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Avg Scene" })
       ] }),
       (plan.retentionFlags?.length ?? 0) > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", style: { borderColor: "#f59e0b33" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value", style: { color: "#f59e0b" }, children: plan.retentionFlags?.length }),

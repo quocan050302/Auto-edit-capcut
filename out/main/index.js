@@ -1043,95 +1043,725 @@ function flattenPlanScenes(plan) {
     return seqs.flatMap((seq) => seq.scenes ?? []);
   });
 }
-function buildPrompt(transcript, scriptText, mediaFiles) {
-  const videoFiles = mediaFiles.filter((m) => m.type === "video");
-  const imageFiles = mediaFiles.filter((m) => m.type === "image");
-  const hasLocalMedia = mediaFiles.length > 0;
-  const mediaList = hasLocalMedia ? [
-    ...videoFiles.map((v) => `  VIDEO: ${v.filename} (${v.durationSecs?.toFixed(1) ?? "?"}s)`),
-    ...imageFiles.map((i) => `  IMAGE: ${i.filename}`)
-  ].join("\n") : "";
-  const transcriptLines = transcript.segments.map(
-    (seg) => `[${seg.id}] ${seg.start.toFixed(1)}s-${seg.end.toFixed(1)}s: "${seg.text}"`
-  ).join("\n");
-  const mediaSection = hasLocalMedia ? `## AVAILABLE LOCAL MEDIA LIBRARY
-${mediaList}
-` : `## MEDIA MODE: STOCK SEARCH ONLY
-No local media files provided. You MUST NOT invent filenames. Set "localAsset" to null for all scenes.
-`;
-  const sceneSchemaExample = hasLocalMedia ? `{
-              "sceneIndex": 1,
-              "localAsset": "exact_filename.mp4 or null if no match",
-              "mediaType": "video",
-              "startTime": 0,
-              "endTime": 15,
-              "duration": 15,
-              "narrativeText": "The narration text spoken here",
-              "transcriptSegmentIds": ["N001", "N002"],
-              "transitionIn": "cut",
-              "visualNote": "Shows opening establishing shot",
-              "visualIntent": "short description of visual concept (3-10 words)",
-              "searchQueries": ["short query 1", "short query 2", "short query 3"]
-            }` : `{
-              "sceneIndex": 1,
-              "localAsset": null,
-              "mediaType": "video",
-              "startTime": 0,
-              "endTime": 15,
-              "duration": 15,
-              "narrativeText": "The narration text spoken here",
-              "transcriptSegmentIds": ["N001", "N002"],
-              "transitionIn": "cut",
-              "visualNote": "Shows opening establishing shot",
-              "visualIntent": "short description of visual concept (3-10 words)",
-              "searchQueries": ["short query 1", "short query 2", "short query 3"]
-            }`;
-  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan.
-
-## NARRATION TRANSCRIPT (${transcript.segments.length} segments, ${transcript.duration.toFixed(0)}s total)
-${transcriptLines}
-
-${mediaSection}
-${scriptText ? `## ORIGINAL SCRIPT
-${scriptText.slice(0, 8e3)}
-` : ""}
-
-## YOUR TASK
-Create a master edit plan as a JSON object. Rules:
-1. Every second of narration MUST be covered by a media clip
-2. ${hasLocalMedia ? 'Match local files logically to narrative content. Set "localAsset" to the exact filename if matched, or null if no local file fits — stock search will fill those gaps.' : 'Set "localAsset" to null for all scenes (stock will be auto-searched).'}
-3. Videos can be used for their full duration or trimmed
-4. Images should display for 3-8 seconds
-5. Divide the content into 3-6 chapters with meaningful titles
-6. Each chapter has 2-4 sequences, each sequence has 2-6 scenes
-7. Transition between scenes: mostly "cut", use "fade" for chapter breaks
-8. For EVERY scene, write a "visualIntent" (3-10 words describing the visual concept) and 3-5 "searchQueries".
-   IMPORTANT — searchQueries must be SHORT and VISUALLY SEARCHABLE (not literal narration sentences).
-   BAD:  "family has to borrow money to cover funeral expenses"
-   GOOD: ["worried family bills", "credit card debt", "financial stress", "loan paperwork"]
-
-Return ONLY valid JSON, no explanation, matching this exact schema:
-{
-  "chapters": [
-    {
-      "chapterIndex": 1,
-      "title": "Chapter title",
-      "startTime": 0,
-      "endTime": 120,
-      "sequences": [
-        {
-          "sequenceIndex": 1,
-          "title": "Sequence title",
-          "startTime": 0,
-          "endTime": 60,
-          "scenes": [
-            ${sceneSchemaExample}
-          ]
-        }
-      ]
+const PACING_PROFILES = {
+  fast: {
+    hook: { min: 2, targetMin: 2.5, preferred: 3.2, targetMax: 4, hardMax: 6 },
+    normal: { min: 3, targetMin: 4, preferred: 5, targetMax: 6, hardMax: 8 }
+  },
+  balanced: {
+    hook: { min: 2.5, targetMin: 3, preferred: 4, targetMax: 5, hardMax: 6 },
+    normal: { min: 3, targetMin: 5.5, preferred: 6.8, targetMax: 8, hardMax: 10 }
+  },
+  cinematic: {
+    hook: { min: 3, targetMin: 4, preferred: 5, targetMax: 6, hardMax: 8 },
+    normal: { min: 4, targetMin: 7, preferred: 8.5, targetMax: 10, hardMax: 12 }
+  },
+  slow: {
+    hook: { min: 4, targetMin: 5, preferred: 6, targetMax: 7, hardMax: 9 },
+    normal: { min: 5, targetMin: 8, preferred: 10, targetMax: 12, hardMax: 14 }
+  }
+};
+const STRONG_PUNCTUATION = /[.?!;]$/;
+function preprocessSegments(segments, profile) {
+  const normalized = [];
+  for (const seg of segments) {
+    const isHook = seg.start < 30;
+    const limits = isHook ? profile.hook : profile.normal;
+    if (seg.duration <= limits.hardMax) {
+      normalized.push({
+        id: seg.id,
+        subId: seg.id,
+        text: seg.text.trim(),
+        start: seg.start,
+        end: seg.end,
+        duration: seg.duration,
+        isSplit: false
+      });
+      continue;
     }
-  ]
+    logger.warn(
+      `[PLAN][Segmentation] Segment ${seg.id} duration (${seg.duration.toFixed(1)}s) exceeds hardMax (${limits.hardMax}s). Splitting into sub-parts...`
+    );
+    const rawWords = seg.text.trim().split(/\s+/).filter(Boolean);
+    if (rawWords.length <= 1) {
+      normalized.push({
+        id: seg.id,
+        subId: seg.id,
+        text: seg.text.trim(),
+        start: seg.start,
+        end: seg.end,
+        duration: seg.duration,
+        isSplit: false
+      });
+      continue;
+    }
+    const numParts = Math.max(2, Math.ceil(seg.duration / limits.preferred));
+    const wordsPerPart = Math.ceil(rawWords.length / numParts);
+    let prevEnd = seg.start;
+    for (let p = 0; p < numParts; p++) {
+      const startWordIdx = p * wordsPerPart;
+      const endWordIdx = Math.min((p + 1) * wordsPerPart, rawWords.length);
+      const partWords = rawWords.slice(startWordIdx, endWordIdx);
+      if (partWords.length === 0) continue;
+      const isLastPart = p === numParts - 1 || endWordIdx >= rawWords.length;
+      const partStart = prevEnd;
+      let partEnd;
+      if (isLastPart) {
+        partEnd = seg.end;
+      } else if (seg.words && seg.words.length === rawWords.length) {
+        const lastWordInPart = seg.words[endWordIdx - 1];
+        const nextWord = seg.words[endWordIdx];
+        partEnd = nextWord ? nextWord.start : lastWordInPart?.end ?? seg.end;
+        partEnd = Number(partEnd.toFixed(2));
+      } else {
+        partEnd = Number((seg.start + endWordIdx / rawWords.length * (seg.end - seg.start)).toFixed(2));
+      }
+      const partDuration = Number((partEnd - partStart).toFixed(2));
+      prevEnd = partEnd;
+      normalized.push({
+        id: seg.id,
+        subId: `${seg.id}#${p + 1}`,
+        text: partWords.join(" "),
+        start: partStart,
+        end: partEnd,
+        duration: partDuration,
+        isSplit: true
+      });
+      if (isLastPart) break;
+    }
+  }
+  return normalized;
+}
+function buildSceneSkeleton(transcript, pacing = "balanced") {
+  const profile = PACING_PROFILES[pacing] ?? PACING_PROFILES.balanced;
+  const normalizedSegments = preprocessSegments(transcript.segments, profile);
+  const skeletons = [];
+  let i = 0;
+  while (i < normalizedSegments.length) {
+    const firstSeg = normalizedSegments[i];
+    const candidateSegments = [firstSeg];
+    i++;
+    while (i < normalizedSegments.length) {
+      const nextSeg = normalizedSegments[i];
+      const isHook = firstSeg.start < 30;
+      const currentLimits = isHook ? profile.hook : profile.normal;
+      const currentDuration = candidateSegments[candidateSegments.length - 1].end - firstSeg.start;
+      const potentialDuration = nextSeg.end - firstSeg.start;
+      if (currentDuration < currentLimits.min) {
+        candidateSegments.push(nextSeg);
+        i++;
+        continue;
+      }
+      if (potentialDuration > currentLimits.hardMax) {
+        break;
+      }
+      const lastText = candidateSegments[candidateSegments.length - 1].text.trim();
+      if (currentDuration >= currentLimits.targetMin && STRONG_PUNCTUATION.test(lastText)) {
+        break;
+      }
+      if (currentDuration >= currentLimits.preferred) {
+        break;
+      }
+      if (potentialDuration > currentLimits.targetMax && currentDuration >= currentLimits.targetMin) {
+        break;
+      }
+      candidateSegments.push(nextSeg);
+      i++;
+    }
+    const sceneStartTime = candidateSegments[0].start;
+    const sceneEndTime = candidateSegments[candidateSegments.length - 1].end;
+    const narrativeText = candidateSegments.map((s) => s.text).join(" ");
+    const transcriptSegmentIds = Array.from(new Set(candidateSegments.map((s) => s.id)));
+    skeletons.push({
+      sceneIndex: skeletons.length + 1,
+      startTime: sceneStartTime,
+      endTime: sceneEndTime,
+      duration: Number((sceneEndTime - sceneStartTime).toFixed(2)),
+      narrativeText,
+      transcriptSegmentIds
+    });
+  }
+  if (skeletons.length > 1) {
+    const lastScene = skeletons[skeletons.length - 1];
+    const prevScene = skeletons[skeletons.length - 2];
+    const isHook = lastScene.startTime < 30;
+    const minDur = isHook ? profile.hook.min : profile.normal.min;
+    const hardMax = isHook ? profile.hook.hardMax : profile.normal.hardMax;
+    if (lastScene.duration < minDur) {
+      if (prevScene.duration + lastScene.duration <= hardMax) {
+        prevScene.endTime = lastScene.endTime;
+        prevScene.duration = Number((prevScene.endTime - prevScene.startTime).toFixed(2));
+        prevScene.narrativeText = `${prevScene.narrativeText} ${lastScene.narrativeText}`;
+        prevScene.transcriptSegmentIds = Array.from(
+          /* @__PURE__ */ new Set([...prevScene.transcriptSegmentIds, ...lastScene.transcriptSegmentIds])
+        );
+        skeletons.pop();
+      } else {
+        logger.warn(
+          `[PLAN][Segmentation] Final scene duration (${lastScene.duration.toFixed(1)}s) is below minimum (${minDur}s) but cannot merge into previous scene without exceeding hardMax (${hardMax}s). Keeping final scene.`
+        );
+      }
+    }
+  }
+  for (let s = 0; s < skeletons.length; s++) {
+    skeletons[s].sceneIndex = s + 1;
+    if (s === 0 && skeletons[s].startTime <= 0.15) {
+      skeletons[s].startTime = 0;
+    }
+    if (s > 0) {
+      const prev = skeletons[s - 1];
+      const cur = skeletons[s];
+      const isPrevHook = prev.startTime < 30;
+      const prevHardMax = isPrevHook ? profile.hook.hardMax : profile.normal.hardMax;
+      if (cur.startTime > prev.endTime) {
+        const gap = cur.startTime - prev.endTime;
+        if (prev.duration + gap <= prevHardMax) {
+          prev.endTime = cur.startTime;
+        } else {
+          cur.startTime = prev.endTime;
+        }
+      } else if (cur.startTime < prev.endTime) {
+        prev.endTime = cur.startTime;
+      }
+      prev.duration = Number((prev.endTime - prev.startTime).toFixed(2));
+      cur.duration = Number((cur.endTime - cur.startTime).toFixed(2));
+    }
+  }
+  const last = skeletons[skeletons.length - 1];
+  if (last) {
+    if (transcript.duration > last.endTime && transcript.duration - last.endTime <= 2) {
+      last.endTime = Number(transcript.duration.toFixed(2));
+    }
+    last.duration = Number((last.endTime - last.startTime).toFixed(2));
+  }
+  const totalDuration = transcript.duration;
+  const avgDuration = totalDuration / skeletons.length;
+  const minDuration = Math.min(...skeletons.map((s) => s.duration));
+  const maxDuration = Math.max(...skeletons.map((s) => s.duration));
+  logger.info(`[PLAN][Segmentation] transcriptSegments=${transcript.segments.length}`);
+  logger.info(`[PLAN][Segmentation] generatedScenes=${skeletons.length}`);
+  logger.info(`[PLAN][Segmentation] duration=${totalDuration.toFixed(1)}s`);
+  logger.info(`[PLAN][Segmentation] averageSceneDuration=${avgDuration.toFixed(2)}s`);
+  logger.info(`[PLAN][Segmentation] minSceneDuration=${minDuration.toFixed(2)}s`);
+  logger.info(`[PLAN][Segmentation] maxSceneDuration=${maxDuration.toFixed(2)}s`);
+  return skeletons;
+}
+function validateScenePlanCoverage(transcript, scenes) {
+  const errors = [];
+  const warnings = [];
+  if (!scenes || scenes.length === 0) {
+    errors.push("Scene plan is empty (0 scenes).");
+    return {
+      valid: false,
+      totalScenes: 0,
+      totalSegments: transcript.segments.length,
+      coveredSegmentsCount: 0,
+      missingSegmentIds: transcript.segments.map((s) => s.id),
+      duplicateSegmentIds: [],
+      errors,
+      warnings
+    };
+  }
+  const sceneIndices = scenes.map((s) => s.sceneIndex);
+  const uniqueIndices = new Set(sceneIndices);
+  if (uniqueIndices.size !== sceneIndices.length) {
+    errors.push(`Duplicate sceneIndex detected: ${sceneIndices.length} scenes but only ${uniqueIndices.size} unique indices.`);
+  }
+  const TIMELINE_TOLERANCE = 0.15;
+  const expectedStart = transcript.segments[0]?.start ?? 0;
+  if (scenes[0].startTime > expectedStart + TIMELINE_TOLERANCE) {
+    errors.push(
+      `First scene startTime (${scenes[0].startTime}s) does not match transcript start (${expectedStart}s).`
+    );
+  }
+  const expectedEnd = transcript.duration;
+  if (Math.abs(scenes[scenes.length - 1].endTime - expectedEnd) > 0.25) {
+    warnings.push(
+      `Last scene endTime (${scenes[scenes.length - 1].endTime}s) differs from transcript duration (${expectedEnd}s) by more than 0.25s.`
+    );
+  }
+  for (let i = 0; i < scenes.length; i++) {
+    const sc = scenes[i];
+    const expectedDur = Number((sc.endTime - sc.startTime).toFixed(2));
+    if (Math.abs(sc.duration - expectedDur) > 0.05) {
+      errors.push(
+        `Scene ${sc.sceneIndex}: duration (${sc.duration}) does not match endTime - startTime (${expectedDur}).`
+      );
+    }
+    if (!sc.narrativeText || sc.narrativeText.trim().length === 0) {
+      errors.push(`Scene ${sc.sceneIndex}: narrativeText is empty.`);
+    }
+    if (!sc.visualIntent || sc.visualIntent.trim().length === 0) {
+      warnings.push(`Scene ${sc.sceneIndex}: visualIntent is empty.`);
+    }
+    if (!sc.searchQueries || sc.searchQueries.filter((q) => q.trim().length >= 2).length < 3) {
+      warnings.push(`Scene ${sc.sceneIndex}: searchQueries has fewer than 3 valid queries.`);
+    }
+    if (i < scenes.length - 1) {
+      const nextSc = scenes[i + 1];
+      if (nextSc.startTime < sc.startTime) {
+        errors.push(
+          `Timeline reversal: Scene ${nextSc.sceneIndex} starts at ${nextSc.startTime}s before Scene ${sc.sceneIndex} at ${sc.startTime}s.`
+        );
+      }
+      const gap = nextSc.startTime - sc.endTime;
+      if (gap > TIMELINE_TOLERANCE) {
+        errors.push(
+          `Significant timeline gap (${gap.toFixed(2)}s) between Scene ${sc.sceneIndex} (end ${sc.endTime}s) and Scene ${nextSc.sceneIndex} (start ${nextSc.startTime}s).`
+        );
+      }
+      const overlap = sc.endTime - nextSc.startTime;
+      if (overlap > TIMELINE_TOLERANCE) {
+        errors.push(
+          `Significant timeline overlap (${overlap.toFixed(2)}s) between Scene ${sc.sceneIndex} (end ${sc.endTime}s) and Scene ${nextSc.sceneIndex} (start ${nextSc.startTime}s).`
+        );
+      }
+    }
+  }
+  const allTranscriptSegmentIds = new Set(transcript.segments.map((s) => s.id));
+  const sceneSegmentIdUsage = /* @__PURE__ */ new Map();
+  for (const sc of scenes) {
+    for (const segId of sc.transcriptSegmentIds || []) {
+      sceneSegmentIdUsage.set(segId, (sceneSegmentIdUsage.get(segId) ?? 0) + 1);
+    }
+  }
+  const missingSegmentIds = [];
+  for (const id of allTranscriptSegmentIds) {
+    if (!sceneSegmentIdUsage.has(id)) {
+      missingSegmentIds.push(id);
+    }
+  }
+  const duplicateSegmentIds = [];
+  for (const [id, count] of sceneSegmentIdUsage.entries()) {
+    if (count > 1) {
+      const originalSeg = transcript.segments.find((s) => s.id === id);
+      if (originalSeg && originalSeg.duration <= 10) {
+        duplicateSegmentIds.push(id);
+      }
+    }
+  }
+  if (missingSegmentIds.length > 0) {
+    errors.push(
+      `Missing transcript segments (${missingSegmentIds.length}/${transcript.segments.length}): ${missingSegmentIds.slice(0, 10).join(", ")}${missingSegmentIds.length > 10 ? "..." : ""}`
+    );
+  }
+  if (duplicateSegmentIds.length > 0) {
+    errors.push(
+      `Unexpected duplicate transcript segments: ${duplicateSegmentIds.slice(0, 10).join(", ")}${duplicateSegmentIds.length > 10 ? "..." : ""}`
+    );
+  }
+  const coveredSegmentsCount = allTranscriptSegmentIds.size - missingSegmentIds.length;
+  const valid = errors.length === 0;
+  logger.info(
+    `[PLAN][Coverage] valid=${valid} coveredSegments=${coveredSegmentsCount}/${allTranscriptSegmentIds.size} totalScenes=${scenes.length} errors=${errors.length} warnings=${warnings.length}`
+  );
+  return {
+    valid,
+    totalScenes: scenes.length,
+    totalSegments: allTranscriptSegmentIds.size,
+    coveredSegmentsCount,
+    missingSegmentIds,
+    duplicateSegmentIds,
+    errors,
+    warnings
+  };
+}
+function getContextPath(projectDir) {
+  return path.join(projectDir, "analysis", "global-script-context.json");
+}
+function scriptHash(text) {
+  return crypto.createHash("md5").update(text).digest("hex").slice(0, 16);
+}
+const SYSTEM_PROMPT$1 = `You are the Context-Aware Visual Research Engine for a long-form documentary.
+Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
+Rules:
+- Identify primary subject, central thesis, geography, time period, communities from the script.
+- List exactTopicAnchors (proper nouns) that MUST appear in exact-match queries.
+- List contextualAnchors (broader descriptors) for when exact results are unavailable.
+- List forbiddenSubstitutions (visually similar but factually wrong subjects).
+- List negativeKeywords (terms that would return wrong stock).
+- Map the storyArc per chapter.
+- Do NOT invent facts not in the script.
+- Return ONLY valid JSON. No markdown. No explanation.`;
+function buildGeminiPrompt$1(fullScriptText, projectId, language) {
+  return `FULL SCRIPT (analyze completely before responding):
+---
+${fullScriptText.slice(0, 4e4)}
+---
+PROJECT ID: ${projectId}
+LANGUAGE: ${language}
+
+Return ONLY valid JSON matching this schema:
+{
+  "projectId": "${projectId}",
+  "language": "${language}",
+  "version": 1,
+  "primarySubject": "the single most important subject",
+  "secondarySubjects": ["string"],
+  "globalSynopsis": "2-3 sentence summary",
+  "centralThesis": "the main argument",
+  "documentaryAngle": "journalistic angle",
+  "targetAudience": "audience description",
+  "geography": { "primaryCountry": null, "primaryRegion": null, "secondaryLocations": [] },
+  "timeContext": { "primaryPeriod": "contemporary", "historicalPeriods": [] },
+  "communities": [{ "name": "name", "role": "protagonist", "visualDescription": "desc", "mustNotConfuseWith": [] }],
+  "recurringPeople": [{ "id": "p1", "role": "narrator", "ageRange": null, "gender": null, "appearance": null, "clothing": null }],
+  "visualWorld": { "environment": [], "architecture": [], "clothing": [], "occupations": [], "machinery": [], "recurringObjects": [], "colorMood": "natural", "documentaryStyle": "observational" },
+  "exactTopicAnchors": [],
+  "contextualAnchors": [],
+  "forbiddenSubstitutions": [],
+  "negativeKeywords": [],
+  "recurringVisualMotifs": [],
+  "storyArc": [{ "chapterId": "CH1", "title": "title", "purpose": "purpose", "startText": "first words", "endText": "last words" }]
 }`;
+}
+async function analyzeGlobalContext(params) {
+  const { projectDir, apiKey, forceRegenerate = false } = params;
+  const progress = params.onProgress ?? (() => {
+  });
+  const modelId = params.model ?? "gemini-3.8-flash";
+  const fullText = params.scriptText ?? params.transcript?.fullText ?? params.transcript?.segments.map((s) => s.text).join(" ") ?? "";
+  if (!fullText.trim()) throw new Error("No script or transcript text for global context analysis.");
+  let projectId = "unknown";
+  const language = params.transcript?.language ?? "en";
+  try {
+    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
+    const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+    projectId = st?.id ?? st?.name ?? "unknown";
+  } catch {
+  }
+  const contextPath = getContextPath(projectDir);
+  const hash = scriptHash(fullText);
+  if (!forceRegenerate && fs__namespace.existsSync(contextPath)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+      if (cached._scriptHash === hash) {
+        logger.info("[GlobalContext] Cache hit");
+        progress("Using cached global script context...", 1);
+        return cached;
+      }
+    } catch {
+    }
+  }
+  let rawJson = "";
+  let aiError = null;
+  const cleanKey = normalizeApiKey(apiKey);
+  if (cleanKey.length > 0) {
+    progress("Analyzing full script for global context...", 0.05);
+    try {
+      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+      const prompt = buildGeminiPrompt$1(fullText, projectId, language);
+      const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
+      const maxRetries = 3;
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
+        try {
+          progress(attempt === 1 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.15);
+          const response = await ai.models.generateContent({
+            model: currentModel,
+            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
+            config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+          });
+          rawJson = response.text ?? "";
+          if (rawJson) break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          aiError = msg;
+          logger.warn(`[GlobalContext] Gemini attempt ${attempt} failed: ${msg}`);
+          if (msg.includes("401") || msg.includes("UNAUTHENTICATED") || msg.includes("API_KEY") || msg.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
+            break;
+          }
+          const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
+          if (overloaded && attempt < maxRetries) {
+            const wait = Math.min(attempt * 2, 6);
+            for (let s = wait; s > 0; s--) {
+              progress(`Gemini overloaded, retrying in ${s}s...`, 0.2);
+              await new Promise((r) => setTimeout(r, 1e3));
+            }
+            continue;
+          }
+        }
+      }
+    } catch (outerErr) {
+      aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
+      logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
+    }
+  } else {
+    logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
+  }
+  let ctx;
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      ctx = JSON.parse(clean);
+      ctx.modelUsed = modelId;
+    } catch {
+      logger.warn("[GlobalContext] JSON parse failed, using fallback context");
+      ctx = buildFallbackContext(projectId, language, fullText);
+      ctx.modelUsed = "algorithmic (JSON parse fallback)";
+    }
+  } else {
+    logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
+    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.7);
+    ctx = buildFallbackContext(projectId, language, fullText);
+    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
+  }
+  ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ctx.version = 1;
+  ctx._scriptHash = hash;
+  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
+  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
+  progress(`Global context ready — "${ctx.primarySubject}"`, 1);
+  return ctx;
+}
+function buildFallbackContext(projectId, language, text) {
+  const STOP_WORDS = /* @__PURE__ */ new Set([
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "another",
+    "any",
+    "are",
+    "aren't",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "can",
+    "cannot",
+    "could",
+    "couldn't",
+    "did",
+    "didn't",
+    "does",
+    "doesn't",
+    "doing",
+    "don't",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "hadn't",
+    "has",
+    "hasn't",
+    "have",
+    "haven't",
+    "having",
+    "here",
+    "here's",
+    "hers",
+    "herself",
+    "himself",
+    "how",
+    "how's",
+    "into",
+    "it's",
+    "its",
+    "itself",
+    "let's",
+    "more",
+    "most",
+    "mustn't",
+    "myself",
+    "never",
+    "only",
+    "other",
+    "ought",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "same",
+    "shan't",
+    "should",
+    "shouldn't",
+    "some",
+    "such",
+    "than",
+    "that",
+    "that's",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "there's",
+    "these",
+    "they",
+    "they'd",
+    "they'll",
+    "they're",
+    "they've",
+    "this",
+    "those",
+    "through",
+    "until",
+    "very",
+    "was",
+    "wasn't",
+    "we'd",
+    "we'll",
+    "we're",
+    "we've",
+    "were",
+    "weren't",
+    "what",
+    "what's",
+    "when",
+    "when's",
+    "where",
+    "where's",
+    "which",
+    "while",
+    "who",
+    "who's",
+    "whom",
+    "why",
+    "why's",
+    "with",
+    "won't",
+    "would",
+    "wouldn't",
+    "you",
+    "you'd",
+    "you'll",
+    "you're",
+    "you've",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "video",
+    "channel",
+    "going",
+    "first",
+    "today",
+    "finally",
+    "place",
+    "entire",
+    "exact",
+    "thing",
+    "things",
+    "really",
+    "almost",
+    "turns",
+    "right",
+    "breakdown",
+    // Vietnamese common stop words
+    "những",
+    "chúng",
+    "trong",
+    "người",
+    "không",
+    "được",
+    "nhiều",
+    "chính",
+    "thực",
+    "thấy",
+    "video",
+    "kênh",
+    "hoặc",
+    "cũng",
+    "này",
+    "đang",
+    "phải",
+    "theo",
+    "cùng",
+    "nhau"
+  ]);
+  const properMatches = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
+  const properFreq = {};
+  for (const p of properMatches) {
+    const lower = p.toLowerCase();
+    if (!STOP_WORDS.has(lower) && lower.length > 3) {
+      properFreq[p] = (properFreq[p] ?? 0) + 1;
+    }
+  }
+  const topProper = Object.entries(properFreq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const words = text.split(/\s+/);
+  const freq = {};
+  for (const w of words) {
+    const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "");
+    if (clean.length > 3 && !STOP_WORDS.has(clean)) {
+      freq[clean] = (freq[clean] ?? 0) + 1;
+    }
+  }
+  const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const primarySubject = topProper[0] || topWords[0] || "Documentary Subject";
+  const exactTopicAnchors = topProper.length > 0 ? topProper.slice(0, 5) : topWords.slice(0, 5);
+  const contextualAnchors = topWords.filter((w) => !exactTopicAnchors.map((x) => x.toLowerCase()).includes(w)).slice(0, 8);
+  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.?!])\s+/).filter(Boolean);
+  const centralThesis = sentences.slice(0, 2).join(" ") || text.slice(0, 250);
+  const globalSynopsis = sentences.slice(0, 4).join(" ") || text.slice(0, 350);
+  return {
+    projectId,
+    language,
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    modelUsed: "algorithmic-fallback",
+    primarySubject,
+    secondarySubjects: topWords.slice(1, 5),
+    globalSynopsis,
+    centralThesis,
+    documentaryAngle: "observational documentary",
+    targetAudience: "general audience",
+    geography: {
+      primaryCountry: "Not specified",
+      secondaryLocations: []
+    },
+    timeContext: {
+      primaryPeriod: "contemporary",
+      historicalPeriods: []
+    },
+    communities: [],
+    recurringPeople: [],
+    visualWorld: {
+      environment: [],
+      architecture: [],
+      clothing: [],
+      occupations: [],
+      machinery: [],
+      recurringObjects: [],
+      colorMood: "natural cinematics",
+      documentaryStyle: "observational"
+    },
+    exactTopicAnchors,
+    contextualAnchors,
+    forbiddenSubstitutions: [],
+    negativeKeywords: ["cartoon", "cgi", "animation", "vlog", "generic"],
+    recurringVisualMotifs: [],
+    storyArc: []
+  };
+}
+function loadGlobalContext(projectDir) {
+  const p = getContextPath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function saveGlobalContext(projectDir, ctx) {
+  const p = getContextPath(projectDir);
+  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
 }
 function extractVisualQueries(text) {
   const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
@@ -1147,67 +1777,398 @@ function extractVisualQueries(text) {
   }
   return queries.filter((q) => q.length >= 3).slice(0, 3);
 }
-function buildAlgorithmicPlan(transcript, projectName) {
-  const segments = transcript.segments;
-  const totalDuration = transcript.duration;
-  const numChapters = Math.min(5, Math.max(2, Math.round(totalDuration / 90)));
-  const segsPerChapter = Math.ceil(segments.length / numChapters);
+function inferEnergyLevelFromText(text) {
+  const lower = text.toLowerCase();
+  const highCues = ["conflict", "battle", "crisis", "explosion", "urgent", "reveal", "shocking", "protest", "disaster", "death"];
+  if (highCues.some((c) => lower.includes(c))) return "high";
+  const lowCues = ["peaceful", "quiet", "meditation", "reflection", "landscape", "slow", "history", "archive"];
+  if (lowCues.some((c) => lower.includes(c))) return "low";
+  return "medium";
+}
+function inferShotTypeFromText(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes("close") || lower.includes("face") || lower.includes("detail") || lower.includes("hand")) return "close-up";
+  if (lower.includes("aerial") || lower.includes("wide") || lower.includes("landscape") || lower.includes("panorama")) return "wide";
+  if (lower.includes("abstract") || lower.includes("symbol") || lower.includes("silhouette")) return "abstract";
+  return "medium";
+}
+function buildAlgorithmicOutline(skeletons, totalDuration) {
+  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)));
+  const scenesPerChapter = Math.ceil(skeletons.length / numChapters);
   const chapters = [];
-  let globalSceneIdx = 1;
   for (let chIdx = 0; chIdx < numChapters; chIdx++) {
-    const chSegs = segments.slice(chIdx * segsPerChapter, (chIdx + 1) * segsPerChapter);
-    if (chSegs.length === 0) continue;
-    const chStart = chSegs[0].start;
-    const chEnd = chSegs[chSegs.length - 1].end;
-    const seqsPerCh = Math.min(3, Math.max(1, Math.ceil(chSegs.length / 4)));
-    const segsPerSeq = Math.ceil(chSegs.length / seqsPerCh);
+    const chStartIdx = chIdx * scenesPerChapter;
+    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length);
+    const chScenes = skeletons.slice(chStartIdx, chEndIdx);
+    if (chScenes.length === 0) continue;
+    const startSceneIndex = chScenes[0].sceneIndex;
+    const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex;
+    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)));
+    const scenesPerSeq = Math.ceil(chScenes.length / numSequences);
     const sequences = [];
-    for (let seqIdx = 0; seqIdx < seqsPerCh; seqIdx++) {
-      const seqSegs = chSegs.slice(seqIdx * segsPerSeq, (seqIdx + 1) * segsPerSeq);
-      if (seqSegs.length === 0) continue;
-      const scenes = seqSegs.map((seg) => {
-        const dur = Math.max(2, Number((seg.end - seg.start).toFixed(1)));
-        const queries = extractVisualQueries(seg.text);
-        return {
-          sceneIndex: globalSceneIdx++,
-          mediaFile: "",
-          mediaType: "video",
-          startTime: seg.start,
-          endTime: seg.end,
-          duration: dur,
-          narrativeText: seg.text,
-          transcriptSegmentIds: [seg.id],
-          transitionIn: "cut",
-          visualNote: `Visual shot: ${queries[0]}`,
-          visualIntent: queries[0] ?? "Documentary cinematic b-roll",
-          searchQueries: queries
-        };
-      });
+    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
+      const seqStartIdx = seqIdx * scenesPerSeq;
+      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length);
+      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx);
+      if (seqScenes.length === 0) continue;
       sequences.push({
         sequenceIndex: seqIdx + 1,
         title: `Sequence ${seqIdx + 1}`,
-        startTime: seqSegs[0].start,
-        endTime: seqSegs[seqSegs.length - 1].end,
-        scenes
+        startSceneIndex: seqScenes[0].sceneIndex,
+        endSceneIndex: seqScenes[seqScenes.length - 1].sceneIndex
       });
     }
     chapters.push({
       chapterIndex: chIdx + 1,
-      title: chIdx === 0 ? "Chapter 1: Introduction" : chIdx === numChapters - 1 ? `Chapter ${chIdx + 1}: Conclusion` : `Chapter ${chIdx + 1}`,
-      startTime: chStart,
-      endTime: chEnd,
+      title: chIdx === 0 ? "Chapter 1: Introduction & Premise" : chIdx === numChapters - 1 ? `Chapter ${chIdx + 1}: Conclusion & Legacy` : `Chapter ${chIdx + 1}: Narrative Progression`,
+      purpose: "Documentary narrative arc",
+      startSceneIndex,
+      endSceneIndex,
       sequences
     });
   }
+  return chapters;
+}
+async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, onProgress) {
+  const firstIndex = skeletons[0].sceneIndex;
+  const lastIndex = skeletons[skeletons.length - 1].sceneIndex;
+  const step = Math.max(1, Math.floor(skeletons.length / 10));
+  const sampleScenes = skeletons.filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0).map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`).join("\n");
+  const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
+Video Duration: ${totalDuration.toFixed(0)}s
+Total Scenes: ${skeletons.length} (Scene ${firstIndex} to Scene ${lastIndex})
+
+${globalContextSummary ? `## GLOBAL CONTEXT
+${globalContextSummary}
+` : ""}
+## SAMPLE SCENE TIMELINE
+${sampleScenes}
+
+## YOUR TASK
+Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
+Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
+Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
+
+Return ONLY valid JSON matching this schema:
+{
+  "chapters": [
+    {
+      "chapterIndex": 1,
+      "title": "Meaningful Chapter Title",
+      "purpose": "Narrative purpose",
+      "startSceneIndex": 1,
+      "endSceneIndex": 25,
+      "sequences": [
+        {
+          "sequenceIndex": 1,
+          "title": "Sequence title",
+          "startSceneIndex": 1,
+          "endSceneIndex": 12
+        }
+      ]
+    }
+  ]
+}`;
+  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
+    const model = modelChain[attempt];
+    try {
+      onProgress?.(`Generating story arc outline (${model})...`, 0.2);
+      const res = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.2,
+          maxOutputTokens: 4096
+        }
+      });
+      const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const data = JSON.parse(clean);
+      if (data.chapters && data.chapters.length >= 2) {
+        const covered = /* @__PURE__ */ new Set();
+        let valid = true;
+        for (const ch of data.chapters) {
+          if (!ch.sequences || ch.sequences.length === 0) {
+            valid = false;
+            break;
+          }
+          for (const seq of ch.sequences) {
+            if (seq.startSceneIndex > seq.endSceneIndex) {
+              valid = false;
+              break;
+            }
+            for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+              if (covered.has(idx)) {
+                valid = false;
+                break;
+              }
+              covered.add(idx);
+            }
+          }
+        }
+        if (valid && covered.size === skeletons.length && !skeletons.some((s) => !covered.has(s.sceneIndex))) {
+          logger.info(`[PLAN] Gemini chapter outline successfully generated: ${data.chapters.length} chapters`);
+          return data.chapters;
+        }
+      }
+    } catch (err) {
+      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed: ${err}`);
+    }
+  }
+  logger.info("[PLAN] Using algorithmic chapter outline fallback");
+  return buildAlgorithmicOutline(skeletons, totalDuration);
+}
+function buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles) {
+  const hasLocalMedia = mediaFiles.length > 0;
+  const mediaList = hasLocalMedia ? [
+    ...mediaFiles.filter((m) => m.type === "video").map((v) => `  VIDEO: ${v.filename}`),
+    ...mediaFiles.filter((m) => m.type === "image").map((i) => `  IMAGE: ${i.filename}`)
+  ].join("\n") : "";
+  const mediaSection = hasLocalMedia ? `## AVAILABLE LOCAL MEDIA FILES (Match exact filename to localAsset if appropriate, otherwise null):
+${mediaList}
+` : `## MEDIA MODE: STOCK SEARCH ONLY
+No local media files. Set localAsset to null for all scenes. Default mediaType to "video".
+`;
+  const scenesJson = JSON.stringify(
+    batchScenes.map((s) => ({
+      sceneIndex: s.sceneIndex,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      duration: s.duration,
+      narrativeText: s.narrativeText,
+      transcriptSegmentIds: s.transcriptSegmentIds
+    })),
+    null,
+    2
+  );
+  return `You are enriching a PRE-DETERMINED documentary scene timeline.
+
+CRITICAL RULES:
+- Do not add scenes.
+- Do not remove scenes.
+- Do not merge scenes.
+- Do not split scenes.
+- Do not renumber scenes.
+- Return exactly one result for every provided sceneIndex.
+- Keep results in the same order.
+- Only provide visual metadata.
+- Each visualIntent must describe one visible concept (3-10 words).
+- Search queries must remain visually searchable (3-5 queries per scene, each query 2-6 words).
+- Do not use abstract narration sentences as stock queries.
+  BAD:  "family has to borrow money to cover funeral expenses"
+  GOOD: ["worried family bills", "financial stress loan", "credit card bills debt"]
+- Maintain global documentary context across all batches.
+- Avoid repeating the same stock concept for consecutive scenes.
+- Prefer real-life documentary footage.
+- Use transitionIn="cut" for most scenes. Use dissolve/fade sparingly.
+- Vary shotType ("wide", "medium", "close-up", "abstract") across consecutive scenes.
+- Hook scenes should use visually strong and specific footage.
+- mediaType must be "video" or "image" (default "video").
+
+${globalContextSummary ? `## GLOBAL DOCUMENTARY CONTEXT
+${globalContextSummary}
+` : ""}
+${mediaSection}
+## SCENES TO ENRICH (${batchScenes.length} scenes)
+${scenesJson}
+
+Return ONLY valid JSON array matching this exact schema:
+[
+  {
+    "sceneIndex": 1,
+    "visualIntent": "3-10 words visual description",
+    "visualNote": "Director suggestion for visual tone and camera angle",
+    "searchQueries": ["short query 1", "short query 2", "short query 3"],
+    "mediaType": "video",
+    "transitionIn": "cut",
+    "energyLevel": "medium",
+    "shotType": "medium",
+    "localAsset": null
+  }
+]`;
+}
+async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, onProgress) {
+  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
+  const enrichedMap = /* @__PURE__ */ new Map();
+  let activeModelIndex = 0;
+  let lastError = "";
+  let successModel = modelChain[0];
+  let usedFallback = false;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const currentModel = modelChain[activeModelIndex];
+    try {
+      onProgress?.(
+        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
+        0.25 + batchIndex / totalBatches * 0.55
+      );
+      const res = await ai.models.generateContent({
+        model: currentModel,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
+          maxOutputTokens: 8192
+        }
+      });
+      const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const items = JSON.parse(clean);
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (typeof item.sceneIndex === "number") {
+            enrichedMap.set(item.sceneIndex, item);
+          }
+        }
+        successModel = currentModel;
+        break;
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      lastError = msg;
+      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`);
+      const isOverloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
+      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
+        activeModelIndex++;
+        await new Promise((r) => setTimeout(r, 1500));
+        continue;
+      }
+      if (attempt < 4) {
+        await new Promise((r) => setTimeout(r, 2e3));
+      }
+    }
+  }
+  let fallbackCount = 0;
+  for (const skel of batchScenes) {
+    if (!enrichedMap.has(skel.sceneIndex)) {
+      fallbackCount++;
+      usedFallback = true;
+      const queries = extractVisualQueries(skel.narrativeText);
+      enrichedMap.set(skel.sceneIndex, {
+        sceneIndex: skel.sceneIndex,
+        visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+        visualNote: `Visual shot: ${queries[0]}`,
+        searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
+        mediaType: "video",
+        transitionIn: "cut",
+        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+        shotType: inferShotTypeFromText(skel.narrativeText)
+      });
+    }
+  }
+  if (fallbackCount > 0) {
+    logger.warn(
+      `[PLAN] Batch ${batchIndex + 1}: ${fallbackCount}/${batchScenes.length} scenes used algorithmic fallback (${lastError || "missing AI data"})`
+    );
+  }
+  return { enrichedMap, modelUsed: successModel, usedFallback };
+}
+function applyLocalMediaMatching(scene, localAssetSuggestion, mediaFiles) {
+  if (localAssetSuggestion && mediaFiles.length > 0) {
+    const cleanSuggestion = localAssetSuggestion.trim().toLowerCase();
+    const matched = mediaFiles.find(
+      (m) => m.filename.toLowerCase() === cleanSuggestion || m.filename.toLowerCase().includes(cleanSuggestion)
+    );
+    if (matched) {
+      scene.localAsset = matched.filename;
+      scene.mediaFile = matched.filename;
+      scene.localPath = matched.filePath;
+      const ext = path.extname(matched.filename).toLowerCase();
+      if ([".mp4", ".mov", ".webm", ".mkv", ".avi"].includes(ext)) {
+        scene.mediaType = "video";
+      } else if ([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"].includes(ext)) {
+        scene.mediaType = "image";
+      }
+      return;
+    }
+  }
+  scene.mediaFile = "";
+  scene.mediaType = "video";
+  scene.localAsset = void 0;
+}
+function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
+  const skeletons = buildSceneSkeleton(transcript, pacing);
+  const outline = buildAlgorithmicOutline(skeletons, transcript.duration);
+  const skeletonMap = /* @__PURE__ */ new Map();
+  for (const skel of skeletons) {
+    skeletonMap.set(skel.sceneIndex, skel);
+  }
+  const chapters = outline.map((ch) => ({
+    chapterIndex: ch.chapterIndex,
+    title: ch.title,
+    startTime: 0,
+    endTime: 0,
+    sequences: ch.sequences.map((seq) => {
+      const scenes = [];
+      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+        const skel = skeletonMap.get(idx);
+        if (!skel) continue;
+        const queries = extractVisualQueries(skel.narrativeText);
+        scenes.push({
+          sceneIndex: skel.sceneIndex,
+          mediaFile: "",
+          mediaType: "video",
+          startTime: skel.startTime,
+          endTime: skel.endTime,
+          duration: skel.duration,
+          narrativeText: skel.narrativeText,
+          transcriptSegmentIds: [...skel.transcriptSegmentIds],
+          transitionIn: "cut",
+          visualNote: `Visual shot: ${queries[0]}`,
+          visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+          searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
+          energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+          shotType: inferShotTypeFromText(skel.narrativeText)
+        });
+      }
+      const seqStart = scenes[0]?.startTime ?? 0;
+      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0;
+      return {
+        sequenceIndex: seq.sequenceIndex,
+        title: seq.title,
+        startTime: seqStart,
+        endTime: seqEnd,
+        scenes
+      };
+    })
+  }));
+  for (const ch of chapters) {
+    const allSeqScenes = ch.sequences.flatMap((s) => s.scenes);
+    ch.startTime = allSeqScenes[0]?.startTime ?? 0;
+    ch.endTime = allSeqScenes[allSeqScenes.length - 1]?.endTime ?? 0;
+  }
+  let globalSceneIndex = 1;
+  for (const ch of chapters) {
+    for (const seq of ch.sequences) {
+      seq.scenes.sort((a, b) => a.startTime - b.startTime);
+      for (const sc of seq.scenes) {
+        sc.sceneIndex = globalSceneIndex++;
+      }
+    }
+  }
   const allScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
+  let pacingIssues = [];
+  try {
+    const flatScenes = flattenPlanScenes({ chapters });
+    pacingIssues = analyzePacing(flatScenes);
+  } catch (err) {
+    logger.warn(`[PLAN] Algorithmic plan pacing guard warning: ${err}`);
+  }
+  const initialFlags = pacingIssues.map((issue) => ({
+    sceneId: issue.sceneId,
+    severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
+    issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
+    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type for visual variety`
+  }));
   return {
     projectName,
-    totalDuration,
+    totalDuration: transcript.duration,
     totalScenes: allScenes.length,
     language: transcript.language,
     chapters,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: "rule-based-engine"
+    modelUsed: "rule-based-segmenter",
+    openLoops: [],
+    motifRegistry: [],
+    retentionFlags: initialFlags
   };
 }
 async function buildEditPlan(params) {
@@ -1223,52 +2184,84 @@ async function buildEditPlan(params) {
     throw new Error("No transcript found. Run transcription first.");
   }
   const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-  progress("Loading script...", 0.08);
+  progress("Loading media library...", 0.07);
   const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
   let mediaFiles = [];
   if (fs__namespace.existsSync(mediaIndexPath)) {
-    const rawItems = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
-    mediaFiles = rawItems.map((item) => ({
-      filePath: item.path ?? "",
-      filename: item.filename,
-      type: item.type === "video" ? "video" : "image",
-      durationSecs: item.durationSecs,
-      fps: item.fps,
-      width: item.width,
-      height: item.height
-    }));
+    try {
+      const rawItems = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
+      mediaFiles = rawItems.map((item) => ({
+        filePath: item.path ?? "",
+        filename: item.filename,
+        type: item.type === "video" ? "video" : "image",
+        durationSecs: item.durationSecs,
+        fps: item.fps,
+        width: item.width,
+        height: item.height
+      }));
+    } catch {
+    }
   }
   let scriptText = null;
+  let projectName = "Unnamed";
+  let projectPacing = "balanced";
   try {
     const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
-    const scriptPathFromParams = params.scriptPath;
-    const scriptPathFromState = (() => {
-      try {
-        const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-        return st?.inputs?.scriptPath;
-      } catch {
-        return void 0;
+    if (fs__namespace.existsSync(stateFile)) {
+      const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+      projectName = st?.name ?? "Unnamed";
+      if (st?.settings?.pacing && ["slow", "balanced", "fast", "cinematic"].includes(st.settings.pacing)) {
+        projectPacing = st.settings.pacing;
       }
-    })();
-    const resolvedScriptPath = scriptPathFromParams ?? scriptPathFromState;
-    if (resolvedScriptPath && fs__namespace.existsSync(resolvedScriptPath)) {
-      scriptText = fs__namespace.readFileSync(resolvedScriptPath, "utf-8");
+      const scriptPathFromState = st?.inputs?.scriptPath;
+      const resolvedScriptPath = params.scriptPath ?? scriptPathFromState;
+      if (resolvedScriptPath && fs__namespace.existsSync(resolvedScriptPath)) {
+        scriptText = fs__namespace.readFileSync(resolvedScriptPath, "utf-8");
+      }
     }
   } catch (err) {
-    logger.warn(`Could not load script text: ${err}`);
+    logger.warn(`Could not load script text or project settings: ${err}`);
   }
-  let projectName = "Unnamed";
+  progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.1);
+  const skeletons = buildSceneSkeleton(transcript, projectPacing);
+  progress(
+    `Created ${skeletons.length} scene skeletons (avg ${(transcript.duration / skeletons.length).toFixed(1)}s/scene)...`,
+    0.14
+  );
+  const cleanApiKey = normalizeApiKey(apiKey);
+  if (!cleanApiKey) {
+    logger.warn("[PLAN] No API key provided, creating algorithmic edit plan");
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing);
+    const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
+    fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
+    progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
+    return fallbackPlan;
+  }
+  let globalContextSummary = "";
   try {
-    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
-    const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-    projectName = st?.name ?? "Unnamed";
-  } catch {
+    progress("Preparing global documentary context...", 0.16);
+    const ctx = await analyzeGlobalContext({
+      projectDir,
+      apiKey: cleanApiKey,
+      model: modelId,
+      scriptText,
+      transcript,
+      onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
+    });
+    globalContextSummary = [
+      `Primary Subject: ${ctx.primarySubject}`,
+      `Central Thesis: ${ctx.centralThesis}`,
+      ctx.geography?.primaryCountry ? `Geography: ${ctx.geography.primaryCountry} (${ctx.geography.primaryRegion ?? ""})` : "",
+      ctx.timeContext?.primaryPeriod ? `Period: ${ctx.timeContext.primaryPeriod}` : "",
+      ctx.exactTopicAnchors?.length ? `Topic Anchors: ${ctx.exactTopicAnchors.join(", ")}` : "",
+      ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(", ")}` : "",
+      ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ""
+    ].filter(Boolean).join("\n");
+  } catch (err) {
+    logger.warn(`[PLAN] Global context extraction failed: ${err}`);
   }
-  progress(`Building prompt (${transcript.segments.length} segments, ${mediaFiles.length} media files)...`, 0.12);
-  const prompt = buildPrompt(transcript, scriptText, mediaFiles);
-  progress("Sending to Gemini AI...", 0.2);
   const ai = new genai.GoogleGenAI({
-    apiKey: normalizeApiKey(apiKey),
+    apiKey: cleanApiKey,
     httpOptions: { apiVersion: "v1beta" }
   });
   const fallbackModelChain = [
@@ -1278,99 +2271,117 @@ async function buildEditPlan(params) {
     "gemini-2.5-flash",
     "gemini-1.5-flash-latest"
   ].filter((v, i, a) => a.indexOf(v) === i);
-  let activeModelIndex = 0;
-  let rawJson = "";
-  let finalModelUsed = modelId;
-  const maxRetries = 5;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const currentModel = fallbackModelChain[activeModelIndex];
-    try {
-      progress(
-        attempt === 1 ? `Đang gửi yêu cầu tới Gemini AI (${currentModel})...` : `Thử lại lần ${attempt}/${maxRetries} (${currentModel})...`,
-        0.2 + (attempt - 1) * 0.1
-      );
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.3,
-          maxOutputTokens: 32768
-        }
-      });
-      rawJson = response.text ?? "";
-      finalModelUsed = currentModel;
-      break;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const isOverloaded = msg.includes("503") || msg.includes("high demand") || msg.includes("UNAVAILABLE") || msg.includes("429");
-      if (isOverloaded && activeModelIndex + 1 < fallbackModelChain.length) {
-        activeModelIndex++;
-        const nextModel = fallbackModelChain[activeModelIndex];
-        logger.warn(`Model ${currentModel} overloaded (503). Auto-switching to fallback: ${nextModel}`);
-        progress(
-          `Model ${currentModel} đang quá tải (503). Tự động chuyển sang model dự phòng "${nextModel}"...`,
-          0.3 + attempt / maxRetries * 0.35
-        );
-        await new Promise((res) => setTimeout(res, 2e3));
-        continue;
-      }
-      if (isOverloaded && attempt < maxRetries) {
-        const waitSec = Math.min(attempt * 4, 16);
-        logger.warn(`Gemini 503 high demand (attempt ${attempt}/${maxRetries}), waiting ${waitSec}s...`);
-        for (let sec = waitSec; sec > 0; sec--) {
-          progress(
-            `Google AI đang quá tải (503 High Demand), tự động thử lại lần ${attempt + 1}/${maxRetries} sau ${sec}s...`,
-            0.3 + (attempt - 1) / maxRetries * 0.35
-          );
-          await new Promise((res) => setTimeout(res, 1e3));
-        }
-        continue;
-      }
-      logger.warn(`All AI attempts failed (${msg}). Activating algorithmic rule-based fallback generator...`);
-      progress("Google AI tạm thời quá tải trên diện rộng. Tự động kích hoạt bộ tạo phân cảnh thông minh theo kịch bản...", 0.85);
-      const fallbackPlan = buildAlgorithmicPlan(transcript, projectName);
-      const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
-      fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
-      progress(`Hoàn tất — đã tạo phân cảnh dự phòng (${fallbackPlan.totalScenes} scenes)`, 1);
-      return fallbackPlan;
-    }
-  }
-  progress("Parsing edit plan...", 0.85);
-  let planData;
-  try {
-    const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    planData = JSON.parse(clean);
-  } catch (err) {
-    logger.warn("Failed to parse Gemini JSON, falling back to algorithmic plan", { raw: rawJson.slice(0, 300) });
-    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName);
-    const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
-    fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
-    progress(`Hoàn tất — đã tạo phân cảnh dự phòng (${fallbackPlan.totalScenes} scenes)`, 1);
-    return fallbackPlan;
-  }
-  for (const ch of planData.chapters || []) {
-    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-    for (const seq of seqs) {
-      for (const sc of seq.scenes || []) {
-        if (!sc.mediaFile) {
-          sc.mediaFile = sc.localAsset || "";
-        }
-        if (!sc.mediaType) {
-          sc.mediaType = "video";
-        }
-      }
-    }
-  }
-  const allScenes = planData.chapters.flatMap(
-    (c) => (c.sequences ?? c.chapters_seq ?? []).flatMap((s) => s.scenes ?? [])
+  progress("Creating chapter and sequence outline...", 0.2);
+  const outline = await generateChapterOutlineWithGemini(
+    ai,
+    fallbackModelChain,
+    skeletons,
+    globalContextSummary,
+    transcript.duration,
+    (m, p) => progress(m, p)
   );
-  const totalScenes = allScenes.length;
-  const totalDuration = transcript.duration;
-  progress("Running Pacing Guard analysis...", 0.88);
+  const BATCH_SIZE = 20;
+  const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE);
+  const allEnrichedMap = /* @__PURE__ */ new Map();
+  let hadAnyBatchFallback = false;
+  let primaryModelUsed = modelId;
+  for (let b = 0; b < totalBatches; b++) {
+    const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+    const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
+      ai,
+      fallbackModelChain,
+      batchScenes,
+      globalContextSummary,
+      mediaFiles,
+      b,
+      totalBatches,
+      progress
+    );
+    for (const [idx, data] of enrichedMap.entries()) {
+      allEnrichedMap.set(idx, data);
+    }
+    if (usedFallback) hadAnyBatchFallback = true;
+    if (b === 0) primaryModelUsed = modelUsed;
+  }
+  progress("Assembling master edit plan...", 0.85);
+  const skeletonMap = /* @__PURE__ */ new Map();
+  for (const skel of skeletons) {
+    skeletonMap.set(skel.sceneIndex, skel);
+  }
+  const chapters = outline.map((ch) => ({
+    chapterIndex: ch.chapterIndex,
+    title: ch.title,
+    startTime: 0,
+    endTime: 0,
+    sequences: ch.sequences.map((seq) => {
+      const scenes = [];
+      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+        const skel = skeletonMap.get(idx);
+        if (!skel) continue;
+        const aiData = allEnrichedMap.get(skel.sceneIndex);
+        const queries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
+        const sc = {
+          sceneIndex: skel.sceneIndex,
+          // will be globally normalized below
+          mediaFile: "",
+          mediaType: aiData?.mediaType === "image" ? "image" : "video",
+          startTime: skel.startTime,
+          endTime: skel.endTime,
+          duration: skel.duration,
+          narrativeText: skel.narrativeText,
+          transcriptSegmentIds: [...skel.transcriptSegmentIds],
+          transitionIn: aiData?.transitionIn ?? "cut",
+          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
+          visualIntent: aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll",
+          searchQueries: queries,
+          energyLevel: aiData?.energyLevel ?? inferEnergyLevelFromText(skel.narrativeText),
+          shotType: aiData?.shotType ?? inferShotTypeFromText(skel.narrativeText)
+        };
+        applyLocalMediaMatching(sc, aiData?.localAsset, mediaFiles);
+        scenes.push(sc);
+      }
+      const seqStart = scenes[0]?.startTime ?? 0;
+      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0;
+      return {
+        sequenceIndex: seq.sequenceIndex,
+        title: seq.title,
+        startTime: seqStart,
+        endTime: seqEnd,
+        scenes
+      };
+    })
+  }));
+  for (const ch of chapters) {
+    const chScenes = ch.sequences.flatMap((s) => s.scenes);
+    ch.startTime = chScenes[0]?.startTime ?? 0;
+    ch.endTime = chScenes[chScenes.length - 1]?.endTime ?? 0;
+  }
+  let globalSceneIndex = 1;
+  for (const ch of chapters) {
+    for (const seq of ch.sequences) {
+      seq.scenes.sort((a, b) => a.startTime - b.startTime);
+      for (const sc of seq.scenes) {
+        sc.sceneIndex = globalSceneIndex++;
+      }
+    }
+  }
+  const allFinalScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
+  const sceneIds = allFinalScenes.map((s) => s.sceneIndex);
+  if (new Set(sceneIds).size !== sceneIds.length) {
+    throw new Error("Duplicate global sceneIndex detected after assembly");
+  }
+  progress("Validating transcript coverage...", 0.88);
+  const coverageResult = validateScenePlanCoverage(transcript, allFinalScenes);
+  if (!coverageResult.valid) {
+    logger.error("[PLAN] Transcript coverage validation encountered issues:", { errors: coverageResult.errors });
+    if (coverageResult.missingSegmentIds.length > 0) {
+      throw new Error(`Transcript coverage validation failed: missing segments [${coverageResult.missingSegmentIds.join(", ")}]`);
+    }
+  }
+  progress("Running Pacing Guard analysis...", 0.9);
   let pacingIssues = [];
   try {
-    const flatScenes = flattenPlanScenes(planData);
+    const flatScenes = flattenPlanScenes({ chapters });
     pacingIssues = analyzePacing(flatScenes);
     logger.info(`[PLAN] Pacing Guard: ${pacingIssues.length} issues found, scenes annotated in-place`);
   } catch (pgErr) {
@@ -1380,27 +2391,34 @@ async function buildEditPlan(params) {
     sceneId: issue.sceneId,
     severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
     issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
-    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type to "${allScenes[Number(issue.sceneId) - 1]?.shotType ?? "wide"}" for visual variety`
+    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type to "${allFinalScenes[Number(issue.sceneId) - 1]?.shotType ?? "wide"}" for visual variety`
   }));
+  const finalModelUsed = hadAnyBatchFallback ? `${primaryModelUsed} + partial-fallback` : primaryModelUsed;
   const plan = {
     projectName,
-    totalDuration,
-    totalScenes,
+    totalDuration: transcript.duration,
+    totalScenes: allFinalScenes.length,
     language: transcript.language,
-    chapters: planData.chapters,
+    chapters,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     modelUsed: finalModelUsed,
-    // Retention Engine fields — pacing-guard populates retentionFlags here;
-    // Gemini QA pass (runRetentionQAPass) will add/replace them with AI analysis.
     openLoops: [],
     motifRegistry: [],
     retentionFlags: initialFlags
   };
-  progress("Saving edit plan...", 0.95);
+  progress("Saving master edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  logger.info("Edit plan saved", { chapters: plan.chapters.length, scenes: totalScenes, pacingIssues: pacingIssues.length });
-  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes, ${initialFlags.length} pacing flags`, 1);
+  logger.info("Edit plan saved", {
+    chapters: plan.chapters.length,
+    scenes: plan.totalScenes,
+    pacingIssues: pacingIssues.length,
+    model: finalModelUsed
+  });
+  progress(
+    `Done — ${plan.chapters.length} chapters, ${plan.totalScenes} scenes (${(plan.totalDuration / plan.totalScenes).toFixed(1)}s/scene), ${initialFlags.length} pacing flags`,
+    1
+  );
   return plan;
 }
 const CONFIG_PATH = path.join(electron.app.getPath("userData"), "app-config.json");
@@ -4211,403 +5229,6 @@ async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey,
     }
   }
   return asset;
-}
-function getContextPath(projectDir) {
-  return path.join(projectDir, "analysis", "global-script-context.json");
-}
-function scriptHash(text) {
-  return crypto.createHash("md5").update(text).digest("hex").slice(0, 16);
-}
-const SYSTEM_PROMPT$1 = `You are the Context-Aware Visual Research Engine for a long-form documentary.
-Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
-Rules:
-- Identify primary subject, central thesis, geography, time period, communities from the script.
-- List exactTopicAnchors (proper nouns) that MUST appear in exact-match queries.
-- List contextualAnchors (broader descriptors) for when exact results are unavailable.
-- List forbiddenSubstitutions (visually similar but factually wrong subjects).
-- List negativeKeywords (terms that would return wrong stock).
-- Map the storyArc per chapter.
-- Do NOT invent facts not in the script.
-- Return ONLY valid JSON. No markdown. No explanation.`;
-function buildGeminiPrompt$1(fullScriptText, projectId, language) {
-  return `FULL SCRIPT (analyze completely before responding):
----
-${fullScriptText.slice(0, 4e4)}
----
-PROJECT ID: ${projectId}
-LANGUAGE: ${language}
-
-Return ONLY valid JSON matching this schema:
-{
-  "projectId": "${projectId}",
-  "language": "${language}",
-  "version": 1,
-  "primarySubject": "the single most important subject",
-  "secondarySubjects": ["string"],
-  "globalSynopsis": "2-3 sentence summary",
-  "centralThesis": "the main argument",
-  "documentaryAngle": "journalistic angle",
-  "targetAudience": "audience description",
-  "geography": { "primaryCountry": null, "primaryRegion": null, "secondaryLocations": [] },
-  "timeContext": { "primaryPeriod": "contemporary", "historicalPeriods": [] },
-  "communities": [{ "name": "name", "role": "protagonist", "visualDescription": "desc", "mustNotConfuseWith": [] }],
-  "recurringPeople": [{ "id": "p1", "role": "narrator", "ageRange": null, "gender": null, "appearance": null, "clothing": null }],
-  "visualWorld": { "environment": [], "architecture": [], "clothing": [], "occupations": [], "machinery": [], "recurringObjects": [], "colorMood": "natural", "documentaryStyle": "observational" },
-  "exactTopicAnchors": [],
-  "contextualAnchors": [],
-  "forbiddenSubstitutions": [],
-  "negativeKeywords": [],
-  "recurringVisualMotifs": [],
-  "storyArc": [{ "chapterId": "CH1", "title": "title", "purpose": "purpose", "startText": "first words", "endText": "last words" }]
-}`;
-}
-async function analyzeGlobalContext(params) {
-  const { projectDir, apiKey, forceRegenerate = false } = params;
-  const progress = params.onProgress ?? (() => {
-  });
-  const modelId = params.model ?? "gemini-3.8-flash";
-  const fullText = params.scriptText ?? params.transcript?.fullText ?? params.transcript?.segments.map((s) => s.text).join(" ") ?? "";
-  if (!fullText.trim()) throw new Error("No script or transcript text for global context analysis.");
-  let projectId = "unknown";
-  const language = params.transcript?.language ?? "en";
-  try {
-    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
-    const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-    projectId = st?.id ?? st?.name ?? "unknown";
-  } catch {
-  }
-  const contextPath = getContextPath(projectDir);
-  const hash = scriptHash(fullText);
-  if (!forceRegenerate && fs__namespace.existsSync(contextPath)) {
-    try {
-      const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
-      if (cached._scriptHash === hash) {
-        logger.info("[GlobalContext] Cache hit");
-        progress("Using cached global script context...", 1);
-        return cached;
-      }
-    } catch {
-    }
-  }
-  let rawJson = "";
-  let aiError = null;
-  const cleanKey = normalizeApiKey(apiKey);
-  if (cleanKey.length > 0) {
-    progress("Analyzing full script for global context...", 0.05);
-    try {
-      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
-      const prompt = buildGeminiPrompt$1(fullText, projectId, language);
-      const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
-      const maxRetries = 3;
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
-        try {
-          progress(attempt === 1 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.15);
-          const response = await ai.models.generateContent({
-            model: currentModel,
-            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
-            config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
-          });
-          rawJson = response.text ?? "";
-          if (rawJson) break;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          aiError = msg;
-          logger.warn(`[GlobalContext] Gemini attempt ${attempt} failed: ${msg}`);
-          if (msg.includes("401") || msg.includes("UNAUTHENTICATED") || msg.includes("API_KEY") || msg.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
-            break;
-          }
-          const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
-          if (overloaded && attempt < maxRetries) {
-            const wait = Math.min(attempt * 2, 6);
-            for (let s = wait; s > 0; s--) {
-              progress(`Gemini overloaded, retrying in ${s}s...`, 0.2);
-              await new Promise((r) => setTimeout(r, 1e3));
-            }
-            continue;
-          }
-        }
-      }
-    } catch (outerErr) {
-      aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
-      logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
-    }
-  } else {
-    logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
-  }
-  let ctx;
-  if (rawJson) {
-    try {
-      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      ctx = JSON.parse(clean);
-      ctx.modelUsed = modelId;
-    } catch {
-      logger.warn("[GlobalContext] JSON parse failed, using fallback context");
-      ctx = buildFallbackContext(projectId, language, fullText);
-      ctx.modelUsed = "algorithmic (JSON parse fallback)";
-    }
-  } else {
-    logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
-    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.7);
-    ctx = buildFallbackContext(projectId, language, fullText);
-    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
-  }
-  ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ctx.version = 1;
-  ctx._scriptHash = hash;
-  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
-  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
-  progress(`Global context ready — "${ctx.primarySubject}"`, 1);
-  return ctx;
-}
-function buildFallbackContext(projectId, language, text) {
-  const STOP_WORDS = /* @__PURE__ */ new Set([
-    "about",
-    "above",
-    "after",
-    "again",
-    "against",
-    "all",
-    "another",
-    "any",
-    "are",
-    "aren't",
-    "because",
-    "been",
-    "before",
-    "being",
-    "below",
-    "between",
-    "both",
-    "but",
-    "can",
-    "cannot",
-    "could",
-    "couldn't",
-    "did",
-    "didn't",
-    "does",
-    "doesn't",
-    "doing",
-    "don't",
-    "down",
-    "during",
-    "each",
-    "few",
-    "for",
-    "from",
-    "further",
-    "had",
-    "hadn't",
-    "has",
-    "hasn't",
-    "have",
-    "haven't",
-    "having",
-    "here",
-    "here's",
-    "hers",
-    "herself",
-    "himself",
-    "how",
-    "how's",
-    "into",
-    "it's",
-    "its",
-    "itself",
-    "let's",
-    "more",
-    "most",
-    "mustn't",
-    "myself",
-    "never",
-    "only",
-    "other",
-    "ought",
-    "our",
-    "ours",
-    "ourselves",
-    "out",
-    "over",
-    "own",
-    "same",
-    "shan't",
-    "should",
-    "shouldn't",
-    "some",
-    "such",
-    "than",
-    "that",
-    "that's",
-    "the",
-    "their",
-    "theirs",
-    "them",
-    "themselves",
-    "then",
-    "there",
-    "there's",
-    "these",
-    "they",
-    "they'd",
-    "they'll",
-    "they're",
-    "they've",
-    "this",
-    "those",
-    "through",
-    "until",
-    "very",
-    "was",
-    "wasn't",
-    "we'd",
-    "we'll",
-    "we're",
-    "we've",
-    "were",
-    "weren't",
-    "what",
-    "what's",
-    "when",
-    "when's",
-    "where",
-    "where's",
-    "which",
-    "while",
-    "who",
-    "who's",
-    "whom",
-    "why",
-    "why's",
-    "with",
-    "won't",
-    "would",
-    "wouldn't",
-    "you",
-    "you'd",
-    "you'll",
-    "you're",
-    "you've",
-    "your",
-    "yours",
-    "yourself",
-    "yourselves",
-    "video",
-    "channel",
-    "going",
-    "first",
-    "today",
-    "finally",
-    "place",
-    "entire",
-    "exact",
-    "thing",
-    "things",
-    "really",
-    "almost",
-    "turns",
-    "right",
-    "breakdown",
-    // Vietnamese common stop words
-    "những",
-    "chúng",
-    "trong",
-    "người",
-    "không",
-    "được",
-    "nhiều",
-    "chính",
-    "thực",
-    "thấy",
-    "video",
-    "kênh",
-    "hoặc",
-    "cũng",
-    "này",
-    "đang",
-    "phải",
-    "theo",
-    "cùng",
-    "nhau"
-  ]);
-  const properMatches = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
-  const properFreq = {};
-  for (const p of properMatches) {
-    const lower = p.toLowerCase();
-    if (!STOP_WORDS.has(lower) && lower.length > 3) {
-      properFreq[p] = (properFreq[p] ?? 0) + 1;
-    }
-  }
-  const topProper = Object.entries(properFreq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
-  const words = text.split(/\s+/);
-  const freq = {};
-  for (const w of words) {
-    const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "");
-    if (clean.length > 3 && !STOP_WORDS.has(clean)) {
-      freq[clean] = (freq[clean] ?? 0) + 1;
-    }
-  }
-  const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
-  const primarySubject = topProper[0] || topWords[0] || "Documentary Subject";
-  const exactTopicAnchors = topProper.length > 0 ? topProper.slice(0, 5) : topWords.slice(0, 5);
-  const contextualAnchors = topWords.filter((w) => !exactTopicAnchors.map((x) => x.toLowerCase()).includes(w)).slice(0, 8);
-  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.?!])\s+/).filter(Boolean);
-  const centralThesis = sentences.slice(0, 2).join(" ") || text.slice(0, 250);
-  const globalSynopsis = sentences.slice(0, 4).join(" ") || text.slice(0, 350);
-  return {
-    projectId,
-    language,
-    version: 1,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: "algorithmic-fallback",
-    primarySubject,
-    secondarySubjects: topWords.slice(1, 5),
-    globalSynopsis,
-    centralThesis,
-    documentaryAngle: "observational documentary",
-    targetAudience: "general audience",
-    geography: {
-      primaryCountry: "Not specified",
-      secondaryLocations: []
-    },
-    timeContext: {
-      primaryPeriod: "contemporary",
-      historicalPeriods: []
-    },
-    communities: [],
-    recurringPeople: [],
-    visualWorld: {
-      environment: [],
-      architecture: [],
-      clothing: [],
-      occupations: [],
-      machinery: [],
-      recurringObjects: [],
-      colorMood: "natural cinematics",
-      documentaryStyle: "observational"
-    },
-    exactTopicAnchors,
-    contextualAnchors,
-    forbiddenSubstitutions: [],
-    negativeKeywords: ["cartoon", "cgi", "animation", "vlog", "generic"],
-    recurringVisualMotifs: [],
-    storyArc: []
-  };
-}
-function loadGlobalContext(projectDir) {
-  const p = getContextPath(projectDir);
-  if (!fs__namespace.existsSync(p)) return null;
-  try {
-    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-function saveGlobalContext(projectDir, ctx) {
-  const p = getContextPath(projectDir);
-  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
 }
 function getQueryCachePath(projectDir) {
   return path.join(projectDir, "assets", "stock", ".context-query-cache.json");

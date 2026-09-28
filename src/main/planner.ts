@@ -1,12 +1,14 @@
 import { GoogleGenAI } from '@google/genai'
 import * as fs from 'fs'
-import { join } from 'path'
+import { join, extname } from 'path'
 import { logger } from './logger'
 import { normalizeApiKey } from './utils/api-key'
-import type { TranscriptResult } from '../../shared/types'
-import type { MasterEditPlanRetentionExt } from '../../shared/types'
+import type { TranscriptResult, MasterEditPlanRetentionExt, Pacing } from '../../shared/types'
 import { analyzePacing, flattenPlanScenes } from './pacing-guard'
 import type { PacingScene } from './pacing-guard'
+import { buildSceneSkeleton, type SceneSkeleton } from './planning/scene-segmenter'
+import { validateScenePlanCoverage } from './planning/scene-validator'
+import { analyzeGlobalContext } from './stock/global-context-analyzer'
 
 // ─── Edit Plan Types ──────────────────────────────────────────────────────────
 
@@ -68,109 +70,9 @@ export interface MasterEditPlan extends MasterEditPlanRetentionExt {
   modelUsed: string
 }
 
-// ─── Prompt builder ───────────────────────────────────────────────────────────
+// ─── Algorithmic rule-based helpers ──────────────────────────────────────────
 
-function buildPrompt(
-  transcript: TranscriptResult,
-  scriptText: string | null,
-  mediaFiles: MediaClip[]
-): string {
-  const videoFiles = mediaFiles.filter(m => m.type === 'video')
-  const imageFiles = mediaFiles.filter(m => m.type === 'image')
-  const hasLocalMedia = mediaFiles.length > 0
-
-  const mediaList = hasLocalMedia ? [
-    ...videoFiles.map(v => `  VIDEO: ${v.filename} (${v.durationSecs?.toFixed(1) ?? '?'}s)`),
-    ...imageFiles.map(i => `  IMAGE: ${i.filename}`)
-  ].join('\n') : ''
-
-  const transcriptLines = transcript.segments.map(seg =>
-    `[${seg.id}] ${seg.start.toFixed(1)}s-${seg.end.toFixed(1)}s: "${seg.text}"`
-  ).join('\n')
-
-  const mediaSection = hasLocalMedia
-    ? `## AVAILABLE LOCAL MEDIA LIBRARY\n${mediaList}\n`
-    : `## MEDIA MODE: STOCK SEARCH ONLY\nNo local media files provided. You MUST NOT invent filenames. Set "localAsset" to null for all scenes.\n`
-
-  const sceneSchemaExample = hasLocalMedia
-    ? `{
-              "sceneIndex": 1,
-              "localAsset": "exact_filename.mp4 or null if no match",
-              "mediaType": "video",
-              "startTime": 0,
-              "endTime": 15,
-              "duration": 15,
-              "narrativeText": "The narration text spoken here",
-              "transcriptSegmentIds": ["N001", "N002"],
-              "transitionIn": "cut",
-              "visualNote": "Shows opening establishing shot",
-              "visualIntent": "short description of visual concept (3-10 words)",
-              "searchQueries": ["short query 1", "short query 2", "short query 3"]
-            }`
-    : `{
-              "sceneIndex": 1,
-              "localAsset": null,
-              "mediaType": "video",
-              "startTime": 0,
-              "endTime": 15,
-              "duration": 15,
-              "narrativeText": "The narration text spoken here",
-              "transcriptSegmentIds": ["N001", "N002"],
-              "transitionIn": "cut",
-              "visualNote": "Shows opening establishing shot",
-              "visualIntent": "short description of visual concept (3-10 words)",
-              "searchQueries": ["short query 1", "short query 2", "short query 3"]
-            }`
-
-  return `You are a professional documentary video editor AI. Your job is to create a complete master edit plan.
-
-## NARRATION TRANSCRIPT (${transcript.segments.length} segments, ${transcript.duration.toFixed(0)}s total)
-${transcriptLines}
-
-${mediaSection}
-${scriptText ? `## ORIGINAL SCRIPT\n${scriptText.slice(0, 8000)}\n` : ''}
-
-## YOUR TASK
-Create a master edit plan as a JSON object. Rules:
-1. Every second of narration MUST be covered by a media clip
-2. ${hasLocalMedia ? 'Match local files logically to narrative content. Set "localAsset" to the exact filename if matched, or null if no local file fits — stock search will fill those gaps.' : 'Set "localAsset" to null for all scenes (stock will be auto-searched).'}
-3. Videos can be used for their full duration or trimmed
-4. Images should display for 3-8 seconds
-5. Divide the content into 3-6 chapters with meaningful titles
-6. Each chapter has 2-4 sequences, each sequence has 2-6 scenes
-7. Transition between scenes: mostly "cut", use "fade" for chapter breaks
-8. For EVERY scene, write a "visualIntent" (3-10 words describing the visual concept) and 3-5 "searchQueries".
-   IMPORTANT — searchQueries must be SHORT and VISUALLY SEARCHABLE (not literal narration sentences).
-   BAD:  "family has to borrow money to cover funeral expenses"
-   GOOD: ["worried family bills", "credit card debt", "financial stress", "loan paperwork"]
-
-Return ONLY valid JSON, no explanation, matching this exact schema:
-{
-  "chapters": [
-    {
-      "chapterIndex": 1,
-      "title": "Chapter title",
-      "startTime": 0,
-      "endTime": 120,
-      "sequences": [
-        {
-          "sequenceIndex": 1,
-          "title": "Sequence title",
-          "startTime": 0,
-          "endTime": 60,
-          "scenes": [
-            ${sceneSchemaExample}
-          ]
-        }
-      ]
-    }
-  ]
-}`
-}
-
-// ─── Algorithmic rule-based fallback generator (Guarantees 100% success) ──────
-
-function extractVisualQueries(text: string): string[] {
+export function extractVisualQueries(text: string): string[] {
   const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, ' ').trim()
   const words = clean.split(/\s+/).filter((w) => w.length > 2)
   const queries: string[] = []
@@ -185,81 +87,514 @@ function extractVisualQueries(text: string): string[] {
   return queries.filter((q) => q.length >= 3).slice(0, 3)
 }
 
-function buildAlgorithmicPlan(
-  transcript: TranscriptResult,
-  projectName: string
-): MasterEditPlan {
-  const segments = transcript.segments
-  const totalDuration = transcript.duration
+function inferEnergyLevelFromText(text: string): 'low' | 'medium' | 'high' {
+  const lower = text.toLowerCase()
+  const highCues = ['conflict', 'battle', 'crisis', 'explosion', 'urgent', 'reveal', 'shocking', 'protest', 'disaster', 'death']
+  if (highCues.some((c) => lower.includes(c))) return 'high'
+  const lowCues = ['peaceful', 'quiet', 'meditation', 'reflection', 'landscape', 'slow', 'history', 'archive']
+  if (lowCues.some((c) => lower.includes(c))) return 'low'
+  return 'medium'
+}
 
-  const numChapters = Math.min(5, Math.max(2, Math.round(totalDuration / 90)))
-  const segsPerChapter = Math.ceil(segments.length / numChapters)
+function inferShotTypeFromText(text: string): 'wide' | 'medium' | 'close-up' | 'abstract' {
+  const lower = text.toLowerCase()
+  if (lower.includes('close') || lower.includes('face') || lower.includes('detail') || lower.includes('hand')) return 'close-up'
+  if (lower.includes('aerial') || lower.includes('wide') || lower.includes('landscape') || lower.includes('panorama')) return 'wide'
+  if (lower.includes('abstract') || lower.includes('symbol') || lower.includes('silhouette')) return 'abstract'
+  return 'medium'
+}
 
-  const chapters: ChapterPlan[] = []
-  let globalSceneIdx = 1
+// ─── Outline Types & Helpers ──────────────────────────────────────────────────
+
+interface OutlineSequence {
+  sequenceIndex: number
+  title: string
+  startSceneIndex: number
+  endSceneIndex: number
+}
+
+interface OutlineChapter {
+  chapterIndex: number
+  title: string
+  purpose?: string
+  startSceneIndex: number
+  endSceneIndex: number
+  sequences: OutlineSequence[]
+}
+
+function buildAlgorithmicOutline(skeletons: SceneSkeleton[], totalDuration: number): OutlineChapter[] {
+  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)))
+  const scenesPerChapter = Math.ceil(skeletons.length / numChapters)
+  const chapters: OutlineChapter[] = []
 
   for (let chIdx = 0; chIdx < numChapters; chIdx++) {
-    const chSegs = segments.slice(chIdx * segsPerChapter, (chIdx + 1) * segsPerChapter)
-    if (chSegs.length === 0) continue
+    const chStartIdx = chIdx * scenesPerChapter
+    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length)
+    const chScenes = skeletons.slice(chStartIdx, chEndIdx)
+    if (chScenes.length === 0) continue
 
-    const chStart = chSegs[0].start
-    const chEnd = chSegs[chSegs.length - 1].end
+    const startSceneIndex = chScenes[0].sceneIndex
+    const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex
 
-    const seqsPerCh = Math.min(3, Math.max(1, Math.ceil(chSegs.length / 4)))
-    const segsPerSeq = Math.ceil(chSegs.length / seqsPerCh)
-    const sequences: SequencePlan[] = []
+    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)))
+    const scenesPerSeq = Math.ceil(chScenes.length / numSequences)
+    const sequences: OutlineSequence[] = []
 
-    for (let seqIdx = 0; seqIdx < seqsPerCh; seqIdx++) {
-      const seqSegs = chSegs.slice(seqIdx * segsPerSeq, (seqIdx + 1) * segsPerSeq)
-      if (seqSegs.length === 0) continue
-
-      const scenes: ScenePlan[] = seqSegs.map((seg) => {
-        const dur = Math.max(2, Number((seg.end - seg.start).toFixed(1)))
-        const queries = extractVisualQueries(seg.text)
-        return {
-          sceneIndex: globalSceneIdx++,
-          mediaFile: '',
-          mediaType: 'video',
-          startTime: seg.start,
-          endTime: seg.end,
-          duration: dur,
-          narrativeText: seg.text,
-          transcriptSegmentIds: [seg.id],
-          transitionIn: 'cut',
-          visualNote: `Visual shot: ${queries[0]}`,
-          visualIntent: queries[0] ?? 'Documentary cinematic b-roll',
-          searchQueries: queries
-        }
-      })
+    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
+      const seqStartIdx = seqIdx * scenesPerSeq
+      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length)
+      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx)
+      if (seqScenes.length === 0) continue
 
       sequences.push({
         sequenceIndex: seqIdx + 1,
         title: `Sequence ${seqIdx + 1}`,
-        startTime: seqSegs[0].start,
-        endTime: seqSegs[seqSegs.length - 1].end,
-        scenes
+        startSceneIndex: seqScenes[0].sceneIndex,
+        endSceneIndex: seqScenes[seqScenes.length - 1].sceneIndex
       })
     }
 
     chapters.push({
       chapterIndex: chIdx + 1,
-      title: chIdx === 0 ? 'Chapter 1: Introduction' : chIdx === numChapters - 1 ? `Chapter ${chIdx + 1}: Conclusion` : `Chapter ${chIdx + 1}`,
-      startTime: chStart,
-      endTime: chEnd,
+      title: chIdx === 0
+        ? 'Chapter 1: Introduction & Premise'
+        : chIdx === numChapters - 1
+          ? `Chapter ${chIdx + 1}: Conclusion & Legacy`
+          : `Chapter ${chIdx + 1}: Narrative Progression`,
+      purpose: 'Documentary narrative arc',
+      startSceneIndex,
+      endSceneIndex,
       sequences
     })
   }
 
+  return chapters
+}
+
+async function generateChapterOutlineWithGemini(
+  ai: GoogleGenAI,
+  modelChain: string[],
+  skeletons: SceneSkeleton[],
+  globalContextSummary: string,
+  totalDuration: number,
+  onProgress?: (msg: string, pct: number) => void
+): Promise<OutlineChapter[]> {
+  const firstIndex = skeletons[0].sceneIndex
+  const lastIndex = skeletons[skeletons.length - 1].sceneIndex
+  const step = Math.max(1, Math.floor(skeletons.length / 10))
+  const sampleScenes = skeletons
+    .filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0)
+    .map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`)
+    .join('\n')
+
+  const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
+Video Duration: ${totalDuration.toFixed(0)}s
+Total Scenes: ${skeletons.length} (Scene ${firstIndex} to Scene ${lastIndex})
+
+${globalContextSummary ? `## GLOBAL CONTEXT\n${globalContextSummary}\n` : ''}
+## SAMPLE SCENE TIMELINE
+${sampleScenes}
+
+## YOUR TASK
+Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
+Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
+Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
+
+Return ONLY valid JSON matching this schema:
+{
+  "chapters": [
+    {
+      "chapterIndex": 1,
+      "title": "Meaningful Chapter Title",
+      "purpose": "Narrative purpose",
+      "startSceneIndex": 1,
+      "endSceneIndex": 25,
+      "sequences": [
+        {
+          "sequenceIndex": 1,
+          "title": "Sequence title",
+          "startSceneIndex": 1,
+          "endSceneIndex": 12
+        }
+      ]
+    }
+  ]
+}`
+
+  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
+    const model = modelChain[attempt]
+    try {
+      onProgress?.(`Generating story arc outline (${model})...`, 0.20)
+      const res = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.2,
+          maxOutputTokens: 4096
+        }
+      })
+      const clean = (res.text ?? '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
+      const data = JSON.parse(clean) as { chapters?: OutlineChapter[] }
+
+      if (data.chapters && data.chapters.length >= 2) {
+        const covered = new Set<number>()
+        let valid = true
+        for (const ch of data.chapters) {
+          if (!ch.sequences || ch.sequences.length === 0) {
+            valid = false
+            break
+          }
+          for (const seq of ch.sequences) {
+            if (seq.startSceneIndex > seq.endSceneIndex) {
+              valid = false
+              break
+            }
+            for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+              if (covered.has(idx)) {
+                valid = false
+                break
+              }
+              covered.add(idx)
+            }
+          }
+        }
+        if (valid && covered.size === skeletons.length && !skeletons.some((s) => !covered.has(s.sceneIndex))) {
+          logger.info(`[PLAN] Gemini chapter outline successfully generated: ${data.chapters.length} chapters`)
+          return data.chapters
+        }
+      }
+    } catch (err) {
+      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed: ${err}`)
+    }
+  }
+
+  logger.info('[PLAN] Using algorithmic chapter outline fallback')
+  return buildAlgorithmicOutline(skeletons, totalDuration)
+}
+
+// ─── Batch Prompt Builder ─────────────────────────────────────────────────────
+
+function buildBatchEnrichmentPrompt(
+  batchScenes: SceneSkeleton[],
+  globalContextSummary: string,
+  mediaFiles: MediaClip[]
+): string {
+  const hasLocalMedia = mediaFiles.length > 0
+  const mediaList = hasLocalMedia
+    ? [
+        ...mediaFiles.filter((m) => m.type === 'video').map((v) => `  VIDEO: ${v.filename}`),
+        ...mediaFiles.filter((m) => m.type === 'image').map((i) => `  IMAGE: ${i.filename}`)
+      ].join('\n')
+    : ''
+
+  const mediaSection = hasLocalMedia
+    ? `## AVAILABLE LOCAL MEDIA FILES (Match exact filename to localAsset if appropriate, otherwise null):\n${mediaList}\n`
+    : `## MEDIA MODE: STOCK SEARCH ONLY\nNo local media files. Set localAsset to null for all scenes. Default mediaType to "video".\n`
+
+  const scenesJson = JSON.stringify(
+    batchScenes.map((s) => ({
+      sceneIndex: s.sceneIndex,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      duration: s.duration,
+      narrativeText: s.narrativeText,
+      transcriptSegmentIds: s.transcriptSegmentIds
+    })),
+    null,
+    2
+  )
+
+  return `You are enriching a PRE-DETERMINED documentary scene timeline.
+
+CRITICAL RULES:
+- Do not add scenes.
+- Do not remove scenes.
+- Do not merge scenes.
+- Do not split scenes.
+- Do not renumber scenes.
+- Return exactly one result for every provided sceneIndex.
+- Keep results in the same order.
+- Only provide visual metadata.
+- Each visualIntent must describe one visible concept (3-10 words).
+- Search queries must remain visually searchable (3-5 queries per scene, each query 2-6 words).
+- Do not use abstract narration sentences as stock queries.
+  BAD:  "family has to borrow money to cover funeral expenses"
+  GOOD: ["worried family bills", "financial stress loan", "credit card bills debt"]
+- Maintain global documentary context across all batches.
+- Avoid repeating the same stock concept for consecutive scenes.
+- Prefer real-life documentary footage.
+- Use transitionIn="cut" for most scenes. Use dissolve/fade sparingly.
+- Vary shotType ("wide", "medium", "close-up", "abstract") across consecutive scenes.
+- Hook scenes should use visually strong and specific footage.
+- mediaType must be "video" or "image" (default "video").
+
+${globalContextSummary ? `## GLOBAL DOCUMENTARY CONTEXT\n${globalContextSummary}\n` : ''}
+${mediaSection}
+## SCENES TO ENRICH (${batchScenes.length} scenes)
+${scenesJson}
+
+Return ONLY valid JSON array matching this exact schema:
+[
+  {
+    "sceneIndex": 1,
+    "visualIntent": "3-10 words visual description",
+    "visualNote": "Director suggestion for visual tone and camera angle",
+    "searchQueries": ["short query 1", "short query 2", "short query 3"],
+    "mediaType": "video",
+    "transitionIn": "cut",
+    "energyLevel": "medium",
+    "shotType": "medium",
+    "localAsset": null
+  }
+]`
+}
+
+// ─── Batch Enrichment Runner ──────────────────────────────────────────────────
+
+async function enrichScenesBatchWithGemini(
+  ai: GoogleGenAI,
+  modelChain: string[],
+  batchScenes: SceneSkeleton[],
+  globalContextSummary: string,
+  mediaFiles: MediaClip[],
+  batchIndex: number,
+  totalBatches: number,
+  onProgress?: (msg: string, pct: number) => void
+): Promise<{ enrichedMap: Map<number, Partial<ScenePlan>>; modelUsed: string; usedFallback: boolean }> {
+  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles)
+  const enrichedMap = new Map<number, Partial<ScenePlan>>()
+
+  let activeModelIndex = 0
+  let lastError = ''
+  let successModel = modelChain[0]
+  let usedFallback = false
+
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const currentModel = modelChain[activeModelIndex]
+    try {
+      onProgress?.(
+        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
+        0.25 + (batchIndex / totalBatches) * 0.55
+      )
+      const res = await ai.models.generateContent({
+        model: currentModel,
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+          temperature: 0.3,
+          maxOutputTokens: 8192
+        }
+      })
+      const clean = (res.text ?? '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
+      const items = JSON.parse(clean) as Array<Partial<ScenePlan> & { sceneIndex?: number }>
+
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (typeof item.sceneIndex === 'number') {
+            enrichedMap.set(item.sceneIndex, item)
+          }
+        }
+        successModel = currentModel
+        break
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      lastError = msg
+      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`)
+
+      const isOverloaded =
+        msg.includes('503') ||
+        msg.includes('429') ||
+        msg.includes('UNAVAILABLE') ||
+        msg.includes('high demand')
+      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
+        activeModelIndex++
+        await new Promise((r) => setTimeout(r, 1500))
+        continue
+      }
+      if (attempt < 4) {
+        await new Promise((r) => setTimeout(r, 2000))
+      }
+    }
+  }
+
+  // Verify that all scenes in this batch have enrichment; fill any missing via algorithmic fallback
+  let fallbackCount = 0
+  for (const skel of batchScenes) {
+    if (!enrichedMap.has(skel.sceneIndex)) {
+      fallbackCount++
+      usedFallback = true
+      const queries = extractVisualQueries(skel.narrativeText)
+      enrichedMap.set(skel.sceneIndex, {
+        sceneIndex: skel.sceneIndex,
+        visualIntent: queries[0] ?? 'Documentary cinematic b-roll',
+        visualNote: `Visual shot: ${queries[0]}`,
+        searchQueries:
+          queries.length >= 3
+            ? queries
+            : [...queries, 'documentary archive footage', 'historical b-roll cinematic'].slice(0, 3),
+        mediaType: 'video',
+        transitionIn: 'cut',
+        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+        shotType: inferShotTypeFromText(skel.narrativeText)
+      })
+    }
+  }
+
+  if (fallbackCount > 0) {
+    logger.warn(
+      `[PLAN] Batch ${batchIndex + 1}: ${fallbackCount}/${batchScenes.length} scenes used algorithmic fallback (${lastError || 'missing AI data'})`
+    )
+  }
+
+  return { enrichedMap, modelUsed: successModel, usedFallback }
+}
+
+// ─── Local Media Assignment Helper ────────────────────────────────────────────
+
+function applyLocalMediaMatching(
+  scene: ScenePlan,
+  localAssetSuggestion: string | null | undefined,
+  mediaFiles: MediaClip[]
+): void {
+  if (localAssetSuggestion && mediaFiles.length > 0) {
+    const cleanSuggestion = localAssetSuggestion.trim().toLowerCase()
+    const matched = mediaFiles.find(
+      (m) =>
+        m.filename.toLowerCase() === cleanSuggestion ||
+        m.filename.toLowerCase().includes(cleanSuggestion)
+    )
+    if (matched) {
+      scene.localAsset = matched.filename
+      scene.mediaFile = matched.filename
+      scene.localPath = matched.filePath
+      const ext = extname(matched.filename).toLowerCase()
+      if (['.mp4', '.mov', '.webm', '.mkv', '.avi'].includes(ext)) {
+        scene.mediaType = 'video'
+      } else if (['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'].includes(ext)) {
+        scene.mediaType = 'image'
+      }
+      return
+    }
+  }
+
+  // Stock search default
+  scene.mediaFile = ''
+  scene.mediaType = 'video'
+  scene.localAsset = undefined
+}
+
+// ─── Full Algorithmic Plan Fallback Generator ─────────────────────────────────
+
+export function buildAlgorithmicPlan(
+  transcript: TranscriptResult,
+  projectName: string,
+  pacing: Pacing = 'balanced'
+): MasterEditPlan {
+  const skeletons = buildSceneSkeleton(transcript, pacing)
+  const outline = buildAlgorithmicOutline(skeletons, transcript.duration)
+
+  const skeletonMap = new Map<number, SceneSkeleton>()
+  for (const skel of skeletons) {
+    skeletonMap.set(skel.sceneIndex, skel)
+  }
+
+  const chapters: ChapterPlan[] = outline.map((ch) => ({
+    chapterIndex: ch.chapterIndex,
+    title: ch.title,
+    startTime: 0,
+    endTime: 0,
+    sequences: ch.sequences.map((seq) => {
+      const scenes: ScenePlan[] = []
+      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+        const skel = skeletonMap.get(idx)
+        if (!skel) continue
+        const queries = extractVisualQueries(skel.narrativeText)
+        scenes.push({
+          sceneIndex: skel.sceneIndex,
+          mediaFile: '',
+          mediaType: 'video',
+          startTime: skel.startTime,
+          endTime: skel.endTime,
+          duration: skel.duration,
+          narrativeText: skel.narrativeText,
+          transcriptSegmentIds: [...skel.transcriptSegmentIds],
+          transitionIn: 'cut',
+          visualNote: `Visual shot: ${queries[0]}`,
+          visualIntent: queries[0] ?? 'Documentary cinematic b-roll',
+          searchQueries:
+            queries.length >= 3
+              ? queries
+              : [...queries, 'documentary archive footage', 'historical b-roll cinematic'].slice(0, 3),
+          energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+          shotType: inferShotTypeFromText(skel.narrativeText)
+        })
+      }
+      const seqStart = scenes[0]?.startTime ?? 0
+      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0
+      return {
+        sequenceIndex: seq.sequenceIndex,
+        title: seq.title,
+        startTime: seqStart,
+        endTime: seqEnd,
+        scenes
+      }
+    })
+  }))
+
+  // Set chapter start/end
+  for (const ch of chapters) {
+    const allSeqScenes = ch.sequences.flatMap((s) => s.scenes)
+    ch.startTime = allSeqScenes[0]?.startTime ?? 0
+    ch.endTime = allSeqScenes[allSeqScenes.length - 1]?.endTime ?? 0
+  }
+
+  // Global sceneIndex normalization
+  let globalSceneIndex = 1
+  for (const ch of chapters) {
+    for (const seq of ch.sequences) {
+      seq.scenes.sort((a, b) => a.startTime - b.startTime)
+      for (const sc of seq.scenes) {
+        sc.sceneIndex = globalSceneIndex++
+      }
+    }
+  }
+
   const allScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes))
+
+  // Run Pacing Guard
+  let pacingIssues: import('../../shared/types').PacingIssue[] = []
+  try {
+    const flatScenes = flattenPlanScenes({ chapters })
+    pacingIssues = analyzePacing(flatScenes)
+  } catch (err) {
+    logger.warn(`[PLAN] Algorithmic plan pacing guard warning: ${err}`)
+  }
+
+  const initialFlags: import('../../shared/types').RetentionFlag[] = pacingIssues.map((issue) => ({
+    sceneId: issue.sceneId,
+    severity: issue.accumulatedMonotoneSeconds > 240 ? 'high' : issue.accumulatedMonotoneSeconds > 150 ? 'medium' : 'low',
+    issue: `${issue.suggestion === 'vary_shot_type' ? 'Monotone shot type' : 'Monotone energy level'} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
+    suggestion:
+      issue.suggestion === 'insert_broll'
+        ? 'Insert a B-roll cutaway or add a stock clip with high motion/contrast'
+        : issue.suggestion === 'insert_text_overlay'
+          ? 'Add a text overlay (keyword callout) at this scene to break visual monotony'
+          : `Change shot type for visual variety`
+  }))
 
   return {
     projectName,
-    totalDuration,
+    totalDuration: transcript.duration,
     totalScenes: allScenes.length,
     language: transcript.language,
     chapters,
     generatedAt: new Date().toISOString(),
-    modelUsed: 'rule-based-engine'
+    modelUsed: 'rule-based-segmenter',
+    openLoops: [],
+    motifRegistry: [],
+    retentionFlags: initialFlags
   }
 }
 
@@ -287,80 +622,109 @@ export async function buildEditPlan(params: {
   }
   const transcript: TranscriptResult = JSON.parse(fs.readFileSync(transcriptPath, 'utf-8'))
 
-  // 2. Load script (optional)
-  progress('Loading script...', 0.08)
+  // 2. Load media index
+  progress('Loading media library...', 0.07)
   const mediaIndexPath = join(projectDir, 'analysis', 'media-index.json')
   let mediaFiles: MediaClip[] = []
 
   if (fs.existsSync(mediaIndexPath)) {
-    const rawItems = JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8')) as Array<{
-      type: string
-      path?: string
-      filename: string
-      durationSecs?: number
-      fps?: number
-      width?: number
-      height?: number
-    }>
-
-    mediaFiles = rawItems.map(item => ({
-      filePath: item.path ?? '',
-      filename: item.filename,
-      type: (item.type === 'video' ? 'video' : 'image') as 'video' | 'image',
-      durationSecs: item.durationSecs,
-      fps: item.fps,
-      width: item.width,
-      height: item.height
-    }))
+    try {
+      const rawItems = JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8')) as Array<{
+        type: string
+        path?: string
+        filename: string
+        durationSecs?: number
+        fps?: number
+        width?: number
+        height?: number
+      }>
+      mediaFiles = rawItems.map((item) => ({
+        filePath: item.path ?? '',
+        filename: item.filename,
+        type: (item.type === 'video' ? 'video' : 'image') as 'video' | 'image',
+        durationSecs: item.durationSecs,
+        fps: item.fps,
+        width: item.width,
+        height: item.height
+      }))
+    } catch { /* ignore */ }
   }
 
-  // 3. Load script text — prefer passed param, fallback to reading state file
+  // 3. Load script text and project state
   let scriptText: string | null = null
+  let projectName = 'Unnamed'
+  let projectPacing: Pacing = 'balanced'
+
   try {
-    // Try project-state.json (correct filename)
     const stateFile = fs.existsSync(join(projectDir, 'project-state.json'))
       ? join(projectDir, 'project-state.json')
       : join(projectDir, 'project.json')
 
-    const scriptPathFromParams = params.scriptPath
-    const scriptPathFromState = (() => {
-      try {
-        const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'))
-        return st?.inputs?.scriptPath as string | undefined
-      } catch { return undefined }
-    })()
-
-    const resolvedScriptPath = scriptPathFromParams ?? scriptPathFromState
-    if (resolvedScriptPath && fs.existsSync(resolvedScriptPath)) {
-      scriptText = fs.readFileSync(resolvedScriptPath, 'utf-8')
+    if (fs.existsSync(stateFile)) {
+      const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'))
+      projectName = st?.name ?? 'Unnamed'
+      if (st?.settings?.pacing && ['slow', 'balanced', 'fast', 'cinematic'].includes(st.settings.pacing)) {
+        projectPacing = st.settings.pacing as Pacing
+      }
+      const scriptPathFromState = st?.inputs?.scriptPath as string | undefined
+      const resolvedScriptPath = params.scriptPath ?? scriptPathFromState
+      if (resolvedScriptPath && fs.existsSync(resolvedScriptPath)) {
+        scriptText = fs.readFileSync(resolvedScriptPath, 'utf-8')
+      }
     }
   } catch (err) {
-    logger.warn(`Could not load script text: ${err}`)
+    logger.warn(`Could not load script text or project settings: ${err}`)
   }
 
-  // Re-read project name from state
-  let projectName = 'Unnamed'
+  // 4. Deterministic Scene Segmentation (Sections 4, 5, 6, 7, 8)
+  progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.10)
+  const skeletons = buildSceneSkeleton(transcript, projectPacing)
+  progress(
+    `Created ${skeletons.length} scene skeletons (avg ${(transcript.duration / skeletons.length).toFixed(1)}s/scene)...`,
+    0.14
+  )
+
+  const cleanApiKey = normalizeApiKey(apiKey)
+  if (!cleanApiKey) {
+    logger.warn('[PLAN] No API key provided, creating algorithmic edit plan')
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing)
+    const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
+    fs.writeFileSync(planPath, JSON.stringify(fallbackPlan, null, 2), 'utf-8')
+    progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1.0)
+    return fallbackPlan
+  }
+
+  // 5. Global Script Context (Section 12)
+  let globalContextSummary = ''
   try {
-    const stateFile = fs.existsSync(join(projectDir, 'project-state.json'))
-      ? join(projectDir, 'project-state.json')
-      : join(projectDir, 'project.json')
-    const st = JSON.parse(fs.readFileSync(stateFile, 'utf-8'))
-    projectName = st?.name ?? 'Unnamed'
-  } catch { /* ignore */ }
+    progress('Preparing global documentary context...', 0.16)
+    const ctx = await analyzeGlobalContext({
+      projectDir,
+      apiKey: cleanApiKey,
+      model: modelId,
+      scriptText,
+      transcript,
+      onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
+    })
+    globalContextSummary = [
+      `Primary Subject: ${ctx.primarySubject}`,
+      `Central Thesis: ${ctx.centralThesis}`,
+      ctx.geography?.primaryCountry ? `Geography: ${ctx.geography.primaryCountry} (${ctx.geography.primaryRegion ?? ''})` : '',
+      ctx.timeContext?.primaryPeriod ? `Period: ${ctx.timeContext.primaryPeriod}` : '',
+      ctx.exactTopicAnchors?.length ? `Topic Anchors: ${ctx.exactTopicAnchors.join(', ')}` : '',
+      ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(', ')}` : '',
+      ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ''
+    ].filter(Boolean).join('\n')
+  } catch (err) {
+    logger.warn(`[PLAN] Global context extraction failed: ${err}`)
+  }
 
-  progress(`Building prompt (${transcript.segments.length} segments, ${mediaFiles.length} media files)...`, 0.12)
-
-  // 4. Build prompt and call Gemini
-  const prompt = buildPrompt(transcript, scriptText, mediaFiles)
-
-  progress('Sending to Gemini AI...', 0.20)
-
+  // 6. Chapter & Sequence Outline (Section 13)
   const ai = new GoogleGenAI({
-    apiKey: normalizeApiKey(apiKey),
+    apiKey: cleanApiKey,
     httpOptions: { apiVersion: 'v1beta' }
   })
 
-  // Fallback model chain: selected model -> newest -> older stable
   const fallbackModelChain = [
     modelId,
     'gemini-3.8-flash',
@@ -369,163 +733,192 @@ export async function buildEditPlan(params: {
     'gemini-1.5-flash-latest'
   ].filter((v, i, a) => a.indexOf(v) === i)
 
-  let activeModelIndex = 0
-  let rawJson = ''
-  let finalModelUsed = modelId
-  const maxRetries = 5
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    const currentModel = fallbackModelChain[activeModelIndex]
-    try {
-      progress(
-        attempt === 1
-          ? `Đang gửi yêu cầu tới Gemini AI (${currentModel})...`
-          : `Thử lại lần ${attempt}/${maxRetries} (${currentModel})...`,
-        0.20 + (attempt - 1) * 0.1
-      )
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.3,
-          maxOutputTokens: 32768
-        }
-      })
-      rawJson = response.text ?? ''
-      finalModelUsed = currentModel
-      break
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const isOverloaded =
-        msg.includes('503') ||
-        msg.includes('high demand') ||
-        msg.includes('UNAVAILABLE') ||
-        msg.includes('429')
-
-      // Case A: Model is overloaded and we have another model in the fallback chain -> auto-switch immediately!
-      if (isOverloaded && activeModelIndex + 1 < fallbackModelChain.length) {
-        activeModelIndex++
-        const nextModel = fallbackModelChain[activeModelIndex]
-        logger.warn(`Model ${currentModel} overloaded (503). Auto-switching to fallback: ${nextModel}`)
-        progress(
-          `Model ${currentModel} đang quá tải (503). Tự động chuyển sang model dự phòng "${nextModel}"...`,
-          0.30 + (attempt / maxRetries) * 0.35
-        )
-        await new Promise((res) => setTimeout(res, 2000))
-        continue
-      }
-
-      // Case B: Retry with countdown backoff
-      if (isOverloaded && attempt < maxRetries) {
-        const waitSec = Math.min(attempt * 4, 16)
-        logger.warn(`Gemini 503 high demand (attempt ${attempt}/${maxRetries}), waiting ${waitSec}s...`)
-        for (let sec = waitSec; sec > 0; sec--) {
-          progress(
-            `Google AI đang quá tải (503 High Demand), tự động thử lại lần ${attempt + 1}/${maxRetries} sau ${sec}s...`,
-            0.30 + ((attempt - 1) / maxRetries) * 0.35
-          )
-          await new Promise((res) => setTimeout(res, 1000))
-        }
-        continue
-      }
-
-      // Case C: If all AI attempts fail, activate rule-based fallback generator
-      logger.warn(`All AI attempts failed (${msg}). Activating algorithmic rule-based fallback generator...`)
-      progress('Google AI tạm thời quá tải trên diện rộng. Tự động kích hoạt bộ tạo phân cảnh thông minh theo kịch bản...', 0.85)
-      const fallbackPlan = buildAlgorithmicPlan(transcript, projectName)
-      const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
-      fs.writeFileSync(planPath, JSON.stringify(fallbackPlan, null, 2), 'utf-8')
-      progress(`Hoàn tất — đã tạo phân cảnh dự phòng (${fallbackPlan.totalScenes} scenes)`, 1.0)
-      return fallbackPlan
-    }
-  }
-
-  progress('Parsing edit plan...', 0.85)
-
-  // 5. Parse and enrich
-  let planData: { chapters: ChapterPlan[] }
-  try {
-    // Strip markdown code fences if present
-    const clean = rawJson.replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
-    planData = JSON.parse(clean)
-  } catch (err) {
-    logger.warn('Failed to parse Gemini JSON, falling back to algorithmic plan', { raw: rawJson.slice(0, 300) })
-    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName)
-    const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
-    fs.writeFileSync(planPath, JSON.stringify(fallbackPlan, null, 2), 'utf-8')
-    progress(`Hoàn tất — đã tạo phân cảnh dự phòng (${fallbackPlan.totalScenes} scenes)`, 1.0)
-    return fallbackPlan
-  }
-
-  // Ensure every scene has mediaFile defined
-  for (const ch of planData.chapters || []) {
-    const seqs = (ch as { sequences?: unknown[]; chapters_seq?: unknown[] }).sequences ?? (ch as { chapters_seq?: unknown[] }).chapters_seq ?? []
-    for (const seq of seqs as Array<{ scenes?: Array<ScenePlan & { localAsset?: string }> }>) {
-      for (const sc of (seq.scenes || [])) {
-        if (!sc.mediaFile) {
-          sc.mediaFile = sc.localAsset || ''
-        }
-        if (!sc.mediaType) {
-          sc.mediaType = 'video'
-        }
-      }
-    }
-  }
-
-  // Compute totals
-  const allScenes = planData.chapters.flatMap(c =>
-    ((c as { sequences?: unknown[]; chapters_seq?: unknown[] }).sequences ?? (c as { chapters_seq?: unknown[] }).chapters_seq ?? [] as Array<{ scenes?: ScenePlan[] }>).flatMap(s => s.scenes ?? [])
+  progress('Creating chapter and sequence outline...', 0.20)
+  const outline = await generateChapterOutlineWithGemini(
+    ai,
+    fallbackModelChain,
+    skeletons,
+    globalContextSummary,
+    transcript.duration,
+    (m, p) => progress(m, p)
   )
-  const totalScenes = allScenes.length
-  const totalDuration = transcript.duration
 
-  // ── 5b. Run pacing-guard (algorithmic, no AI, fully synchronous) ──────────
-  // Annotates scenes in-place with energyLevel, shotType, isPatternInterrupt.
-  // Any failure is non-fatal: plan continues without pacing annotations.
-  progress('Running Pacing Guard analysis...', 0.88)
+  // 7. Batch Enrichment via Gemini (Sections 10, 11, 16)
+  const BATCH_SIZE = 20
+  const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE)
+  const allEnrichedMap = new Map<number, Partial<ScenePlan>>()
+  let hadAnyBatchFallback = false
+  let primaryModelUsed = modelId
+
+  for (let b = 0; b < totalBatches; b++) {
+    const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE)
+    const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
+      ai,
+      fallbackModelChain,
+      batchScenes,
+      globalContextSummary,
+      mediaFiles,
+      b,
+      totalBatches,
+      progress
+    )
+
+    for (const [idx, data] of enrichedMap.entries()) {
+      allEnrichedMap.set(idx, data)
+    }
+    if (usedFallback) hadAnyBatchFallback = true
+    if (b === 0) primaryModelUsed = modelUsed
+  }
+
+  // 8. Assemble Full Plan Structure (Chapters -> Sequences -> Scenes)
+  progress('Assembling master edit plan...', 0.85)
+
+  const skeletonMap = new Map<number, SceneSkeleton>()
+  for (const skel of skeletons) {
+    skeletonMap.set(skel.sceneIndex, skel)
+  }
+
+  const chapters: ChapterPlan[] = outline.map((ch) => ({
+    chapterIndex: ch.chapterIndex,
+    title: ch.title,
+    startTime: 0,
+    endTime: 0,
+    sequences: ch.sequences.map((seq) => {
+      const scenes: ScenePlan[] = []
+      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+        const skel = skeletonMap.get(idx)
+        if (!skel) continue
+
+        const aiData = allEnrichedMap.get(skel.sceneIndex)
+        const queries = aiData?.searchQueries && aiData.searchQueries.length >= 3
+          ? aiData.searchQueries
+          : extractVisualQueries(skel.narrativeText)
+
+        const sc: ScenePlan = {
+          sceneIndex: skel.sceneIndex, // will be globally normalized below
+          mediaFile: '',
+          mediaType: aiData?.mediaType === 'image' ? 'image' : 'video',
+          startTime: skel.startTime,
+          endTime: skel.endTime,
+          duration: skel.duration,
+          narrativeText: skel.narrativeText,
+          transcriptSegmentIds: [...skel.transcriptSegmentIds],
+          transitionIn: (aiData?.transitionIn as 'cut' | 'fade' | 'dissolve') ?? 'cut',
+          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
+          visualIntent: aiData?.visualIntent ?? queries[0] ?? 'Documentary cinematic b-roll',
+          searchQueries: queries,
+          energyLevel: (aiData?.energyLevel as 'low' | 'medium' | 'high') ?? inferEnergyLevelFromText(skel.narrativeText),
+          shotType: (aiData?.shotType as 'wide' | 'medium' | 'close-up' | 'abstract') ?? inferShotTypeFromText(skel.narrativeText)
+        }
+
+        applyLocalMediaMatching(sc, aiData?.localAsset, mediaFiles)
+        scenes.push(sc)
+      }
+
+      const seqStart = scenes[0]?.startTime ?? 0
+      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0
+      return {
+        sequenceIndex: seq.sequenceIndex,
+        title: seq.title,
+        startTime: seqStart,
+        endTime: seqEnd,
+        scenes
+      }
+    })
+  }))
+
+  // Ensure chapter start and end times reflect their sequences
+  for (const ch of chapters) {
+    const chScenes = ch.sequences.flatMap((s) => s.scenes)
+    ch.startTime = chScenes[0]?.startTime ?? 0
+    ch.endTime = chScenes[chScenes.length - 1]?.endTime ?? 0
+  }
+
+  // 9. Re-index sceneIndex globally (Section 14)
+  let globalSceneIndex = 1
+  for (const ch of chapters) {
+    for (const seq of ch.sequences) {
+      seq.scenes.sort((a, b) => a.startTime - b.startTime)
+      for (const sc of seq.scenes) {
+        sc.sceneIndex = globalSceneIndex++
+      }
+    }
+  }
+
+  const allFinalScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes))
+
+  // Validate global uniqueness of sceneIndex
+  const sceneIds = allFinalScenes.map((s) => s.sceneIndex)
+  if (new Set(sceneIds).size !== sceneIds.length) {
+    throw new Error('Duplicate global sceneIndex detected after assembly')
+  }
+
+  // 10. Validate Transcript Coverage (Section 15)
+  progress('Validating transcript coverage...', 0.88)
+  const coverageResult = validateScenePlanCoverage(transcript, allFinalScenes)
+  if (!coverageResult.valid) {
+    logger.error('[PLAN] Transcript coverage validation encountered issues:', { errors: coverageResult.errors })
+    // If fatal validation errors exist, log and throw
+    if (coverageResult.missingSegmentIds.length > 0) {
+      throw new Error(`Transcript coverage validation failed: missing segments [${coverageResult.missingSegmentIds.join(', ')}]`)
+    }
+  }
+
+  // 11. Run Pacing Guard (Section 18)
+  progress('Running Pacing Guard analysis...', 0.90)
   let pacingIssues: import('../../shared/types').PacingIssue[] = []
   try {
-    const flatScenes = flattenPlanScenes(planData as { chapters: Array<{ sequences?: Array<{ scenes?: PacingScene[] }>; chapters_seq?: Array<{ scenes?: PacingScene[] }> }> })
+    const flatScenes = flattenPlanScenes({ chapters })
     pacingIssues = analyzePacing(flatScenes)
     logger.info(`[PLAN] Pacing Guard: ${pacingIssues.length} issues found, scenes annotated in-place`)
   } catch (pgErr: unknown) {
     logger.warn(`[PLAN] Pacing Guard error (non-fatal): ${pgErr instanceof Error ? pgErr.message : String(pgErr)}`)
   }
 
-  // Convert pacing issues into initial retention flags (severity heuristic)
   const initialFlags: import('../../shared/types').RetentionFlag[] = pacingIssues.map((issue) => ({
     sceneId: issue.sceneId,
     severity: issue.accumulatedMonotoneSeconds > 240 ? 'high' : issue.accumulatedMonotoneSeconds > 150 ? 'medium' : 'low',
     issue: `${issue.suggestion === 'vary_shot_type' ? 'Monotone shot type' : 'Monotone energy level'} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
-    suggestion: issue.suggestion === 'insert_broll'
-      ? 'Insert a B-roll cutaway or add a stock clip with high motion/contrast'
-      : issue.suggestion === 'insert_text_overlay'
-        ? 'Add a text overlay (keyword callout) at this scene to break visual monotony'
-        : `Change shot type to "${(allScenes[Number(issue.sceneId) - 1] as ScenePlan | undefined)?.shotType ?? 'wide'}" for visual variety`
+    suggestion:
+      issue.suggestion === 'insert_broll'
+        ? 'Insert a B-roll cutaway or add a stock clip with high motion/contrast'
+        : issue.suggestion === 'insert_text_overlay'
+          ? 'Add a text overlay (keyword callout) at this scene to break visual monotony'
+          : `Change shot type to "${(allFinalScenes[Number(issue.sceneId) - 1] as ScenePlan | undefined)?.shotType ?? 'wide'}" for visual variety`
   }))
 
+  const finalModelUsed = hadAnyBatchFallback
+    ? `${primaryModelUsed} + partial-fallback`
+    : primaryModelUsed
+
   const plan: MasterEditPlan = {
-    projectName: projectName,
-    totalDuration,
-    totalScenes,
+    projectName,
+    totalDuration: transcript.duration,
+    totalScenes: allFinalScenes.length,
     language: transcript.language,
-    chapters: planData.chapters,
+    chapters,
     generatedAt: new Date().toISOString(),
     modelUsed: finalModelUsed,
-    // Retention Engine fields — pacing-guard populates retentionFlags here;
-    // Gemini QA pass (runRetentionQAPass) will add/replace them with AI analysis.
     openLoops: [],
     motifRegistry: [],
     retentionFlags: initialFlags
   }
 
-  // 6. Save
-  progress('Saving edit plan...', 0.95)
+  // 12. Save Master Edit Plan (Section 19)
+  progress('Saving master edit plan...', 0.95)
   const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
-  logger.info('Edit plan saved', { chapters: plan.chapters.length, scenes: totalScenes, pacingIssues: pacingIssues.length })
+  logger.info('Edit plan saved', {
+    chapters: plan.chapters.length,
+    scenes: plan.totalScenes,
+    pacingIssues: pacingIssues.length,
+    model: finalModelUsed
+  })
 
-  progress(`Done — ${plan.chapters.length} chapters, ${totalScenes} scenes, ${initialFlags.length} pacing flags`, 1.0)
+  progress(
+    `Done — ${plan.chapters.length} chapters, ${plan.totalScenes} scenes (${(plan.totalDuration / plan.totalScenes).toFixed(1)}s/scene), ${initialFlags.length} pacing flags`,
+    1.0
+  )
+
   return plan
 }

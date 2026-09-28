@@ -212,11 +212,11 @@ function ChapterCard({ chapter, sceneOffset, highlightedSceneId }: { chapter: Ch
                   {fmt(seq.startTime)}–{fmt(seq.endTime)}
                 </span>
               </div>
-              {seq.scenes.map((scene, si) => (
+              {seq.scenes.map((scene) => (
                 <SceneRow
                   key={scene.sceneIndex}
                   scene={scene}
-                  globalIdx={sceneOffset + si + 1}
+                  globalIdx={scene.sceneIndex}
                   isHighlighted={highlightedSceneId === String(scene.sceneIndex)}
                 />
               ))}
@@ -543,6 +543,10 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
           <div className="stat-card">
             <div className="stat-value accent">{fmt(plan.totalDuration)}</div>
             <div className="stat-label">Duration</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-value accent">{(plan.totalDuration / Math.max(1, plan.totalScenes)).toFixed(1)}s</div>
+            <div className="stat-label">Avg Scene</div>
           </div>
           {(plan.retentionFlags?.length ?? 0) > 0 && (
             <div className="stat-card" style={{ borderColor: '#f59e0b33' }}>
