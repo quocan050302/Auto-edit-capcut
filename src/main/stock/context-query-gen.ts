@@ -12,6 +12,13 @@ import { join } from "path"
 import { createHash as cryptoHash } from "crypto"
 import { logger } from "../logger"
 import { normalizeApiKey } from "../utils/api-key"
+import {
+  normalizePreferredTextModel,
+  buildFallbackModelList,
+  classifyGeminiErrorKind,
+  DEPRECATED_TEXT_MODELS
+} from "../utils/gemini-fallback"
+import { sanitizeStockQuery, dedupeStockQueries } from "./query-sanitizer"
 import type { GlobalScriptContext, SceneContextPacket, StockSearchPlan } from "../../../shared/types"
 
 export type QueryProgressCallback = (msg: string, pct: number) => void
@@ -124,34 +131,48 @@ function buildFallbackPlan(packet: SceneContextPacket, globalCtx: GlobalScriptCo
   const anchor = globalCtx.exactTopicAnchors[0] ?? globalCtx.primarySubject
   const env = globalCtx.visualWorld.environment[0] ?? "rural"
   const action = packet.localContext.visibleAction || "community life"
-  const location = globalCtx.geography.primaryRegion ?? globalCtx.geography.primaryCountry ?? ""
+  const locRaw = globalCtx.geography.primaryRegion ?? globalCtx.geography.primaryCountry ?? ""
+  const location = locRaw.toLowerCase().includes("not specified") ? "" : locRaw
 
-  return {
-    visualIntent: `${anchor} ${action}`,
-    exactQueries: [
-      `${anchor} ${action} ${location}`.trim(),
-      `${anchor} ${action}`.trim(),
-      `${anchor} community ${env}`.trim()
-    ],
-    subjectQueries: [
-      `${anchor} ${env}`,
-      `${anchor} community`
-    ],
-    contextualQueries: [
-      `${env} community ${action}`,
-      `rural ${action}`,
-      packet.chapterContext.chapterTitle.toLowerCase()
-    ],
-    fallbackQueries: [
-      action,
-      env + " landscape"
-    ],
+  const plan: StockSearchPlan = {
+    visualIntent: sanitizeStockQuery(`${anchor} ${action}`),
+    exactQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${anchor} ${action} ${location}`.trim()),
+      sanitizeStockQuery(`${anchor} ${action}`.trim()),
+      sanitizeStockQuery(`${anchor} community ${env}`.trim())
+    ]),
+    subjectQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${anchor} ${env}`),
+      sanitizeStockQuery(`${anchor} community`)
+    ]),
+    contextualQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${env} community ${action}`),
+      sanitizeStockQuery(`rural ${action}`),
+      sanitizeStockQuery(packet.chapterContext.chapterTitle.toLowerCase())
+    ]),
+    fallbackQueries: dedupeStockQueries([
+      sanitizeStockQuery(action),
+      sanitizeStockQuery(env + " landscape")
+    ]),
     requiredTerms: [anchor],
     preferredTerms: globalCtx.contextualAnchors.slice(0, 3),
     negativeTerms: globalCtx.negativeKeywords,
     targetMediaType: "video",
     desiredShotTypes: ["wide shot", "medium shot"],
     desiredOrientation: "landscape"
+  }
+  return plan
+}
+
+function sanitizePlan(plan: StockSearchPlan): StockSearchPlan {
+  const fallback = sanitizeStockQuery(plan.visualIntent || "documentary footage")
+  return {
+    ...plan,
+    visualIntent: sanitizeStockQuery(plan.visualIntent, fallback),
+    exactQueries: dedupeStockQueries((plan.exactQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    subjectQueries: dedupeStockQueries((plan.subjectQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    contextualQueries: dedupeStockQueries((plan.contextualQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    fallbackQueries: dedupeStockQueries((plan.fallbackQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5)
   }
 }
 
@@ -168,54 +189,102 @@ export async function generateContextAwareSearchPlan(params: {
   onProgress?: QueryProgressCallback
 }): Promise<StockSearchPlan> {
   const { projectDir, apiKey, packet, globalContext, sceneId, useCache = true } = params
-  const modelId = params.model ?? "gemini-3.8-flash"
+  const rawModel = params.model
 
+  if (rawModel && DEPRECATED_TEXT_MODELS.has(rawModel)) {
+    logger.warn(`[GeminiModel] Saved model ${rawModel} is unavailable for this account.`)
+    logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(rawModel)}.`)
+  }
+
+  const fallbackModels = buildFallbackModelList(rawModel)
   const cacheKey = makeCacheKey(globalContext, sceneId, packet.localContext.narration)
   const cache = useCache ? loadQueryCache(projectDir) : {}
 
   // Cache hit
   if (useCache && cache[cacheKey] && cache[cacheKey].contextVersion === globalContext.version) {
     logger.info(`[QueryGen] Cache hit for scene ${sceneId}`)
-    return cache[cacheKey].plan
+    return sanitizePlan(cache[cacheKey].plan)
   }
 
-  const ai = new GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } })
-  const prompt = buildScenePrompt(packet, globalContext)
-  const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i)
+  const cleanKey = normalizeApiKey(apiKey)
   let rawJson = ""
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)]
-    try {
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-        config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 2048 }
-      })
-      rawJson = response.text ?? ""
-      break
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err)
-      const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE")
-      if (overloaded && attempt < 3) {
-        await new Promise((r) => setTimeout(r, 2000 * attempt))
-        continue
+  if (cleanKey.length > 0) {
+    const ai = new GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } })
+    const prompt = buildScenePrompt(packet, globalContext)
+
+    for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+      const currentModel = fallbackModels[mIdx]
+      let retryCount = 0
+      const maxRetries = 2
+
+      while (retryCount <= maxRetries) {
+        try {
+          const response = await ai.models.generateContent({
+            model: currentModel,
+            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+            config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 2048 }
+          })
+          rawJson = response.text ?? ""
+          if (rawJson) {
+            logger.info(`[QueryGen] Scene ${sceneId} generated successfully with ${currentModel}.`)
+            break
+          }
+        } catch (err: unknown) {
+          const { kind, message } = classifyGeminiErrorKind(err)
+
+          if (kind === "MODEL_NOT_FOUND") {
+            const nextModel = fallbackModels[mIdx + 1]
+            logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`)
+            break // switch immediately to next model without retry
+          }
+
+          if (kind === "AUTH_ERROR") {
+            logger.error(`[QueryGen] Gemini authentication error. Check API key.`)
+            mIdx = fallbackModels.length // stop further model attempts
+            break
+          }
+
+          if (kind === "BAD_REQUEST") {
+            logger.warn(`[QueryGen] Gemini bad request: ${message.slice(0, 100)}`)
+            break
+          }
+
+          // RATE_LIMIT or SERVICE_UNAVAILABLE or UNKNOWN
+          retryCount++
+          if (retryCount <= maxRetries) {
+            const delay = Math.pow(2, retryCount) * 1000 + Math.floor(Math.random() * 500)
+            logger.warn(`[QueryGen] Gemini ${currentModel} error (${kind}), retrying in ${delay}ms...`)
+            await new Promise((r) => setTimeout(r, delay))
+          } else {
+            logger.warn(`[QueryGen] Gemini ${currentModel} exhausted retries, switching model...`)
+            break
+          }
+        }
       }
-      logger.warn(`[QueryGen] Scene ${sceneId} AI failed (${msg}), using rule-based fallback`)
-      return buildFallbackPlan(packet, globalContext)
+
+      if (rawJson) {
+        break
+      }
     }
   }
 
   let plan: StockSearchPlan
-  try {
-    const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
-    plan = JSON.parse(clean) as StockSearchPlan
-    // Validate required fields
-    if (!plan.exactQueries?.length) throw new Error("Missing exactQueries")
-  } catch {
-    logger.warn(`[QueryGen] Scene ${sceneId} JSON parse failed, using rule-based fallback`)
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
+      plan = JSON.parse(clean) as StockSearchPlan
+      if (!plan.exactQueries?.length) throw new Error("Missing exactQueries")
+    } catch {
+      logger.warn(`[QueryGen] Scene ${sceneId} JSON parse failed, using rule-based fallback`)
+      plan = buildFallbackPlan(packet, globalContext)
+    }
+  } else {
+    logger.warn(`[QueryGen] Scene ${sceneId} AI failed, using rule-based fallback`)
     plan = buildFallbackPlan(packet, globalContext)
   }
+
+  plan = sanitizePlan(plan)
 
   // Save to cache
   if (useCache) {

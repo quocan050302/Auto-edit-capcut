@@ -26,6 +26,12 @@ import type {
 } from "../../../shared/types"
 import { pexelsSearchVideos, pexelsSearchPhotos } from "./providers/pexels"
 import { pixabaySearchVideos, pixabaySearchPhotos } from "./providers/pixabay"
+import {
+  setPixabayProjectDir,
+  isPixabayPaused,
+  getPixabayPauseRemainingSecs
+} from "./providers/pixabay-rate-limiter"
+import { sanitizeStockQuery, dedupeStockQueries } from "./query-sanitizer"
 import { QueryCache } from "./query-cache"
 import { downloadAsset, loadAssetsManifest, saveAssetsManifest } from "./downloader"
 import { analyzeGlobalContext, loadGlobalContext } from "./global-context-analyzer"
@@ -83,14 +89,20 @@ function toOrientation(ar: string | undefined): "landscape" | "portrait" | "squa
   return "landscape"
 }
 
-// ------ Tiered search (A->B->C->D) ------------------------------------------
+export const MIN_ACCEPTABLE_CANDIDATE_SCORE = 55
+export const TARGET_CANDIDATES_PER_SCENE = 3
+export const MAX_PIXABAY_QUERIES_PER_SCENE = 2
+
+// ------ Tiered search (A->B->C->D) with Provider Waterfall -----------------
 
 async function searchWithTieredPlan(
   plan: StockSearchPlan,
   pexelsApiKey: string,
   pixabayApiKey: string | undefined,
   orientation: "landscape" | "portrait" | "square",
-  cache: QueryCache
+  cache: QueryCache,
+  onProgressMsg?: (msg: string) => void,
+  scoreEvaluator?: (candidates: StockSearchResult[]) => number
 ): Promise<{ candidates: StockSearchResult[]; tierUsed: "A" | "B" | "C" | "D" }> {
   const allCandidates: StockSearchResult[] = []
   const seenIds = new Set<string>()
@@ -104,88 +116,144 @@ async function searchWithTieredPlan(
     }
   }
 
-  const searchTier = async (queries: string[], minNeeded: number): Promise<boolean> => {
-    for (const query of queries) {
-      if (pexelsApiKey) {
-        const cached = cache.get(`pexels_v:${query}`)
-        if (cached) {
-          addCandidates(cached)
-        } else {
-          const res = await pexelsSearchVideos(query, pexelsApiKey, 8, orientation)
-          cache.set(`pexels_v:${query}`, res)
-          addCandidates(res)
-        }
-      }
+  // 1. Sanitize all queries
+  const fallback = sanitizeStockQuery(plan.visualIntent || "documentary footage")
+  const sanitizedPlan: StockSearchPlan = {
+    ...plan,
+    exactQueries: dedupeStockQueries((plan.exactQueries || []).map((q) => sanitizeStockQuery(q, fallback))),
+    subjectQueries: dedupeStockQueries((plan.subjectQueries || []).map((q) => sanitizeStockQuery(q, fallback))),
+    contextualQueries: dedupeStockQueries((plan.contextualQueries || []).map((q) => sanitizeStockQuery(q, fallback))),
+    fallbackQueries: dedupeStockQueries((plan.fallbackQueries || []).map((q) => sanitizeStockQuery(q, fallback)))
+  }
 
-      if (pixabayApiKey) {
+  const searchPexelsList = async (queries: string[]): Promise<void> => {
+    if (!pexelsApiKey) return
+    for (const query of queries) {
+      const cached = cache.get(`pexels_v:${query}`)
+      if (cached) {
+        addCandidates(cached)
+      } else {
+        const res = await pexelsSearchVideos(query, pexelsApiKey, 8, orientation)
+        cache.set(`pexels_v:${query}`, res)
+        addCandidates(res)
+      }
+      if (allCandidates.length >= 10) break
+    }
+  }
+
+  const pexelsPhotoFallback = async (queries: string[]): Promise<void> => {
+    if (!pexelsApiKey) return
+    for (const query of queries.slice(0, 2)) {
+      const cached = cache.get(`pexels_p:${query}`)
+      if (cached) {
+        addCandidates(cached)
+      } else {
+        const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, orientation)
+        cache.set(`pexels_p:${query}`, res)
+        addCandidates(res)
+      }
+    }
+  }
+
+  // 2. Search Pexels across tiers first
+  let pexelsTier: "A" | "B" | "C" | "D" = "D"
+
+  // Tier A -- exact
+  await searchPexelsList(sanitizedPlan.exactQueries)
+  if (allCandidates.length > 0) pexelsTier = "A"
+
+  // Tier B -- subject
+  if (allCandidates.length < TARGET_CANDIDATES_PER_SCENE) {
+    await searchPexelsList(sanitizedPlan.subjectQueries)
+    if (pexelsTier === "D" && allCandidates.length > 0) pexelsTier = "B"
+  }
+
+  // Tier C -- contextual
+  if (allCandidates.length < TARGET_CANDIDATES_PER_SCENE) {
+    await searchPexelsList(sanitizedPlan.contextualQueries)
+    if (pexelsTier === "D" && allCandidates.length > 0) pexelsTier = "C"
+  }
+
+  // Photo fallback if still few candidates
+  if (allCandidates.length < 2) {
+    await pexelsPhotoFallback([...sanitizedPlan.exactQueries, ...sanitizedPlan.subjectQueries])
+  }
+
+  // Check if Pexels returned enough candidates of acceptable quality
+  const bestScore = scoreEvaluator ? scoreEvaluator(allCandidates) : 60
+  const hasEnoughCandidates =
+    allCandidates.length >= TARGET_CANDIDATES_PER_SCENE && bestScore >= MIN_ACCEPTABLE_CANDIDATE_SCORE
+
+  if (hasEnoughCandidates) {
+    onProgressMsg?.("Pexels returned enough candidates. Pixabay skipped to preserve API quota.")
+    logger.info(`[StockEngine] Pexels returned enough candidates (${allCandidates.length}, best score ${bestScore}). Pixabay skipped to preserve API quota.`)
+    return { candidates: allCandidates, tierUsed: pexelsTier }
+  }
+
+  // 3. Fallback to Pixabay if needed
+  if (pixabayApiKey) {
+    if (isPixabayPaused()) {
+      const waitSec = getPixabayPauseRemainingSecs()
+      if (waitSec > 0) {
+        onProgressMsg?.(`Pixabay rate limit reached. Waiting ${waitSec} seconds while Pexels continues...`)
+        logger.info(`[Pixabay] Rate limit paused (${waitSec}s remaining). Skipping Pixabay for this scene.`)
+      } else {
+        onProgressMsg?.("Pixabay temporarily unavailable. Continuing with Pexels and cached assets.")
+        logger.info("[Pixabay] Provider temporarily unavailable. Continuing with Pexels and cached assets.")
+      }
+    } else {
+      // Limit to at most MAX_PIXABAY_QUERIES_PER_SCENE
+      const pixabayQueries = dedupeStockQueries([
+        ...sanitizedPlan.exactQueries,
+        ...sanitizedPlan.subjectQueries,
+        ...sanitizedPlan.contextualQueries,
+        ...sanitizedPlan.fallbackQueries
+      ]).slice(0, MAX_PIXABAY_QUERIES_PER_SCENE)
+
+      const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal"
+
+      for (const query of pixabayQueries) {
+        if (isPixabayPaused()) break
         const cached = cache.get(`pixabay_v:${query}`)
         if (cached) {
           addCandidates(cached)
         } else {
-          const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal"
-          const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation)
-          cache.set(`pixabay_v:${query}`, res)
-          addCandidates(res)
+          try {
+            const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation)
+            cache.set(`pixabay_v:${query}`, res)
+            addCandidates(res)
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Video search failed for query "${query}": ${pxErr}`)
+          }
         }
+        if (allCandidates.length >= 10) break
       }
 
-      if (allCandidates.length >= 12) break
-    }
-    return allCandidates.length >= minNeeded
-  }
-
-  const photoFallback = async (queries: string[]): Promise<void> => {
-    for (const query of queries.slice(0, 2)) {
-      if (pexelsApiKey) {
-        const cached = cache.get(`pexels_p:${query}`)
+      if (allCandidates.length < 2 && pixabayQueries.length > 0 && !isPixabayPaused()) {
+        const topQuery = pixabayQueries[0]
+        const cached = cache.get(`pixabay_p:${topQuery}`)
         if (cached) {
           addCandidates(cached)
         } else {
-          const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, orientation)
-          cache.set(`pexels_p:${query}`, res)
-          addCandidates(res)
-        }
-      }
-
-      if (pixabayApiKey) {
-        const cached = cache.get(`pixabay_p:${query}`)
-        if (cached) {
-          addCandidates(cached)
-        } else {
-          const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal"
-          const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, pxOrientation)
-          cache.set(`pixabay_p:${query}`, res)
-          addCandidates(res)
+          try {
+            const res = await pixabaySearchPhotos(topQuery, pixabayApiKey, 6, pxOrientation)
+            cache.set(`pixabay_p:${topQuery}`, res)
+            addCandidates(res)
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Photo search failed for query "${topQuery}": ${pxErr}`)
+          }
         }
       }
     }
   }
 
-  // Tier A -- exact
-  const tierAok = await searchTier(plan.exactQueries, 3)
-  if (tierAok && allCandidates.length >= 3) {
-    if (allCandidates.length < 2) await photoFallback(plan.exactQueries)
-    return { candidates: allCandidates, tierUsed: "A" }
+  // If still empty, try fallbackQueries on Pexels
+  if (allCandidates.length === 0 && pexelsApiKey) {
+    await searchPexelsList(sanitizedPlan.fallbackQueries)
+    await pexelsPhotoFallback(sanitizedPlan.fallbackQueries)
   }
 
-  // Tier B -- subject
-  const tierBok = await searchTier(plan.subjectQueries, 3)
-  if (tierBok && allCandidates.length >= 3) {
-    if (allCandidates.length < 2) await photoFallback(plan.subjectQueries)
-    return { candidates: allCandidates, tierUsed: "B" }
-  }
-
-  // Tier C -- contextual
-  await searchTier(plan.contextualQueries, 2)
-  if (allCandidates.length >= 2) {
-    if (allCandidates.length < 2) await photoFallback(plan.contextualQueries)
-    return { candidates: allCandidates, tierUsed: "C" }
-  }
-
-  // Tier D -- illustrative fallback
-  await searchTier(plan.fallbackQueries, 1)
-  await photoFallback(plan.fallbackQueries)
-  return { candidates: allCandidates, tierUsed: "D" }
+  return { candidates: allCandidates, tierUsed: pexelsTier }
 }
 
 // ------ Main engine ----------------------------------------------------------
@@ -203,6 +271,9 @@ export async function runContextAwareStockEngine(
     model,
     forceReanalysis = false
   } = params
+
+  // Set project dir for persistent Pixabay cache
+  setPixabayProjectDir(projectDir)
 
   // Load edit plan
   const planPath = join(projectDir, "analysis", "master-edit-plan.json")
@@ -323,7 +394,7 @@ export async function runContextAwareStockEngine(
     const narration = scene.narrativeText ?? ""
     const sceneDuration = scene.duration ?? (scene.endTime - scene.startTime)
 
-    onProgress(`[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} — candidate search...`, pct)
+    onProgress(`[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - candidate search...`, pct)
 
     const prevEntry = i > 0 ? scenesToProcess[i - 1] : null
     const nextEntry = i < scenesToProcess.length - 1 ? scenesToProcess[i + 1] : null
@@ -416,12 +487,34 @@ export async function runContextAwareStockEngine(
     }
 
     try {
+      const scoreEvaluator = (candidatesToScore: StockSearchResult[]): number => {
+        if (!candidatesToScore.length) return 0
+        if (hasGlobalContext && globalContext) {
+          const evalCtx = {
+            globalContext: globalContext!,
+            chapterTitle,
+            chapterPurpose,
+            narration,
+            visualIntent: planToUse.visualIntent,
+            scenePurpose: scene.visualIntent ?? "",
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            usedAssetIds
+          }
+          const ranked = rankContextCandidates(candidatesToScore, evalCtx)
+          return ranked[0]?.contextScore.totalScore ?? 0
+        }
+        return 60
+      }
+
       const { candidates, tierUsed: tu } = await searchWithTieredPlan(
         planToUse,
         pexelsApiKey,
         pixabayApiKey,
         orientation,
-        cache
+        cache,
+        (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct),
+        scoreEvaluator
       )
       tierUsed = tu
 

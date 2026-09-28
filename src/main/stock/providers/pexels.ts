@@ -18,7 +18,7 @@ async function pexelsFetch(url: string, apiKey: string, attempt = 0): Promise<Re
   if (res.status === 429 && attempt < 3) {
     const retryAfter = Number(res.headers.get('Retry-After') ?? 5) || 5
     const delay = Math.max(retryAfter, Math.pow(2, attempt) * 3) * 1000
-    logger.warn(`[Pexels] 429 rate-limited — waiting ${delay / 1000}s (attempt ${attempt + 1}/3)`)
+    logger.warn(`[Pexels] 429 rate-limited - waiting ${delay / 1000}s (request ${attempt + 1}/3)`)
     await new Promise((r) => setTimeout(r, delay))
     return pexelsFetch(url, apiKey, attempt + 1)
   }

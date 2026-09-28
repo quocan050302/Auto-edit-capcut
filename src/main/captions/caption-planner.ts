@@ -16,6 +16,12 @@ import * as path from 'path'
 import { GoogleGenAI } from '@google/genai'
 import { logger } from '../logger'
 import { normalizeApiKey } from '../utils/api-key'
+import {
+  normalizePreferredTextModel,
+  buildFallbackModelList,
+  classifyGeminiErrorKind,
+  DEPRECATED_TEXT_MODELS
+} from '../utils/gemini-fallback'
 import type {
   CaptionPlan,
   CaptionPhrase,
@@ -369,8 +375,11 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
   const allWords = transcript.segments.flatMap(seg => seg.words ?? [])
 
   // Thử Gemini với fallback chain
-  const fallbackModels = [modelId, 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest']
-    .filter((v, i, a) => a.indexOf(v) === i)
+  if (modelId && DEPRECATED_TEXT_MODELS.has(modelId)) {
+    logger.warn(`[GeminiModel] Saved model ${modelId} is unavailable for this account.`)
+    logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(modelId)}.`)
+  }
+  const fallbackModels = buildFallbackModelList(modelId)
 
   let plan: CaptionPlan | null = null
 
@@ -415,13 +424,19 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
       logger.info(`[CaptionPlanner] Gemini thành công với model ${currentModel}, ${plan.phrases.length} phrases`)
       break
     } catch (err) {
-      logger.warn(`[CaptionPlanner] ${currentModel} thất bại: ${String(err)}`)
+      const { kind } = classifyGeminiErrorKind(err)
+      if (kind === 'MODEL_NOT_FOUND') {
+        const nextModel = fallbackModels[attempt + 1]
+        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? 'rule-based fallback'}.`)
+      } else {
+        logger.warn(`[CaptionPlanner] ${currentModel} thất bại: ${String(err)}`)
+      }
     }
   }
 
   // Fallback thuật toán nếu tất cả model đều lỗi
   if (!plan) {
-    progress('Gemini không khả dụng — dùng fallback thuật toán...', 0.70)
+    progress('Gemini không khả dụng - dùng fallback thuật toán...', 0.70)
     plan = buildFallbackCaptionPlan(transcript, scenes)
   }
 

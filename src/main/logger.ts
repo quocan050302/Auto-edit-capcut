@@ -16,7 +16,11 @@ const logFormat = winston.format.combine(
   winston.format.errors({ stack: true }),
   winston.format.printf(({ level, message, timestamp, ...meta }) => {
     const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : ''
-    return `[${timestamp}] ${level.toUpperCase()}: ${message}${metaStr}`
+    const safeMsg = String(message)
+      .replace(/—/g, '-')
+      .replace(/→/g, '->')
+      .replace(/…/g, '...')
+    return `[${timestamp}] ${level.toUpperCase()}: ${safeMsg}${metaStr}`
   })
 )
 

@@ -10,6 +10,10 @@ const CONFIG_PATH = join(
   'app-config.json'
 );
 
+import { normalizePreferredTextModel, DEPRECATED_TEXT_MODELS, RECOMMENDED_TEXT_MODELS } from "./utils/gemini-fallback";
+
+export { normalizePreferredTextModel, DEPRECATED_TEXT_MODELS, RECOMMENDED_TEXT_MODELS };
+
 export interface AppConfig {
   geminiApiKey?: string;
   openaiApiKey?: string;
@@ -22,7 +26,11 @@ export interface AppConfig {
 export function loadConfig(): AppConfig {
   try {
     if (fs.existsSync(CONFIG_PATH)) {
-      return JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+      const cfg = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8")) as AppConfig;
+      if (cfg.preferredModel) {
+        cfg.preferredModel = normalizePreferredTextModel(cfg.preferredModel);
+      }
+      return cfg;
     }
   } catch {
     logger.warn("Failed to read app config, using defaults");

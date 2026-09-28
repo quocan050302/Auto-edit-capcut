@@ -17,6 +17,12 @@ import type {
 } from '../../../shared/types'
 import { pexelsSearchVideos, pexelsSearchPhotos } from './providers/pexels'
 import { pixabaySearchVideos, pixabaySearchPhotos } from './providers/pixabay'
+import {
+  setPixabayProjectDir,
+  isPixabayPaused,
+  getPixabayPauseRemainingSecs
+} from './providers/pixabay-rate-limiter'
+import { sanitizeStockQuery, dedupeStockQueries } from './query-sanitizer'
 import { QueryCache } from './query-cache'
 import { rankCandidates } from './ranker'
 import { downloadAsset, loadAssetsManifest, saveAssetsManifest } from './downloader'
@@ -62,7 +68,7 @@ interface EditPlan {
   [key: string]: unknown
 }
 
-/** Perform provider search for a single scene's queries across Pexels and Pixabay */
+/** Perform provider search for a single scene's queries across Pexels and Pixabay with waterfall */
 async function searchForScene(
   queries: string[],
   pexelsApiKey: string,
@@ -82,8 +88,12 @@ async function searchForScene(
     }
   }
 
-  for (const query of queries) {
-    if (pexelsApiKey) {
+  // Sanitize all queries
+  const cleanQueries = dedupeStockQueries(queries.map((q) => sanitizeStockQuery(q)))
+
+  // 1. Search Pexels videos first
+  if (pexelsApiKey) {
+    for (const query of cleanQueries) {
       const cached = cache.get(`pexels_v:${query}`)
       if (cached) {
         addCandidates(cached)
@@ -92,26 +102,47 @@ async function searchForScene(
         cache.set(`pexels_v:${query}`, res)
         addCandidates(res)
       }
+      if (allCandidates.length >= 10) break
     }
+  }
 
-    if (pixabayApiKey) {
-      const cached = cache.get(`pixabay_v:${query}`)
-      if (cached) {
-        addCandidates(cached)
-      } else {
-        const orientation = preferredOrientation === 'portrait' ? 'vertical' : 'horizontal'
-        const res = await pixabaySearchVideos(query, pixabayApiKey, 8, orientation)
-        cache.set(`pixabay_v:${query}`, res)
-        addCandidates(res)
+  // 2. If Pexels has enough candidates, skip Pixabay to preserve quota
+  if (allCandidates.length >= 3) {
+    logger.info(`[StockEngine] Pexels returned enough candidates (${allCandidates.length}). Pixabay skipped to preserve API quota.`)
+    return allCandidates
+  }
+
+  // 3. Fallback to Pixabay if needed
+  if (pixabayApiKey) {
+    if (isPixabayPaused()) {
+      const waitSec = getPixabayPauseRemainingSecs()
+      logger.info(`[Pixabay] Rate limit paused (${waitSec}s remaining). Skipping Pixabay for this scene.`)
+    } else {
+      const pxOrientation = preferredOrientation === 'portrait' ? 'vertical' : 'horizontal'
+      // Limit to top 2 queries for Pixabay
+      const pixabayQueries = cleanQueries.slice(0, 2)
+      for (const query of pixabayQueries) {
+        if (isPixabayPaused()) break
+        const cached = cache.get(`pixabay_v:${query}`)
+        if (cached) {
+          addCandidates(cached)
+        } else {
+          try {
+            const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation)
+            cache.set(`pixabay_v:${query}`, res)
+            addCandidates(res)
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Video search failed for query "${query}": ${pxErr}`)
+          }
+        }
+        if (allCandidates.length >= 10) break
       }
     }
-
-    if (allCandidates.length >= 10) break
   }
 
   // Photo fallback if few video candidates
   if (allCandidates.length < 3) {
-    for (const query of queries.slice(0, 2)) {
+    for (const query of cleanQueries.slice(0, 2)) {
       if (pexelsApiKey) {
         const cached = cache.get(`pexels_p:${query}`)
         if (cached) {
@@ -123,15 +154,19 @@ async function searchForScene(
         }
       }
 
-      if (pixabayApiKey) {
+      if (pixabayApiKey && !isPixabayPaused() && allCandidates.length < 2) {
         const cached = cache.get(`pixabay_p:${query}`)
         if (cached) {
           addCandidates(cached)
         } else {
-          const orientation = preferredOrientation === 'portrait' ? 'vertical' : 'horizontal'
-          const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation)
-          cache.set(`pixabay_p:${query}`, res)
-          addCandidates(res)
+          try {
+            const orientation = preferredOrientation === 'portrait' ? 'vertical' : 'horizontal'
+            const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation)
+            cache.set(`pixabay_p:${query}`, res)
+            addCandidates(res)
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Photo search failed for query "${query}": ${pxErr}`)
+          }
         }
       }
     }
@@ -155,6 +190,9 @@ export async function runStockEngine(
   onProgress: ProgressCallback = () => {}
 ): Promise<StockRunResult> {
   const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = '16:9' } = params
+
+  // Set project dir for persistent Pixabay cache
+  setPixabayProjectDir(projectDir)
 
   const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   if (!fs.existsSync(planPath)) {
@@ -214,7 +252,7 @@ export async function runStockEngine(
     }
   }
 
-  onProgress(`Starting stock search for ${scenesToProcess.length} scenes…`, 0.01)
+  onProgress(`Starting stock search for ${scenesToProcess.length} scenes...`, 0.01)
 
   for (let i = 0; i < scenesToProcess.length; i++) {
     const entry = scenesToProcess[i]
@@ -229,7 +267,7 @@ export async function runStockEngine(
     const sceneDuration = scene.duration ?? (scene.endTime - scene.startTime)
 
     onProgress(
-      `[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} — "${queries[0]}"`,
+      `[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - "${queries[0]}"`,
       pct
     )
 
@@ -378,7 +416,7 @@ export async function runStockEngine(
   }
 
   onProgress(
-    `Done — ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`,
+    `Done - ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`,
     1.0
   )
 
@@ -404,11 +442,12 @@ export async function replaceSceneAsset(
   const cache = new QueryCache(stockDir)
   const manifest = loadAssetsManifest(stockDir)
   const orientation = toOrientation(preferredAspectRatio)
+  const sanitizedQuery = sanitizeStockQuery(newQuery)
 
   const candidates = await searchForScene(
-    [newQuery], pexelsApiKey, pixabayApiKey, orientation, cache
+    [sanitizedQuery], pexelsApiKey, pixabayApiKey, orientation, cache
   )
-  if (candidates.length === 0) throw new Error(`No results for query "${newQuery}"`)
+  if (candidates.length === 0) throw new Error(`No results for query "${sanitizedQuery}"`)
 
   const usedIds = new Set(manifest.map((a) => a.assetId))
   const ranked = rankCandidates(candidates, {

@@ -3,6 +3,13 @@ import * as fs from 'fs'
 import { join, extname } from 'path'
 import { logger } from './logger'
 import { normalizeApiKey } from './utils/api-key'
+import {
+  normalizePreferredTextModel,
+  buildFallbackModelList,
+  classifyGeminiErrorKind,
+  DEPRECATED_TEXT_MODELS
+} from './utils/gemini-fallback'
+import { sanitizeStockQuery, dedupeStockQueries } from './stock/query-sanitizer'
 import type { TranscriptResult, MasterEditPlanRetentionExt, Pacing } from '../../shared/types'
 import { analyzePacing, flattenPlanScenes } from './pacing-guard'
 import type { PacingScene } from './pacing-guard'
@@ -265,7 +272,13 @@ Return ONLY valid JSON matching this schema:
         }
       }
     } catch (err) {
-      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed: ${err}`)
+      const { kind } = classifyGeminiErrorKind(err)
+      if (kind === 'MODEL_NOT_FOUND') {
+        const nextModel = modelChain[attempt + 1]
+        logger.warn(`[GeminiModel] Saved model ${model} is unavailable for this account. Falling back to ${nextModel ?? 'algorithmic outline fallback'}.`)
+      } else {
+        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed: ${err}`)
+      }
     }
   }
 
@@ -401,9 +414,24 @@ async function enrichScenesBatchWithGemini(
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       lastError = msg
+      const { kind } = classifyGeminiErrorKind(err)
+
+      if (kind === 'MODEL_NOT_FOUND') {
+        const nextModel = modelChain[activeModelIndex + 1]
+        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? 'algorithmic fallback'}.`)
+        if (activeModelIndex + 1 < modelChain.length) {
+          activeModelIndex++
+          continue
+        } else {
+          break
+        }
+      }
+
       logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`)
 
       const isOverloaded =
+        kind === 'RATE_LIMIT' ||
+        kind === 'SERVICE_UNAVAILABLE' ||
         msg.includes('503') ||
         msg.includes('429') ||
         msg.includes('UNAVAILABLE') ||
@@ -725,13 +753,12 @@ export async function buildEditPlan(params: {
     httpOptions: { apiVersion: 'v1beta' }
   })
 
-  const fallbackModelChain = [
-    modelId,
-    'gemini-3.8-flash',
-    'gemini-3.6-flash',
-    'gemini-2.5-flash',
-    'gemini-1.5-flash-latest'
-  ].filter((v, i, a) => a.indexOf(v) === i)
+  if (modelId && DEPRECATED_TEXT_MODELS.has(modelId)) {
+    logger.warn(`[GeminiModel] Saved model ${modelId} is unavailable for this account.`)
+    logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(modelId)}.`)
+  }
+
+  const fallbackModelChain = buildFallbackModelList(modelId)
 
   progress('Creating chapter and sequence outline...', 0.20)
   const outline = await generateChapterOutlineWithGemini(
@@ -748,7 +775,7 @@ export async function buildEditPlan(params: {
   const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE)
   const allEnrichedMap = new Map<number, Partial<ScenePlan>>()
   let hadAnyBatchFallback = false
-  let primaryModelUsed = modelId
+  let primaryModelUsed = fallbackModelChain[0]
 
   for (let b = 0; b < totalBatches; b++) {
     const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE)
@@ -790,9 +817,10 @@ export async function buildEditPlan(params: {
         if (!skel) continue
 
         const aiData = allEnrichedMap.get(skel.sceneIndex)
-        const queries = aiData?.searchQueries && aiData.searchQueries.length >= 3
+        const rawQueries = aiData?.searchQueries && aiData.searchQueries.length >= 3
           ? aiData.searchQueries
           : extractVisualQueries(skel.narrativeText)
+        const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)))
 
         const sc: ScenePlan = {
           sceneIndex: skel.sceneIndex, // will be globally normalized below
