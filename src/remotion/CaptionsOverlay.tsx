@@ -24,24 +24,27 @@ import { BigStatementCaption } from './components/BigStatementCaption'
 import { NewsChyronCaption } from './components/NewsChyronCaption'
 import { DataNoteCallout } from './components/DataNoteCallout'
 import { ProofVisualOverlay } from './components/ProofVisualOverlay'
+import { VisualGrammarOverlay } from './components/VisualGrammarOverlay'
 import { resolveCaptionAnimation } from './animations/presets'
-import type { CaptionPlan } from '../../shared/types'
+import type { CaptionPlan, VisualGrammarDecision } from '../../shared/types'
 import type { ProofVisual } from '../../src/main/retention/retention-types'
 
 interface Props {
   captionPlan: CaptionPlan
   proofVisuals?: ProofVisual[]  // optional — absent = caption-only (backward compat)
+  visualGrammar?: Array<VisualGrammarDecision & { absoluteStartTime?: number; absoluteEndTime?: number }>
 }
 
-export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals }) => {
+export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, visualGrammar }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
   const currentTime = frame / fps
 
   // Filter active phrases tại frame hiện tại
-  const activePhrases = captionPlan.phrases.filter(
+  const activePhrases = (captionPlan?.phrases ?? []).filter(
     (p) => currentTime >= p.startTime && currentTime <= p.endTime
   )
+
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#00FF00' }}>
@@ -128,9 +131,27 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals }) 
           />
         )
       })}
+
+      {/* Visual Scene Grammar overlays */}
+      {(visualGrammar ?? []).map((dec, idx) => {
+        if (!dec.enabled) return null
+        const startTime = dec.absoluteStartTime ?? 0
+        const endTime = dec.absoluteEndTime ?? (startTime + dec.duration)
+        const entranceFrame = Math.round(startTime * fps)
+        const exitFrame = Math.round(endTime * fps)
+        return (
+          <VisualGrammarOverlay
+            key={`vg_${idx}_${dec.sceneId}_${dec.type}`}
+            decision={dec}
+            entranceFrame={entranceFrame}
+            exitFrame={exitFrame}
+          />
+        )
+      })}
     </AbsoluteFill>
   )
 }
+
 
 /**
  * inferPreset — backward compatible: suy ra preset từ emphasisType.
