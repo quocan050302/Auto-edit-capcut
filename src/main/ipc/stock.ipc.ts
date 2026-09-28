@@ -11,7 +11,20 @@ import { loadAssetsManifest, saveAssetsManifest } from "../stock/downloader"
 import { logger } from "../logger"
 import { normalizeApiKey } from "../utils/api-key"
 
+import {
+  getStockCandidatesForProject,
+  selectCandidateForScene,
+  approveCandidateForScene,
+  calculateStoryboardSummary
+} from "../production-intelligence/storyboard-service"
+import {
+  loadProductionSettings,
+  saveProductionSettings
+} from "../production-intelligence/production-settings"
+import type { ProductionIntelligenceSettings } from "../../../shared/types"
+
 export function registerStockHandlers(ipcMain: IpcMain): void {
+
 
   // ── Run full stock search pipeline (context-aware when API key available) ───
   ipcMain.handle(
@@ -307,4 +320,50 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
       }
     }
   )
+
+  // ── Production Intelligence: Storyboard Candidates ──────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATES_GET,
+    (_event, params: { projectDir: string; sceneIndex?: number }) => {
+      return getStockCandidatesForProject(params.projectDir, params.sceneIndex)
+    }
+  )
+
+
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATE_SELECT,
+    async (_event, params: { projectDir: string; sceneIndex: number; candidateId: string }) => {
+      return selectCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATE_APPROVE,
+    (_event, params: { projectDir: string; sceneIndex: number; candidateId?: string }) => {
+      return approveCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_STORYBOARD_SUMMARY_GET,
+    (_event, projectDir: string) => {
+      return calculateStoryboardSummary(projectDir)
+    }
+  )
+
+  // ── Production Intelligence: Settings ───────────────────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_SETTINGS_GET,
+    (_event, projectDir?: string) => {
+      return loadProductionSettings(projectDir)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_SETTINGS_SET,
+    (_event, params: { projectDir?: string; settings: Partial<ProductionIntelligenceSettings> }) => {
+      return saveProductionSettings(params.projectDir, params.settings)
+    }
+  )
 }
+

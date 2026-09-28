@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Context-Aware Stock Engine -- replaces naive scene-by-scene pipeline.
  *
  * Flow:
@@ -31,6 +31,15 @@ import { downloadAsset, loadAssetsManifest, saveAssetsManifest } from "./downloa
 import { analyzeGlobalContext, loadGlobalContext } from "./global-context-analyzer"
 import { generateContextAwareSearchPlan } from "./context-query-gen"
 import { rankContextCandidates } from "./context-ranker"
+import { loadProductionSettings } from "../production-intelligence/production-settings"
+import {
+  rankCandidatesForScene,
+  loadStockCandidates,
+  saveStockCandidates
+} from "../production-intelligence/candidate-ranking"
+import { HistoricalAssignmentSummary } from "../production-intelligence/diversity-engine"
+import { atomicWriteJson, readJsonSafe } from "../production-intelligence/json-store"
+import { flattenEditPlanScenes } from "../utils/scene-plan"
 import { logger } from "../logger"
 
 export type ProgressCallback = (msg: string, pct: number) => void
@@ -39,6 +48,7 @@ export type ProgressCallback = (msg: string, pct: number) => void
 
 interface ScenePlanWithIntent {
   sceneIndex: number
+  sceneId?: string
   narrativeText?: string
   visualIntent?: string
   searchQueries?: string[]
@@ -47,45 +57,24 @@ interface ScenePlanWithIntent {
   duration: number
   localPath?: string
   locked?: boolean
+  manualOverride?: boolean
   mediaFile?: string
   mediaType?: "video" | "image"
-  // Context-aware additions
   chapterId?: string
   chapterTitle?: string
   chapterPurpose?: string
   continuityGroup?: string
 }
 
-interface ChapterWithIndex {
-  chapterIndex: number
-  title: string
-  purpose?: string
-  sequences: Array<{ scenes: ScenePlanWithIntent[] }>
-}
-
 interface EditPlan {
-  chapters: ChapterWithIndex[]
+  chapters: Array<{
+    chapterIndex?: number
+    title?: string
+    purpose?: string
+    sequences?: Array<{ scenes?: ScenePlanWithIntent[] }>
+    chapters_seq?: Array<{ scenes?: ScenePlanWithIntent[] }>
+  }>
   [key: string]: unknown
-}
-
-function flattenScenesWithChapter(
-  plan: EditPlan
-): Array<{ scene: ScenePlanWithIntent; chapterId: string; chapterTitle: string; chapterPurpose: string }> {
-  const result: Array<{ scene: ScenePlanWithIntent; chapterId: string; chapterTitle: string; chapterPurpose: string }> = []
-  for (const ch of plan.chapters ?? []) {
-    const seqs = (ch as { sequences?: unknown[]; chapters_seq?: unknown[] }).sequences ?? (ch as { chapters_seq?: unknown[] }).chapters_seq ?? []
-    for (const seq of seqs as Array<{ scenes?: ScenePlanWithIntent[] }>) {
-      for (const scene of seq.scenes ?? []) {
-        result.push({
-          scene,
-          chapterId: `CH${ch.chapterIndex}`,
-          chapterTitle: ch.title,
-          chapterPurpose: ch.purpose ?? ""
-        })
-      }
-    }
-  }
-  return result
 }
 
 function toOrientation(ar: string | undefined): "landscape" | "portrait" | "square" {
@@ -117,43 +106,57 @@ async function searchWithTieredPlan(
 
   const searchTier = async (queries: string[], minNeeded: number): Promise<boolean> => {
     for (const query of queries) {
-      // Pexels Video
-      let cached = cache.get(`pexels_v:${query}`)
-      if (cached) { addCandidates(cached) }
-      else {
-        const res = await pexelsSearchVideos(query, pexelsApiKey, 10, orientation)
-        cache.set(`pexels_v:${query}`, res)
-        addCandidates(res)
+      if (pexelsApiKey) {
+        const cached = cache.get(`pexels_v:${query}`)
+        if (cached) {
+          addCandidates(cached)
+        } else {
+          const res = await pexelsSearchVideos(query, pexelsApiKey, 8, orientation)
+          cache.set(`pexels_v:${query}`, res)
+          addCandidates(res)
+        }
       }
-      if (allCandidates.length >= 10) return true
-    }
-    if (allCandidates.length >= minNeeded) return true
 
-    // Pixabay Video fallback
-    if (pixabayApiKey) {
-      for (const query of queries.slice(0, 2)) {
+      if (pixabayApiKey) {
         const cached = cache.get(`pixabay_v:${query}`)
-        if (cached) { addCandidates(cached) }
-        else {
+        if (cached) {
+          addCandidates(cached)
+        } else {
           const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal"
           const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation)
           cache.set(`pixabay_v:${query}`, res)
           addCandidates(res)
         }
-        if (allCandidates.length >= minNeeded) return true
       }
+
+      if (allCandidates.length >= 12) break
     }
     return allCandidates.length >= minNeeded
   }
 
   const photoFallback = async (queries: string[]): Promise<void> => {
     for (const query of queries.slice(0, 2)) {
-      const cached = cache.get(`pexels_p:${query}`)
-      if (cached) { addCandidates(cached) }
-      else {
-        const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, orientation)
-        cache.set(`pexels_p:${query}`, res)
-        addCandidates(res)
+      if (pexelsApiKey) {
+        const cached = cache.get(`pexels_p:${query}`)
+        if (cached) {
+          addCandidates(cached)
+        } else {
+          const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, orientation)
+          cache.set(`pexels_p:${query}`, res)
+          addCandidates(res)
+        }
+      }
+
+      if (pixabayApiKey) {
+        const cached = cache.get(`pixabay_p:${query}`)
+        if (cached) {
+          addCandidates(cached)
+        } else {
+          const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal"
+          const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, pxOrientation)
+          cache.set(`pixabay_p:${query}`, res)
+          addCandidates(res)
+        }
       }
     }
   }
@@ -204,23 +207,48 @@ export async function runContextAwareStockEngine(
   // Load edit plan
   const planPath = join(projectDir, "analysis", "master-edit-plan.json")
   if (!fs.existsSync(planPath)) {
-    return { success: false, totalScenes: 0, assignedScenes: 0, failedScenes: 0, assignments: [], error: "No edit plan found. Run AI Planning first." }
+    return {
+      success: false,
+      totalScenes: 0,
+      assignedScenes: 0,
+      failedScenes: 0,
+      assignments: [],
+      error: "No edit plan found. Run AI Planning first."
+    }
   }
   const plan: EditPlan = JSON.parse(fs.readFileSync(planPath, "utf-8"))
 
   const stockDir = join(projectDir, "assets", "stock")
   fs.mkdirSync(stockDir, { recursive: true })
 
+  const prodSettings = loadProductionSettings(projectDir)
+  const stockCandidatesStore = loadStockCandidates(projectDir)
+
   const cache = new QueryCache(stockDir)
   let manifest = loadAssetsManifest(stockDir)
   const usedAssetIds = new Set<string>(manifest.map((a) => a.assetId))
 
-  const flatScenes = flattenScenesWithChapter(plan)
-  const scenesNeedingStock = flatScenes.filter(
-    ({ scene }) => !scene.locked && (!scene.localPath || !fs.existsSync(scene.localPath))
-  )
+  const reviewPath = join(projectDir, "analysis", "stock-assignments.json")
+  const existingAssignments = fs.existsSync(reviewPath)
+    ? readJsonSafe<StockSceneAssignment[]>(reviewPath, [])
+    : []
+  const existingMap = new Map<number, StockSceneAssignment>()
+  for (const a of existingAssignments) {
+    existingMap.set(a.sceneIndex, a)
+  }
 
-  onProgress(`Starting context-aware stock search for ${scenesNeedingStock.length} scenes...`, 0.01)
+  const flattenedEntries = flattenEditPlanScenes<ScenePlanWithIntent>(plan)
+
+  // Identify locked/approved scenes that must NOT be overwritten
+  const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    const existing = existingMap.get(scene.sceneIndex)
+    if (scene.locked || existing?.locked) return false
+    if (existing?.manualOverride) return false
+    if (existing?.approvalStatus === "approved") return false
+    return true
+  })
+
+  onProgress(`Starting context-aware stock search for ${scenesToProcess.length} scenes...`, 0.01)
 
   // -- Phase 1: Load or generate GlobalScriptContext --
   let globalContext: GlobalScriptContext | null = null
@@ -228,7 +256,6 @@ export async function runContextAwareStockEngine(
     try {
       onProgress("Phase 1: Analyzing full script for global context...", 0.02)
 
-      // Load transcript + script text
       let scriptText: string | null = null
       let transcript: TranscriptResult | null = null
 
@@ -238,16 +265,23 @@ export async function runContextAwareStockEngine(
       }
       try {
         const stateFile = fs.existsSync(join(projectDir, "project-state.json"))
-          ? join(projectDir, "project-state.json") : join(projectDir, "project.json")
+          ? join(projectDir, "project-state.json")
+          : join(projectDir, "project.json")
         const st = JSON.parse(fs.readFileSync(stateFile, "utf-8"))
         const scriptPath = st?.inputs?.scriptPath as string | undefined
         if (scriptPath && fs.existsSync(scriptPath)) {
           scriptText = fs.readFileSync(scriptPath, "utf-8")
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
 
       globalContext = await analyzeGlobalContext({
-        projectDir, apiKey, model, scriptText, transcript,
+        projectDir,
+        apiKey,
+        model,
+        scriptText,
+        transcript,
         forceRegenerate: forceReanalysis,
         onProgress: (msg, pct) => onProgress(`[GlobalContext] ${msg}`, pct * 0.08)
       })
@@ -262,7 +296,7 @@ export async function runContextAwareStockEngine(
 
   const hasGlobalContext = globalContext !== null
   if (!hasGlobalContext) {
-    logger.warn("[StockEngine] No GlobalContext available. Running in legacy mode.")
+    logger.warn("[StockEngine] No GlobalContext available. Running in basic query mode.")
     onProgress("Warning: No global context. Running in basic query mode.", 0.05)
   }
 
@@ -271,19 +305,28 @@ export async function runContextAwareStockEngine(
   let assignedCount = 0
   let failedCount = 0
 
-  // -- Phase 2-7: Per-scene context-aware search --
-  for (let i = 0; i < scenesNeedingStock.length; i++) {
-    const { scene, chapterId, chapterTitle, chapterPurpose } = scenesNeedingStock[i]
-    const pct = 0.10 + (i / scenesNeedingStock.length) * 0.85
-    const sceneId = `scene_${scene.sceneIndex}`
+  // Preserve locked/approved assignments first
+  for (const entry of flattenedEntries) {
+    const existing = existingMap.get(entry.sceneIndex)
+    const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved"
+    if (isLocked && existing) {
+      assignments.push(existing)
+      if (existing.status === "assigned") assignedCount++
+    }
+  }
+
+  // Process remaining scenes
+  for (let i = 0; i < scenesToProcess.length; i++) {
+    const entry = scenesToProcess[i]
+    const { scene, sceneId, chapterTitle, chapterPurpose } = entry
+    const pct = 0.1 + (i / scenesToProcess.length) * 0.85
     const narration = scene.narrativeText ?? ""
     const sceneDuration = scene.duration ?? (scene.endTime - scene.startTime)
 
-    onProgress(`[${i + 1}/${scenesNeedingStock.length}] Scene ${scene.sceneIndex} — context-aware search...`, pct)
+    onProgress(`[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} — candidate search...`, pct)
 
-    // Neighboring context
-    const prevEntry = i > 0 ? scenesNeedingStock[i - 1] : null
-    const nextEntry = i < scenesNeedingStock.length - 1 ? scenesNeedingStock[i + 1] : null
+    const prevEntry = i > 0 ? scenesToProcess[i - 1] : null
+    const nextEntry = i < scenesToProcess.length - 1 ? scenesToProcess[i + 1] : null
     const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : ""
     const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : ""
 
@@ -291,7 +334,6 @@ export async function runContextAwareStockEngine(
     let tierUsed: "A" | "B" | "C" | "D" = "D"
 
     if (hasGlobalContext && apiKey) {
-      // Build SceneContextPacket (Phase 3)
       const packet: SceneContextPacket = {
         globalContext: {
           primarySubject: globalContext!.primarySubject,
@@ -307,7 +349,7 @@ export async function runContextAwareStockEngine(
           forbiddenSubstitutions: globalContext!.forbiddenSubstitutions,
           negativeKeywords: globalContext!.negativeKeywords
         },
-        chapterContext: { chapterId, chapterTitle, chapterPurpose },
+        chapterContext: { chapterId: `CH${entry.chapterIndex}`, chapterTitle, chapterPurpose },
         localContext: {
           narration,
           scenePurpose: scene.visualIntent ?? "",
@@ -319,10 +361,15 @@ export async function runContextAwareStockEngine(
         neighboringContext: { previousScene: previousSceneSummary, nextScene: nextSceneSummary }
       }
 
-      // Phase 4: Generate tiered search plan
       try {
         searchPlan = await generateContextAwareSearchPlan({
-          projectDir, apiKey, model, packet, globalContext: globalContext!, sceneId, useCache: true
+          projectDir,
+          apiKey,
+          model,
+          packet,
+          globalContext: globalContext!,
+          sceneId,
+          useCache: true
         })
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -330,7 +377,6 @@ export async function runContextAwareStockEngine(
       }
     }
 
-    // Fallback to legacy queries if no context plan
     const legacyQueries = scene.searchQueries?.length
       ? scene.searchQueries
       : [scene.visualIntent ?? narration ?? "documentary b-roll"].slice(0, 3)
@@ -363,16 +409,19 @@ export async function runContextAwareStockEngine(
       locked: false,
       manualOverride: false,
       status: "searching",
-      chapterId,
+      chapterId: `CH${entry.chapterIndex}`,
       chapterTitle,
       scenePurpose: scene.visualIntent ?? "",
       searchPlan: planToUse
     }
 
     try {
-      // Phase 6: Tiered search
       const { candidates, tierUsed: tu } = await searchWithTieredPlan(
-        planToUse, pexelsApiKey, pixabayApiKey, orientation, cache
+        planToUse,
+        pexelsApiKey,
+        pixabayApiKey,
+        orientation,
+        cache
       )
       tierUsed = tu
 
@@ -381,57 +430,130 @@ export async function runContextAwareStockEngine(
         assignment.errorMessage = "No candidates found from any provider or tier"
         failedCount++
       } else {
-        // Phase 7: Context-aware ranking
-        let ranked: Array<typeof candidates[0] & { contextScore?: { totalScore: number; matchLabel: string; visualTruthLabel: string; penaltyReasons: string[] } }>
-        if (hasGlobalContext) {
-          const ctx = {
-            globalContext: globalContext!,
-            chapterTitle,
-            chapterPurpose,
+        const assignmentHistory: HistoricalAssignmentSummary[] = assignments.map((a) => ({
+          sceneIndex: a.sceneIndex,
+          provider: a.asset?.provider,
+          assetId: a.asset?.assetId,
+          creator: a.asset?.creator,
+          title: a.asset?.searchQuery,
+          downloadUrl: a.asset?.downloadUrl,
+          thumbnailUrl: a.asset?.thumbnailUrl,
+          isLocked: a.locked
+        }))
+
+        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+          // Candidate Stock Ranking
+          const scoringCtx = {
             narration,
             visualIntent: planToUse.visualIntent,
-            scenePurpose: scene.visualIntent ?? "",
+            searchPlan: planToUse,
+            globalContext,
+            chapterTitle,
+            chapterPurpose,
             sceneDurationSecs: sceneDuration,
             preferredAspectRatio,
-            usedAssetIds
+            assignmentHistory,
+            isLocked: scene.locked
           }
-          ranked = rankContextCandidates(candidates, ctx)
-          // If all rejected, use raw candidates sorted by basic score
-          if (ranked.length === 0) {
-            ranked = candidates.map((c) => ({ ...c, contextScore: undefined })) as typeof ranked
-          }
+
+          const topCandidates = rankCandidatesForScene(
+            sceneId,
+            scene.sceneIndex,
+            candidates,
+            scoringCtx,
+            prodSettings.candidatesPerScene || 3
+          )
+
+          stockCandidatesStore[sceneId] = topCandidates
+
+          const winner = topCandidates.find((c) => c.selected) || topCandidates[0]
+          const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0]
+          const downloadedAsset = await downloadAsset(
+            winner.result,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          )
+
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId)
+          manifest.push(downloadedAsset)
+          usedAssetIds.add(downloadedAsset.assetId)
+
+          scene.localPath = downloadedAsset.localPath
+          scene.mediaFile = basename(downloadedAsset.localPath)
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video"
+
+          assignment.asset = downloadedAsset
+          assignment.score = winner.score.totalScore
+          assignment.usedQuery = usedQuery
+          assignment.status = "assigned"
+          assignment.tierUsed = tierUsed
+          assignment.matchLabel =
+            winner.score.totalScore >= 80 ? "STRONG_MATCH" : winner.score.totalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE"
+          assignment.visualTruthLabel = winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH"
+          assignment.scoreBreakdown = winner.score as unknown as StockSceneAssignment["scoreBreakdown"]
+          assignment.candidates = topCandidates
+          assignment.selectedCandidateId = winner.candidateId
+          assignment.approvalStatus = "auto_selected"
+          assignment.rejectedCandidates = topCandidates.slice(1).map((c) => ({
+            title: c.result.title,
+            score: c.score.totalScore,
+            reason: c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
+          }))
+          assignedCount++
         } else {
-          ranked = candidates as typeof ranked
+          // Legacy ranking fallback
+          let ranked: Array<typeof candidates[0] & { contextScore?: { totalScore: number; matchLabel: string; visualTruthLabel: string; penaltyReasons: string[] } }>
+          if (hasGlobalContext) {
+            const ctx = {
+              globalContext: globalContext!,
+              chapterTitle,
+              chapterPurpose,
+              narration,
+              visualIntent: planToUse.visualIntent,
+              scenePurpose: scene.visualIntent ?? "",
+              sceneDurationSecs: sceneDuration,
+              preferredAspectRatio,
+              usedAssetIds
+            }
+            ranked = rankContextCandidates(candidates, ctx)
+            if (ranked.length === 0) {
+              ranked = candidates.map((c) => ({ ...c, contextScore: undefined })) as typeof ranked
+            }
+          } else {
+            ranked = candidates as typeof ranked
+          }
+
+          const winner = ranked[0]
+          const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0]
+          const downloadedAsset = await downloadAsset(winner, scene.sceneIndex, usedQuery, stockDir, manifest)
+
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId)
+          manifest.push(downloadedAsset)
+          usedAssetIds.add(downloadedAsset.assetId)
+
+          scene.localPath = downloadedAsset.localPath
+          scene.mediaFile = basename(downloadedAsset.localPath)
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video"
+
+          const contextScore = (winner as { contextScore?: { totalScore: number; matchLabel: string; visualTruthLabel: string; penaltyReasons: string[] } }).contextScore
+
+          assignment.asset = downloadedAsset
+          assignment.score = contextScore?.totalScore ?? 75
+          assignment.usedQuery = usedQuery
+          assignment.status = "assigned"
+          assignment.tierUsed = tierUsed
+          assignment.matchLabel = contextScore?.matchLabel
+          assignment.visualTruthLabel = contextScore?.visualTruthLabel
+          assignment.scoreBreakdown = contextScore as StockSceneAssignment["scoreBreakdown"]
+          assignment.rejectedCandidates = ranked.slice(1, 4).map((c) => ({
+            title: c.title,
+            score: (c as { contextScore?: { totalScore: number } }).contextScore?.totalScore ?? 0,
+            reason: (c as { contextScore?: { penaltyReasons: string[] } }).contextScore?.penaltyReasons?.[0] ?? "lower score"
+          }))
+          assignedCount++
         }
-
-        const winner = ranked[0]
-        const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0]
-        const downloadedAsset = await downloadAsset(winner, scene.sceneIndex, usedQuery, stockDir, manifest)
-
-        manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId)
-        manifest.push(downloadedAsset)
-        usedAssetIds.add(downloadedAsset.assetId)
-
-        scene.localPath = downloadedAsset.localPath
-        scene.mediaFile = basename(downloadedAsset.localPath)
-        scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video"
-
-        const contextScore = (winner as { contextScore?: { totalScore: number; matchLabel: string; visualTruthLabel: string; penaltyReasons: string[] } }).contextScore
-
-        assignment.asset = downloadedAsset
-        assignment.score = contextScore?.totalScore ?? 75
-        assignment.usedQuery = usedQuery
-        assignment.status = "assigned"
-        assignment.tierUsed = tierUsed
-        assignment.matchLabel = contextScore?.matchLabel
-        assignment.visualTruthLabel = contextScore?.visualTruthLabel
-        assignment.scoreBreakdown = contextScore as StockSceneAssignment["scoreBreakdown"]
-        assignment.rejectedCandidates = ranked.slice(1, 4).map((c) => ({
-          title: c.title,
-          score: (c as { contextScore?: { totalScore: number } }).contextScore?.totalScore ?? 0,
-          reason: (c as { contextScore?: { penaltyReasons: string[] } }).contextScore?.penaltyReasons?.[0] ?? "lower score"
-        }))
-        assignedCount++
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -446,20 +568,24 @@ export async function runContextAwareStockEngine(
     saveAssetsManifest(stockDir, manifest)
   }
 
-  // Save updated plan
-  fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8")
+  // Sort assignments by sceneIndex
+  assignments.sort((a, b) => a.sceneIndex - b.sceneIndex)
 
-  // Save assignments
-  const reviewPath = join(projectDir, "analysis", "stock-assignments.json")
-  fs.writeFileSync(reviewPath, JSON.stringify(assignments, null, 2), "utf-8")
+  // Atomic saves
+  atomicWriteJson(planPath, plan)
+  atomicWriteJson(reviewPath, assignments)
+  if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+    saveStockCandidates(projectDir, stockCandidatesStore)
+  }
 
-  onProgress(`Done -- ${assignedCount}/${scenesNeedingStock.length} scenes assigned, ${failedCount} failed`, 1.0)
+  onProgress(`Done -- ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`, 1.0)
 
   return {
     success: true,
-    totalScenes: scenesNeedingStock.length,
+    totalScenes: flattenedEntries.length,
     assignedScenes: assignedCount,
     failedScenes: failedCount,
     assignments
   }
 }
+

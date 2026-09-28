@@ -15,8 +15,13 @@ import type {
   CaptionPlan,
   CaptionPhrase,
   ApiKeyVerifyResult,
-  RenderTransitionSettings
+  RenderTransitionSettings,
+  StockCandidate,
+  StoryboardSummary,
+  ProductionIntelligenceSettings,
+  RenderQaReport
 } from '../../shared/types'
+
 
 const api = {
   window: {
@@ -145,8 +150,22 @@ const api = {
         callback(data)
       ipcRenderer.on(IPC_CHANNELS.RENDER_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.RENDER_PROGRESS, handler)
+    },
+
+    runPreflight: (params: { projectDir: string }): Promise<RenderQaReport> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFLIGHT_RUN, params),
+
+    getQaReport: (params: { projectDir: string }): Promise<RenderQaReport | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_QA_GET, params),
+
+    onQaProgress: (callback: (data: { stage: string; progress: number; message: string }) => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, data: { stage: string; progress: number; message: string }): void =>
+        callback(data)
+      ipcRenderer.on(IPC_CHANNELS.RENDER_QA_PROGRESS, handler)
+      return () => ipcRenderer.off(IPC_CHANNELS.RENDER_QA_PROGRESS, handler)
     }
   },
+
 
   stock: {
     run: (params: { projectDir: string; forceReanalysis?: boolean }): Promise<StockRunResult> =>
@@ -173,6 +192,20 @@ const api = {
 
     saveContext: (params: { projectDir: string; context: GlobalScriptContext }): Promise<{ success: boolean; version?: number; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_SAVE, params),
+
+    // Candidate Storyboard Review
+    getCandidates: (params: { projectDir: string; sceneIndex?: number }): Promise<Record<string, StockCandidate[]> | StockCandidate[]> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_CANDIDATES_GET, params),
+
+    selectCandidate: (params: { projectDir: string; sceneIndex: number; candidateId: string }): Promise<{ success: boolean; asset?: StockAsset; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_CANDIDATE_SELECT, params),
+
+    approveCandidate: (params: { projectDir: string; sceneIndex: number; candidateId?: string }): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_CANDIDATE_APPROVE, params),
+
+    getStoryboardSummary: (projectDir: string): Promise<StoryboardSummary> =>
+      ipcRenderer.invoke(IPC_CHANNELS.STOCK_STORYBOARD_SUMMARY_GET, projectDir),
+
 
     onProgress: (callback: (data: { message: string; progress: number }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: { message: string; progress: number }): void =>
@@ -271,8 +304,17 @@ const api = {
       ipcRenderer.on(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler)
       return () => ipcRenderer.off(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler)
     }
+  },
+
+  production: {
+    getSettings: (projectDir?: string): Promise<ProductionIntelligenceSettings> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_GET, projectDir),
+
+    setSettings: (params: { projectDir?: string; settings: Partial<ProductionIntelligenceSettings> }): Promise<ProductionIntelligenceSettings> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_SET, params)
   }
 }
+
 
 contextBridge.exposeInMainWorld('api', api)
 

@@ -20,6 +20,15 @@ import { pixabaySearchVideos, pixabaySearchPhotos } from './providers/pixabay'
 import { QueryCache } from './query-cache'
 import { rankCandidates } from './ranker'
 import { downloadAsset, loadAssetsManifest, saveAssetsManifest } from './downloader'
+import { loadProductionSettings } from '../production-intelligence/production-settings'
+import {
+  rankCandidatesForScene,
+  loadStockCandidates,
+  saveStockCandidates
+} from '../production-intelligence/candidate-ranking'
+import { HistoricalAssignmentSummary } from '../production-intelligence/diversity-engine'
+import { atomicWriteJson, readJsonSafe } from '../production-intelligence/json-store'
+import { flattenEditPlanScenes } from '../utils/scene-plan'
 import { logger } from '../logger'
 
 export type ProgressCallback = (msg: string, pct: number) => void
@@ -28,6 +37,7 @@ export type ProgressCallback = (msg: string, pct: number) => void
 
 interface ScenePlanWithIntent {
   sceneIndex: number
+  sceneId?: string
   narrativeText?: string
   visualIntent?: string
   searchQueries?: string[]
@@ -36,25 +46,23 @@ interface ScenePlanWithIntent {
   duration: number
   localPath?: string
   locked?: boolean
+  manualOverride?: boolean
   mediaFile?: string
   mediaType?: 'video' | 'image'
 }
 
 interface EditPlan {
   chapters: Array<{
-    sequences: Array<{
-      scenes: ScenePlanWithIntent[]
-    }>
+    chapterIndex?: number
+    title?: string
+    purpose?: string
+    sequences?: Array<{ scenes?: ScenePlanWithIntent[] }>
+    chapters_seq?: Array<{ scenes?: ScenePlanWithIntent[] }>
   }>
   [key: string]: unknown
 }
 
-function flattenScenes(plan: EditPlan): ScenePlanWithIntent[] {
-  return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? [])
-    .flatMap((seq: { scenes?: ScenePlanWithIntent[] }) => seq.scenes ?? [])
-}
-
-/** Perform provider fallback search for a single scene's queries */
+/** Perform provider search for a single scene's queries across Pexels and Pixabay */
 async function searchForScene(
   queries: string[],
   pexelsApiKey: string,
@@ -75,22 +83,18 @@ async function searchForScene(
   }
 
   for (const query of queries) {
-    // 1. Pexels Video
-    let cached = cache.get(`pexels_v:${query}`)
-    if (cached) {
-      addCandidates(cached)
-    } else {
-      const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation)
-      cache.set(`pexels_v:${query}`, res)
-      addCandidates(res)
+    if (pexelsApiKey) {
+      const cached = cache.get(`pexels_v:${query}`)
+      if (cached) {
+        addCandidates(cached)
+      } else {
+        const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation)
+        cache.set(`pexels_v:${query}`, res)
+        addCandidates(res)
+      }
     }
 
-    if (allCandidates.length >= 6) break
-  }
-
-  // 2. If we need more, search Pixabay Video
-  if (allCandidates.length < 3 && pixabayApiKey) {
-    for (const query of queries.slice(0, 2)) {
+    if (pixabayApiKey) {
       const cached = cache.get(`pixabay_v:${query}`)
       if (cached) {
         addCandidates(cached)
@@ -101,33 +105,34 @@ async function searchForScene(
         addCandidates(res)
       }
     }
+
+    if (allCandidates.length >= 10) break
   }
 
-  // 3. Photo fallback — Pexels Photo
-  if (allCandidates.length < 2) {
+  // Photo fallback if few video candidates
+  if (allCandidates.length < 3) {
     for (const query of queries.slice(0, 2)) {
-      const cached = cache.get(`pexels_p:${query}`)
-      if (cached) {
-        addCandidates(cached)
-      } else {
-        const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation)
-        cache.set(`pexels_p:${query}`, res)
-        addCandidates(res)
+      if (pexelsApiKey) {
+        const cached = cache.get(`pexels_p:${query}`)
+        if (cached) {
+          addCandidates(cached)
+        } else {
+          const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation)
+          cache.set(`pexels_p:${query}`, res)
+          addCandidates(res)
+        }
       }
-    }
-  }
 
-  // 4. Photo fallback — Pixabay Photo
-  if (allCandidates.length < 2 && pixabayApiKey) {
-    for (const query of queries.slice(0, 1)) {
-      const cached = cache.get(`pixabay_p:${query}`)
-      if (cached) {
-        addCandidates(cached)
-      } else {
-        const orientation = preferredOrientation === 'portrait' ? 'vertical' : 'horizontal'
-        const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation)
-        cache.set(`pixabay_p:${query}`, res)
-        addCandidates(res)
+      if (pixabayApiKey) {
+        const cached = cache.get(`pixabay_p:${query}`)
+        if (cached) {
+          addCandidates(cached)
+        } else {
+          const orientation = preferredOrientation === 'portrait' ? 'vertical' : 'horizontal'
+          const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation)
+          cache.set(`pixabay_p:${query}`, res)
+          addCandidates(res)
+        }
       }
     }
   }
@@ -151,7 +156,6 @@ export async function runStockEngine(
 ): Promise<StockRunResult> {
   const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = '16:9' } = params
 
-  // Load edit plan
   const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   if (!fs.existsSync(planPath)) {
     return {
@@ -168,26 +172,54 @@ export async function runStockEngine(
   const stockDir = join(projectDir, 'assets', 'stock')
   fs.mkdirSync(stockDir, { recursive: true })
 
+  const prodSettings = loadProductionSettings(projectDir)
+  const stockCandidatesStore = loadStockCandidates(projectDir)
+
   const cache = new QueryCache(stockDir)
   let manifest = loadAssetsManifest(stockDir)
   const usedAssetIds = new Set<string>(manifest.map((a) => a.assetId))
 
-  // Flatten scenes across all chapters → sequences
-  const allScenes = flattenScenes(plan)
-  const scenesNeedingStock = allScenes.filter(
-    (s) => !s.locked && (!s.localPath || !fs.existsSync(s.localPath))
-  )
+  const reviewPath = join(projectDir, 'analysis', 'stock-assignments.json')
+  const existingAssignments = fs.existsSync(reviewPath)
+    ? readJsonSafe<StockSceneAssignment[]>(reviewPath, [])
+    : []
+  const existingMap = new Map<number, StockSceneAssignment>()
+  for (const a of existingAssignments) {
+    existingMap.set(a.sceneIndex, a)
+  }
+
+  const flattenedEntries = flattenEditPlanScenes<ScenePlanWithIntent>(plan)
+
+  // Identify locked/approved scenes that must NOT be overwritten
+  const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    const existing = existingMap.get(scene.sceneIndex)
+    if (scene.locked || existing?.locked) return false
+    if (existing?.manualOverride) return false
+    if (existing?.approvalStatus === 'approved') return false
+    return true
+  })
 
   const assignments: StockSceneAssignment[] = []
   let assignedCount = 0
   let failedCount = 0
   const orientation = toOrientation(preferredAspectRatio)
 
-  onProgress(`Starting stock search for ${scenesNeedingStock.length} scenes…`, 0.01)
+  // Preserve locked/approved assignments first
+  for (const entry of flattenedEntries) {
+    const existing = existingMap.get(entry.sceneIndex)
+    const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === 'approved'
+    if (isLocked && existing) {
+      assignments.push(existing)
+      if (existing.status === 'assigned') assignedCount++
+    }
+  }
 
-  for (let i = 0; i < scenesNeedingStock.length; i++) {
-    const scene = scenesNeedingStock[i]
-    const pct = 0.05 + (i / scenesNeedingStock.length) * 0.85
+  onProgress(`Starting stock search for ${scenesToProcess.length} scenes…`, 0.01)
+
+  for (let i = 0; i < scenesToProcess.length; i++) {
+    const entry = scenesToProcess[i]
+    const { scene, sceneId, chapterTitle, chapterPurpose } = entry
+    const pct = 0.05 + (i / scenesToProcess.length) * 0.85
     const queries: string[] = scene.searchQueries?.length
       ? scene.searchQueries
       : [scene.visualIntent ?? scene.narrativeText ?? 'nature background'].slice(0, 4)
@@ -197,12 +229,12 @@ export async function runStockEngine(
     const sceneDuration = scene.duration ?? (scene.endTime - scene.startTime)
 
     onProgress(
-      `[${i + 1}/${scenesNeedingStock.length}] Scene ${scene.sceneIndex} — "${queries[0]}"`,
+      `[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} — "${queries[0]}"`,
       pct
     )
 
     const assignment: StockSceneAssignment = {
-      sceneId: `scene_${scene.sceneIndex}`,
+      sceneId,
       sceneIndex: scene.sceneIndex,
       narrationText,
       startTime: scene.startTime,
@@ -227,42 +259,102 @@ export async function runStockEngine(
         assignment.errorMessage = 'No candidates found from any provider'
         failedCount++
       } else {
-        const ranked = rankCandidates(candidates, {
-          visualIntent,
-          narrationText,
-          sceneDurationSecs: sceneDuration,
-          preferredAspectRatio,
-          usedAssetIds
-        })
+        const assignmentHistory: HistoricalAssignmentSummary[] = assignments.map((a) => ({
+          sceneIndex: a.sceneIndex,
+          provider: a.asset?.provider,
+          assetId: a.asset?.assetId,
+          creator: a.asset?.creator,
+          title: a.asset?.searchQuery,
+          downloadUrl: a.asset?.downloadUrl,
+          thumbnailUrl: a.asset?.thumbnailUrl,
+          isLocked: a.locked
+        }))
 
-        const winner = ranked[0]
-        const usedQuery = queries.find((q) =>
-          winner.searchQuery !== undefined ? winner.searchQuery === q : true
-        ) ?? queries[0]
+        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+          const scoringCtx = {
+            narration: narrationText,
+            visualIntent,
+            chapterTitle,
+            chapterPurpose,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            assignmentHistory,
+            isLocked: scene.locked
+          }
 
-        const downloadedAsset = await downloadAsset(
-          winner,
-          scene.sceneIndex,
-          usedQuery,
-          stockDir,
-          manifest
-        )
+          const topCandidates = rankCandidatesForScene(
+            sceneId,
+            scene.sceneIndex,
+            candidates,
+            scoringCtx,
+            prodSettings.candidatesPerScene || 3
+          )
 
-        // Update manifest
-        manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId)
-        manifest.push(downloadedAsset)
-        usedAssetIds.add(downloadedAsset.assetId)
+          stockCandidatesStore[sceneId] = topCandidates
 
-        // Stamp the plan scene
-        scene.localPath = downloadedAsset.localPath
-        scene.mediaFile = basename(downloadedAsset.localPath)
-        scene.mediaType = downloadedAsset.mediaType === 'photo' ? 'image' : 'video'
+          const winner = topCandidates.find((c) => c.selected) || topCandidates[0]
+          const usedQuery = queries[0]
+          const downloadedAsset = await downloadAsset(
+            winner.result,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          )
 
-        assignment.asset = downloadedAsset
-        assignment.score = winner.score
-        assignment.usedQuery = usedQuery
-        assignment.status = 'assigned'
-        assignedCount++
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId)
+          manifest.push(downloadedAsset)
+          usedAssetIds.add(downloadedAsset.assetId)
+
+          scene.localPath = downloadedAsset.localPath
+          scene.mediaFile = basename(downloadedAsset.localPath)
+          scene.mediaType = downloadedAsset.mediaType === 'photo' ? 'image' : 'video'
+
+          assignment.asset = downloadedAsset
+          assignment.score = winner.score.totalScore
+          assignment.usedQuery = usedQuery
+          assignment.status = 'assigned'
+          assignment.candidates = topCandidates
+          assignment.selectedCandidateId = winner.candidateId
+          assignment.approvalStatus = 'auto_selected'
+          assignment.scoreBreakdown = winner.score as unknown as StockSceneAssignment['scoreBreakdown']
+          assignedCount++
+        } else {
+          const ranked = rankCandidates(candidates, {
+            visualIntent,
+            narrationText,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            usedAssetIds
+          })
+
+          const winner = ranked[0]
+          const usedQuery = queries.find((q) =>
+            winner.searchQuery !== undefined ? winner.searchQuery === q : true
+          ) ?? queries[0]
+
+          const downloadedAsset = await downloadAsset(
+            winner,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          )
+
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId)
+          manifest.push(downloadedAsset)
+          usedAssetIds.add(downloadedAsset.assetId)
+
+          scene.localPath = downloadedAsset.localPath
+          scene.mediaFile = basename(downloadedAsset.localPath)
+          scene.mediaType = downloadedAsset.mediaType === 'photo' ? 'image' : 'video'
+
+          assignment.asset = downloadedAsset
+          assignment.score = winner.score
+          assignment.usedQuery = usedQuery
+          assignment.status = 'assigned'
+          assignedCount++
+        }
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
@@ -277,21 +369,22 @@ export async function runStockEngine(
     saveAssetsManifest(stockDir, manifest)
   }
 
-  // Save updated plan with localPaths stamped in
-  fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
+  assignments.sort((a, b) => a.sceneIndex - b.sceneIndex)
 
-  // Save assignments for review UI
-  const reviewPath = join(projectDir, 'analysis', 'stock-assignments.json')
-  fs.writeFileSync(reviewPath, JSON.stringify(assignments, null, 2), 'utf-8')
+  atomicWriteJson(planPath, plan)
+  atomicWriteJson(reviewPath, assignments)
+  if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+    saveStockCandidates(projectDir, stockCandidatesStore)
+  }
 
   onProgress(
-    `Done — ${assignedCount}/${scenesNeedingStock.length} scenes assigned, ${failedCount} failed`,
+    `Done — ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`,
     1.0
   )
 
   return {
     success: true,
-    totalScenes: scenesNeedingStock.length,
+    totalScenes: flattenedEntries.length,
     assignedScenes: assignedCount,
     failedScenes: failedCount,
     assignments
@@ -338,14 +431,16 @@ export async function replaceSceneAsset(
   const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   if (fs.existsSync(planPath)) {
     const plan: EditPlan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
-    const scene = flattenScenes(plan).find((s) => s.sceneIndex === sceneIndex)
-    if (scene) {
-      scene.localPath = asset.localPath
-      scene.mediaFile = basename(asset.localPath)
-      scene.mediaType = asset.mediaType === 'photo' ? 'image' : 'video'
-      fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
+    const flat = flattenEditPlanScenes<ScenePlanWithIntent>(plan)
+    const sceneEntry = flat.find((s) => s.sceneIndex === sceneIndex)
+    if (sceneEntry) {
+      sceneEntry.scene.localPath = asset.localPath
+      sceneEntry.scene.mediaFile = basename(asset.localPath)
+      sceneEntry.scene.mediaType = asset.mediaType === 'photo' ? 'image' : 'video'
+      atomicWriteJson(planPath, plan)
     }
   }
 
   return asset
 }
+
