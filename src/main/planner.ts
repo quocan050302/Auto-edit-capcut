@@ -2,6 +2,7 @@ import { GoogleGenAI } from '@google/genai'
 import * as fs from 'fs'
 import { join } from 'path'
 import { logger } from './logger'
+import { normalizeApiKey } from './utils/api-key'
 import type { TranscriptResult } from '../../shared/types'
 import type { MasterEditPlanRetentionExt } from '../../shared/types'
 import { analyzePacing, flattenPlanScenes } from './pacing-guard'
@@ -355,7 +356,7 @@ export async function buildEditPlan(params: {
   progress('Sending to Gemini AI...', 0.20)
 
   const ai = new GoogleGenAI({
-    apiKey,
+    apiKey: normalizeApiKey(apiKey),
     httpOptions: { apiVersion: 'v1beta' }
   })
 

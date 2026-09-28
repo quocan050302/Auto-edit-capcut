@@ -7616,6 +7616,16 @@ function InputPage({
       ` })
   ] });
 }
+function normalizeApiKey(raw) {
+  let value = raw ?? "";
+  value = value.trim();
+  value = value.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+  value = value.replace(/^[`"'“”‘’]+/, "");
+  value = value.replace(/[`"'“”‘’]+$/, "");
+  value = value.replace(/^Bearer\s+/i, "");
+  value = value.replace(/[\r\n]/g, "").trim();
+  return value;
+}
 function SegControl({
   options,
   value,
@@ -7632,31 +7642,223 @@ function SegControl({
     opt.value
   )) });
 }
+const API_KEY_STATUS_CONFIG = {
+  EMPTY: {
+    label: "EMPTY",
+    bg: "rgba(148, 163, 184, 0.1)",
+    color: "var(--text-muted)",
+    border: "1px solid rgba(148, 163, 184, 0.2)",
+    containerBorder: "var(--border-subtle)"
+  },
+  UNSAVED: {
+    label: "● UNSAVED",
+    bg: "rgba(234, 179, 8, 0.15)",
+    color: "#eab308",
+    border: "1px solid rgba(234, 179, 8, 0.3)",
+    containerBorder: "rgba(234, 179, 8, 0.4)",
+    defaultMsg: 'Có thay đổi chưa lưu. Hãy nhấn "Save" để lưu và kiểm tra key.'
+  },
+  SAVING: {
+    label: "SAVING...",
+    bg: "rgba(96, 165, 250, 0.15)",
+    color: "#60a5fa",
+    border: "1px solid rgba(96, 165, 250, 0.3)",
+    containerBorder: "var(--border-brand)",
+    defaultMsg: "Đang lưu API key vào cấu hình..."
+  },
+  SAVED_NOT_VERIFIED: {
+    label: "SAVED (NOT VERIFIED)",
+    bg: "rgba(96, 165, 250, 0.15)",
+    color: "#60a5fa",
+    border: "1px solid rgba(96, 165, 250, 0.3)",
+    containerBorder: "var(--border-brand)"
+  },
+  VERIFYING: {
+    label: "⟳ VERIFYING...",
+    bg: "rgba(168, 85, 247, 0.15)",
+    color: "#c084fc",
+    border: "1px solid rgba(168, 85, 247, 0.3)",
+    containerBorder: "var(--border-brand)",
+    defaultMsg: "Đang gửi yêu cầu kiểm tra tới provider..."
+  },
+  VERIFIED: {
+    label: "✓ VERIFIED",
+    bg: "rgba(52, 211, 153, 0.15)",
+    color: "#34d399",
+    border: "1px solid rgba(52, 211, 153, 0.3)",
+    containerBorder: "rgba(52, 211, 153, 0.5)",
+    defaultMsg: "API key hợp lệ và đã sẵn sàng sử dụng."
+  },
+  INVALID_KEY: {
+    label: "✗ INVALID KEY",
+    bg: "rgba(248, 113, 113, 0.15)",
+    color: "#f87171",
+    border: "1px solid rgba(248, 113, 113, 0.3)",
+    containerBorder: "rgba(248, 113, 113, 0.5)",
+    defaultMsg: "Provider phản hồi: API key không hợp lệ hoặc đã bị thu hồi."
+  },
+  QUOTA_EXCEEDED: {
+    label: "⚠️ QUOTA EXCEEDED",
+    bg: "rgba(251, 146, 60, 0.15)",
+    color: "#fb923c",
+    border: "1px solid rgba(251, 146, 60, 0.3)",
+    containerBorder: "rgba(251, 146, 60, 0.5)",
+    defaultMsg: "Key hợp lệ nhưng đã vượt quá quota (Rate limit / Resource exhausted)."
+  },
+  PERMISSION_DENIED: {
+    label: "⛔ PERMISSION DENIED",
+    bg: "rgba(248, 113, 113, 0.15)",
+    color: "#f87171",
+    border: "1px solid rgba(248, 113, 113, 0.3)",
+    containerBorder: "rgba(248, 113, 113, 0.5)",
+    defaultMsg: "Tài khoản không có quyền truy cập API này (Permission denied)."
+  },
+  MODEL_UNAVAILABLE: {
+    label: "⚠ MODEL UNAVAILABLE",
+    bg: "rgba(192, 132, 252, 0.15)",
+    color: "#c084fc",
+    border: "1px solid rgba(192, 132, 252, 0.3)",
+    containerBorder: "rgba(192, 132, 252, 0.5)",
+    defaultMsg: "Model Gemini chỉ định hiện không khả dụng với tài khoản này."
+  },
+  NETWORK_ERROR: {
+    label: "⚡ NETWORK ERROR",
+    bg: "rgba(250, 204, 21, 0.15)",
+    color: "#facc15",
+    border: "1px solid rgba(250, 204, 21, 0.3)",
+    containerBorder: "rgba(250, 204, 21, 0.5)",
+    defaultMsg: "Không thể kết nối tới máy chủ Google (Lỗi mạng hoặc mất kết nối)."
+  },
+  SERVICE_UNAVAILABLE: {
+    label: "☁️ SERVICE UNAVAILABLE",
+    bg: "rgba(251, 146, 60, 0.15)",
+    color: "#fb923c",
+    border: "1px solid rgba(251, 146, 60, 0.3)",
+    containerBorder: "rgba(251, 146, 60, 0.5)",
+    defaultMsg: "Máy chủ Google AI đang tạm thời quá tải (503 Service Unavailable)."
+  }
+};
 function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
   const [value, setValue] = reactExports.useState("");
-  const [saved, setSaved] = reactExports.useState(false);
+  const [savedValue, setSavedValue] = reactExports.useState("");
+  const [status, setStatus] = reactExports.useState("EMPTY");
+  const [statusMsg, setStatusMsg] = reactExports.useState("");
   const [loading, setLoading] = reactExports.useState(true);
   const [show, setShow] = reactExports.useState(false);
+  const isGemini = configKey === "geminiApiKey";
+  const lastVerifiedStatusRef = reactExports.useRef(null);
+  const lastVerifiedMsgRef = reactExports.useRef("");
+  const runVerification = async (keyToVerify) => {
+    const clean = normalizeApiKey(keyToVerify);
+    if (!clean) {
+      setStatus("EMPTY");
+      setStatusMsg("");
+      return;
+    }
+    if (!window.api?.config || typeof window.api.config.verifyKey !== "function") {
+      console.warn("[Settings] window.api.config.verifyKey is not available in running Electron instance.");
+      setStatus("SAVED_NOT_VERIFIED");
+      setStatusMsg("Đã lưu API key vào cấu hình. Hãy khởi động lại dev server (npm run dev) để nạp tính năng kiểm tra trực tiếp.");
+      return;
+    }
+    setStatus("VERIFYING");
+    setStatusMsg("Đang gửi yêu cầu xác thực tới Google AI API...");
+    try {
+      const res = await window.api.config.verifyKey({ key: clean, configKey });
+      if (res && res.status) {
+        setStatus(res.status);
+        setStatusMsg(res.message ?? "");
+        lastVerifiedStatusRef.current = res.status;
+        lastVerifiedMsgRef.current = res.message ?? "";
+      } else {
+        setStatus("SAVED_NOT_VERIFIED");
+        setStatusMsg("Đã lưu API key.");
+      }
+    } catch (err) {
+      console.error("[VerifyKey Error]", err);
+      const errStr = String(err);
+      if (errStr.includes("No handler registered") || errStr.includes("is not a function")) {
+        setStatus("SAVED_NOT_VERIFIED");
+        setStatusMsg("Đã lưu API key vào cấu hình. Hãy khởi động lại dev server (npm run dev) để nạp handler kiểm tra.");
+      } else {
+        setStatus("NETWORK_ERROR");
+        setStatusMsg("Không thể kết nối tới dịch vụ xác thực.");
+      }
+    }
+  };
   reactExports.useEffect(() => {
-    window.api.config.get(configKey).then((v2) => {
-      if (v2) setValue(v2);
+    window.api.config.get(configKey).then((saved) => {
+      const clean = normalizeApiKey(saved ?? "");
+      setValue(clean);
+      setSavedValue(clean);
       setLoading(false);
+      if (!clean) {
+        setStatus("EMPTY");
+        setStatusMsg("");
+      } else if (isGemini) {
+        setStatus("SAVED_NOT_VERIFIED");
+        runVerification(clean);
+      } else {
+        setStatus("SAVED_NOT_VERIFIED");
+        setStatusMsg("");
+      }
     });
   }, [configKey]);
   async function handleSave() {
-    await window.api.config.set(configKey, value.trim());
-    setSaved(true);
-    setTimeout(() => setSaved(false), 2e3);
+    const clean = normalizeApiKey(value);
+    if (!clean) {
+      setStatus("SAVING");
+      await window.api.config.set(configKey, "");
+      setValue("");
+      setSavedValue("");
+      setStatus("EMPTY");
+      setStatusMsg("Đã xóa API key.");
+      lastVerifiedStatusRef.current = null;
+      lastVerifiedMsgRef.current = "";
+      return;
+    }
+    setStatus("SAVING");
+    setStatusMsg("Đang lưu API key...");
+    await window.api.config.set(configKey, clean);
+    setSavedValue(clean);
+    setValue(clean);
+    if (isGemini) {
+      setStatus("SAVED_NOT_VERIFIED");
+      await runVerification(clean);
+    } else {
+      setStatus("SAVED_NOT_VERIFIED");
+      setStatusMsg("Đã lưu thành công.");
+      setTimeout(() => {
+        setStatusMsg("");
+      }, 3e3);
+    }
   }
-  const hasValue = value.trim().length > 0;
-  const isGemini = configKey === "geminiApiKey";
-  const isGeminiFormat = !isGemini || value.trim().startsWith("AIza");
-  const isValid = hasValue && value.trim().length > 10 && isGeminiFormat;
+  function handleChange(e) {
+    const raw = e.target.value;
+    setValue(raw);
+    const clean = normalizeApiKey(raw);
+    if (!clean) {
+      setStatus("EMPTY");
+      setStatusMsg("");
+    } else if (clean !== savedValue) {
+      setStatus("UNSAVED");
+      setStatusMsg("Thay đổi chưa được lưu. Hãy bấm Save để lưu và xác thực key.");
+    } else {
+      setStatus(lastVerifiedStatusRef.current || "SAVED_NOT_VERIFIED");
+      setStatusMsg(lastVerifiedMsgRef.current || "");
+    }
+  }
+  const conf = API_KEY_STATUS_CONFIG[status];
+  const badgeLabel = !isGemini && status === "SAVED_NOT_VERIFIED" ? "✓ SET" : conf.label;
+  const badgeColor = !isGemini && status === "SAVED_NOT_VERIFIED" ? "var(--color-success)" : conf.color;
+  const badgeBg = !isGemini && status === "SAVED_NOT_VERIFIED" ? "rgba(52,211,153,0.15)" : conf.bg;
+  const badgeBorder = !isGemini && status === "SAVED_NOT_VERIFIED" ? "1px solid rgba(52,211,153,0.3)" : conf.border;
+  const displayMsg = statusMsg || conf.defaultMsg;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
     padding: "16px",
     background: "var(--bg-elevated)",
     borderRadius: "var(--radius-md)",
-    border: `1px solid ${hasValue && isValid ? "var(--border-brand)" : hasValue && !isValid ? "rgba(248,113,113,0.4)" : "var(--border-subtle)"}`,
+    border: `1px solid ${conf.containerBorder}`,
     display: "flex",
     flexDirection: "column",
     gap: "10px",
@@ -7665,22 +7867,15 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }, children: label }),
-        hasValue && isValid && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
           fontSize: "10px",
           padding: "2px 8px",
-          background: "rgba(52,211,153,0.15)",
-          color: "var(--color-success)",
+          background: badgeBg,
+          color: badgeColor,
+          border: badgeBorder,
           borderRadius: "999px",
           fontWeight: 600
-        }, children: "✓ SET" }),
-        hasValue && !isValid && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-          fontSize: "10px",
-          padding: "2px 8px",
-          background: "rgba(248,113,113,0.15)",
-          color: "var(--color-error)",
-          borderRadius: "999px",
-          fontWeight: 600
-        }, children: isGemini && !isGeminiFormat ? '✗ CẦN KEY "AIzaSy..."' : "✗ INVALID FORMAT" })
+        }, children: badgeLabel })
       ] }),
       link && /* @__PURE__ */ jsxRuntimeExports.jsx(
         "a",
@@ -7706,15 +7901,12 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
             type: show ? "text" : "password",
             placeholder: loading ? "Loading..." : placeholder,
             value,
-            onChange: (e) => {
-              setValue(e.target.value);
-              setSaved(false);
-            },
-            disabled: loading,
+            onChange: handleChange,
+            disabled: loading || status === "SAVING",
             style: {
               width: "100%",
               background: "var(--bg-base)",
-              border: `1px solid ${hasValue && !isValid ? "rgba(248,113,113,0.5)" : "var(--border-default)"}`,
+              border: `1px solid ${conf.containerBorder}`,
               borderRadius: "var(--radius-sm)",
               color: "var(--text-primary)",
               fontFamily: "var(--font-mono)",
@@ -7749,18 +7941,36 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }) {
           }
         )
       ] }),
+      isGemini && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "btn btn-secondary",
+          onClick: () => runVerification(normalizeApiKey(value || savedValue)),
+          disabled: loading || status === "SAVING" || status === "VERIFYING" || !normalizeApiKey(value || savedValue),
+          title: "Kiểm tra trực tiếp với Google AI API",
+          style: { minWidth: "70px", flexShrink: 0 },
+          children: status === "VERIFYING" ? "⟳ Checking..." : "Verify"
+        }
+      ),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
-          className: `btn ${saved ? "btn-success" : "btn-primary"}`,
+          className: `btn ${status === "VERIFIED" ? "btn-success" : "btn-primary"}`,
           onClick: handleSave,
-          disabled: !hasValue || loading,
-          style: { minWidth: "80px", flexShrink: 0 },
-          children: saved ? "✓ Saved" : "Save"
+          disabled: loading || status === "SAVING" || status === "VERIFYING" || status === "EMPTY" && !savedValue,
+          style: { minWidth: "70px", flexShrink: 0 },
+          children: status === "SAVING" ? "Saving..." : status === "UNSAVED" ? "Save" : status === "VERIFIED" ? "✓ Saved" : "Save"
         }
       )
     ] }),
-    hasValue && isGemini && !isGeminiFormat ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#f87171" }, children: '⚠️ Key Gemini hiện tại không bắt đầu bằng "AIzaSy...". Hãy lấy API key từ Google AI Studio (aistudio.google.com/apikey).' }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: hint })
+    displayMsg && status !== "EMPTY" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+      fontSize: "11px",
+      color: badgeColor,
+      display: "flex",
+      alignItems: "center",
+      gap: "6px"
+    }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: displayMsg }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: hint })
   ] });
 }
 function SettingsPage({ project, onUpdateSettings }) {
@@ -7861,7 +8071,7 @@ function SettingsPage({ project, onUpdateSettings }) {
         {
           label: "Gemini API Key",
           configKey: "geminiApiKey",
-          placeholder: "AIzaSy...",
+          placeholder: "Paste your Gemini API key here...",
           hint: "Required for Phase 3 Edit Planning. Free tier: 1500 requests/day.",
           link: "https://aistudio.google.com/apikey",
           linkLabel: "Get free key at aistudio.google.com ↗"
@@ -9045,6 +9255,7 @@ function fmtBytes(bytes) {
 function RenderPage({ project }) {
   const [isRendering, setIsRendering] = reactExports.useState(false);
   const [progress, setProgress] = reactExports.useState(null);
+  const [captionProgress, setCaptionProgress] = reactExports.useState(null);
   const [result, setResult] = reactExports.useState(null);
   const [error, setError] = reactExports.useState(null);
   const [hasPlan, setHasPlan] = reactExports.useState(false);
@@ -9097,9 +9308,13 @@ function RenderPage({ project }) {
     setIsRendering(true);
     setError(null);
     setResult(null);
+    setCaptionProgress(null);
     setProgress({ stage: "Starting...", progress: 0 });
     startTimer();
     const unsub = window.api.render.onProgress((data) => setProgress(data));
+    const unsubCaption = window.api.captions?.onRenderProgress?.(
+      (data) => setCaptionProgress(data)
+    );
     try {
       const res = resolution;
       const response = await window.api.render.start({
@@ -9119,11 +9334,13 @@ function RenderPage({ project }) {
     } finally {
       setIsRendering(false);
       setProgress(null);
+      setCaptionProgress(null);
       stopTimer();
       unsub();
+      unsubCaption?.();
     }
   }
-  const pct = progress ? Math.round(progress.progress * 100) : 0;
+  const pct2 = progress ? Math.round(progress.progress * 100) : 0;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
@@ -9269,7 +9486,7 @@ function RenderPage({ project }) {
                   }
                 ),
                 "Rendering... ",
-                pct,
+                pct2,
                 "%"
               ] }) : result ? "🔄 Re-render" : "▶ Start Render"
             }
@@ -9285,7 +9502,7 @@ function RenderPage({ project }) {
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title", children: "Render Progress" }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "12px", fontFamily: "var(--font-mono)", color: "var(--brand-primary)" }, children: [
-          pct,
+          pct2,
           "%"
         ] })
       ] }),
@@ -9294,10 +9511,37 @@ function RenderPage({ project }) {
           "div",
           {
             className: "progress-bar-fill",
-            style: { width: `${Math.max(2, pct)}%`, transition: "width 0.4s ease" }
+            style: { width: `${Math.max(2, pct2)}%`, transition: "width 0.4s ease" }
           }
         ) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: progress.stage }),
+        captionProgress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 4 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            display: "flex",
+            justifyContent: "space-between",
+            fontSize: "11px",
+            color: "var(--text-muted)",
+            marginBottom: 4
+          }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🎬 Caption Overlay (Remotion)" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", color: "#a5b4fc" }, children: [
+              Math.round(captionProgress.progress * 100),
+              "%"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "progress-bar-wrap", style: { height: "6px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "div",
+            {
+              className: "progress-bar-fill",
+              style: {
+                width: `${Math.max(1, Math.round(captionProgress.progress * 100))}%`,
+                background: "linear-gradient(90deg, #6366f1, #a5b4fc)",
+                transition: "width 0.4s ease"
+              }
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginTop: 4 }, children: captionProgress.message })
+        ] }),
         progress.sceneIndex && progress.totalScenes && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "4px", flexWrap: "wrap" }, children: Array.from({ length: progress.totalScenes }, (_, i) => /* @__PURE__ */ jsxRuntimeExports.jsx(
           "div",
           {
@@ -10594,15 +10838,27 @@ const EMPHASIS_COLORS = {
   punchline: { bg: "#d97706", text: "#fef3c7", label: "💥 Punch" },
   normal: { bg: "#374151", text: "#f9fafb", label: "💬 Normal" }
 };
+function fmtTime(secs) {
+  const m2 = Math.floor(secs / 60);
+  const s = Math.floor(secs % 60);
+  return `${m2}:${String(s).padStart(2, "0")}`;
+}
+function pct(n2, total) {
+  if (total <= 0) return "0%";
+  return (n2 / total * 100).toFixed(1) + "%";
+}
 function RangePill({ range, totalDuration, isSelected, onClick }) {
   const colors = EMPHASIS_COLORS[range.reason];
   const leftPct = range.startTime / totalDuration * 100;
-  const widthPct = Math.max(1, (range.endTime - range.startTime) / totalDuration * 100);
+  const widthPct = Math.max(0.5, (range.endTime - range.startTime) / totalDuration * 100);
+  const dur = (range.endTime - range.startTime).toFixed(1);
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     "div",
     {
       onClick,
-      title: `${colors.label}: ${range.startTime.toFixed(1)}s – ${range.endTime.toFixed(1)}s`,
+      title: `${colors.label}
+${fmtTime(range.startTime)} → ${fmtTime(range.endTime)}
+Duration: ${dur}s`,
       style: {
         position: "absolute",
         left: `${leftPct}%`,
@@ -10621,6 +10877,117 @@ function RangePill({ range, totalDuration, isSelected, onClick }) {
       }
     }
   );
+}
+function TimelineRuler({ totalDuration }) {
+  const ticks = [0, 0.25, 0.5, 0.75, 1];
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { position: "relative", height: 16, marginBottom: 2 }, children: ticks.map((t2) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+    position: "absolute",
+    left: `${t2 * 100}%`,
+    transform: "translateX(-50%)",
+    fontSize: 10,
+    color: "#64748b",
+    whiteSpace: "nowrap"
+  }, children: fmtTime(t2 * totalDuration) }, t2)) });
+}
+const ANIMATION_PRESETS = [
+  { value: void 0, label: "Auto" },
+  { value: "smooth_kinetic", label: "Smooth" },
+  { value: "punch", label: "Punch" },
+  { value: "swipe_reveal", label: "Swipe" },
+  { value: "blur_focus", label: "Blur" },
+  { value: "impact_keyword", label: "Impact" },
+  { value: "type_pop", label: "Pop" }
+];
+const INTENSITIES = [
+  { value: void 0, label: "Auto" },
+  { value: "subtle", label: "Subtle" },
+  { value: "medium", label: "Medium" },
+  { value: "strong", label: "Strong" }
+];
+const KEYWORD_EFFECTS = [
+  { value: void 0, label: "Auto" },
+  { value: "none", label: "None" },
+  { value: "spring", label: "Spring" },
+  { value: "impact", label: "Impact" },
+  { value: "highlight", label: "Highlight" }
+];
+function AnimationControls({ phrase, onUpdate }) {
+  const [open, setOpen] = reactExports.useState(false);
+  function chipStyle(active) {
+    return {
+      padding: "2px 7px",
+      borderRadius: 8,
+      fontSize: 10,
+      border: "1px solid",
+      borderColor: active ? "#7c3aed" : "rgba(255,255,255,0.15)",
+      background: active ? "rgba(124,58,237,0.25)" : "transparent",
+      color: active ? "#c4b5fd" : "#94a3b8",
+      cursor: "pointer"
+    };
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 4 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "button",
+      {
+        onClick: () => setOpen(!open),
+        style: {
+          fontSize: 10,
+          padding: "2px 8px",
+          borderRadius: 6,
+          border: "1px solid rgba(255,255,255,0.15)",
+          background: "transparent",
+          color: "#94a3b8",
+          cursor: "pointer"
+        },
+        children: [
+          "🎞 Animation ",
+          open ? "▲" : "▼",
+          phrase.animationPreset && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#c4b5fd", marginLeft: 4 }, children: [
+            "● ",
+            phrase.animationPreset
+          ] })
+        ]
+      }
+    ),
+    open && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 6, display: "flex", flexDirection: "column", gap: 6 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: "#64748b", marginBottom: 3 }, children: "PRESET" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 3 }, children: ANIMATION_PRESETS.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            style: chipStyle(phrase.animationPreset === p2.value),
+            onClick: () => onUpdate(phrase.id, { animationPreset: p2.value }),
+            children: p2.label
+          },
+          String(p2.value)
+        )) })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: "#64748b", marginBottom: 3 }, children: "INTENSITY" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 3 }, children: INTENSITIES.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            style: chipStyle(phrase.animationIntensity === p2.value),
+            onClick: () => onUpdate(phrase.id, { animationIntensity: p2.value }),
+            children: p2.label
+          },
+          String(p2.value)
+        )) })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: "#64748b", marginBottom: 3 }, children: "KEYWORD" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 3 }, children: KEYWORD_EFFECTS.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            style: chipStyle(phrase.keywordAnimation === p2.value),
+            onClick: () => onUpdate(phrase.id, { keywordAnimation: p2.value }),
+            children: p2.label
+          },
+          String(p2.value)
+        )) })
+      ] })
+    ] })
+  ] });
 }
 function PhraseCard({ phrase, projectDir: _projectDir, onUpdate }) {
   const colors = EMPHASIS_COLORS[phrase.emphasisType];
@@ -10735,7 +11102,8 @@ function PhraseCard({ phrase, projectDir: _projectDir, onUpdate }) {
     (phrase.highlightWords ?? []).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "#fbbf24" }, children: [
       "★ Highlight: ",
       phrase.highlightWords.join(", ")
-    ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(AnimationControls, { phrase, onUpdate })
   ] });
 }
 function ToggleBadge({ label, active, onChange }) {
@@ -10772,11 +11140,12 @@ const btnStyle = {
 function CaptionsPage({ projectDir }) {
   const [plan, setPlan] = reactExports.useState(null);
   const [loading, setLoading] = reactExports.useState(false);
+  const [previewLoading, setPreviewLoading] = reactExports.useState(false);
   const [progress, setProgress] = reactExports.useState(null);
   const [error, setError] = reactExports.useState(null);
   const [selectedRangeIdx, setSelectedRangeIdx] = reactExports.useState(null);
   const [previewPath, setPreviewPath] = reactExports.useState(null);
-  const totalDuration = plan ? Math.max(...plan.activeRanges.map((r2) => r2.endTime), 60) : 120;
+  const totalDuration = plan ? plan.sourceDuration ?? (plan.activeRanges.length > 0 ? Math.max(...plan.activeRanges.map((r2) => r2.endTime), 60) : 120) : 120;
   reactExports.useEffect(() => {
     let unsubProgress = null;
     async function load() {
@@ -10795,12 +11164,32 @@ function CaptionsPage({ projectDir }) {
       unsubProgress?.();
     };
   }, [projectDir]);
-  const handleGenerate = reactExports.useCallback(async (force = false) => {
+  const handleRegenerate = reactExports.useCallback(async () => {
     setLoading(true);
     setError(null);
     setProgress(null);
     try {
-      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: force });
+      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: true });
+      if (res.success && res.plan) {
+        setPlan(res.plan);
+        setSelectedRangeIdx(null);
+        setPreviewPath(null);
+      } else {
+        setError(res.error ?? "Không thể tạo caption plan");
+      }
+    } catch (e) {
+      setError("Regenerate thất bại — vẫn giữ plan trước đó: " + String(e));
+    } finally {
+      setLoading(false);
+      setProgress(null);
+    }
+  }, [projectDir]);
+  const handleGenerateFirst = reactExports.useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setProgress(null);
+    try {
+      const res = await window.api.captions.generatePlan({ projectDir, forceRegenerate: false });
       if (res.success && res.plan) {
         setPlan(res.plan);
       } else {
@@ -10829,14 +11218,14 @@ function CaptionsPage({ projectDir }) {
     if (!res.success) setError(res.error ?? "Lỗi tạo file .ass");
   }, [projectDir]);
   const handlePreview = reactExports.useCallback(async (range) => {
-    setLoading(true);
+    setPreviewLoading(true);
     setError(null);
     const res = await window.api.captions.previewRender({
       projectDir,
       startTime: range.startTime,
       endTime: Math.min(range.endTime, range.startTime + 12)
     });
-    setLoading(false);
+    setPreviewLoading(false);
     if (res.success && res.previewPath) {
       setPreviewPath(res.previewPath);
     } else {
@@ -10847,6 +11236,19 @@ function CaptionsPage({ projectDir }) {
   const phrasesInRange = selectedRange && plan ? plan.phrases.filter(
     (p2) => p2.startTime >= selectedRange.startTime && p2.endTime <= selectedRange.endTime + 1
   ) : [];
+  const captionTimeSecs = plan?.activeRanges.reduce((a, r2) => a + r2.endTime - r2.startTime, 0) ?? 0;
+  const hookWindowSecs = plan?.hookWindowSeconds ?? 30;
+  const hookRange = plan?.activeRanges.find((r2) => r2.reason === "hook");
+  const hookCoveredSecs = hookRange ? hookRange.endTime - hookRange.startTime : 0;
+  const hookTargetSecs = Math.min(hookWindowSecs, totalDuration);
+  const isGemini = plan?.generationSource === "gemini" || !plan?.generatedByFallback && plan?.generationSource === void 0 && plan?.generatedAt;
+  const genLabel = plan?.generationSource === "gemini" ? `🤖 Gemini${plan.generationModel ? ` (${plan.generationModel.replace("gemini-", "")})` : ""}` : plan?.generatedByFallback || plan?.generationSource === "fallback" ? "⚙ Fallback" : null;
+  const emphasisCount = plan ? Object.fromEntries(
+    ["hook", "list_transition", "shock_stat", "punchline", "normal"].map((k2) => [
+      k2,
+      plan.phrases.filter((p2) => p2.emphasisType === k2).length
+    ])
+  ) : {};
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
     height: "100%",
     overflowY: "auto",
@@ -10904,53 +11306,95 @@ function CaptionsPage({ projectDir }) {
         borderRadius: 2
       } }) })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 10, marginBottom: 24, flexWrap: "wrap" }, children: !plan ? (
+      /* Lần đầu — load cache hoặc generate */
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
-          onClick: () => handleGenerate(false),
+          onClick: handleGenerateFirst,
           disabled: loading,
           style: { ...btnStyle, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
-          children: loading ? "⏳ Đang xử lý..." : plan ? "🔄 Tạo lại Plan" : "✨ Tạo Caption Plan"
+          children: loading ? "⏳ Đang xử lý..." : "✨ Tạo Caption Plan"
+        }
+      )
+    ) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: handleRegenerate,
+          disabled: loading,
+          title: "Chạy lại planner — bỏ qua cache. Dùng Gemini nếu có API key, fallback nếu không.",
+          style: { ...btnStyle, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
+          children: loading ? "⏳ Đang xử lý..." : "🔄 Tạo lại Plan"
         }
       ),
-      plan && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            onClick: () => handleGenerate(true),
-            disabled: loading,
-            style: { ...btnStyle, background: "#0369a1", opacity: loading ? 0.6 : 1 },
-            children: "🔄 Force Regenerate (Gemini)"
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            onClick: handleRegenerateAss,
-            disabled: loading,
-            style: { ...btnStyle, background: "#065f46", opacity: loading ? 0.6 : 1 },
-            children: "📄 Tạo lại file .ass"
-          }
-        )
-      ] })
-    ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: handleRegenerateAss,
+          disabled: loading,
+          style: { ...btnStyle, background: "#065f46", opacity: loading ? 0.6 : 1 },
+          children: "📄 Tạo lại file .ass"
+        }
+      )
+    ] }) }),
     plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       background: "rgba(255,255,255,0.04)",
       border: "1px solid rgba(255,255,255,0.08)",
       borderRadius: 10,
       padding: "14px 18px",
-      marginBottom: 20,
-      display: "flex",
-      gap: 24,
-      flexWrap: "wrap"
+      marginBottom: 20
     }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Phrases", value: plan.phrases.length }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Active Ranges", value: plan.activeRanges.length }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Tổng thời gian BẬT", value: `${plan.activeRanges.reduce((a, r2) => a + r2.endTime - r2.startTime, 0).toFixed(0)}s` }),
-      plan.generatedByFallback && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#fbbf24", padding: "2px 8px", background: "rgba(251,191,36,0.1)", borderRadius: 4, alignSelf: "center" }, children: "⚠️ Fallback — chưa qua Gemini" })
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 20, flexWrap: "wrap", marginBottom: 12 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Phrases", value: plan.phrases.length }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Active Ranges", value: plan.activeRanges.length }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(Stat, { label: "Caption Time", value: `${captionTimeSecs.toFixed(0)}s` }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Stat,
+          {
+            label: "Coverage",
+            value: `${pct(captionTimeSecs, totalDuration)}`,
+            sub: `${captionTimeSecs.toFixed(0)}s / ${totalDuration.toFixed(0)}s`
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          Stat,
+          {
+            label: "Hook Coverage",
+            value: `${pct(hookCoveredSecs, hookTargetSecs)}`,
+            sub: `${hookCoveredSecs.toFixed(0)}s / ${hookTargetSecs.toFixed(0)}s`,
+            highlight: hookCoveredSecs >= hookTargetSecs - 0.5
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }, children: [
+        genLabel && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          fontSize: 11,
+          padding: "3px 10px",
+          borderRadius: 6,
+          background: isGemini ? "rgba(37,99,235,0.15)" : "rgba(251,191,36,0.12)",
+          border: `1px solid ${isGemini ? "rgba(96,165,250,0.3)" : "rgba(251,191,36,0.3)"}`,
+          color: isGemini ? "#93c5fd" : "#fbbf24"
+        }, children: genLabel }),
+        plan.generationReason && plan.generationSource === "fallback" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#9ca3af" }, children: plan.generationReason.includes("No API") ? "No API key" : plan.generationReason.includes("Quota") ? "Quota exhausted" : plan.generationReason.includes("unavailable") ? "Model unavailable" : "Local algorithm" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 8, flexWrap: "wrap" }, children: Object.entries(emphasisCount).filter(([, c]) => c > 0).map(([key, count]) => {
+          const c = EMPHASIS_COLORS[key];
+          return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+            fontSize: 10,
+            padding: "2px 7px",
+            borderRadius: 8,
+            background: `${c.bg}33`,
+            color: c.text,
+            border: `1px solid ${c.bg}55`
+          }, children: [
+            c.label.split(" ")[1],
+            " ",
+            count
+          ] }, key);
+        }) })
+      ] })
     ] }),
-    plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, marginBottom: 10, flexWrap: "wrap" }, children: [
+    plan && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 10, marginBottom: 8, flexWrap: "wrap" }, children: [
       Object.entries(EMPHASIS_COLORS).map(([key, c]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 5, fontSize: 12 }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: 12, height: 12, borderRadius: 2, background: c.bg } }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#94a3b8" }, children: c.label })
@@ -10960,6 +11404,7 @@ function CaptionsPage({ projectDir }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#94a3b8" }, children: "Tắt" })
       ] })
     ] }),
+    plan && totalDuration > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(TimelineRuler, { totalDuration }),
     plan && /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
       {
@@ -10984,6 +11429,7 @@ function CaptionsPage({ projectDir }) {
             },
             idx
           )),
+          plan.activeRanges.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, color: "#475569" }, children: "Không có active ranges" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { position: "absolute", bottom: 0, left: 0, right: 0, height: 1, background: "rgba(255,255,255,0.05)" } })
         ]
       }
@@ -11006,9 +11452,11 @@ function CaptionsPage({ projectDir }) {
             fontWeight: 700
           }, children: EMPHASIS_COLORS[selectedRange.reason].label }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 13, color: "#94a3b8" }, children: [
-            selectedRange.startTime.toFixed(1),
-            "s – ",
-            selectedRange.endTime.toFixed(1),
+            fmtTime(selectedRange.startTime),
+            " – ",
+            fmtTime(selectedRange.endTime),
+            " • ",
+            (selectedRange.endTime - selectedRange.startTime).toFixed(1),
             "s  • ",
             phrasesInRange.length,
             " phrases"
@@ -11018,9 +11466,15 @@ function CaptionsPage({ projectDir }) {
           "button",
           {
             onClick: () => handlePreview(selectedRange),
-            disabled: loading,
-            style: { ...btnStyle, background: "#b45309", padding: "6px 14px", fontSize: 12, opacity: loading ? 0.6 : 1 },
-            children: "👁 Xem trước đoạn này"
+            disabled: previewLoading || loading,
+            style: {
+              ...btnStyle,
+              background: previewLoading ? "#374151" : "#b45309",
+              padding: "6px 14px",
+              fontSize: 12,
+              opacity: previewLoading || loading ? 0.6 : 1
+            },
+            children: previewLoading ? "⏳ Đang render..." : "👁 Xem trước đoạn này"
           }
         )
       ] }),
@@ -11041,17 +11495,26 @@ function CaptionsPage({ projectDir }) {
       background: "rgba(255,255,255,0.04)",
       border: "1px solid rgba(255,255,255,0.1)",
       borderRadius: 10,
-      padding: 18
+      padding: 18,
+      marginBottom: 24
     }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 13, color: "#86efac", marginBottom: 10 }, children: [
         "✅ Preview đã render: ",
         /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { fontSize: 11 }, children: previewPath })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "video",
+        {
+          src: `file://${previewPath}`,
+          controls: true,
+          style: { width: "100%", maxHeight: 240, borderRadius: 6, background: "#000" }
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
           onClick: () => setPreviewPath(null),
-          style: { ...btnStyle, background: "#374151", fontSize: 12 },
+          style: { ...btnStyle, background: "#374151", fontSize: 12, marginTop: 10 },
           children: "✕ Đóng"
         }
       )
@@ -11083,9 +11546,10 @@ function CaptionsPage({ projectDir }) {
     ] })
   ] });
 }
-function Stat({ label, value }) {
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center" }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 20, fontWeight: 800, color: "#f8fafc" }, children: value }),
+function Stat({ label, value, sub, highlight }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center", minWidth: 60 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 18, fontWeight: 800, color: highlight ? "#86efac" : "#f8fafc" }, children: value }),
+    sub && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 1 }, children: sub }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#94a3b8", marginTop: 2 }, children: label })
   ] });
 }

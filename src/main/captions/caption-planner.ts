@@ -15,6 +15,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { GoogleGenAI } from '@google/genai'
 import { logger } from '../logger'
+import { normalizeApiKey } from '../utils/api-key'
 import type {
   CaptionPlan,
   CaptionPhrase,
@@ -383,7 +384,7 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
         0.20 + attempt * 0.10
       )
 
-      const ai = new GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: 'v1beta' } })
+      const ai = new GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: 'v1beta' } })
       const prompt = buildGeminiPrompt(scenes, allWords)
 
       const response = await ai.models.generateContent({

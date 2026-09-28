@@ -19,6 +19,8 @@ import { IPC_CHANNELS } from '../../../shared/types'
 import { generateCaptionPlan, loadCaptionPlan, saveCaptionPlan } from '../captions/caption-planner'
 import { renderCaptionsOverlay } from '../captions/remotion-renderer'
 import { logger } from '../logger'
+import { loadConfig } from '../config'
+import { normalizeApiKey } from '../utils/api-key'
 import type { CaptionPlan, CaptionPhrase, CaptionActiveRange } from '../../../shared/types'
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -53,18 +55,22 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
     }
 
     try {
-      // Lấy Gemini API key từ config
-      const configPath = path.join(os.homedir(), '.auto-edit-config.json')
-      let apiKey = ''
-      if (fs.existsSync(configPath)) {
-        try {
-          const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
-          apiKey = cfg.geminiApiKey ?? ''
-        } catch { /* ignore */ }
+      // Lấy Gemini API key từ app config (Settings)
+      const appCfg = loadConfig()
+      let apiKey = normalizeApiKey(appCfg.geminiApiKey ?? '')
+
+      if (!apiKey) {
+        const configPath = path.join(os.homedir(), '.auto-edit-config.json')
+        if (fs.existsSync(configPath)) {
+          try {
+            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf-8'))
+            apiKey = normalizeApiKey(cfg.geminiApiKey ?? '')
+          } catch { /* ignore */ }
+        }
       }
 
       // Fallback: lấy từ env
-      if (!apiKey) apiKey = process.env.GEMINI_API_KEY ?? ''
+      if (!apiKey) apiKey = normalizeApiKey(process.env.GEMINI_API_KEY ?? '')
 
       const plan = await generateCaptionPlan({
         projectDir: params.projectDir,

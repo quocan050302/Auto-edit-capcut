@@ -9,6 +9,7 @@ import { runContextAwareStockEngine } from "../stock/context-stock-engine"
 import { analyzeGlobalContext, loadGlobalContext, saveGlobalContext } from "../stock/global-context-analyzer"
 import { loadAssetsManifest, saveAssetsManifest } from "../stock/downloader"
 import { logger } from "../logger"
+import { normalizeApiKey } from "../utils/api-key"
 
 export function registerStockHandlers(ipcMain: IpcMain): void {
 
@@ -32,14 +33,15 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
 
       try {
         // Use context-aware engine when Gemini API key is present
-        if (config.geminiApiKey) {
+        const geminiApiKey = normalizeApiKey(config.geminiApiKey ?? "")
+        if (geminiApiKey) {
           const result = await runContextAwareStockEngine(
             {
               projectDir: params.projectDir,
               pexelsApiKey: config.pexelsApiKey ?? "",
               pixabayApiKey: config.pixabayApiKey,
               preferredAspectRatio: "16:9",
-              apiKey: config.geminiApiKey,
+              apiKey: geminiApiKey,
               forceReanalysis: params.forceReanalysis ?? false
             },
             sendProgress
@@ -215,7 +217,7 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
     async (event, params: { projectDir: string; forceRegenerate?: boolean; scriptPath?: string | null }) => {
       const win = BrowserWindow.fromWebContents(event.sender)
       const config = loadConfig()
-      const geminiKey = config.geminiApiKey?.trim() ?? ""
+      const geminiKey = normalizeApiKey(config.geminiApiKey ?? "")
 
       const sendProgress = (message: string, progress: number): void => {
         win?.webContents.send(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, { message, progress })
@@ -270,10 +272,8 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
         if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
           if (!geminiKey) {
             warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn."
-          } else if (!geminiKey.startsWith("AIza")) {
-            warning = "Khóa Gemini API không đúng định dạng (cần bắt đầu bằng AIzaSy... từ Google AI Studio). Đã phân tích tự động từ kịch bản."
           } else {
-            warning = "Gemini AI tạm thời quá tải. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc."
+            warning = "Gemini AI tạm thời quá tải hoặc không phản hồi. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc."
           }
         }
 

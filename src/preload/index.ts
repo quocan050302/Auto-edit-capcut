@@ -13,7 +13,8 @@ import type {
   AudioRunResult,
   GlobalScriptContext,
   CaptionPlan,
-  CaptionPhrase
+  CaptionPhrase,
+  ApiKeyVerifyResult
 } from '../../shared/types'
 
 const api = {
@@ -107,7 +108,9 @@ const api = {
     get: (key: string): Promise<string | null> =>
       ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET, key),
     set: (key: string, value: string): Promise<{ success: boolean }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value)
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value),
+    verifyKey: (params: { key: string; configKey?: string; model?: string }): Promise<ApiKeyVerifyResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CONFIG_VERIFY_KEY, params)
   },
 
   plan: {

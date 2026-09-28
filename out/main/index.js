@@ -62,6 +62,7 @@ const IPC_CHANNELS = {
   // Config (API keys, preferences)
   CONFIG_GET: "config:get",
   CONFIG_SET: "config:set",
+  CONFIG_VERIFY_KEY: "config:verify-key",
   // AI Edit Planning
   PLAN_GENERATE: "plan:generate",
   PLAN_PROGRESS: "plan:progress",
@@ -760,6 +761,130 @@ function registerTranscribeHandlers(ipcMain) {
     }
   );
 }
+function normalizeApiKey(raw) {
+  let value = raw ?? "";
+  value = value.trim();
+  value = value.replace(/[\u200B-\u200D\u2060\uFEFF]/g, "");
+  value = value.replace(/^[`"'“”‘’]+/, "");
+  value = value.replace(/[`"'“”‘’]+$/, "");
+  value = value.replace(/^Bearer\s+/i, "");
+  value = value.replace(/[\r\n]/g, "").trim();
+  return value;
+}
+function classifyGeminiError(err) {
+  const msg = err instanceof Error ? err.message : String(err);
+  const errObj = err;
+  const status = typeof errObj?.status === "number" ? errObj.status : void 0;
+  const code = errObj?.code ?? errObj?.cause?.code;
+  let reason = "";
+  let statusText = "";
+  try {
+    const jsonMatch = msg.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      statusText = parsed?.error?.status ?? "";
+      const details = parsed?.error?.details;
+      if (Array.isArray(details)) {
+        for (const d of details) {
+          if (d?.reason) reason = d.reason;
+        }
+      }
+    }
+  } catch {
+  }
+  const combined = `${msg} ${reason} ${statusText}`.toLowerCase();
+  if (code === "ENOTFOUND" || code === "ETIMEDOUT" || code === "ECONNREFUSED" || code === "ECONNRESET" || code === "EHOSTUNREACH" || code === "EAI_AGAIN" || combined.includes("fetch failed") || combined.includes("getaddrinfo") || combined.includes("socket hang up") || combined.includes("failed to fetch") || combined.includes("network error") || combined.includes("networktimeout")) {
+    return {
+      valid: false,
+      status: "NETWORK_ERROR",
+      message: "Không thể kết nối tới Google AI API. Vui lòng kiểm tra lại kết nối mạng internet."
+    };
+  }
+  if (status === 404 || statusText === "NOT_FOUND" || combined.includes("not_found") || combined.includes("model is not found") || combined.includes("model not found") || combined.includes("is not supported for this api version")) {
+    return {
+      valid: false,
+      status: "MODEL_UNAVAILABLE",
+      message: "Model Gemini chỉ định không khả dụng với tài khoản này. Hệ thống sẽ tự động dùng model fallback."
+    };
+  }
+  if (status === 429 || statusText === "RESOURCE_EXHAUSTED" || combined.includes("resource_exhausted") || combined.includes("quota") || combined.includes("rate limit")) {
+    return {
+      valid: false,
+      status: "QUOTA_EXCEEDED",
+      message: "API key hợp lệ nhưng đã hết quota (Rate limit / Resource exhausted). Vui lòng thử lại sau."
+    };
+  }
+  if (status === 403 || statusText === "PERMISSION_DENIED" || combined.includes("permission_denied") || combined.includes("permission") || combined.includes("unregistered callers")) {
+    return {
+      valid: false,
+      status: "PERMISSION_DENIED",
+      message: "Khóa API không có quyền truy cập dịch vụ này (Permission Denied). Hãy kiểm tra lại quyền trong Google Cloud / AI Studio."
+    };
+  }
+  if (status === 503 || status === 502 || status === 504 || status === 500 || statusText === "UNAVAILABLE" || combined.includes("unavailable") || combined.includes("high demand") || combined.includes("overloaded") || combined.includes("internal server error")) {
+    return {
+      valid: false,
+      status: "SERVICE_UNAVAILABLE",
+      message: "Máy chủ Google AI đang tạm thời quá tải hoặc bảo trì (503 Service Unavailable). Hãy thử lại sau ít phút."
+    };
+  }
+  if (reason === "API_KEY_INVALID" || status === 400 || combined.includes("api_key_invalid") || combined.includes("api key not valid") || combined.includes("invalid api key") || combined.includes("key is invalid")) {
+    return {
+      valid: false,
+      status: "INVALID_KEY",
+      message: "Khóa API không hợp lệ. Vui lòng lấy key mới từ Google AI Studio (aistudio.google.com)."
+    };
+  }
+  return {
+    valid: false,
+    status: "INVALID_KEY",
+    message: msg
+  };
+}
+async function verifyGeminiApiKey(rawKey, model) {
+  const key = normalizeApiKey(rawKey);
+  if (!key) {
+    return {
+      valid: false,
+      status: "EMPTY",
+      message: "Chưa nhập API key."
+    };
+  }
+  try {
+    const ai = new genai.GoogleGenAI({
+      apiKey: key,
+      httpOptions: { apiVersion: "v1beta" }
+    });
+    const pager = await ai.models.list({ config: { pageSize: 1 } });
+    let firstModelName = "";
+    for await (const m of pager) {
+      firstModelName = m.name ?? "";
+      break;
+    }
+    if (model) {
+      try {
+        await ai.models.get({ model });
+      } catch (modelErr) {
+        const classified = classifyGeminiError(modelErr);
+        if (classified.status === "MODEL_UNAVAILABLE") {
+          return classified;
+        }
+        if (classified.status !== "VERIFIED") {
+          return classified;
+        }
+      }
+    }
+    return {
+      valid: true,
+      status: "VERIFIED",
+      message: "API key hợp lệ và đã sẵn sàng sử dụng.",
+      modelTested: model ?? (firstModelName ? firstModelName.replace(/^models\//, "") : "gemini-3.8-flash")
+    };
+  } catch (err) {
+    logger.warn(`[GeminiKeyVerification] Failed: ${err}`);
+    return classifyGeminiError(err);
+  }
+}
 const DEFAULT_CONFIG = {
   maxMonotoneEnergySeconds: 150,
   // 2.5 minutes — documentary standard
@@ -1143,7 +1268,7 @@ async function buildEditPlan(params) {
   const prompt = buildPrompt(transcript, scriptText, mediaFiles);
   progress("Sending to Gemini AI...", 0.2);
   const ai = new genai.GoogleGenAI({
-    apiKey,
+    apiKey: normalizeApiKey(apiKey),
     httpOptions: { apiVersion: "v1beta" }
   });
   const fallbackModelChain = [
@@ -1300,7 +1425,8 @@ function saveConfig(config) {
 function registerPlannerHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.CONFIG_SET, (_event, key, value) => {
     const config = loadConfig();
-    config[key] = value;
+    const cleanValue = normalizeApiKey(value);
+    config[key] = cleanValue;
     saveConfig(config);
     return { success: true };
   });
@@ -1308,6 +1434,20 @@ function registerPlannerHandlers(ipcMain) {
     const config = loadConfig();
     return config[key] ?? null;
   });
+  ipcMain.handle(
+    IPC_CHANNELS.CONFIG_VERIFY_KEY,
+    async (_event, params) => {
+      const { key, configKey, model } = params;
+      if (configKey === "geminiApiKey" || !configKey) {
+        return await verifyGeminiApiKey(key, model);
+      }
+      const clean = normalizeApiKey(key);
+      if (!clean) {
+        return { valid: false, status: "EMPTY", message: "API key is empty" };
+      }
+      return { valid: true, status: "SAVED_NOT_VERIFIED" };
+    }
+  );
   ipcMain.handle(IPC_CHANNELS.PLAN_GET, (_event, projectDir) => {
     const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
     if (!fs__namespace.existsSync(planPath)) return null;
@@ -1322,7 +1462,8 @@ function registerPlannerHandlers(ipcMain) {
     async (event, params) => {
       const win = electron.BrowserWindow.fromWebContents(event.sender);
       const config = loadConfig();
-      if (!config.geminiApiKey) {
+      const apiKey = normalizeApiKey(config.geminiApiKey ?? "");
+      if (!apiKey) {
         return { success: false, error: "Gemini API key not configured. Go to Settings to add it." };
       }
       const sendProgress = (message, progress) => {
@@ -1331,7 +1472,7 @@ function registerPlannerHandlers(ipcMain) {
       try {
         const plan = await buildEditPlan({
           projectDir: params.projectDir,
-          apiKey: config.geminiApiKey,
+          apiKey,
           model: params.model,
           onProgress: sendProgress
         });
@@ -3417,10 +3558,11 @@ async function analyzeGlobalContext(params) {
   }
   let rawJson = "";
   let aiError = null;
-  if (apiKey && apiKey.trim().length > 0) {
+  const cleanKey = normalizeApiKey(apiKey);
+  if (cleanKey.length > 0) {
     progress("Analyzing full script for global context...", 0.05);
     try {
-      const ai = new genai.GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } });
+      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
       const prompt = buildGeminiPrompt$1(fullText, projectId, language);
       const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
       const maxRetries = 3;
@@ -3860,7 +4002,7 @@ async function generateContextAwareSearchPlan(params) {
     logger.info(`[QueryGen] Cache hit for scene ${sceneId}`);
     return cache[cacheKey].plan;
   }
-  const ai = new genai.GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1beta" } });
+  const ai = new genai.GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } });
   const prompt = buildScenePrompt(packet, globalContext);
   const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
   let rawJson = "";
@@ -4408,14 +4550,15 @@ function registerStockHandlers(ipcMain) {
         win?.webContents.send(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, { message, progress });
       };
       try {
-        if (config.geminiApiKey) {
+        const geminiApiKey = normalizeApiKey(config.geminiApiKey ?? "");
+        if (geminiApiKey) {
           const result2 = await runContextAwareStockEngine(
             {
               projectDir: params.projectDir,
               pexelsApiKey: config.pexelsApiKey ?? "",
               pixabayApiKey: config.pixabayApiKey,
               preferredAspectRatio: "16:9",
-              apiKey: config.geminiApiKey,
+              apiKey: geminiApiKey,
               forceReanalysis: params.forceReanalysis ?? false
             },
             sendProgress
@@ -4564,7 +4707,7 @@ function registerStockHandlers(ipcMain) {
     async (event, params) => {
       const win = electron.BrowserWindow.fromWebContents(event.sender);
       const config = loadConfig();
-      const geminiKey = config.geminiApiKey?.trim() ?? "";
+      const geminiKey = normalizeApiKey(config.geminiApiKey ?? "");
       const sendProgress = (message, progress) => {
         win?.webContents.send(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, { message, progress });
       };
@@ -4608,10 +4751,8 @@ function registerStockHandlers(ipcMain) {
         if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
           if (!geminiKey) {
             warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn.";
-          } else if (!geminiKey.startsWith("AIza")) {
-            warning = "Khóa Gemini API không đúng định dạng (cần bắt đầu bằng AIzaSy... từ Google AI Studio). Đã phân tích tự động từ kịch bản.";
           } else {
-            warning = "Gemini AI tạm thời quá tải. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
+            warning = "Gemini AI tạm thời quá tải hoặc không phản hồi. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
           }
         }
         return { success: true, context: ctx, warning };
@@ -5367,7 +5508,7 @@ async function generateCaptionPlan(params) {
         attempt === 0 ? `Đang gửi lên Gemini (${currentModel})...` : `Thử lại với ${currentModel}...`,
         0.2 + attempt * 0.1
       );
-      const ai = new genai.GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } });
+      const ai = new genai.GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } });
       const prompt = buildGeminiPrompt(scenes, allWords);
       const response = await ai.models.generateContent({
         model: currentModel,
@@ -5478,16 +5619,19 @@ function registerCaptionHandlers(ipcMain) {
       win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
     };
     try {
-      const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
-      let apiKey = "";
-      if (fs__namespace.existsSync(configPath)) {
-        try {
-          const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
-          apiKey = cfg.geminiApiKey ?? "";
-        } catch {
+      const appCfg = loadConfig();
+      let apiKey = normalizeApiKey(appCfg.geminiApiKey ?? "");
+      if (!apiKey) {
+        const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
+        if (fs__namespace.existsSync(configPath)) {
+          try {
+            const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
+            apiKey = normalizeApiKey(cfg.geminiApiKey ?? "");
+          } catch {
+          }
         }
       }
-      if (!apiKey) apiKey = process.env.GEMINI_API_KEY ?? "";
+      if (!apiKey) apiKey = normalizeApiKey(process.env.GEMINI_API_KEY ?? "");
       const plan = await generateCaptionPlan({
         projectDir: params.projectDir,
         apiKey,

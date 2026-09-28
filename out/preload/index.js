@@ -25,6 +25,7 @@ const IPC_CHANNELS = {
   // Config (API keys, preferences)
   CONFIG_GET: "config:get",
   CONFIG_SET: "config:set",
+  CONFIG_VERIFY_KEY: "config:verify-key",
   // AI Edit Planning
   PLAN_GENERATE: "plan:generate",
   PLAN_PROGRESS: "plan:progress",
@@ -102,7 +103,8 @@ const api = {
   },
   config: {
     get: (key) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_GET, key),
-    set: (key, value) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value)
+    set: (key, value) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_SET, key, value),
+    verifyKey: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CONFIG_VERIFY_KEY, params)
   },
   plan: {
     generate: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.PLAN_GENERATE, params),

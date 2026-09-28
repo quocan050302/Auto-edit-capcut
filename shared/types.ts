@@ -491,6 +491,28 @@ export interface AudioRunResult {
   error?: string
 }
 
+// ─── API Key Verification Types ──────────────────────────────────────────────
+export type ApiKeyStatus =
+  | 'EMPTY'
+  | 'UNSAVED'
+  | 'SAVING'
+  | 'SAVED_NOT_VERIFIED'
+  | 'VERIFYING'
+  | 'VERIFIED'
+  | 'INVALID_KEY'
+  | 'QUOTA_EXCEEDED'
+  | 'PERMISSION_DENIED'
+  | 'MODEL_UNAVAILABLE'
+  | 'NETWORK_ERROR'
+  | 'SERVICE_UNAVAILABLE'
+
+export interface ApiKeyVerifyResult {
+  valid: boolean
+  status: ApiKeyStatus
+  message?: string
+  modelTested?: string
+}
+
 // IPC channel names
 export const IPC_CHANNELS = {
   // File dialogs
@@ -526,6 +548,7 @@ export const IPC_CHANNELS = {
   // Config (API keys, preferences)
   CONFIG_GET: 'config:get',
   CONFIG_SET: 'config:set',
+  CONFIG_VERIFY_KEY: 'config:verify-key',
 
   // AI Edit Planning
   PLAN_GENERATE: 'plan:generate',

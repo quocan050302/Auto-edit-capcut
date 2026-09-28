@@ -6,11 +6,14 @@ import { join } from 'path'
 import * as fs from 'fs'
 import { logger } from '../logger'
 
+import { normalizeApiKey, verifyGeminiApiKey } from '../utils/api-key'
+
 export function registerPlannerHandlers(ipcMain: IpcMain): void {
   // Save API key
   ipcMain.handle(IPC_CHANNELS.CONFIG_SET, (_event, key: string, value: string) => {
     const config = loadConfig()
-    ;(config as Record<string, string>)[key] = value
+    const cleanValue = normalizeApiKey(value)
+    ;(config as Record<string, string>)[key] = cleanValue
     saveConfig(config)
     return { success: true }
   })
@@ -20,6 +23,22 @@ export function registerPlannerHandlers(ipcMain: IpcMain): void {
     const config = loadConfig()
     return (config as Record<string, string>)[key] ?? null
   })
+
+  // Verify API key directly with provider API (no prefix guessing)
+  ipcMain.handle(
+    IPC_CHANNELS.CONFIG_VERIFY_KEY,
+    async (_event, params: { key: string; configKey?: string; model?: string }) => {
+      const { key, configKey, model } = params
+      if (configKey === 'geminiApiKey' || !configKey) {
+        return await verifyGeminiApiKey(key, model)
+      }
+      const clean = normalizeApiKey(key)
+      if (!clean) {
+        return { valid: false, status: 'EMPTY', message: 'API key is empty' }
+      }
+      return { valid: true, status: 'SAVED_NOT_VERIFIED' }
+    }
+  )
 
   // Get edit plan if exists
   ipcMain.handle(IPC_CHANNELS.PLAN_GET, (_event, projectDir: string) => {
@@ -39,7 +58,8 @@ export function registerPlannerHandlers(ipcMain: IpcMain): void {
       const win = BrowserWindow.fromWebContents(event.sender)
       const config = loadConfig()
 
-      if (!config.geminiApiKey) {
+      const apiKey = normalizeApiKey(config.geminiApiKey ?? '')
+      if (!apiKey) {
         return { success: false, error: 'Gemini API key not configured. Go to Settings to add it.' }
       }
 
@@ -50,7 +70,7 @@ export function registerPlannerHandlers(ipcMain: IpcMain): void {
       try {
         const plan = await buildEditPlan({
           projectDir: params.projectDir,
-          apiKey: config.geminiApiKey,
+          apiKey,
           model: params.model,
           onProgress: sendProgress
         })

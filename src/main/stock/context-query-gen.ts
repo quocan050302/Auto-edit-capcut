@@ -11,6 +11,7 @@ import * as fs from "fs"
 import { join } from "path"
 import { createHash as cryptoHash } from "crypto"
 import { logger } from "../logger"
+import { normalizeApiKey } from "../utils/api-key"
 import type { GlobalScriptContext, SceneContextPacket, StockSearchPlan } from "../../../shared/types"
 
 export type QueryProgressCallback = (msg: string, pct: number) => void
@@ -178,7 +179,7 @@ export async function generateContextAwareSearchPlan(params: {
     return cache[cacheKey].plan
   }
 
-  const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: "v1beta" } })
+  const ai = new GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } })
   const prompt = buildScenePrompt(packet, globalContext)
   const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i)
   let rawJson = ""

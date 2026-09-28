@@ -3,6 +3,7 @@ import * as fs from "fs"
 import { join } from "path"
 import { createHash } from "crypto"
 import { logger } from "../logger"
+import { normalizeApiKey } from "../utils/api-key"
 import type { GlobalScriptContext, TranscriptResult } from "../../../shared/types"
 
 export type ProgressCallback = (msg: string, pct: number) => void
@@ -106,10 +107,11 @@ export async function analyzeGlobalContext(params: {
   let rawJson = ""
   let aiError: string | null = null
 
-  if (apiKey && apiKey.trim().length > 0) {
+  const cleanKey = normalizeApiKey(apiKey)
+  if (cleanKey.length > 0) {
     progress("Analyzing full script for global context...", 0.05)
     try {
-      const ai = new GoogleGenAI({ apiKey: apiKey.trim(), httpOptions: { apiVersion: "v1beta" } })
+      const ai = new GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } })
       const prompt = buildGeminiPrompt(fullText, projectId, language)
       const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i)
       const maxRetries = 3

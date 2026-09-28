@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react'
-import type { ProjectState, ProjectSettings, VideoType, AspectRatio, Pacing } from '../../../../shared/types'
+import React, { useState, useEffect, useRef } from 'react'
+import type { ProjectState, ProjectSettings, VideoType, AspectRatio, Pacing, ApiKeyStatus } from '../../../../shared/types'
+import { normalizeApiKey } from '../../../../shared/api-key'
 
 interface SettingsPageProps {
   project: ProjectState
@@ -31,6 +32,110 @@ function SegControl<T extends string>({
 
 // ─── API Key Row ──────────────────────────────────────────────────────────────
 
+const API_KEY_STATUS_CONFIG: Record<ApiKeyStatus, {
+  label: string
+  bg: string
+  color: string
+  border: string
+  containerBorder: string
+  defaultMsg?: string
+}> = {
+  EMPTY: {
+    label: 'EMPTY',
+    bg: 'rgba(148, 163, 184, 0.1)',
+    color: 'var(--text-muted)',
+    border: '1px solid rgba(148, 163, 184, 0.2)',
+    containerBorder: 'var(--border-subtle)'
+  },
+  UNSAVED: {
+    label: '● UNSAVED',
+    bg: 'rgba(234, 179, 8, 0.15)',
+    color: '#eab308',
+    border: '1px solid rgba(234, 179, 8, 0.3)',
+    containerBorder: 'rgba(234, 179, 8, 0.4)',
+    defaultMsg: 'Có thay đổi chưa lưu. Hãy nhấn "Save" để lưu và kiểm tra key.'
+  },
+  SAVING: {
+    label: 'SAVING...',
+    bg: 'rgba(96, 165, 250, 0.15)',
+    color: '#60a5fa',
+    border: '1px solid rgba(96, 165, 250, 0.3)',
+    containerBorder: 'var(--border-brand)',
+    defaultMsg: 'Đang lưu API key vào cấu hình...'
+  },
+  SAVED_NOT_VERIFIED: {
+    label: 'SAVED (NOT VERIFIED)',
+    bg: 'rgba(96, 165, 250, 0.15)',
+    color: '#60a5fa',
+    border: '1px solid rgba(96, 165, 250, 0.3)',
+    containerBorder: 'var(--border-brand)'
+  },
+  VERIFYING: {
+    label: '⟳ VERIFYING...',
+    bg: 'rgba(168, 85, 247, 0.15)',
+    color: '#c084fc',
+    border: '1px solid rgba(168, 85, 247, 0.3)',
+    containerBorder: 'var(--border-brand)',
+    defaultMsg: 'Đang gửi yêu cầu kiểm tra tới provider...'
+  },
+  VERIFIED: {
+    label: '✓ VERIFIED',
+    bg: 'rgba(52, 211, 153, 0.15)',
+    color: '#34d399',
+    border: '1px solid rgba(52, 211, 153, 0.3)',
+    containerBorder: 'rgba(52, 211, 153, 0.5)',
+    defaultMsg: 'API key hợp lệ và đã sẵn sàng sử dụng.'
+  },
+  INVALID_KEY: {
+    label: '✗ INVALID KEY',
+    bg: 'rgba(248, 113, 113, 0.15)',
+    color: '#f87171',
+    border: '1px solid rgba(248, 113, 113, 0.3)',
+    containerBorder: 'rgba(248, 113, 113, 0.5)',
+    defaultMsg: 'Provider phản hồi: API key không hợp lệ hoặc đã bị thu hồi.'
+  },
+  QUOTA_EXCEEDED: {
+    label: '⚠️ QUOTA EXCEEDED',
+    bg: 'rgba(251, 146, 60, 0.15)',
+    color: '#fb923c',
+    border: '1px solid rgba(251, 146, 60, 0.3)',
+    containerBorder: 'rgba(251, 146, 60, 0.5)',
+    defaultMsg: 'Key hợp lệ nhưng đã vượt quá quota (Rate limit / Resource exhausted).'
+  },
+  PERMISSION_DENIED: {
+    label: '⛔ PERMISSION DENIED',
+    bg: 'rgba(248, 113, 113, 0.15)',
+    color: '#f87171',
+    border: '1px solid rgba(248, 113, 113, 0.3)',
+    containerBorder: 'rgba(248, 113, 113, 0.5)',
+    defaultMsg: 'Tài khoản không có quyền truy cập API này (Permission denied).'
+  },
+  MODEL_UNAVAILABLE: {
+    label: '⚠ MODEL UNAVAILABLE',
+    bg: 'rgba(192, 132, 252, 0.15)',
+    color: '#c084fc',
+    border: '1px solid rgba(192, 132, 252, 0.3)',
+    containerBorder: 'rgba(192, 132, 252, 0.5)',
+    defaultMsg: 'Model Gemini chỉ định hiện không khả dụng với tài khoản này.'
+  },
+  NETWORK_ERROR: {
+    label: '⚡ NETWORK ERROR',
+    bg: 'rgba(250, 204, 21, 0.15)',
+    color: '#facc15',
+    border: '1px solid rgba(250, 204, 21, 0.3)',
+    containerBorder: 'rgba(250, 204, 21, 0.5)',
+    defaultMsg: 'Không thể kết nối tới máy chủ Google (Lỗi mạng hoặc mất kết nối).'
+  },
+  SERVICE_UNAVAILABLE: {
+    label: '☁️ SERVICE UNAVAILABLE',
+    bg: 'rgba(251, 146, 60, 0.15)',
+    color: '#fb923c',
+    border: '1px solid rgba(251, 146, 60, 0.3)',
+    containerBorder: 'rgba(251, 146, 60, 0.5)',
+    defaultMsg: 'Máy chủ Google AI đang tạm thời quá tải (503 Service Unavailable).'
+  }
+}
+
 function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
   label: string
   configKey: string
@@ -40,34 +145,141 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
   linkLabel?: string
 }): React.ReactElement {
   const [value, setValue] = useState('')
-  const [saved, setSaved] = useState(false)
+  const [savedValue, setSavedValue] = useState('')
+  const [status, setStatus] = useState<ApiKeyStatus>('EMPTY')
+  const [statusMsg, setStatusMsg] = useState('')
   const [loading, setLoading] = useState(true)
   const [show, setShow] = useState(false)
 
+  const isGemini = configKey === 'geminiApiKey'
+  const lastVerifiedStatusRef = useRef<ApiKeyStatus | null>(null)
+  const lastVerifiedMsgRef = useRef<string>('')
+
+  const runVerification = async (keyToVerify: string): Promise<void> => {
+    const clean = normalizeApiKey(keyToVerify)
+    if (!clean) {
+      setStatus('EMPTY')
+      setStatusMsg('')
+      return
+    }
+
+    // Safety check: verify if the method exists on window.api.config
+    if (!window.api?.config || typeof window.api.config.verifyKey !== 'function') {
+      console.warn('[Settings] window.api.config.verifyKey is not available in running Electron instance.')
+      setStatus('SAVED_NOT_VERIFIED')
+      setStatusMsg('Đã lưu API key vào cấu hình. Hãy khởi động lại dev server (npm run dev) để nạp tính năng kiểm tra trực tiếp.')
+      return
+    }
+
+    setStatus('VERIFYING')
+    setStatusMsg('Đang gửi yêu cầu xác thực tới Google AI API...')
+    try {
+      const res = await window.api.config.verifyKey({ key: clean, configKey })
+      if (res && res.status) {
+        setStatus(res.status)
+        setStatusMsg(res.message ?? '')
+        lastVerifiedStatusRef.current = res.status
+        lastVerifiedMsgRef.current = res.message ?? ''
+      } else {
+        setStatus('SAVED_NOT_VERIFIED')
+        setStatusMsg('Đã lưu API key.')
+      }
+    } catch (err: unknown) {
+      console.error('[VerifyKey Error]', err)
+      const errStr = String(err)
+      if (errStr.includes('No handler registered') || errStr.includes('is not a function')) {
+        setStatus('SAVED_NOT_VERIFIED')
+        setStatusMsg('Đã lưu API key vào cấu hình. Hãy khởi động lại dev server (npm run dev) để nạp handler kiểm tra.')
+      } else {
+        setStatus('NETWORK_ERROR')
+        setStatusMsg('Không thể kết nối tới dịch vụ xác thực.')
+      }
+    }
+  }
+
   useEffect(() => {
-    window.api.config.get(configKey).then((v) => {
-      if (v) setValue(v)
+    window.api.config.get(configKey).then((saved) => {
+      const clean = normalizeApiKey(saved ?? '')
+      setValue(clean)
+      setSavedValue(clean)
       setLoading(false)
+
+      if (!clean) {
+        setStatus('EMPTY')
+        setStatusMsg('')
+      } else if (isGemini) {
+        setStatus('SAVED_NOT_VERIFIED')
+        runVerification(clean)
+      } else {
+        setStatus('SAVED_NOT_VERIFIED')
+        setStatusMsg('')
+      }
     })
   }, [configKey])
 
   async function handleSave(): Promise<void> {
-    await window.api.config.set(configKey, value.trim())
-    setSaved(true)
-    setTimeout(() => setSaved(false), 2000)
+    const clean = normalizeApiKey(value)
+    if (!clean) {
+      setStatus('SAVING')
+      await window.api.config.set(configKey, '')
+      setValue('')
+      setSavedValue('')
+      setStatus('EMPTY')
+      setStatusMsg('Đã xóa API key.')
+      lastVerifiedStatusRef.current = null
+      lastVerifiedMsgRef.current = ''
+      return
+    }
+
+    setStatus('SAVING')
+    setStatusMsg('Đang lưu API key...')
+    await window.api.config.set(configKey, clean)
+    setSavedValue(clean)
+    setValue(clean)
+
+    if (isGemini) {
+      setStatus('SAVED_NOT_VERIFIED')
+      await runVerification(clean)
+    } else {
+      setStatus('SAVED_NOT_VERIFIED')
+      setStatusMsg('Đã lưu thành công.')
+      setTimeout(() => {
+        setStatusMsg('')
+      }, 3000)
+    }
   }
 
-  const hasValue = value.trim().length > 0
-  const isGemini = configKey === 'geminiApiKey'
-  const isGeminiFormat = !isGemini || value.trim().startsWith('AIza')
-  const isValid = hasValue && value.trim().length > 10 && isGeminiFormat
+  function handleChange(e: React.ChangeEvent<HTMLInputElement>): void {
+    const raw = e.target.value
+    setValue(raw)
+    const clean = normalizeApiKey(raw)
+
+    if (!clean) {
+      setStatus('EMPTY')
+      setStatusMsg('')
+    } else if (clean !== savedValue) {
+      setStatus('UNSAVED')
+      setStatusMsg('Thay đổi chưa được lưu. Hãy bấm Save để lưu và xác thực key.')
+    } else {
+      // Reverted to current savedValue
+      setStatus(lastVerifiedStatusRef.current || 'SAVED_NOT_VERIFIED')
+      setStatusMsg(lastVerifiedMsgRef.current || '')
+    }
+  }
+
+  const conf = API_KEY_STATUS_CONFIG[status]
+  const badgeLabel = !isGemini && status === 'SAVED_NOT_VERIFIED' ? '✓ SET' : conf.label
+  const badgeColor = !isGemini && status === 'SAVED_NOT_VERIFIED' ? 'var(--color-success)' : conf.color
+  const badgeBg = !isGemini && status === 'SAVED_NOT_VERIFIED' ? 'rgba(52,211,153,0.15)' : conf.bg
+  const badgeBorder = !isGemini && status === 'SAVED_NOT_VERIFIED' ? '1px solid rgba(52,211,153,0.3)' : conf.border
+  const displayMsg = statusMsg || conf.defaultMsg
 
   return (
     <div style={{
       padding: '16px',
       background: 'var(--bg-elevated)',
       borderRadius: 'var(--radius-md)',
-      border: `1px solid ${hasValue && isValid ? 'var(--border-brand)' : (hasValue && !isValid ? 'rgba(248,113,113,0.4)' : 'var(--border-subtle)')}`,
+      border: `1px solid ${conf.containerBorder}`,
       display: 'flex',
       flexDirection: 'column',
       gap: '10px',
@@ -76,22 +288,17 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <span style={{ fontSize: '12px', fontWeight: 700, color: 'var(--text-primary)' }}>{label}</span>
-          {hasValue && isValid && (
-            <span style={{
-              fontSize: '10px', padding: '2px 8px',
-              background: 'rgba(52,211,153,0.15)', color: 'var(--color-success)',
-              borderRadius: '999px', fontWeight: 600
-            }}>✓ SET</span>
-          )}
-          {hasValue && !isValid && (
-            <span style={{
-              fontSize: '10px', padding: '2px 8px',
-              background: 'rgba(248,113,113,0.15)', color: 'var(--color-error)',
-              borderRadius: '999px', fontWeight: 600
-            }}>
-              {isGemini && !isGeminiFormat ? '✗ CẦN KEY "AIzaSy..."' : '✗ INVALID FORMAT'}
-            </span>
-          )}
+          <span style={{
+            fontSize: '10px',
+            padding: '2px 8px',
+            background: badgeBg,
+            color: badgeColor,
+            border: badgeBorder,
+            borderRadius: '999px',
+            fontWeight: 600
+          }}>
+            {badgeLabel}
+          </span>
         </div>
         {link && (
           <a
@@ -113,12 +320,12 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
             type={show ? 'text' : 'password'}
             placeholder={loading ? 'Loading...' : placeholder}
             value={value}
-            onChange={(e) => { setValue(e.target.value); setSaved(false) }}
-            disabled={loading}
+            onChange={handleChange}
+            disabled={loading || status === 'SAVING'}
             style={{
               width: '100%',
               background: 'var(--bg-base)',
-              border: `1px solid ${hasValue && !isValid ? 'rgba(248,113,113,0.5)' : 'var(--border-default)'}`,
+              border: `1px solid ${conf.containerBorder}`,
               borderRadius: 'var(--radius-sm)',
               color: 'var(--text-primary)',
               fontFamily: 'var(--font-mono)',
@@ -141,23 +348,42 @@ function ApiKeyRow({ label, configKey, placeholder, hint, link, linkLabel }: {
             {show ? '🙈' : '👁️'}
           </button>
         </div>
+
+        {isGemini && (
+          <button
+            className="btn btn-secondary"
+            onClick={() => runVerification(normalizeApiKey(value || savedValue))}
+            disabled={loading || status === 'SAVING' || status === 'VERIFYING' || !normalizeApiKey(value || savedValue)}
+            title="Kiểm tra trực tiếp với Google AI API"
+            style={{ minWidth: '70px', flexShrink: 0 }}
+          >
+            {status === 'VERIFYING' ? '⟳ Checking...' : 'Verify'}
+          </button>
+        )}
+
         <button
-          className={`btn ${saved ? 'btn-success' : 'btn-primary'}`}
+          className={`btn ${status === 'VERIFIED' ? 'btn-success' : 'btn-primary'}`}
           onClick={handleSave}
-          disabled={!hasValue || loading}
-          style={{ minWidth: '80px', flexShrink: 0 }}
+          disabled={loading || status === 'SAVING' || status === 'VERIFYING' || (status === 'EMPTY' && !savedValue)}
+          style={{ minWidth: '70px', flexShrink: 0 }}
         >
-          {saved ? '✓ Saved' : 'Save'}
+          {status === 'SAVING' ? 'Saving...' : (status === 'UNSAVED' ? 'Save' : (status === 'VERIFIED' ? '✓ Saved' : 'Save'))}
         </button>
       </div>
 
-      {hasValue && isGemini && !isGeminiFormat ? (
-        <div style={{ fontSize: '11px', color: '#f87171' }}>
-          ⚠️ Key Gemini hiện tại không bắt đầu bằng &quot;AIzaSy...&quot;. Hãy lấy API key từ Google AI Studio (aistudio.google.com/apikey).
+      {displayMsg && status !== 'EMPTY' && (
+        <div style={{
+          fontSize: '11px',
+          color: badgeColor,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '6px'
+        }}>
+          <span>{displayMsg}</span>
         </div>
-      ) : (
-        <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{hint}</div>
       )}
+
+      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>{hint}</div>
     </div>
   )
 }
@@ -279,7 +505,7 @@ export function SettingsPage({ project, onUpdateSettings }: SettingsPageProps): 
           <ApiKeyRow
             label="Gemini API Key"
             configKey="geminiApiKey"
-            placeholder="AIzaSy..."
+            placeholder="Paste your Gemini API key here..."
             hint='Required for Phase 3 Edit Planning. Free tier: 1500 requests/day.'
             link="https://aistudio.google.com/apikey"
             linkLabel="Get free key at aistudio.google.com ↗"
