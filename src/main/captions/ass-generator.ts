@@ -218,7 +218,7 @@ export function generateAssFile(
   outputPath: string,
   fontsDir: string
 ): void {
-  logger.info(`[CaptionASS] Đang sinh file .ass: ${outputPath}`)
+  logger.info(`[CaptionASS] Generating .ass file: ${outputPath}`)
   logger.info(`[CaptionASS] ${captionPlan.phrases.length} phrases | fontsDir: ${fontsDir}`)
 
   // Tạo thư mục chứa file .ass nếu chưa có
@@ -239,7 +239,7 @@ export function generateAssFile(
   const assContent = lines.join('\n') + '\n'
   fs.writeFileSync(outputPath, assContent, { encoding: 'utf-8' })
 
-  logger.info(`[CaptionASS] Đã ghi ${captionPlan.phrases.length} phrases vào ${outputPath}`)
+  logger.info(`[CaptionASS] Wrote ${captionPlan.phrases.length} phrases to ${outputPath}`)
 }
 
 /**
@@ -247,7 +247,7 @@ export function generateAssFile(
  * Dùng để test FFmpeg burn-in độc lập mà không cần chạy toàn bộ pipeline.
  */
 export function generateTestAssFile(outputPath: string, fontsDir: string): void {
-  logger.info(`[CaptionASS] Sinh file .ass TEST tại: ${outputPath}`)
+  logger.info(`[CaptionASS] Generating test .ass file at: ${outputPath}`)
 
   const testPlan: CaptionPlan = {
     enabled: true,

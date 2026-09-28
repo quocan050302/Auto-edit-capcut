@@ -83,7 +83,7 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
       return { success: true, plan }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      logger.error(`[CaptionsIPC] generate-plan lỗi: ${msg}`)
+      logger.error(`[CaptionsIPC] generate-plan failed: ${msg}`)
       return { success: false, error: msg }
     }
   })
@@ -114,7 +114,7 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
       plan.phrases[idx] = { ...plan.phrases[idx], ...params.updates }
       saveCaptionPlan(params.projectDir, plan)
 
-      logger.info(`[CaptionsIPC] Đã cập nhật phrase ${params.phraseId}`)
+      logger.info(`[CaptionsIPC] Updated phrase ${params.phraseId}`)
       return { success: true, plan }
     } catch (err) {
       return { success: false, error: String(err) }
@@ -179,11 +179,11 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
         onRenderProgress: (pct) => sendProgress(`Render: ${Math.round(pct * 100)}%`, 0.50 + pct * 0.48),
       })
 
-      logger.info(`[CaptionsIPC] Đã tạo lại overlay Remotion: ${overlayPath}`)
+      logger.info(`[CaptionsIPC] Regenerated Remotion overlay: ${overlayPath}`)
       return { success: true, overlayPath }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      logger.error(`[CaptionsIPC] regenerate-overlay lỗi: ${msg}`)
+      logger.error(`[CaptionsIPC] regenerate-overlay failed: ${msg}`)
       return { success: false, error: msg }
     }
   })
@@ -289,7 +289,7 @@ export function registerCaptionHandlers(ipcMain: IpcMain): void {
       return { success: true, previewPath: previewOutput }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      logger.error(`[CaptionsIPC] preview-render lỗi: ${msg}`)
+      logger.error(`[CaptionsIPC] preview-render failed: ${msg}`)
       return { success: false, error: msg }
     }
   })

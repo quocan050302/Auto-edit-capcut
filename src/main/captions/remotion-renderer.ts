@@ -28,11 +28,11 @@ let cachedBundleUrl: string | null = null
  */
 async function getBundle(onProgress?: (pct: number) => void): Promise<string> {
   if (cachedBundleUrl) {
-    logger.info('[RemotionRenderer] Dùng bundle cache')
+    logger.info('[RemotionRenderer] Using bundle cache')
     return cachedBundleUrl
   }
 
-  logger.info('[RemotionRenderer] Đang bundle Remotion composition...')
+  logger.info('[RemotionRenderer] Bundling Remotion composition...')
 
   const entryPoint = path.join(__dirname, '../../src/remotion/index.ts')
 
@@ -89,7 +89,7 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
   const durationInFrames = Math.ceil(videoDurationInSeconds * fps)
 
   logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)`)
-  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}×${resolution.height}`)
+  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}x${resolution.height}`)
   logger.info(`[RemotionRenderer] Phrases: ${captionPlan?.phrases?.length ?? 0}`)
   logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`)
   logger.info(`[RemotionRenderer] VisualGrammar: ${visualGrammar?.length ?? 0}`)
@@ -127,7 +127,7 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
     },
   })
 
-  logger.info(`[RemotionRenderer] Overlay xong: ${outputPath}`)
+  logger.info(`[RemotionRenderer] Overlay complete: ${outputPath}`)
 }
 
 /**
@@ -135,5 +135,5 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
  */
 export function clearBundleCache(): void {
   cachedBundleUrl = null
-  logger.info('[RemotionRenderer] Bundle cache đã xoá')
+  logger.info('[RemotionRenderer] Bundle cache cleared')
 }

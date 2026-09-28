@@ -6,10 +6,17 @@ import { logger } from "../logger"
 import { normalizeApiKey } from "../utils/api-key"
 import {
   normalizePreferredTextModel,
-  buildFallbackModelList,
   classifyGeminiErrorKind,
   DEPRECATED_TEXT_MODELS
 } from "../utils/gemini-fallback"
+import { getAvailableModelsForTask } from "../ai/model-router"
+import {
+  recordModelRateLimit,
+  recordModelUnavailable,
+  recordModelNotFound,
+  recordModelSuccess,
+  recordModelFailure
+} from "../ai/model-health"
 import type { GlobalScriptContext, TranscriptResult } from "../../../shared/types"
 
 export type ProgressCallback = (msg: string, pct: number) => void
@@ -78,7 +85,7 @@ export async function analyzeGlobalContext(params: {
 }): Promise<GlobalScriptContext> {
   const { projectDir, apiKey, forceRegenerate = false } = params
   const progress = params.onProgress ?? (() => {})
-  const modelId = params.model ?? "gemini-3.8-flash"
+  const modelId = params.model ?? "gemini-3.5-flash"
 
   const fullText = params.scriptText
     ?? params.transcript?.fullText
@@ -125,12 +132,12 @@ export async function analyzeGlobalContext(params: {
         logger.warn(`[GeminiModel] Saved model ${rawModel} is unavailable for this account.`)
         logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(rawModel)}.`)
       }
-      const fallbackModels = buildFallbackModelList(rawModel)
+      const fallbackModels = getAvailableModelsForTask("global_context", rawModel)
 
       for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
         const currentModel = fallbackModels[mIdx]
         let retryCount = 0
-        const maxRetries = 2
+        const maxRetries = 1
 
         while (retryCount <= maxRetries) {
           try {
@@ -148,21 +155,23 @@ export async function analyzeGlobalContext(params: {
             rawJson = response.text ?? ""
             if (rawJson) {
               successfulModel = currentModel
+              recordModelSuccess(currentModel)
               break
             }
           } catch (err: unknown) {
             const { kind, message } = classifyGeminiErrorKind(err)
+            recordModelFailure(currentModel, kind)
             aiError = message
 
             if (kind === "MODEL_NOT_FOUND") {
               const nextModel = fallbackModels[mIdx + 1]
-              logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`)
-              break // switch immediately without retrying 404 model
+              logger.warn(`[GeminiModel] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`)
+              break
             }
 
             if (kind === "AUTH_ERROR") {
               logger.error(`[GlobalContext] Gemini authentication error. Check API key.`)
-              mIdx = fallbackModels.length // terminate model search
+              mIdx = fallbackModels.length
               break
             }
 
@@ -171,7 +180,12 @@ export async function analyzeGlobalContext(params: {
               break
             }
 
-            // RATE_LIMIT or SERVICE_UNAVAILABLE or UNKNOWN
+            if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
+              const nextModel = fallbackModels[mIdx + 1]
+              logger.warn(`[GlobalContext] Gemini ${currentModel} encountered ${kind}. Circuit breaker tripped. Switching immediately to ${nextModel ?? "fallback"}...`)
+              break
+            }
+
             retryCount++
             if (retryCount <= maxRetries) {
               const wait = Math.pow(2, retryCount)
@@ -208,7 +222,7 @@ export async function analyzeGlobalContext(params: {
     }
   } else {
     logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`)
-    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.70)
+    progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.70)
     ctx = buildFallbackContext(projectId, language, fullText)
     ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic"
   }

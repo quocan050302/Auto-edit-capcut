@@ -1072,7 +1072,7 @@ export async function renderVideo(params: {
       )
 
       const filterComplex = filterParts.join(';')
-      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`)
+      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`)
 
       await ffmpegRun([
         ...ffArgs,
@@ -1188,7 +1188,7 @@ export async function renderVideo(params: {
       const captionedPath = path.join(outputDir, '_captioned_tmp.mp4')
       safeUnlink(captionedPath)
 
-      logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
+      logger.info(`[RENDER] Overlay merge: ${overlayPath} -> ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
 
       await ffmpegRun([
         '-y',
@@ -1350,20 +1350,20 @@ function buildProofVisualList(
     const normText = pv.primaryText.replace(/[\s,.$%]/g, '').toUpperCase()
     const dedupKey = `${normText}_${Math.floor(absStart / 15)}`
     if (seenKeys.has(dedupKey)) {
-      logger.debug(`[ProofVisual] scene ${i} skipped — duplicate: ${pv.primaryText}`)
+      logger.debug(`[ProofVisual] scene ${i} skipped -- duplicate: ${pv.primaryText}`)
       continue
     }
 
     // Dedup vs DataNote captions
     if (isDuplicateOfDataNote(pv.primaryText, captionPlan, absStart, absEnd)) {
-      logger.info(`[ProofVisual] scene ${i} skipped — duplicate DataNote: ${pv.primaryText}`)
+      logger.info(`[ProofVisual] scene ${i} skipped -- duplicate DataNote: ${pv.primaryText}`)
       continue
     }
 
     // Check caption state at this timestamp
     const captionState = getCaptionStateAt(absStart, absEnd, captionPlan)
     if (captionState === 'strong') {
-      logger.info(`[ProofVisual] scene ${i} skipped — overlaps big_statement caption`)
+      logger.info(`[ProofVisual] scene ${i} skipped -- overlaps big_statement caption`)
       continue
     }
 
@@ -1379,7 +1379,7 @@ function buildProofVisualList(
       position: resolvedPosition,
     })
 
-    logger.info(`[ProofVisual] scene ${i} → ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`)
+    logger.info(`[ProofVisual] scene ${i} -> ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`)
   }
 
   return result

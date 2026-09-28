@@ -117,6 +117,8 @@ export function buildFallbackModelList(initialModel?: string): string[] {
   return models.filter((v, i, a) => a.indexOf(v) === i)
 }
 
+import { recordModelSuccess, recordModelFailure } from "../ai/model-health"
+
 export async function executeGeminiWithFallback<T>(params: {
   initialModel?: string
   taskName: string
@@ -142,9 +144,11 @@ export async function executeGeminiWithFallback<T>(params: {
     while (retryCount <= maxRetriesForModel) {
       try {
         const result = await execute(currentModel)
+        recordModelSuccess(currentModel)
         return { result, modelUsed: currentModel }
       } catch (err: unknown) {
         const { kind, message } = classifyGeminiErrorKind(err)
+        recordModelFailure(currentModel, kind)
 
         if (kind === "MODEL_NOT_FOUND") {
           const nextModel = modelChain[mIdx + 1]

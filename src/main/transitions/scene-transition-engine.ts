@@ -463,7 +463,7 @@ export async function concatSceneClipsWithTransitions(params: {
 
   // If all boundaries are hard cuts, skip xfade re-encode and let legacy concat handle it
   if (cutCount === transitions.length) {
-    logger.info('[Transitions] All boundaries are hard cuts — skipping xfade filter_complex')
+    logger.info('[Transitions] All boundaries are hard cuts -- skipping xfade filter_complex')
     return false
   }
 

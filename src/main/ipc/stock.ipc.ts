@@ -275,7 +275,7 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
         const ctx = await analyzeGlobalContext({
           projectDir: params.projectDir,
           apiKey: geminiKey,
-          model: config.preferredModel ?? "gemini-3.8-flash",
+          model: config.preferredModel ?? "gemini-3.5-flash",
           scriptText, transcript,
           forceRegenerate: params.forceRegenerate ?? false,
           onProgress: sendProgress

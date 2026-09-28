@@ -5,10 +5,11 @@ import { logger } from './logger'
 import { normalizeApiKey } from './utils/api-key'
 import {
   normalizePreferredTextModel,
-  buildFallbackModelList,
   classifyGeminiErrorKind,
   DEPRECATED_TEXT_MODELS
 } from './utils/gemini-fallback'
+import { getAvailableModelsForTask } from './ai/model-router'
+import { recordModelSuccess, recordModelFailure } from './ai/model-health'
 import { sanitizeStockQuery, dedupeStockQueries } from './stock/query-sanitizer'
 import type { TranscriptResult, MasterEditPlanRetentionExt, Pacing } from '../../shared/types'
 import { analyzePacing, flattenPlanScenes } from './pacing-guard'
@@ -267,17 +268,19 @@ Return ONLY valid JSON matching this schema:
           }
         }
         if (valid && covered.size === skeletons.length && !skeletons.some((s) => !covered.has(s.sceneIndex))) {
+          recordModelSuccess(model)
           logger.info(`[PLAN] Gemini chapter outline successfully generated: ${data.chapters.length} chapters`)
           return data.chapters
         }
       }
     } catch (err) {
       const { kind } = classifyGeminiErrorKind(err)
+      recordModelFailure(model, kind)
       if (kind === 'MODEL_NOT_FOUND') {
         const nextModel = modelChain[attempt + 1]
-        logger.warn(`[GeminiModel] Saved model ${model} is unavailable for this account. Falling back to ${nextModel ?? 'algorithmic outline fallback'}.`)
+        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? 'algorithmic outline fallback'}.`)
       } else {
-        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed: ${err}`)
+        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`)
       }
     }
   }
@@ -408,6 +411,7 @@ async function enrichScenesBatchWithGemini(
             enrichedMap.set(item.sceneIndex, item)
           }
         }
+        recordModelSuccess(currentModel)
         successModel = currentModel
         break
       }
@@ -415,6 +419,7 @@ async function enrichScenesBatchWithGemini(
       const msg = err instanceof Error ? err.message : String(err)
       lastError = msg
       const { kind } = classifyGeminiErrorKind(err)
+      recordModelFailure(currentModel, kind)
 
       if (kind === 'MODEL_NOT_FOUND') {
         const nextModel = modelChain[activeModelIndex + 1]
@@ -758,7 +763,7 @@ export async function buildEditPlan(params: {
     logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(modelId)}.`)
   }
 
-  const fallbackModelChain = buildFallbackModelList(modelId)
+  const fallbackModelChain = getAvailableModelsForTask('planning', modelId)
 
   progress('Creating chapter and sequence outline...', 0.20)
   const outline = await generateChapterOutlineWithGemini(

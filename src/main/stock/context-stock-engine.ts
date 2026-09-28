@@ -35,7 +35,7 @@ import { sanitizeStockQuery, dedupeStockQueries } from "./query-sanitizer"
 import { QueryCache } from "./query-cache"
 import { downloadAsset, loadAssetsManifest, saveAssetsManifest } from "./downloader"
 import { analyzeGlobalContext, loadGlobalContext } from "./global-context-analyzer"
-import { generateContextAwareSearchPlan } from "./context-query-gen"
+import { generateContextAwareSearchPlan, batchGenerateSearchPlans } from "./context-query-gen"
 import { rankContextCandidates } from "./context-ranker"
 import { loadProductionSettings } from "../production-intelligence/production-settings"
 import {
@@ -386,11 +386,69 @@ export async function runContextAwareStockEngine(
     }
   }
 
-  // Process remaining scenes
+  // -- Phase 4: High-throughput batch query generation --
+  let preGeneratedPlans = new Map<string, StockSearchPlan>()
+  if (hasGlobalContext && apiKey && scenesToProcess.length > 0) {
+    try {
+      const batchInput = scenesToProcess.map((entry, idx) => {
+        const prevEntry = idx > 0 ? scenesToProcess[idx - 1] : null
+        const nextEntry = idx < scenesToProcess.length - 1 ? scenesToProcess[idx + 1] : null
+        const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : ""
+        const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : ""
+        const narration = entry.scene.narrativeText ?? ""
+
+        const packet: SceneContextPacket = {
+          globalContext: {
+            primarySubject: globalContext!.primarySubject,
+            centralThesis: globalContext!.centralThesis,
+            geography: [
+              globalContext!.geography.primaryCountry,
+              globalContext!.geography.primaryRegion,
+              ...globalContext!.geography.secondaryLocations
+            ].filter(Boolean) as string[],
+            timePeriod: [globalContext!.timeContext.primaryPeriod, ...globalContext!.timeContext.historicalPeriods],
+            exactTopicAnchors: globalContext!.exactTopicAnchors,
+            contextualAnchors: globalContext!.contextualAnchors,
+            forbiddenSubstitutions: globalContext!.forbiddenSubstitutions,
+            negativeKeywords: globalContext!.negativeKeywords
+          },
+          chapterContext: { chapterId: `CH${entry.chapterIndex}`, chapterTitle: entry.chapterTitle, chapterPurpose: entry.chapterPurpose },
+          localContext: {
+            narration,
+            scenePurpose: entry.scene.visualIntent ?? "",
+            visibleSubject: entry.scene.visualIntent ?? globalContext!.primarySubject,
+            visibleAction: entry.scene.visualIntent ?? "community activity",
+            preferredLocation: globalContext!.geography.primaryRegion ?? globalContext!.geography.primaryCountry ?? "",
+            preferredTimePeriod: globalContext!.timeContext.primaryPeriod
+          },
+          neighboringContext: { previousScene: previousSceneSummary, nextScene: nextSceneSummary }
+        }
+
+        return { sceneId: entry.sceneId, packet }
+      })
+
+      preGeneratedPlans = await batchGenerateSearchPlans({
+        projectDir,
+        apiKey,
+        model,
+        scenes: batchInput,
+        globalContext: globalContext!,
+        useCache: !forceReanalysis,
+        onProgress: (msg, pct) => {
+          onProgress(msg, 0.05 + pct * 0.15)
+        }
+      })
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.warn(`[StockEngine] Batch search plan generation failed (${msg}), falling back to per-scene generation`)
+    }
+  }
+
+  // Process remaining scenes (Phase 6: Search & Download)
   for (let i = 0; i < scenesToProcess.length; i++) {
     const entry = scenesToProcess[i]
     const { scene, sceneId, chapterTitle, chapterPurpose } = entry
-    const pct = 0.1 + (i / scenesToProcess.length) * 0.85
+    const pct = 0.20 + (i / scenesToProcess.length) * 0.75
     const narration = scene.narrativeText ?? ""
     const sceneDuration = scene.duration ?? (scene.endTime - scene.startTime)
 
@@ -401,10 +459,10 @@ export async function runContextAwareStockEngine(
     const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : ""
     const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : ""
 
-    let searchPlan: StockSearchPlan | null = null
+    let searchPlan: StockSearchPlan | null = preGeneratedPlans.get(sceneId) ?? null
     let tierUsed: "A" | "B" | "C" | "D" = "D"
 
-    if (hasGlobalContext && apiKey) {
+    if (!searchPlan && hasGlobalContext && apiKey) {
       const packet: SceneContextPacket = {
         globalContext: {
           primarySubject: globalContext!.primarySubject,

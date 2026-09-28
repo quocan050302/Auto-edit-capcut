@@ -45,10 +45,10 @@ export function registerRenderHandlers(ipcMain: IpcMain): void {
               logger.info(`[RenderIPC] Caption plan exists but disabled or empty (enabled=${loaded.enabled}, phrases=${loaded.phrases?.length ?? 0})`)
             }
           } catch (e) {
-            logger.warn(`[RenderIPC] Không đọc được caption-plan.json: ${String(e)}`)
+            logger.warn(`[RenderIPC] Could not read caption-plan.json: ${String(e)}`)
           }
         } else {
-          logger.info('[RenderIPC] Không có caption-plan.json — bỏ qua burn captions')
+          logger.info('[RenderIPC] No caption-plan.json -- skipping caption burn')
         }
 
         const result = await renderVideo({
