@@ -80,6 +80,72 @@ function ffmpegRun(args: string[]): Promise<void> {
   })
 }
 
+function safeUnlink(filePath: string | undefined): void {
+  if (!filePath) return
+  try {
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath)
+    }
+  } catch (error) {
+    logger.warn(
+      `[RENDER] Could not delete temporary file ${filePath}: ${String(error)}`
+    )
+  }
+}
+
+interface VideoStreamInfo {
+  hasVideo: boolean
+  width: number
+  height: number
+  duration: number
+}
+
+async function probeVideoInfo(filePath: string): Promise<VideoStreamInfo | null> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const ffp = require('ffprobe-static')
+    if (!ffp?.path || !fs.existsSync(ffp.path)) return null
+
+    return new Promise((resolve) => {
+      const proc = spawn(
+        ffp.path,
+        [
+          '-v', 'error',
+          '-select_streams', 'v:0',
+          '-show_entries', 'stream=codec_type,width,height,duration:format=duration',
+          '-of', 'json',
+          filePath
+        ],
+        { windowsHide: true }
+      )
+      let stdout = ''
+      proc.stdout.on('data', (d: Buffer) => { stdout += d.toString() })
+      proc.on('close', (code) => {
+        if (code === 0) {
+          try {
+            const data = JSON.parse(stdout)
+            const stream = data.streams?.[0]
+            const duration = parseFloat(data.format?.duration) || parseFloat(stream?.duration) || 0
+            if (stream && stream.codec_type === 'video') {
+              resolve({
+                hasVideo: true,
+                width: Number(stream.width) || 0,
+                height: Number(stream.height) || 0,
+                duration
+              })
+              return
+            }
+          } catch { /* ignore */ }
+        }
+        resolve(null)
+      })
+      proc.on('error', () => resolve(null))
+    })
+  } catch {
+    return null
+  }
+}
+
 async function concatSceneClipsLegacy(
   sceneClips: string[],
   tmpDir: string,
@@ -99,6 +165,7 @@ async function concatSceneClipsLegacy(
     '-c', 'copy',
     rawVideoPath
   ])
+  safeUnlink(concatList)
 }
 
 /**
@@ -116,6 +183,55 @@ function normalizePathForFFmpeg(p: string): string {
   return path.resolve(p)
 }
 
+export type ResolvedMediaKind = 'image' | 'video'
+
+export const IMAGE_EXTENSIONS = new Set([
+  '.jpg',
+  '.jpeg',
+  '.png',
+  '.webp',
+  '.bmp',
+  '.gif'
+])
+
+export const VIDEO_EXTENSIONS = new Set([
+  '.mp4',
+  '.mov',
+  '.webm',
+  '.mkv',
+  '.avi',
+  '.m4v',
+  '.mpeg',
+  '.mpg'
+])
+
+export function detectMediaKind(
+  mediaPath: string,
+  declaredType?: 'video' | 'image'
+): ResolvedMediaKind {
+  const cleanPath = mediaPath
+    .split('?')[0]
+    .split('#')[0]
+
+  const extension = path.extname(cleanPath).toLowerCase()
+
+  // Extension thật của file luôn có độ ưu tiên cao nhất.
+  if (VIDEO_EXTENSIONS.has(extension)) {
+    return 'video'
+  }
+
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return 'image'
+  }
+
+  // Chỉ dùng metadata nếu extension không xác định được.
+  if (declaredType === 'image') {
+    return 'image'
+  }
+
+  return 'video'
+}
+
 /** Find actual file path for a media filename by searching source folders */
 function resolveMediaPath(
   filename: string,
@@ -126,73 +242,120 @@ function resolveMediaPath(
   return item ? normalizePathForFFmpeg(item.path) : null
 }
 
+export interface ResolvedSceneMedia {
+  sceneIndex: number
+  mediaPath: string | null
+  source:
+    | 'localPath'
+    | 'localAsset'
+    | 'mediaIndex'
+    | 'stockAssignment'
+    | 'stockFolder'
+    | 'missing'
+}
+
+function resolveSceneMediaWithSource(
+  scene: ScenePlan,
+  mediaIndex: Array<{ filename: string; path: string }>,
+  projectDir: string
+): ResolvedSceneMedia {
+  // 1. scene.localPath
+  if (scene.localPath) {
+    const p = normalizePathForFFmpeg(scene.localPath)
+    if (fs.existsSync(p)) {
+      scene.mediaType = detectMediaKind(p, scene.mediaType)
+      return { sceneIndex: scene.sceneIndex, mediaPath: p, source: 'localPath' }
+    }
+  }
+
+  // 2. scene.localAsset
+  if (scene.localAsset) {
+    const p = normalizePathForFFmpeg(scene.localAsset)
+    if (fs.existsSync(p)) {
+      scene.mediaType = detectMediaKind(p, scene.mediaType)
+      return { sceneIndex: scene.sceneIndex, mediaPath: p, source: 'localAsset' }
+    }
+  }
+
+  // 3. scene.mediaFile / localAsset trong media-index.json
+  if (scene.mediaFile) {
+    const found = resolveMediaPath(scene.mediaFile, mediaIndex)
+    if (found && fs.existsSync(found)) {
+      scene.mediaType = detectMediaKind(found, scene.mediaType)
+      return { sceneIndex: scene.sceneIndex, mediaPath: found, source: 'mediaIndex' }
+    }
+  }
+  if (scene.localAsset) {
+    const found = resolveMediaPath(scene.localAsset, mediaIndex)
+    if (found && fs.existsSync(found)) {
+      scene.mediaType = detectMediaKind(found, scene.mediaType)
+      return { sceneIndex: scene.sceneIndex, mediaPath: found, source: 'mediaIndex' }
+    }
+  }
+
+  // 4. stock-assignments.json
+  try {
+    const assignmentsPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
+    if (fs.existsSync(assignmentsPath)) {
+      const assignments = JSON.parse(fs.readFileSync(assignmentsPath, 'utf-8'))
+      if (Array.isArray(assignments)) {
+        const matched = assignments.find(
+          (a: { sceneIndex?: number; sceneId?: string; asset?: { localPath?: string; mediaType?: 'video' | 'image' } }) =>
+            (a.sceneIndex === scene.sceneIndex || a.sceneId === `scene_${scene.sceneIndex}`) &&
+            a.asset?.localPath
+        )
+        if (matched?.asset?.localPath) {
+          const p = normalizePathForFFmpeg(matched.asset.localPath)
+          if (fs.existsSync(p)) {
+            scene.mediaType = detectMediaKind(p, matched.asset.mediaType ?? scene.mediaType)
+            return { sceneIndex: scene.sceneIndex, mediaPath: p, source: 'stockAssignment' }
+          }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 5. assets/stock folder by scene prefix (e.g. S001_, S010_)
+  try {
+    const stockDir = path.join(projectDir, 'assets', 'stock')
+    if (fs.existsSync(stockDir)) {
+      const files = fs.readdirSync(stockDir)
+      const prefix3 = `S${String(scene.sceneIndex).padStart(3, '0')}_`
+      const prefix4 = `S${String(scene.sceneIndex).padStart(4, '0')}_`
+      const match = files.find(
+        (f) =>
+          (f.startsWith(prefix3) || f.startsWith(prefix4)) &&
+          /\.(mp4|mov|webm|mkv|avi|jpg|jpeg|png|webp)$/i.test(f)
+      )
+      if (match) {
+        const p = path.join(stockDir, match)
+        if (fs.existsSync(p)) {
+          scene.mediaType = detectMediaKind(p, scene.mediaType)
+          return { sceneIndex: scene.sceneIndex, mediaPath: p, source: 'stockFolder' }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  return { sceneIndex: scene.sceneIndex, mediaPath: null, source: 'missing' }
+}
+
 /** Resolve the actual media path for a scene — prefers localPath (stock downloads) over mediaFile lookup */
 function resolveSceneMedia(
   scene: ScenePlan,
   mediaIndex: Array<{ filename: string; path: string }>,
   projectDir?: string
 ): string | null {
-  // 1. Direct local path (set by stock engine or user upload)
-  if (scene.localPath) {
-    const p = normalizePathForFFmpeg(scene.localPath)
-    if (fs.existsSync(p)) return p
+  if (!projectDir) {
+    if (scene.localPath && fs.existsSync(normalizePathForFFmpeg(scene.localPath))) return normalizePathForFFmpeg(scene.localPath)
+    if (scene.localAsset && fs.existsSync(normalizePathForFFmpeg(scene.localAsset))) return normalizePathForFFmpeg(scene.localAsset)
+    if (scene.mediaFile) {
+      const found = resolveMediaPath(scene.mediaFile, mediaIndex)
+      if (found) return found
+    }
+    return null
   }
-  if (scene.localAsset) {
-    const p = normalizePathForFFmpeg(scene.localAsset)
-    if (fs.existsSync(p)) return p
-  }
-
-  // 2. Look up by filename in media index
-  if (scene.mediaFile) {
-    const found = resolveMediaPath(scene.mediaFile, mediaIndex)
-    if (found) return found
-  }
-  if (scene.localAsset) {
-    const found = resolveMediaPath(scene.localAsset, mediaIndex)
-    if (found) return found
-  }
-
-  // 3. Fallback: look up in stock-assignments.json if available
-  if (projectDir) {
-    try {
-      const assignmentsPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
-      if (fs.existsSync(assignmentsPath)) {
-        const assignments = JSON.parse(fs.readFileSync(assignmentsPath, 'utf-8'))
-        if (Array.isArray(assignments)) {
-          const matched = assignments.find(
-            (a: { sceneIndex?: number; sceneId?: string; asset?: { localPath?: string } }) =>
-              (a.sceneIndex === scene.sceneIndex || a.sceneId === `scene_${scene.sceneIndex}`) &&
-              a.asset?.localPath
-          )
-          if (matched?.asset?.localPath) {
-            const p = normalizePathForFFmpeg(matched.asset.localPath)
-            if (fs.existsSync(p)) return p
-          }
-        }
-      }
-    } catch { /* ignore */ }
-
-    // 4. Fallback: scan assets/stock/ folder by scene prefix (e.g. S001_, S010_)
-    try {
-      const stockDir = path.join(projectDir, 'assets', 'stock')
-      if (fs.existsSync(stockDir)) {
-        const files = fs.readdirSync(stockDir)
-        const prefix3 = `S${String(scene.sceneIndex).padStart(3, '0')}_`
-        const prefix4 = `S${String(scene.sceneIndex).padStart(4, '0')}_`
-        const match = files.find(
-          (f) =>
-            (f.startsWith(prefix3) || f.startsWith(prefix4)) &&
-            /\.(mp4|mov|webm|mkv|avi|jpg|jpeg|png|webp)$/i.test(f)
-        )
-        if (match) {
-          const p = path.join(stockDir, match)
-          if (fs.existsSync(p)) return p
-        }
-      }
-    } catch { /* ignore */ }
-  }
-
-  return null
+  return resolveSceneMediaWithSource(scene, mediaIndex, projectDir).mediaPath
 }
 
 // ─── Main render function ─────────────────────────────────────────────────────
@@ -217,9 +380,35 @@ async function renderVisualBeatsToClip(params: {
   tmpDir: string
   sceneIndex: number
 }): Promise<void> {
-  const { beats, mediaPath, isImage, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params
+  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params
 
   const beatClips: string[] = []
+  const cleanExt = path.extname(mediaPath.split('?')[0].split('#')[0]).toLowerCase()
+
+  // Re-derive isImage from the actual file extension — extension always takes priority.
+  // This protects against stale/wrong mediaType metadata in the edit plan.
+  let isImage: boolean
+  if (VIDEO_EXTENSIONS.has(cleanExt)) {
+    isImage = false
+  } else if (IMAGE_EXTENSIONS.has(cleanExt)) {
+    isImage = true
+  } else {
+    // Unknown extension: trust the caller's value but warn
+    isImage = params.isImage
+    logger.warn(
+      `[RetentionEngine] scene ${sceneIndex}: unknown extension "${cleanExt}" for ${mediaPath}, ` +
+      `using caller-provided isImage=${isImage}`
+    )
+  }
+
+  // Sanity guard: log if caller and extension disagree
+  if (params.isImage !== isImage) {
+    logger.warn(
+      `[RetentionEngine] scene ${sceneIndex}: mediaType mismatch corrected — ` +
+      `caller said isImage=${params.isImage} but extension "${cleanExt}" → isImage=${isImage}. ` +
+      `path=${mediaPath}`
+    )
+  }
 
   try {
     for (let bi = 0; bi < beats.length; bi++) {
@@ -251,7 +440,7 @@ async function renderVisualBeatsToClip(params: {
           '-y',
           '-ss', String(ssOffset),
           '-i', mediaPath,
-          '-vf', vfFilter,
+          '-vf', `${vfFilter},tpad=stop_mode=clone:stop_duration=${beatDuration},trim=duration=${beatDuration},setpts=PTS-STARTPTS`,
           '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
           '-t', String(beatDuration),
           '-r', String(fps),
@@ -267,6 +456,7 @@ async function renderVisualBeatsToClip(params: {
     // Concat beats into scene clip
     if (beatClips.length === 1) {
       // Just rename
+      safeUnlink(outClip)
       fs.renameSync(beatClips[0], outClip)
     } else {
       const beatConcatList = path.join(tmpDir, `beat_concat_${sceneIndex}.txt`)
@@ -282,38 +472,44 @@ async function renderVisualBeatsToClip(params: {
         outClip
       ])
       // Cleanup beat clips + concat list
-      try {
-        for (const bc of beatClips) fs.unlinkSync(bc)
-        fs.unlinkSync(beatConcatList)
-      } catch { /* ignore */ }
+      for (const bc of beatClips) safeUnlink(bc)
+      safeUnlink(beatConcatList)
     }
 
     logger.info(`[RetentionEngine] scene ${sceneIndex}: ${beats.length} beats rendered and concatenated`)
 
   } catch (err) {
-    logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${String(err)}), falling back to legacy`)
+    // If it's a media classification error, re-throw immediately.
+    // Do NOT swallow it into the fallback — that would run -loop 1 on a video file.
+    const errMsg = String(err)
+    if (errMsg.includes('Media classification error') || errMsg.includes('Option loop not found')) {
+      throw err
+    }
+
+    logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${errMsg}), falling back to legacy`)
 
     // Cleanup partial beat clips
     for (const bc of beatClips) {
-      try { fs.unlinkSync(bc) } catch { /* ignore */ }
+      safeUnlink(bc)
     }
 
-    // FALLBACK: legacy single clip
+    // FALLBACK: legacy single clip (use re-derived isImage, never the stale caller value)
     const baseFilt = scaleFilt
+    const fallbackDur = beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)
     if (isImage) {
       await ffmpegRun([
         '-y', '-loop', '1', '-i', mediaPath,
         '-vf', baseFilt,
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-        '-t', String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        '-t', String(fallbackDur),
         '-r', String(fps), '-pix_fmt', 'yuv420p', outClip
       ])
     } else {
       await ffmpegRun([
         '-y', '-i', mediaPath,
-        '-vf', baseFilt,
+        '-vf', `${baseFilt},tpad=stop_mode=clone:stop_duration=${fallbackDur},trim=duration=${fallbackDur},setpts=PTS-STARTPTS`,
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-        '-t', String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        '-t', String(fallbackDur),
         '-r', String(fps), '-an', '-pix_fmt', 'yuv420p', outClip
       ])
     }
@@ -346,480 +542,674 @@ export async function renderVideo(params: {
     onProgress?.({ stage, progress: pct, ...extra })
   }
 
-  // ── 1. Load edit plan ─────────────────────────────────────────────────────
-  progress('Loading edit plan...', 0.02)
-  const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
-  if (!fs.existsSync(planPath)) throw new Error('No edit plan found. Run AI Planning first.')
-  const plan: EditPlan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
+  let tmpDir: string | undefined = undefined
+  let workingOutputPath: string | undefined = undefined
 
-  // ── 2. Load media index ───────────────────────────────────────────────────
-  progress('Loading media index...', 0.04)
-  const mediaIndexPath = path.join(projectDir, 'analysis', 'media-index.json')
-  const mediaIndex: Array<{ filename: string; path: string }> =
-    fs.existsSync(mediaIndexPath)
-      ? JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8'))
-      : []
-
-  // ── 3. Flatten scenes (preserving chapter and sequence info) ─────────────
-  const sceneEntries: RenderSceneEntry[] = []
-  plan.chapters.forEach((ch, chIdx) => {
-    const seqs = ch.sequences ?? ch.chapters_seq ?? []
-    let isFirstInCh = true
-    seqs.forEach((seq, seqIdx) => {
-      let isFirstInSeq = true
-      const scList = seq.scenes ?? []
-      scList.forEach((scene) => {
-        sceneEntries.push({
-          scene,
-          chapterIndex: chIdx,
-          sequenceIndex: seqIdx,
-          isFirstInChapter: isFirstInCh,
-          isFirstInSequence: isFirstInSeq
-        })
-        isFirstInCh = false
-        isFirstInSeq = false
-      })
-    })
-  })
-  const scenes: ScenePlan[] = sceneEntries.map(entry => entry.scene)
-  const totalScenes = scenes.length
-  progress(`Processing ${totalScenes} scenes...`, 0.06)
-
-  // Pre-resolve media for any scene missing localPath in memory (e.g. from stock-assignments or assets/stock)
-  for (const scene of scenes) {
-    if (!scene.localPath || !fs.existsSync(normalizePathForFFmpeg(scene.localPath))) {
-      const resolved = resolveSceneMedia(scene, mediaIndex, projectDir)
-      if (resolved) {
-        scene.localPath = resolved
-        if (!scene.mediaFile) {
-          scene.mediaFile = path.basename(resolved)
-        }
-      }
-    }
-  }
-
-  // ── 4. Render each scene to a temp clip ───────────────────────────────────
-  // Use OS temp dir to avoid issues with special characters (colons, backslashes)
-  // in the project directory path (which may be stored as a Windows-style path on macOS)
-  const projectHash = Buffer.from(projectDir).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)
-  const tmpDir = path.join(os.tmpdir(), `auto-edit-render-${projectHash}`)
-  fs.mkdirSync(tmpDir, { recursive: true })
-
-  const sceneClips: string[] = []
-  const { width, height } = resolution
-
-  // ── Retention Engine setup ─────────────────────────────────────────────────
-  const retentionSettings: RetentionSettings = DEFAULT_RETENTION_SETTINGS
-  const retCtx = createDefaultContext()
-
-  // Pre-compute retention decisions for all scenes (sequential context tracking)
-  const retentionDecisions = new Map<number, import('./retention/retention-types').RetentionDecision>()
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i]
-    const sceneInput: SceneRetentionInput = {
-      sceneId: String(scene.sceneIndex),
-      sceneIndex: i,
-      duration: scene.duration,
-      energyLevel: (scene as any).energyLevel,
-      shotType: (scene as any).shotType,
-      narrativeText: (scene as any).narrativeText,
-      visualIntent: scene.visualIntent,
-      isPatternInterrupt: (scene as any).isPatternInterrupt,
-      localPath: scene.localPath,
-      isNewChapter: i === 0 || (scene as any).isFirstInChapter,
-    }
-    const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings)
-    retentionDecisions.set(i, decision)
-    updateRetentionContext(retCtx, sceneInput, decision)
-  }
-
-  // Run retention QA (flags only — does NOT block render)
   try {
-    const qaScenes = scenes.map((s, i) => ({
-      sceneIndex: i,
-      sceneId: String(s.sceneIndex),
-      duration: s.duration,
-      energyLevel: (s as any).energyLevel,
-      shotType: (s as any).shotType,
-      narrativeText: (s as any).narrativeText,
-      visualIntent: s.visualIntent,
-      isPatternInterrupt: (s as any).isPatternInterrupt,
-      visualBeats: retentionDecisions.get(i)?.visualBeats,
-    }))
-    const qaFlags = runRetentionQA(qaScenes)
-    if (qaFlags.length > 0) {
-      const qaPath = path.join(projectDir, 'analysis', 'retention-qa.json')
-      fs.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), 'utf-8')
-      logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`)
-    }
-  } catch (err) {
-    logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`)
-  }
+    // ── 1. Load edit plan ─────────────────────────────────────────────────────
+    progress('Loading edit plan...', 0.02)
+    const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
+    if (!fs.existsSync(planPath)) throw new Error('No edit plan found. Run AI Planning first.')
+    const plan: EditPlan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
 
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i]
-    const mediaName = scene.localPath
-      ? path.basename(scene.localPath)
-      : (scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`)
+    // ── 2. Load media index ───────────────────────────────────────────────────
+    progress('Loading media index...', 0.04)
+    const mediaIndexPath = path.join(projectDir, 'analysis', 'media-index.json')
+    const mediaIndex: Array<{ filename: string; path: string }> =
+      fs.existsSync(mediaIndexPath)
+        ? JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8'))
+        : []
 
-    const pct = 0.06 + (i / totalScenes) * 0.70
-    progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
-      sceneIndex: i + 1,
-      totalScenes
-    })
-
-    const mediaPath = resolveSceneMedia(scene, mediaIndex, projectDir)
-    const outClip = path.join(tmpDir, `scene_${String(i + 1).padStart(4, '0')}.mp4`)
-
-    const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`
-
-    if (!mediaPath || !fs.existsSync(mediaPath)) {
-      // Missing media: generate a black placeholder
-      logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`)
-      await ffmpegRun([
-        '-y',
-        '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-        '-t', String(scene.duration),
-        '-pix_fmt', 'yuv420p',
-        outClip
-      ])
-    } else {
-      const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === 'image'
-      const decision = retentionDecisions.get(i)
-      const beats = decision?.visualBeats ?? []
-      const hasMultipleBeats = beats.length > 1
-
-      if (hasMultipleBeats && retentionSettings.enabled) {
-        // ── ENHANCED: render visual beats then concat into scene clip ──────────
-        await renderVisualBeatsToClip({
-          beats,
-          mediaPath,
-          isImage,
-          outClip,
-          width,
-          height,
-          fps,
-          scaleFilt,
-          tmpDir,
-          sceneIndex: i,
+    // ── 3. Flatten scenes (preserving chapter and sequence info) ─────────────
+    const sceneEntries: RenderSceneEntry[] = []
+    plan.chapters.forEach((ch, chIdx) => {
+      const seqs = ch.sequences ?? ch.chapters_seq ?? []
+      let isFirstInCh = true
+      seqs.forEach((seq, seqIdx) => {
+        let isFirstInSeq = true
+        const scList = seq.scenes ?? []
+        scList.forEach((scene) => {
+          sceneEntries.push({
+            scene,
+            chapterIndex: chIdx,
+            sequenceIndex: seqIdx,
+            isFirstInChapter: isFirstInCh,
+            isFirstInSequence: isFirstInSeq
+          })
+          isFirstInCh = false
+          isFirstInSeq = false
         })
-      } else {
-        // ── LEGACY: single clip render (unchanged behavior) ─────────────────
-        // Apply crop if single beat has semantic crop
-        const singleBeat = beats[0]
-        let vfFilter = scaleFilt
-        if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
-          const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps)
-          if (zf) {
-            // Apply scale first then zoompan
-            vfFilter = `${scaleFilt},${zf}`
-            logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`)
-          }
-        }
+      })
+    })
+    const scenes: ScenePlan[] = sceneEntries.map(entry => entry.scene)
+    const totalScenes = scenes.length
+    progress(`Processing ${totalScenes} scenes...`, 0.06)
 
-        if (isImage) {
-          await ffmpegRun([
-            '-y',
-            '-loop', '1',
-            '-i', mediaPath,
-            '-vf', vfFilter,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-            '-t', String(scene.duration),
-            '-r', String(fps),
-            '-pix_fmt', 'yuv420p',
-            outClip
-          ])
-        } else {
-          await ffmpegRun([
-            '-y',
-            '-i', mediaPath,
-            '-vf', vfFilter,
-            '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-            '-t', String(scene.duration),
-            '-r', String(fps),
-            '-an',
-            '-pix_fmt', 'yuv420p',
-            outClip
-          ])
+    // ── 3b. Media Preflight ──────────────────────────────────────────────────
+    progress('Validating scene media...', 0.08)
+    const preflightResults: ResolvedSceneMedia[] = []
+    let resolvedMediaCount = 0
+    let missingMediaCount = 0
+
+    for (const scene of scenes) {
+      const resolved = resolveSceneMediaWithSource(scene, mediaIndex, projectDir)
+      preflightResults.push(resolved)
+      if (resolved.mediaPath && fs.existsSync(resolved.mediaPath)) {
+        resolvedMediaCount++
+        scene.localPath = resolved.mediaPath
+        if (!scene.mediaFile) {
+          scene.mediaFile = path.basename(resolved.mediaPath)
         }
+        const detectedKind = detectMediaKind(resolved.mediaPath, scene.mediaType)
+        if (scene.mediaType !== detectedKind) {
+          logger.warn(
+            `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. ` +
+            `Plan says ${scene.mediaType ?? 'unknown'}, but file extension indicates ${detectedKind}. ` +
+            `Syncing memory mediaType to ${detectedKind}.`
+          )
+          scene.mediaType = detectedKind
+        }
+        logger.info(
+          `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} mediaKind=${detectedKind} exists=true path=${resolved.mediaPath}`
+        )
+      } else {
+        missingMediaCount++
+        logger.warn(
+          `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} exists=false`
+        )
       }
     }
 
-    sceneClips.push(outClip)
-  }
-
-  // ── 5. Concatenate all scene clips ────────────────────────────────────────
-  progress('Concatenating scenes...', 0.78)
-  const rawVideo = path.join(tmpDir, 'raw_video.mp4')
-
-  const validSettings = validateTransitionSettings(params.transitionSettings)
-  const shouldAttemptTransitions =
-    validSettings &&
-    validSettings.enabled &&
-    sceneEntries.length > 1
-
-  let usedTransitions = false
-
-  if (shouldAttemptTransitions) {
-    try {
-      progress('Resolving scene transitions...', 0.78)
-      usedTransitions = await concatSceneClipsWithTransitions({
-        sceneEntries,
-        sceneClips,
-        settings: validSettings,
-        fps,
-        tmpDir,
-        rawVideoPath: rawVideo,
-        onProgress: (stage, pct) => progress(stage, pct)
-      })
-    } catch (err: unknown) {
-      logger.warn(
-        `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
-      )
-      progress('Transitions failed — using standard cuts...', 0.79)
-      try {
-        if (fs.existsSync(rawVideo)) fs.unlinkSync(rawVideo)
-      } catch { /* ignore */ }
-
-      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo)
-    }
-  }
-
-  // If transitions were not attempted or resolved to all cuts
-  if (!usedTransitions && !fs.existsSync(rawVideo)) {
-    await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo)
-  }
-
-  // ── 6. Load audio plan (Smart Audio Director) ─────────────────────────────
-  progress('Loading audio plan…', 0.86)
-  const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
-  const audioPlan: AudioPlan | null = fs.existsSync(audioPlanPath)
-    ? (JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8')) as AudioPlan)
-    : null
-
-  const approvedMusic = audioPlan?.sections.filter(
-    (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
-  ) ?? []
-
-  const approvedSfx = audioPlan?.sfxAssignments.filter(
-    (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
-  ) ?? []
-
-  const hasAudio = fs.existsSync(voiceoverPath)
-  const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0
-
-  logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`)
-
-  // ── 7. Mix voiceover + music + SFX ────────────────────────────────────────
-  progress('Mixing audio tracks…', 0.90)
-  const outputDir = path.join(projectDir, 'output')
-  fs.mkdirSync(outputDir, { recursive: true })
-  const outputPath = path.join(outputDir, `${outputName}.mp4`)
-
-  if (!hasAudio && !hasMusicOrSfx) {
-    // No audio at all — just copy raw video
-    fs.copyFileSync(rawVideo, outputPath)
-  } else if (!hasMusicOrSfx && hasAudio) {
-    // Simple case: voiceover only
-    await ffmpegRun([
-      '-y',
-      '-i', rawVideo,
-      '-i', voiceoverPath,
-      '-c:v', 'copy',
-      '-c:a', 'aac', '-b:a', '192k',
-      '-map', '0:v:0', '-map', '1:a:0',
-      '-shortest',
-      outputPath
-    ])
-  } else {
-    // Complex case: voiceover + background music + SFX
-    // Build ffmpeg inputs and filter_complex
-    const ffArgs: string[] = ['-y', '-i', rawVideo]
-
-    let inputIdx = 1
-
-    // Input: voiceover
-    const voiceoverIdx = hasAudio ? inputIdx++ : -1
-    if (hasAudio) ffArgs.push('-i', voiceoverPath)
-
-    // Inputs: background music sections
-    const musicInputs: Array<{ idx: number; section: typeof approvedMusic[0] }> = []
-    for (const sec of approvedMusic) {
-      ffArgs.push('-i', normalizePathForFFmpeg(sec.approvedLocalPath!))
-      musicInputs.push({ idx: inputIdx++, section: sec })
-    }
-
-    // Inputs: SFX
-    const sfxInputs: Array<{ idx: number; sfx: typeof approvedSfx[0] }> = []
-    for (const sfx of approvedSfx) {
-      ffArgs.push('-i', normalizePathForFFmpeg(sfx.approvedLocalPath!))
-      sfxInputs.push({ idx: inputIdx++, sfx })
-    }
-
-    // Build filter_complex
-    const filterParts: string[] = []
-    const mixLabels: string[] = []
-
-    // Voiceover — normalize loudness to -16 LUFS so it's always clear and consistent
-    if (hasAudio) {
-      filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`)
-      mixLabels.push('[vo]')
-    }
-
-    // Music sections — ducked under voiceover
-    // Default: -30 dB (3.2% amplitude) — subtle background bed
-    for (const { idx, section } of musicInputs) {
-      const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6)
-      const fadeIn = section.fadeInSecs ?? 2
-      const fadeOut = section.fadeOutSecs ?? 3
-      const dur = section.durationSecs
-      const label = `music_${idx}`
-      filterParts.push(
-        `[${idx}:a]volume=${vol},` +
-        `afade=t=in:ss=0:d=${fadeIn},` +
-        `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
-        `adelay=${Math.round(section.startTime * 1000)}|${Math.round(section.startTime * 1000)},` +
-        `apad[${label}]`
-      )
-      mixLabels.push(`[${label}]`)
-    }
-
-    // SFX — placed at scene start time
-    for (const { idx, sfx } of sfxInputs) {
-      const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6)
-      const fadeIn = sfx.fadeInSecs ?? 0.5
-      const fadeOut = sfx.fadeOutSecs ?? 0.5
-      const dur = sfx.endTime - sfx.startTime
-      const label = `sfx_${idx}`
-      filterParts.push(
-        `[${idx}:a]volume=${vol},` +
-        `afade=t=in:ss=0:d=${fadeIn},` +
-        `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
-        `adelay=${Math.round(sfx.startTime * 1000)}|${Math.round(sfx.startTime * 1000)},` +
-        `apad[${label}]`
-      )
-      mixLabels.push(`[${label}]`)
-    }
-
-    // Mix all tracks, then limit output to prevent clipping
-    const nInputs = mixLabels.length
-    filterParts.push(
-      // normalize=1 scales by 1/nInputs to prevent summing clips
-      `${mixLabels.join('')}amix=inputs=${nInputs}:duration=first:normalize=1,` +
-      // Final brick-wall limiter: ensure no sample exceeds -1 dBTP
-      `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+    logger.info(
+      `[RENDER][Media] resolved=${resolvedMediaCount} missing=${missingMediaCount} total=${scenes.length}`
     )
 
-    const filterComplex = filterParts.join(';')
-    logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`)
+    if (scenes.length > 0 && resolvedMediaCount === 0) {
+      throw new Error(
+        'No scene media could be resolved. Refusing to render an all-black video. Check master-edit-plan.json, media-index.json and stock-assignments.json.'
+      )
+    }
 
-    await ffmpegRun([
-      ...ffArgs,
-      '-filter_complex', filterComplex,
-      '-map', '0:v:0',
-      '-map', '[amixed]',
-      '-c:v', 'copy',
-      '-c:a', 'aac', '-b:a', '192k',
-      '-shortest',
-      outputPath
-    ])
-  }
+    // ── 4. Render each scene to a unique temp directory ─────────────────────
+    const projectHash = Buffer.from(projectDir).toString('base64').replace(/[^a-zA-Z0-9]/g, '').slice(0, 16)
+    const tmpBaseDir = path.join(os.tmpdir(), `auto-edit-render-${projectHash}-`)
+    tmpDir = fs.mkdtempSync(tmpBaseDir)
+    logger.info(`[RENDER] Temporary directory: ${tmpDir}`)
 
-  // ── 7b. Render Dynamic Kinetic Captions via Remotion (nếu được bật) ────────
-  if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-    // ── 7b-i. Build proof visuals list với absolute timing ───────────────────
-    let proofVisuals: ProofVisual[] = []
+    const sceneClips: string[] = []
+    const { width, height } = resolution
 
-    if (retentionSettings.proofVisualsEnabled) {
+    // ── Retention Engine setup ─────────────────────────────────────────────────
+    const retentionSettings: RetentionSettings = DEFAULT_RETENTION_SETTINGS
+    const retCtx = createDefaultContext()
+
+    // Pre-compute retention decisions for all scenes (sequential context tracking)
+    const retentionDecisions = new Map<number, import('./retention/retention-types').RetentionDecision>()
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i]
+      const sceneInput: SceneRetentionInput = {
+        sceneId: String(scene.sceneIndex),
+        sceneIndex: i,
+        duration: scene.duration,
+        energyLevel: (scene as any).energyLevel,
+        shotType: (scene as any).shotType,
+        narrativeText: (scene as any).narrativeText,
+        visualIntent: scene.visualIntent,
+        isPatternInterrupt: (scene as any).isPatternInterrupt,
+        localPath: scene.localPath,
+        isNewChapter: i === 0 || (scene as any).isFirstInChapter,
+      }
+      const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings)
+      retentionDecisions.set(i, decision)
+      updateRetentionContext(retCtx, sceneInput, decision)
+    }
+
+    // Run retention QA (flags only — does NOT block render)
+    try {
+      const qaScenes = scenes.map((s, i) => ({
+        sceneIndex: i,
+        sceneId: String(s.sceneIndex),
+        duration: s.duration,
+        energyLevel: (s as any).energyLevel,
+        shotType: (s as any).shotType,
+        narrativeText: (s as any).narrativeText,
+        visualIntent: s.visualIntent,
+        isPatternInterrupt: (s as any).isPatternInterrupt,
+        visualBeats: retentionDecisions.get(i)?.visualBeats,
+      }))
+      const qaFlags = runRetentionQA(qaScenes)
+      if (qaFlags.length > 0) {
+        const qaPath = path.join(projectDir, 'analysis', 'retention-qa.json')
+        fs.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), 'utf-8')
+        logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`)
+      }
+    } catch (err) {
+      logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`)
+    }
+
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i]
+      const mediaName = scene.localPath
+        ? path.basename(scene.localPath)
+        : (scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`)
+
+      const pct = 0.08 + (i / totalScenes) * 0.68
+      progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
+        sceneIndex: i + 1,
+        totalScenes
+      })
+
+      const mediaPath = (scene.localPath && fs.existsSync(scene.localPath))
+        ? scene.localPath
+        : resolveSceneMedia(scene, mediaIndex, projectDir)
+
+      const outClip = path.join(tmpDir, `scene_${String(i + 1).padStart(4, '0')}.mp4`)
+      const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`
+
+      if (!mediaPath || !fs.existsSync(mediaPath)) {
+        // Missing media: generate a black placeholder
+        logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`)
+        await ffmpegRun([
+          '-y',
+          '-f', 'lavfi', '-i', `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
+          '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+          '-t', String(scene.duration),
+          '-pix_fmt', 'yuv420p',
+          outClip
+        ])
+      } else {
+        const mediaKind = detectMediaKind(mediaPath, scene.mediaType)
+        const isImage = mediaKind === 'image'
+
+        const declaredType = scene.mediaType
+        const cleanExt = path.extname(mediaPath.split('?')[0].split('#')[0]).toLowerCase()
+        const extensionType = VIDEO_EXTENSIONS.has(cleanExt) ? 'video' : IMAGE_EXTENSIONS.has(cleanExt) ? 'image' : undefined
+
+        if (declaredType && extensionType && declaredType !== extensionType) {
+          logger.warn(
+            `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. ` +
+            `Plan says ${declaredType}, but file extension indicates ${extensionType}. ` +
+            `Using ${extensionType}.`
+          )
+        }
+
+        if (scene.mediaType !== mediaKind) {
+          scene.mediaType = mediaKind
+        }
+
+        logger.info(
+          `[RENDER] Scene ${scene.sceneIndex}: ` +
+          `mediaKind=${mediaKind}, ` +
+          `declaredType=${declaredType ?? 'unknown'}, ` +
+          `extension=${cleanExt}, ` +
+          `path=${mediaPath}`
+        )
+
+        // Validate before calling FFmpeg
+        if (isImage && VIDEO_EXTENSIONS.has(cleanExt)) {
+          throw new Error(
+            `Media classification error: video file was about to be rendered as image: ${mediaPath}`
+          )
+        }
+        if (!isImage && IMAGE_EXTENSIONS.has(cleanExt)) {
+          throw new Error(
+            `Media classification error: image file was about to be rendered as video: ${mediaPath}`
+          )
+        }
+
+        const decision = retentionDecisions.get(i)
+        const beats = decision?.visualBeats ?? []
+        const hasMultipleBeats = beats.length > 1
+
+        if (hasMultipleBeats && retentionSettings.enabled) {
+          // ── ENHANCED: render visual beats then concat into scene clip ──────────
+          await renderVisualBeatsToClip({
+            beats,
+            mediaPath,
+            isImage,
+            outClip,
+            width,
+            height,
+            fps,
+            scaleFilt,
+            tmpDir,
+            sceneIndex: i,
+          })
+        } else {
+          // ── LEGACY: single clip render (unchanged behavior) ─────────────────
+          // Apply crop if single beat has semantic crop
+          const singleBeat = beats[0]
+          let vfFilter = scaleFilt
+          if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
+            const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps)
+            if (zf) {
+              // Apply scale first then zoompan
+              vfFilter = `${scaleFilt},${zf}`
+              logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`)
+            }
+          }
+
+          if (isImage) {
+            await ffmpegRun([
+              '-y',
+              '-loop', '1',
+              '-i', mediaPath,
+              '-vf', vfFilter,
+              '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+              '-t', String(scene.duration),
+              '-r', String(fps),
+              '-pix_fmt', 'yuv420p',
+              outClip
+            ])
+          } else {
+            const durationGuard =
+              `tpad=stop_mode=clone:stop_duration=${scene.duration},` +
+              `trim=duration=${scene.duration},` +
+              `setpts=PTS-STARTPTS`
+            const videoFilter = `${vfFilter},${durationGuard}`
+
+            await ffmpegRun([
+              '-y',
+              '-i', mediaPath,
+              '-vf', videoFilter,
+              '-c:v', 'libx264',
+              '-preset', 'fast',
+              '-crf', '20',
+              '-t', String(scene.duration),
+              '-r', String(fps),
+              '-an',
+              '-pix_fmt', 'yuv420p',
+              outClip
+            ])
+          }
+        }
+      }
+
+      // Validate scene clip
+      if (!fs.existsSync(outClip) || fs.statSync(outClip).size === 0) {
+        throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip.`)
+      }
+
+      const clipProbe = await probeVideoInfo(outClip)
+      if (clipProbe) {
+        if (!clipProbe.hasVideo || clipProbe.width <= 0 || clipProbe.height <= 0 || clipProbe.duration <= 0) {
+          throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip (invalid stream).`)
+        }
+        const maxAllowedDiff = 1 / fps + 0.05
+        const diff = Math.abs(clipProbe.duration - scene.duration)
+        if (diff > maxAllowedDiff) {
+          logger.warn(
+            `[RENDER] Scene ${scene.sceneIndex} duration deviation: expected=${scene.duration.toFixed(3)}s actual=${clipProbe.duration.toFixed(3)}s diff=${diff.toFixed(3)}s (tolerance=${maxAllowedDiff.toFixed(3)}s)`
+          )
+        }
+        logger.info(
+          `[RENDER] Scene ${scene.sceneIndex} clip validated: path=${outClip} sizeBytes=${fs.statSync(outClip).size} duration=${clipProbe.duration.toFixed(3)}s resolution=${clipProbe.width}x${clipProbe.height}`
+        )
+      } else {
+        logger.info(
+          `[RENDER] Scene ${scene.sceneIndex} clip created: path=${outClip} sizeBytes=${fs.statSync(outClip).size}`
+        )
+      }
+
+      sceneClips.push(outClip)
+    }
+
+    // ── 5. Concatenate all scene clips ────────────────────────────────────────
+    progress('Concatenating scenes...', 0.78)
+    const rawVideo = path.join(tmpDir, 'raw_video.mp4')
+
+    const validSettings = validateTransitionSettings(params.transitionSettings)
+    const shouldAttemptTransitions =
+      validSettings &&
+      validSettings.enabled &&
+      sceneEntries.length > 1
+
+    let rawVideoCreated = false
+
+    if (shouldAttemptTransitions) {
       try {
-        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan)
-        logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`)
-        // Save debug plan (non-blocking)
-        try {
-          const pvPlanPath = path.join(projectDir, 'analysis', 'proof-visual-plan.json')
-          fs.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map(pv => ({
-            type: pv.type, text: pv.primaryText,
-            startTime: pv.absoluteStartTime, endTime: pv.absoluteEndTime,
-            position: pv.position
-          })), null, 2), 'utf-8')
-        } catch { /* non-blocking */ }
-      } catch (err) {
-        logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`)
-        proofVisuals = []
+        progress('Resolving scene transitions...', 0.78)
+        rawVideoCreated = await concatSceneClipsWithTransitions({
+          sceneEntries,
+          sceneClips,
+          settings: validSettings,
+          fps,
+          tmpDir,
+          rawVideoPath: rawVideo,
+          onProgress: (stage, pct) => progress(stage, pct)
+        })
+        if (rawVideoCreated) {
+          logger.info('[RENDER] Scene assembly method=transitions')
+        }
+      } catch (err: unknown) {
+        logger.warn(
+          `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
+        )
+        progress('Transitions failed — using standard cuts...', 0.79)
+        safeUnlink(rawVideo)
+        rawVideoCreated = false
       }
     }
 
-    // ── 7b-ii. Render lớp overlay bằng Remotion ─────────────────────────────
-    progress('Rendering caption overlay (Remotion)...', 0.91)
-    const captionsDir = path.join(projectDir, 'assets', 'captions')
-    fs.mkdirSync(captionsDir, { recursive: true })
-    const overlayPath = path.join(captionsDir, 'overlay.mp4')  // H264 green screen
+    if (!rawVideoCreated) {
+      const method = shouldAttemptTransitions ? 'legacy-fallback' : 'legacy-concat'
+      logger.info(`[RENDER] Scene assembly method=${method}`)
+      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo)
+      rawVideoCreated = true
+    }
 
-    const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0)
+    // ── Validate raw_video.mp4 before audio ──
+    if (!fs.existsSync(rawVideo) || fs.statSync(rawVideo).size === 0) {
+      throw new Error('Raw video was not created or is empty.')
+    }
 
-    await renderCaptionsOverlay({
-      captionPlan: params.captionPlan,
-      proofVisuals,
-      videoDurationInSeconds: videoDurationSecs,
-      outputPath: overlayPath,
-      fps,
-      resolution,
-      onBundleProgress: (pct) => {
-        progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 0.002)
-      },
-      onRenderProgress: (pct) => {
-        progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01)
-      },
+    const rawProbe = await probeVideoInfo(rawVideo)
+    if (!rawProbe || !rawProbe.hasVideo || rawProbe.duration <= 0 || rawProbe.width <= 0 || rawProbe.height <= 0) {
+      throw new Error(
+        'The scene assembly step produced an invalid raw video. Audio and captions were not applied.'
+      )
+    }
+
+    if (rawProbe.width !== width || rawProbe.height !== height) {
+      logger.warn(
+        `[RENDER] Raw video resolution ${rawProbe.width}x${rawProbe.height} does not match target ${width}x${height}`
+      )
+    }
+
+    logger.info(
+      `[RENDER] Raw video validated:\npath=${rawVideo}\nduration=${rawProbe.duration.toFixed(3)}s\nresolution=${rawProbe.width}x${rawProbe.height}\nsizeBytes=${fs.statSync(rawVideo).size}`
+    )
+
+    // ── 6. Load audio plan (Smart Audio Director) ─────────────────────────────
+    progress('Loading audio plan…', 0.86)
+    const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
+    const audioPlan: AudioPlan | null = fs.existsSync(audioPlanPath)
+      ? (JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8')) as AudioPlan)
+      : null
+
+    const approvedMusic = audioPlan?.sections.filter(
+      (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
+    ) ?? []
+
+    const approvedSfx = audioPlan?.sfxAssignments.filter(
+      (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
+    ) ?? []
+
+    const hasAudio = fs.existsSync(voiceoverPath)
+    const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0
+
+    logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`)
+
+    // ── 7. Mix voiceover + music + SFX ────────────────────────────────────────
+    progress('Mixing audio tracks…', 0.90)
+    const outputDir = path.join(projectDir, 'output')
+    fs.mkdirSync(outputDir, { recursive: true })
+    const outputPath = path.join(outputDir, `${outputName}.mp4`)
+    workingOutputPath = path.join(outputDir, `_${outputName}_working.mp4`)
+    safeUnlink(workingOutputPath)
+
+    if (!hasAudio && !hasMusicOrSfx) {
+      // No audio at all — just copy raw video
+      fs.copyFileSync(rawVideo, workingOutputPath)
+    } else if (!hasMusicOrSfx && hasAudio) {
+      // Simple case: voiceover only
+      await ffmpegRun([
+        '-y',
+        '-i', rawVideo,
+        '-i', voiceoverPath,
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '192k',
+        '-map', '0:v:0', '-map', '1:a:0',
+        '-shortest',
+        workingOutputPath
+      ])
+    } else {
+      // Complex case: voiceover + background music + SFX
+      // Build ffmpeg inputs and filter_complex
+      const ffArgs: string[] = ['-y', '-i', rawVideo]
+
+      let inputIdx = 1
+
+      // Input: voiceover
+      const voiceoverIdx = hasAudio ? inputIdx++ : -1
+      if (hasAudio) ffArgs.push('-i', voiceoverPath)
+
+      // Inputs: background music sections
+      const musicInputs: Array<{ idx: number; section: typeof approvedMusic[0] }> = []
+      for (const sec of approvedMusic) {
+        ffArgs.push('-i', normalizePathForFFmpeg(sec.approvedLocalPath!))
+        musicInputs.push({ idx: inputIdx++, section: sec })
+      }
+
+      // Inputs: SFX
+      const sfxInputs: Array<{ idx: number; sfx: typeof approvedSfx[0] }> = []
+      for (const sfx of approvedSfx) {
+        ffArgs.push('-i', normalizePathForFFmpeg(sfx.approvedLocalPath!))
+        sfxInputs.push({ idx: inputIdx++, sfx })
+      }
+
+      // Build filter_complex
+      const filterParts: string[] = []
+      const mixLabels: string[] = []
+
+      // Voiceover — normalize loudness to -16 LUFS so it's always clear and consistent
+      if (hasAudio) {
+        filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`)
+        mixLabels.push('[vo]')
+      }
+
+      // Music sections — ducked under voiceover
+      // Default: -30 dB (3.2% amplitude) — subtle background bed
+      for (const { idx, section } of musicInputs) {
+        const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6)
+        const fadeIn = section.fadeInSecs ?? 2
+        const fadeOut = section.fadeOutSecs ?? 3
+        const dur = section.durationSecs
+        const label = `music_${idx}`
+        filterParts.push(
+          `[${idx}:a]volume=${vol},` +
+          `afade=t=in:ss=0:d=${fadeIn},` +
+          `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
+          `adelay=${Math.round(section.startTime * 1000)}|${Math.round(section.startTime * 1000)},` +
+          `apad[${label}]`
+        )
+        mixLabels.push(`[${label}]`)
+      }
+
+      // SFX — placed at scene start time
+      for (const { idx, sfx } of sfxInputs) {
+        const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6)
+        const fadeIn = sfx.fadeInSecs ?? 0.5
+        const fadeOut = sfx.fadeOutSecs ?? 0.5
+        const dur = sfx.endTime - sfx.startTime
+        const label = `sfx_${idx}`
+        filterParts.push(
+          `[${idx}:a]volume=${vol},` +
+          `afade=t=in:ss=0:d=${fadeIn},` +
+          `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
+          `adelay=${Math.round(sfx.startTime * 1000)}|${Math.round(sfx.startTime * 1000)},` +
+          `apad[${label}]`
+        )
+        mixLabels.push(`[${label}]`)
+      }
+
+      // Mix all tracks, then limit output to prevent clipping
+      const nInputs = mixLabels.length
+      filterParts.push(
+        // normalize=1 scales by 1/nInputs to prevent summing clips
+        `${mixLabels.join('')}amix=inputs=${nInputs}:duration=first:normalize=1,` +
+        // Final brick-wall limiter: ensure no sample exceeds -1 dBTP
+        `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+      )
+
+      const filterComplex = filterParts.join(';')
+      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`)
+
+      await ffmpegRun([
+        ...ffArgs,
+        '-filter_complex', filterComplex,
+        '-map', '0:v:0',
+        '-map', '[amixed]',
+        '-c:v', 'copy',
+        '-c:a', 'aac', '-b:a', '192k',
+        '-shortest',
+        workingOutputPath
+      ])
+    }
+
+    if (!fs.existsSync(workingOutputPath) || fs.statSync(workingOutputPath).size === 0) {
+      throw new Error('Audio mixing step failed to produce a valid video file.')
+    }
+    const audioProbe = await probeVideoInfo(workingOutputPath)
+    if (!audioProbe || !audioProbe.hasVideo || audioProbe.duration <= 0) {
+      throw new Error('The audio mixing step produced an invalid video. Video stream is missing.')
+    }
+    logger.info(
+      `[RENDER] Audio mixing output validated: path=${workingOutputPath} sizeBytes=${fs.statSync(workingOutputPath).size} duration=${audioProbe.duration.toFixed(3)}s`
+    )
+
+    // ── 7b. Render Dynamic Kinetic Captions via Remotion (nếu được bật) ────────
+    if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
+      // ── 7b-i. Build proof visuals list với absolute timing ───────────────────
+      let proofVisuals: ProofVisual[] = []
+
+      if (retentionSettings.proofVisualsEnabled) {
+        try {
+          proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan)
+          logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`)
+          // Save debug plan (non-blocking)
+          try {
+            const pvPlanPath = path.join(projectDir, 'analysis', 'proof-visual-plan.json')
+            fs.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map(pv => ({
+              type: pv.type, text: pv.primaryText,
+              startTime: pv.absoluteStartTime, endTime: pv.absoluteEndTime,
+              position: pv.position
+            })), null, 2), 'utf-8')
+          } catch { /* non-blocking */ }
+        } catch (err) {
+          logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`)
+          proofVisuals = []
+        }
+      }
+
+      // ── 7b-ii. Render lớp overlay bằng Remotion ─────────────────────────────
+      progress('Rendering caption overlay (Remotion)...', 0.91)
+      const captionsDir = path.join(projectDir, 'assets', 'captions')
+      fs.mkdirSync(captionsDir, { recursive: true })
+      const overlayPath = path.join(captionsDir, 'overlay.mp4')  // H264 green screen
+
+      const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0)
+
+      await renderCaptionsOverlay({
+        captionPlan: params.captionPlan,
+        proofVisuals,
+        videoDurationInSeconds: videoDurationSecs,
+        outputPath: overlayPath,
+        fps,
+        resolution,
+        onBundleProgress: (pct) => {
+          progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 0.002)
+        },
+        onRenderProgress: (pct) => {
+          progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01)
+        },
+      })
+
+      // ── 7b-iii. Merge overlay lên video gốc bằng FFmpeg ─────────────────────
+      progress('Compositing captions overlay...', 0.93)
+      const captionedPath = path.join(outputDir, '_captioned_tmp.mp4')
+      safeUnlink(captionedPath)
+
+      logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
+
+      await ffmpegRun([
+        '-y',
+        '-i', workingOutputPath,       // [0] video có audio
+        '-i', overlayPath,             // [1] caption MP4 green screen từ Remotion
+        '-filter_complex',
+        '[1:v]format=rgba,colorkey=0x00ff00:0.12:0.05[ov];[0:v][ov]overlay=0:0:shortest=1:eof_action=pass,format=yuv420p[outv]',
+        '-map', '[outv]',
+        '-map', '0:a?',
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+        '-c:a', 'copy',
+        captionedPath
+      ])
+
+      if (!fs.existsSync(captionedPath) || fs.statSync(captionedPath).size === 0) {
+        safeUnlink(captionedPath)
+        throw new Error('Caption overlay compositing failed to produce a valid file.')
+      }
+
+      const captionedProbe = await probeVideoInfo(captionedPath)
+      if (!captionedProbe || !captionedProbe.hasVideo || captionedProbe.duration <= 0) {
+        safeUnlink(captionedPath)
+        throw new Error('Caption overlay composited file has no valid video stream.')
+      }
+
+      logger.info(
+        `[RENDER] Caption overlay composited: path=${captionedPath} sizeBytes=${fs.statSync(captionedPath).size} duration=${captionedProbe.duration.toFixed(3)}s`
+      )
+
+      // Thay thế working output bằng bản đã có caption
+      safeUnlink(workingOutputPath)
+      fs.renameSync(captionedPath, workingOutputPath)
+
+      // Dọn overlay tạm
+      safeUnlink(overlayPath)
+
+      logger.info('[RENDER] Caption overlay composited')
+    }
+
+    // ── 8. Final output validation & publishing ────────────────────────────────
+    progress('Finalizing output...', 0.96)
+    if (!fs.existsSync(workingOutputPath) || fs.statSync(workingOutputPath).size === 0) {
+      throw new Error('Final render working file is missing or empty.')
+    }
+    const finalProbe = await probeVideoInfo(workingOutputPath)
+    if (!finalProbe || !finalProbe.hasVideo || finalProbe.duration <= 0) {
+      throw new Error('Final output does not contain a valid video stream.')
+    }
+
+    // Atomically promote working output to final outputPath
+    safeUnlink(outputPath)
+    fs.renameSync(workingOutputPath, outputPath)
+
+    // ── 9. Cleanup temp files ─────────────────────────────────────────────────
+    progress('Cleaning up...', 0.98)
+    for (const clip of sceneClips) {
+      safeUnlink(clip)
+    }
+    safeUnlink(rawVideo)
+
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+      logger.info(`[RENDER] Removed temporary directory: ${tmpDir}`)
+    } catch (error) {
+      logger.warn(`[RENDER] Could not remove temporary directory ${tmpDir}: ${String(error)}`)
+    }
+
+    const stat = fs.statSync(outputPath)
+    const durationSecs = finalProbe.duration || scenes.reduce((a, s) => a + s.duration, 0)
+
+    progress(`Done → ${outputPath}`, 1.0)
+    logger.info('[RENDER] Complete', {
+      outputPath,
+      durationSecs: Math.round(durationSecs * 100) / 100,
+      resolution: `${finalProbe.width}x${finalProbe.height}`,
+      fileSizeMB: (stat.size / 1024 / 1024).toFixed(2)
     })
 
-    // ── 7b-iii. Merge overlay lên video gốc bằng FFmpeg ─────────────────────
-    progress('Compositing captions overlay...', 0.93)
-    const captionedPath = path.join(path.dirname(outputPath), '_captioned_tmp.mp4')
+    return { outputPath, durationSecs, fileSizeBytes: stat.size }
 
-    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
-
-    await ffmpegRun([
-      '-y',
-      '-i', outputPath,              // [0] video có audio
-      '-i', overlayPath,             // [1] caption MP4 green screen từ Remotion
-      '-filter_complex', '[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]',
-      '-map', '[outv]',
-      '-map', '0:a',
-      '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
-      '-c:a', 'copy',
-      '-pix_fmt', 'yuv420p',
-      captionedPath
-    ])
-
-    // Thay thế output final bằng bản đã có caption
-    fs.renameSync(captionedPath, outputPath)
-
-    // Dọn overlay tạm
-    try { fs.unlinkSync(overlayPath) } catch { /* ignore */ }
-
-    logger.info('[RENDER] Caption overlay composited')
+  } catch (err) {
+    if (workingOutputPath) safeUnlink(workingOutputPath)
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      try {
+        fs.rmSync(tmpDir, { recursive: true, force: true })
+      } catch { /* ignore */ }
+    }
+    throw err
   }
-
-  // ── 8. Cleanup temp files ─────────────────────────────────────────────────
-  progress('Cleaning up...', 0.97)
-  try {
-    for (const clip of sceneClips) fs.unlinkSync(clip)
-    fs.unlinkSync(concatList)
-    fs.unlinkSync(rawVideo)
-  } catch { /* ignore cleanup errors */ }
-
-  const stat = fs.statSync(outputPath)
-  const durationSecs = scenes.reduce((a, s) => a + s.duration, 0)
-
-  progress(`Done → ${outputPath}`, 1.0)
-  logger.info('[RENDER] Complete', {
-    outputPath,
-    durationSecs: Math.round(durationSecs),
-    fileSizeMB: (stat.size / 1024 / 1024).toFixed(1)
-  })
-
-  return { outputPath, durationSecs, fileSizeBytes: stat.size }
 }
 
 // ─── Proof Visual helpers ─────────────────────────────────────────────────────

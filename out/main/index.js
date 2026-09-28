@@ -2531,10 +2531,72 @@ function ffmpegRun$1(args) {
     proc.on("error", reject);
   });
 }
+function safeUnlink(filePath) {
+  if (!filePath) return;
+  try {
+    if (fs__namespace.existsSync(filePath)) {
+      fs__namespace.unlinkSync(filePath);
+    }
+  } catch (error) {
+    logger.warn(
+      `[RENDER] Could not delete temporary file ${filePath}: ${String(error)}`
+    );
+  }
+}
+async function probeVideoInfo(filePath) {
+  try {
+    const ffp = require("ffprobe-static");
+    if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
+    return new Promise((resolve) => {
+      const proc = child_process.spawn(
+        ffp.path,
+        [
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "stream=codec_type,width,height,duration:format=duration",
+          "-of",
+          "json",
+          filePath
+        ],
+        { windowsHide: true }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("close", (code) => {
+        if (code === 0) {
+          try {
+            const data = JSON.parse(stdout);
+            const stream = data.streams?.[0];
+            const duration = parseFloat(data.format?.duration) || parseFloat(stream?.duration) || 0;
+            if (stream && stream.codec_type === "video") {
+              resolve({
+                hasVideo: true,
+                width: Number(stream.width) || 0,
+                height: Number(stream.height) || 0,
+                duration
+              });
+              return;
+            }
+          } catch {
+          }
+        }
+        resolve(null);
+      });
+      proc.on("error", () => resolve(null));
+    });
+  } catch {
+    return null;
+  }
+}
 async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath) {
-  const concatList2 = path__namespace.join(tmpDir, "concat.txt");
+  const concatList = path__namespace.join(tmpDir, "concat.txt");
   fs__namespace.writeFileSync(
-    concatList2,
+    concatList,
     // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
     sceneClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
     "utf-8"
@@ -2546,78 +2608,156 @@ async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath) {
     "-safe",
     "0",
     "-i",
-    concatList2,
+    concatList,
     "-c",
     "copy",
     rawVideoPath
   ]);
+  safeUnlink(concatList);
 }
 function normalizePathForFFmpeg(p) {
   if (!p) return p;
   if (p.startsWith("/")) return p;
   return path__namespace.resolve(p);
 }
+const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".webp",
+  ".bmp",
+  ".gif"
+]);
+const VIDEO_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".mp4",
+  ".mov",
+  ".webm",
+  ".mkv",
+  ".avi",
+  ".m4v",
+  ".mpeg",
+  ".mpg"
+]);
+function detectMediaKind(mediaPath, declaredType) {
+  const cleanPath = mediaPath.split("?")[0].split("#")[0];
+  const extension = path__namespace.extname(cleanPath).toLowerCase();
+  if (VIDEO_EXTENSIONS.has(extension)) {
+    return "video";
+  }
+  if (IMAGE_EXTENSIONS.has(extension)) {
+    return "image";
+  }
+  if (declaredType === "image") {
+    return "image";
+  }
+  return "video";
+}
 function resolveMediaPath(filename, mediaIndex) {
   if (!filename) return null;
   const item = mediaIndex.find((m) => m.filename === filename || path__namespace.basename(m.path) === filename);
   return item ? normalizePathForFFmpeg(item.path) : null;
 }
-function resolveSceneMedia(scene, mediaIndex, projectDir) {
+function resolveSceneMediaWithSource(scene, mediaIndex, projectDir) {
   if (scene.localPath) {
     const p = normalizePathForFFmpeg(scene.localPath);
-    if (fs__namespace.existsSync(p)) return p;
+    if (fs__namespace.existsSync(p)) {
+      scene.mediaType = detectMediaKind(p, scene.mediaType);
+      return { sceneIndex: scene.sceneIndex, mediaPath: p, source: "localPath" };
+    }
   }
   if (scene.localAsset) {
     const p = normalizePathForFFmpeg(scene.localAsset);
-    if (fs__namespace.existsSync(p)) return p;
+    if (fs__namespace.existsSync(p)) {
+      scene.mediaType = detectMediaKind(p, scene.mediaType);
+      return { sceneIndex: scene.sceneIndex, mediaPath: p, source: "localAsset" };
+    }
   }
   if (scene.mediaFile) {
     const found = resolveMediaPath(scene.mediaFile, mediaIndex);
-    if (found) return found;
+    if (found && fs__namespace.existsSync(found)) {
+      scene.mediaType = detectMediaKind(found, scene.mediaType);
+      return { sceneIndex: scene.sceneIndex, mediaPath: found, source: "mediaIndex" };
+    }
   }
   if (scene.localAsset) {
     const found = resolveMediaPath(scene.localAsset, mediaIndex);
-    if (found) return found;
+    if (found && fs__namespace.existsSync(found)) {
+      scene.mediaType = detectMediaKind(found, scene.mediaType);
+      return { sceneIndex: scene.sceneIndex, mediaPath: found, source: "mediaIndex" };
+    }
   }
-  if (projectDir) {
-    try {
-      const assignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
-      if (fs__namespace.existsSync(assignmentsPath)) {
-        const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
-        if (Array.isArray(assignments)) {
-          const matched = assignments.find(
-            (a) => (a.sceneIndex === scene.sceneIndex || a.sceneId === `scene_${scene.sceneIndex}`) && a.asset?.localPath
-          );
-          if (matched?.asset?.localPath) {
-            const p = normalizePathForFFmpeg(matched.asset.localPath);
-            if (fs__namespace.existsSync(p)) return p;
+  try {
+    const assignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+    if (fs__namespace.existsSync(assignmentsPath)) {
+      const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      if (Array.isArray(assignments)) {
+        const matched = assignments.find(
+          (a) => (a.sceneIndex === scene.sceneIndex || a.sceneId === `scene_${scene.sceneIndex}`) && a.asset?.localPath
+        );
+        if (matched?.asset?.localPath) {
+          const p = normalizePathForFFmpeg(matched.asset.localPath);
+          if (fs__namespace.existsSync(p)) {
+            scene.mediaType = detectMediaKind(p, matched.asset.mediaType ?? scene.mediaType);
+            return { sceneIndex: scene.sceneIndex, mediaPath: p, source: "stockAssignment" };
           }
         }
       }
-    } catch {
     }
-    try {
-      const stockDir = path__namespace.join(projectDir, "assets", "stock");
-      if (fs__namespace.existsSync(stockDir)) {
-        const files = fs__namespace.readdirSync(stockDir);
-        const prefix3 = `S${String(scene.sceneIndex).padStart(3, "0")}_`;
-        const prefix4 = `S${String(scene.sceneIndex).padStart(4, "0")}_`;
-        const match = files.find(
-          (f) => (f.startsWith(prefix3) || f.startsWith(prefix4)) && /\.(mp4|mov|webm|mkv|avi|jpg|jpeg|png|webp)$/i.test(f)
-        );
-        if (match) {
-          const p = path__namespace.join(stockDir, match);
-          if (fs__namespace.existsSync(p)) return p;
+  } catch {
+  }
+  try {
+    const stockDir = path__namespace.join(projectDir, "assets", "stock");
+    if (fs__namespace.existsSync(stockDir)) {
+      const files = fs__namespace.readdirSync(stockDir);
+      const prefix3 = `S${String(scene.sceneIndex).padStart(3, "0")}_`;
+      const prefix4 = `S${String(scene.sceneIndex).padStart(4, "0")}_`;
+      const match = files.find(
+        (f) => (f.startsWith(prefix3) || f.startsWith(prefix4)) && /\.(mp4|mov|webm|mkv|avi|jpg|jpeg|png|webp)$/i.test(f)
+      );
+      if (match) {
+        const p = path__namespace.join(stockDir, match);
+        if (fs__namespace.existsSync(p)) {
+          scene.mediaType = detectMediaKind(p, scene.mediaType);
+          return { sceneIndex: scene.sceneIndex, mediaPath: p, source: "stockFolder" };
         }
       }
-    } catch {
     }
+  } catch {
   }
-  return null;
+  return { sceneIndex: scene.sceneIndex, mediaPath: null, source: "missing" };
+}
+function resolveSceneMedia(scene, mediaIndex, projectDir) {
+  if (!projectDir) {
+    if (scene.localPath && fs__namespace.existsSync(normalizePathForFFmpeg(scene.localPath))) return normalizePathForFFmpeg(scene.localPath);
+    if (scene.localAsset && fs__namespace.existsSync(normalizePathForFFmpeg(scene.localAsset))) return normalizePathForFFmpeg(scene.localAsset);
+    if (scene.mediaFile) {
+      const found = resolveMediaPath(scene.mediaFile, mediaIndex);
+      if (found) return found;
+    }
+    return null;
+  }
+  return resolveSceneMediaWithSource(scene, mediaIndex, projectDir).mediaPath;
 }
 async function renderVisualBeatsToClip(params) {
-  const { beats, mediaPath, isImage, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params;
+  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params;
   const beatClips = [];
+  const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
+  let isImage;
+  if (VIDEO_EXTENSIONS.has(cleanExt)) {
+    isImage = false;
+  } else if (IMAGE_EXTENSIONS.has(cleanExt)) {
+    isImage = true;
+  } else {
+    isImage = params.isImage;
+    logger.warn(
+      `[RetentionEngine] scene ${sceneIndex}: unknown extension "${cleanExt}" for ${mediaPath}, using caller-provided isImage=${isImage}`
+    );
+  }
+  if (params.isImage !== isImage) {
+    logger.warn(
+      `[RetentionEngine] scene ${sceneIndex}: mediaType mismatch corrected — caller said isImage=${params.isImage} but extension "${cleanExt}" → isImage=${isImage}. path=${mediaPath}`
+    );
+  }
   try {
     for (let bi = 0; bi < beats.length; bi++) {
       const beat = beats[bi];
@@ -2660,7 +2800,7 @@ async function renderVisualBeatsToClip(params) {
           "-i",
           mediaPath,
           "-vf",
-          vfFilter,
+          `${vfFilter},tpad=stop_mode=clone:stop_duration=${beatDuration},trim=duration=${beatDuration},setpts=PTS-STARTPTS`,
           "-c:v",
           "libx264",
           "-preset",
@@ -2680,6 +2820,7 @@ async function renderVisualBeatsToClip(params) {
       beatClips.push(beatClip);
     }
     if (beatClips.length === 1) {
+      safeUnlink(outClip);
       fs__namespace.renameSync(beatClips[0], outClip);
     } else {
       const beatConcatList = path__namespace.join(tmpDir, `beat_concat_${sceneIndex}.txt`);
@@ -2700,22 +2841,21 @@ async function renderVisualBeatsToClip(params) {
         "copy",
         outClip
       ]);
-      try {
-        for (const bc of beatClips) fs__namespace.unlinkSync(bc);
-        fs__namespace.unlinkSync(beatConcatList);
-      } catch {
-      }
+      for (const bc of beatClips) safeUnlink(bc);
+      safeUnlink(beatConcatList);
     }
     logger.info(`[RetentionEngine] scene ${sceneIndex}: ${beats.length} beats rendered and concatenated`);
   } catch (err) {
-    logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${String(err)}), falling back to legacy`);
+    const errMsg = String(err);
+    if (errMsg.includes("Media classification error") || errMsg.includes("Option loop not found")) {
+      throw err;
+    }
+    logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${errMsg}), falling back to legacy`);
     for (const bc of beatClips) {
-      try {
-        fs__namespace.unlinkSync(bc);
-      } catch {
-      }
+      safeUnlink(bc);
     }
     const baseFilt = scaleFilt;
+    const fallbackDur = beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0);
     if (isImage) {
       await ffmpegRun$1([
         "-y",
@@ -2732,7 +2872,7 @@ async function renderVisualBeatsToClip(params) {
         "-crf",
         "20",
         "-t",
-        String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        String(fallbackDur),
         "-r",
         String(fps),
         "-pix_fmt",
@@ -2745,7 +2885,7 @@ async function renderVisualBeatsToClip(params) {
         "-i",
         mediaPath,
         "-vf",
-        baseFilt,
+        `${baseFilt},tpad=stop_mode=clone:stop_duration=${fallbackDur},trim=duration=${fallbackDur},setpts=PTS-STARTPTS`,
         "-c:v",
         "libx264",
         "-preset",
@@ -2753,7 +2893,7 @@ async function renderVisualBeatsToClip(params) {
         "-crf",
         "20",
         "-t",
-        String(beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0)),
+        String(fallbackDur),
         "-r",
         String(fps),
         "-an",
@@ -2777,434 +2917,585 @@ async function renderVideo(params) {
     logger.info(`[RENDER] ${stage} (${Math.round(pct * 100)}%)`);
     onProgress?.({ stage, progress: pct, ...extra });
   };
-  progress("Loading edit plan...", 0.02);
-  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-  if (!fs__namespace.existsSync(planPath)) throw new Error("No edit plan found. Run AI Planning first.");
-  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-  progress("Loading media index...", 0.04);
-  const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
-  const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
-  const sceneEntries = [];
-  plan.chapters.forEach((ch, chIdx) => {
-    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-    let isFirstInCh = true;
-    seqs.forEach((seq, seqIdx) => {
-      let isFirstInSeq = true;
-      const scList = seq.scenes ?? [];
-      scList.forEach((scene) => {
-        sceneEntries.push({
-          scene,
-          chapterIndex: chIdx,
-          sequenceIndex: seqIdx,
-          isFirstInChapter: isFirstInCh,
-          isFirstInSequence: isFirstInSeq
+  let tmpDir = void 0;
+  let workingOutputPath = void 0;
+  try {
+    progress("Loading edit plan...", 0.02);
+    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+    if (!fs__namespace.existsSync(planPath)) throw new Error("No edit plan found. Run AI Planning first.");
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    progress("Loading media index...", 0.04);
+    const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
+    const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
+    const sceneEntries = [];
+    plan.chapters.forEach((ch, chIdx) => {
+      const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+      let isFirstInCh = true;
+      seqs.forEach((seq, seqIdx) => {
+        let isFirstInSeq = true;
+        const scList = seq.scenes ?? [];
+        scList.forEach((scene) => {
+          sceneEntries.push({
+            scene,
+            chapterIndex: chIdx,
+            sequenceIndex: seqIdx,
+            isFirstInChapter: isFirstInCh,
+            isFirstInSequence: isFirstInSeq
+          });
+          isFirstInCh = false;
+          isFirstInSeq = false;
         });
-        isFirstInCh = false;
-        isFirstInSeq = false;
       });
     });
-  });
-  const scenes = sceneEntries.map((entry) => entry.scene);
-  const totalScenes = scenes.length;
-  progress(`Processing ${totalScenes} scenes...`, 0.06);
-  for (const scene of scenes) {
-    if (!scene.localPath || !fs__namespace.existsSync(normalizePathForFFmpeg(scene.localPath))) {
-      const resolved = resolveSceneMedia(scene, mediaIndex, projectDir);
-      if (resolved) {
-        scene.localPath = resolved;
+    const scenes = sceneEntries.map((entry) => entry.scene);
+    const totalScenes = scenes.length;
+    progress(`Processing ${totalScenes} scenes...`, 0.06);
+    progress("Validating scene media...", 0.08);
+    const preflightResults = [];
+    let resolvedMediaCount = 0;
+    let missingMediaCount = 0;
+    for (const scene of scenes) {
+      const resolved = resolveSceneMediaWithSource(scene, mediaIndex, projectDir);
+      preflightResults.push(resolved);
+      if (resolved.mediaPath && fs__namespace.existsSync(resolved.mediaPath)) {
+        resolvedMediaCount++;
+        scene.localPath = resolved.mediaPath;
         if (!scene.mediaFile) {
-          scene.mediaFile = path__namespace.basename(resolved);
+          scene.mediaFile = path__namespace.basename(resolved.mediaPath);
         }
+        const detectedKind = detectMediaKind(resolved.mediaPath, scene.mediaType);
+        if (scene.mediaType !== detectedKind) {
+          logger.warn(
+            `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${scene.mediaType ?? "unknown"}, but file extension indicates ${detectedKind}. Syncing memory mediaType to ${detectedKind}.`
+          );
+          scene.mediaType = detectedKind;
+        }
+        logger.info(
+          `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} mediaKind=${detectedKind} exists=true path=${resolved.mediaPath}`
+        );
+      } else {
+        missingMediaCount++;
+        logger.warn(
+          `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} exists=false`
+        );
       }
     }
-  }
-  const projectHash = Buffer.from(projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
-  const tmpDir = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${projectHash}`);
-  fs__namespace.mkdirSync(tmpDir, { recursive: true });
-  const sceneClips = [];
-  const { width, height } = resolution;
-  const retentionSettings = DEFAULT_RETENTION_SETTINGS;
-  const retCtx = createDefaultContext();
-  const retentionDecisions = /* @__PURE__ */ new Map();
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i];
-    const sceneInput = {
-      sceneId: String(scene.sceneIndex),
-      sceneIndex: i,
-      duration: scene.duration,
-      energyLevel: scene.energyLevel,
-      shotType: scene.shotType,
-      narrativeText: scene.narrativeText,
-      visualIntent: scene.visualIntent,
-      isPatternInterrupt: scene.isPatternInterrupt,
-      localPath: scene.localPath,
-      isNewChapter: i === 0 || scene.isFirstInChapter
-    };
-    const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings);
-    retentionDecisions.set(i, decision);
-    updateRetentionContext(retCtx, sceneInput, decision);
-  }
-  try {
-    const qaScenes = scenes.map((s, i) => ({
-      sceneIndex: i,
-      sceneId: String(s.sceneIndex),
-      duration: s.duration,
-      energyLevel: s.energyLevel,
-      shotType: s.shotType,
-      narrativeText: s.narrativeText,
-      visualIntent: s.visualIntent,
-      isPatternInterrupt: s.isPatternInterrupt,
-      visualBeats: retentionDecisions.get(i)?.visualBeats
-    }));
-    const qaFlags = runRetentionQA(qaScenes);
-    if (qaFlags.length > 0) {
-      const qaPath = path__namespace.join(projectDir, "analysis", "retention-qa.json");
-      fs__namespace.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), "utf-8");
-      logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`);
+    logger.info(
+      `[RENDER][Media] resolved=${resolvedMediaCount} missing=${missingMediaCount} total=${scenes.length}`
+    );
+    if (scenes.length > 0 && resolvedMediaCount === 0) {
+      throw new Error(
+        "No scene media could be resolved. Refusing to render an all-black video. Check master-edit-plan.json, media-index.json and stock-assignments.json."
+      );
     }
-  } catch (err) {
-    logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`);
-  }
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i];
-    const mediaName = scene.localPath ? path__namespace.basename(scene.localPath) : scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`;
-    const pct = 0.06 + i / totalScenes * 0.7;
-    progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
-      sceneIndex: i + 1,
-      totalScenes
-    });
-    const mediaPath = resolveSceneMedia(scene, mediaIndex, projectDir);
-    const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
-    const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
-    if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
-      logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`);
+    const projectHash = Buffer.from(projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
+    const tmpBaseDir = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${projectHash}-`);
+    tmpDir = fs__namespace.mkdtempSync(tmpBaseDir);
+    logger.info(`[RENDER] Temporary directory: ${tmpDir}`);
+    const sceneClips = [];
+    const { width, height } = resolution;
+    const retentionSettings = DEFAULT_RETENTION_SETTINGS;
+    const retCtx = createDefaultContext();
+    const retentionDecisions = /* @__PURE__ */ new Map();
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      const sceneInput = {
+        sceneId: String(scene.sceneIndex),
+        sceneIndex: i,
+        duration: scene.duration,
+        energyLevel: scene.energyLevel,
+        shotType: scene.shotType,
+        narrativeText: scene.narrativeText,
+        visualIntent: scene.visualIntent,
+        isPatternInterrupt: scene.isPatternInterrupt,
+        localPath: scene.localPath,
+        isNewChapter: i === 0 || scene.isFirstInChapter
+      };
+      const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings);
+      retentionDecisions.set(i, decision);
+      updateRetentionContext(retCtx, sceneInput, decision);
+    }
+    try {
+      const qaScenes = scenes.map((s, i) => ({
+        sceneIndex: i,
+        sceneId: String(s.sceneIndex),
+        duration: s.duration,
+        energyLevel: s.energyLevel,
+        shotType: s.shotType,
+        narrativeText: s.narrativeText,
+        visualIntent: s.visualIntent,
+        isPatternInterrupt: s.isPatternInterrupt,
+        visualBeats: retentionDecisions.get(i)?.visualBeats
+      }));
+      const qaFlags = runRetentionQA(qaScenes);
+      if (qaFlags.length > 0) {
+        const qaPath = path__namespace.join(projectDir, "analysis", "retention-qa.json");
+        fs__namespace.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), "utf-8");
+        logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`);
+      }
+    } catch (err) {
+      logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`);
+    }
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      const mediaName = scene.localPath ? path__namespace.basename(scene.localPath) : scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`;
+      const pct = 0.08 + i / totalScenes * 0.68;
+      progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
+        sceneIndex: i + 1,
+        totalScenes
+      });
+      const mediaPath = scene.localPath && fs__namespace.existsSync(scene.localPath) ? scene.localPath : resolveSceneMedia(scene, mediaIndex, projectDir);
+      const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
+      const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+      if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
+        logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`);
+        await ffmpegRun$1([
+          "-y",
+          "-f",
+          "lavfi",
+          "-i",
+          `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
+          "-c:v",
+          "libx264",
+          "-preset",
+          "fast",
+          "-crf",
+          "23",
+          "-t",
+          String(scene.duration),
+          "-pix_fmt",
+          "yuv420p",
+          outClip
+        ]);
+      } else {
+        const mediaKind = detectMediaKind(mediaPath, scene.mediaType);
+        const isImage = mediaKind === "image";
+        const declaredType = scene.mediaType;
+        const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
+        const extensionType = VIDEO_EXTENSIONS.has(cleanExt) ? "video" : IMAGE_EXTENSIONS.has(cleanExt) ? "image" : void 0;
+        if (declaredType && extensionType && declaredType !== extensionType) {
+          logger.warn(
+            `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${declaredType}, but file extension indicates ${extensionType}. Using ${extensionType}.`
+          );
+        }
+        if (scene.mediaType !== mediaKind) {
+          scene.mediaType = mediaKind;
+        }
+        logger.info(
+          `[RENDER] Scene ${scene.sceneIndex}: mediaKind=${mediaKind}, declaredType=${declaredType ?? "unknown"}, extension=${cleanExt}, path=${mediaPath}`
+        );
+        if (isImage && VIDEO_EXTENSIONS.has(cleanExt)) {
+          throw new Error(
+            `Media classification error: video file was about to be rendered as image: ${mediaPath}`
+          );
+        }
+        if (!isImage && IMAGE_EXTENSIONS.has(cleanExt)) {
+          throw new Error(
+            `Media classification error: image file was about to be rendered as video: ${mediaPath}`
+          );
+        }
+        const decision = retentionDecisions.get(i);
+        const beats = decision?.visualBeats ?? [];
+        const hasMultipleBeats = beats.length > 1;
+        if (hasMultipleBeats && retentionSettings.enabled) {
+          await renderVisualBeatsToClip({
+            beats,
+            mediaPath,
+            isImage,
+            outClip,
+            width,
+            height,
+            fps,
+            scaleFilt,
+            tmpDir,
+            sceneIndex: i
+          });
+        } else {
+          const singleBeat = beats[0];
+          let vfFilter = scaleFilt;
+          if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
+            const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps);
+            if (zf) {
+              vfFilter = `${scaleFilt},${zf}`;
+              logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`);
+            }
+          }
+          if (isImage) {
+            await ffmpegRun$1([
+              "-y",
+              "-loop",
+              "1",
+              "-i",
+              mediaPath,
+              "-vf",
+              vfFilter,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "fast",
+              "-crf",
+              "20",
+              "-t",
+              String(scene.duration),
+              "-r",
+              String(fps),
+              "-pix_fmt",
+              "yuv420p",
+              outClip
+            ]);
+          } else {
+            const durationGuard = `tpad=stop_mode=clone:stop_duration=${scene.duration},trim=duration=${scene.duration},setpts=PTS-STARTPTS`;
+            const videoFilter = `${vfFilter},${durationGuard}`;
+            await ffmpegRun$1([
+              "-y",
+              "-i",
+              mediaPath,
+              "-vf",
+              videoFilter,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "fast",
+              "-crf",
+              "20",
+              "-t",
+              String(scene.duration),
+              "-r",
+              String(fps),
+              "-an",
+              "-pix_fmt",
+              "yuv420p",
+              outClip
+            ]);
+          }
+        }
+      }
+      if (!fs__namespace.existsSync(outClip) || fs__namespace.statSync(outClip).size === 0) {
+        throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip.`);
+      }
+      const clipProbe = await probeVideoInfo(outClip);
+      if (clipProbe) {
+        if (!clipProbe.hasVideo || clipProbe.width <= 0 || clipProbe.height <= 0 || clipProbe.duration <= 0) {
+          throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip (invalid stream).`);
+        }
+        const maxAllowedDiff = 1 / fps + 0.05;
+        const diff = Math.abs(clipProbe.duration - scene.duration);
+        if (diff > maxAllowedDiff) {
+          logger.warn(
+            `[RENDER] Scene ${scene.sceneIndex} duration deviation: expected=${scene.duration.toFixed(3)}s actual=${clipProbe.duration.toFixed(3)}s diff=${diff.toFixed(3)}s (tolerance=${maxAllowedDiff.toFixed(3)}s)`
+          );
+        }
+        logger.info(
+          `[RENDER] Scene ${scene.sceneIndex} clip validated: path=${outClip} sizeBytes=${fs__namespace.statSync(outClip).size} duration=${clipProbe.duration.toFixed(3)}s resolution=${clipProbe.width}x${clipProbe.height}`
+        );
+      } else {
+        logger.info(
+          `[RENDER] Scene ${scene.sceneIndex} clip created: path=${outClip} sizeBytes=${fs__namespace.statSync(outClip).size}`
+        );
+      }
+      sceneClips.push(outClip);
+    }
+    progress("Concatenating scenes...", 0.78);
+    const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
+    const validSettings = validateTransitionSettings(params.transitionSettings);
+    const shouldAttemptTransitions = validSettings && validSettings.enabled && sceneEntries.length > 1;
+    let rawVideoCreated = false;
+    if (shouldAttemptTransitions) {
+      try {
+        progress("Resolving scene transitions...", 0.78);
+        rawVideoCreated = await concatSceneClipsWithTransitions({
+          sceneEntries,
+          sceneClips,
+          settings: validSettings,
+          fps,
+          tmpDir,
+          rawVideoPath: rawVideo,
+          onProgress: (stage, pct) => progress(stage, pct)
+        });
+        if (rawVideoCreated) {
+          logger.info("[RENDER] Scene assembly method=transitions");
+        }
+      } catch (err) {
+        logger.warn(
+          `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
+        );
+        progress("Transitions failed — using standard cuts...", 0.79);
+        safeUnlink(rawVideo);
+        rawVideoCreated = false;
+      }
+    }
+    if (!rawVideoCreated) {
+      const method = shouldAttemptTransitions ? "legacy-fallback" : "legacy-concat";
+      logger.info(`[RENDER] Scene assembly method=${method}`);
+      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo);
+      rawVideoCreated = true;
+    }
+    if (!fs__namespace.existsSync(rawVideo) || fs__namespace.statSync(rawVideo).size === 0) {
+      throw new Error("Raw video was not created or is empty.");
+    }
+    const rawProbe = await probeVideoInfo(rawVideo);
+    if (!rawProbe || !rawProbe.hasVideo || rawProbe.duration <= 0 || rawProbe.width <= 0 || rawProbe.height <= 0) {
+      throw new Error(
+        "The scene assembly step produced an invalid raw video. Audio and captions were not applied."
+      );
+    }
+    if (rawProbe.width !== width || rawProbe.height !== height) {
+      logger.warn(
+        `[RENDER] Raw video resolution ${rawProbe.width}x${rawProbe.height} does not match target ${width}x${height}`
+      );
+    }
+    logger.info(
+      `[RENDER] Raw video validated:
+path=${rawVideo}
+duration=${rawProbe.duration.toFixed(3)}s
+resolution=${rawProbe.width}x${rawProbe.height}
+sizeBytes=${fs__namespace.statSync(rawVideo).size}`
+    );
+    progress("Loading audio plan…", 0.86);
+    const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+    const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;
+    const approvedMusic = audioPlan?.sections.filter(
+      (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
+    ) ?? [];
+    const approvedSfx = audioPlan?.sfxAssignments.filter(
+      (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
+    ) ?? [];
+    const hasAudio = fs__namespace.existsSync(voiceoverPath);
+    const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0;
+    logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`);
+    progress("Mixing audio tracks…", 0.9);
+    const outputDir = path__namespace.join(projectDir, "output");
+    fs__namespace.mkdirSync(outputDir, { recursive: true });
+    const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
+    workingOutputPath = path__namespace.join(outputDir, `_${outputName}_working.mp4`);
+    safeUnlink(workingOutputPath);
+    if (!hasAudio && !hasMusicOrSfx) {
+      fs__namespace.copyFileSync(rawVideo, workingOutputPath);
+    } else if (!hasMusicOrSfx && hasAudio) {
       await ffmpegRun$1([
         "-y",
-        "-f",
-        "lavfi",
         "-i",
-        `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
+        rawVideo,
+        "-i",
+        voiceoverPath,
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-shortest",
+        workingOutputPath
+      ]);
+    } else {
+      const ffArgs = ["-y", "-i", rawVideo];
+      let inputIdx = 1;
+      const voiceoverIdx = hasAudio ? inputIdx++ : -1;
+      if (hasAudio) ffArgs.push("-i", voiceoverPath);
+      const musicInputs = [];
+      for (const sec of approvedMusic) {
+        ffArgs.push("-i", normalizePathForFFmpeg(sec.approvedLocalPath));
+        musicInputs.push({ idx: inputIdx++, section: sec });
+      }
+      const sfxInputs = [];
+      for (const sfx of approvedSfx) {
+        ffArgs.push("-i", normalizePathForFFmpeg(sfx.approvedLocalPath));
+        sfxInputs.push({ idx: inputIdx++, sfx });
+      }
+      const filterParts = [];
+      const mixLabels = [];
+      if (hasAudio) {
+        filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`);
+        mixLabels.push("[vo]");
+      }
+      for (const { idx, section } of musicInputs) {
+        const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6);
+        const fadeIn = section.fadeInSecs ?? 2;
+        const fadeOut = section.fadeOutSecs ?? 3;
+        const dur = section.durationSecs;
+        const label = `music_${idx}`;
+        filterParts.push(
+          `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(section.startTime * 1e3)}|${Math.round(section.startTime * 1e3)},apad[${label}]`
+        );
+        mixLabels.push(`[${label}]`);
+      }
+      for (const { idx, sfx } of sfxInputs) {
+        const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6);
+        const fadeIn = sfx.fadeInSecs ?? 0.5;
+        const fadeOut = sfx.fadeOutSecs ?? 0.5;
+        const dur = sfx.endTime - sfx.startTime;
+        const label = `sfx_${idx}`;
+        filterParts.push(
+          `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(sfx.startTime * 1e3)}|${Math.round(sfx.startTime * 1e3)},apad[${label}]`
+        );
+        mixLabels.push(`[${label}]`);
+      }
+      const nInputs = mixLabels.length;
+      filterParts.push(
+        // normalize=1 scales by 1/nInputs to prevent summing clips
+        `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+      );
+      const filterComplex = filterParts.join(";");
+      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`);
+      await ffmpegRun$1([
+        ...ffArgs,
+        "-filter_complex",
+        filterComplex,
+        "-map",
+        "0:v:0",
+        "-map",
+        "[amixed]",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-shortest",
+        workingOutputPath
+      ]);
+    }
+    if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
+      throw new Error("Audio mixing step failed to produce a valid video file.");
+    }
+    const audioProbe = await probeVideoInfo(workingOutputPath);
+    if (!audioProbe || !audioProbe.hasVideo || audioProbe.duration <= 0) {
+      throw new Error("The audio mixing step produced an invalid video. Video stream is missing.");
+    }
+    logger.info(
+      `[RENDER] Audio mixing output validated: path=${workingOutputPath} sizeBytes=${fs__namespace.statSync(workingOutputPath).size} duration=${audioProbe.duration.toFixed(3)}s`
+    );
+    if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
+      let proofVisuals = [];
+      if (retentionSettings.proofVisualsEnabled) {
+        try {
+          proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan);
+          logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
+          try {
+            const pvPlanPath = path__namespace.join(projectDir, "analysis", "proof-visual-plan.json");
+            fs__namespace.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map((pv) => ({
+              type: pv.type,
+              text: pv.primaryText,
+              startTime: pv.absoluteStartTime,
+              endTime: pv.absoluteEndTime,
+              position: pv.position
+            })), null, 2), "utf-8");
+          } catch {
+          }
+        } catch (err) {
+          logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`);
+          proofVisuals = [];
+        }
+      }
+      progress("Rendering caption overlay (Remotion)...", 0.91);
+      const captionsDir = path__namespace.join(projectDir, "assets", "captions");
+      fs__namespace.mkdirSync(captionsDir, { recursive: true });
+      const overlayPath = path__namespace.join(captionsDir, "overlay.mp4");
+      const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
+      await renderCaptionsOverlay({
+        captionPlan: params.captionPlan,
+        proofVisuals,
+        videoDurationInSeconds: videoDurationSecs,
+        outputPath: overlayPath,
+        fps,
+        resolution,
+        onBundleProgress: (pct) => {
+          progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 2e-3);
+        },
+        onRenderProgress: (pct) => {
+          progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01);
+        }
+      });
+      progress("Compositing captions overlay...", 0.93);
+      const captionedPath = path__namespace.join(outputDir, "_captioned_tmp.mp4");
+      safeUnlink(captionedPath);
+      logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`);
+      await ffmpegRun$1([
+        "-y",
+        "-i",
+        workingOutputPath,
+        // [0] video có audio
+        "-i",
+        overlayPath,
+        // [1] caption MP4 green screen từ Remotion
+        "-filter_complex",
+        "[1:v]format=rgba,colorkey=0x00ff00:0.12:0.05[ov];[0:v][ov]overlay=0:0:shortest=1:eof_action=pass,format=yuv420p[outv]",
+        "-map",
+        "[outv]",
+        "-map",
+        "0:a?",
         "-c:v",
         "libx264",
         "-preset",
         "fast",
         "-crf",
-        "23",
-        "-t",
-        String(scene.duration),
-        "-pix_fmt",
-        "yuv420p",
-        outClip
+        "20",
+        "-c:a",
+        "copy",
+        captionedPath
       ]);
-    } else {
-      const isImage = /\.(jpe?g|png|webp|bmp|gif)$/i.test(mediaPath) || scene.mediaType === "image";
-      const decision = retentionDecisions.get(i);
-      const beats = decision?.visualBeats ?? [];
-      const hasMultipleBeats = beats.length > 1;
-      if (hasMultipleBeats && retentionSettings.enabled) {
-        await renderVisualBeatsToClip({
-          beats,
-          mediaPath,
-          isImage,
-          outClip,
-          width,
-          height,
-          fps,
-          scaleFilt,
-          tmpDir,
-          sceneIndex: i
-        });
-      } else {
-        const singleBeat = beats[0];
-        let vfFilter = scaleFilt;
-        if (singleBeat?.crop && singleBeat.crop.scale > 1.005) {
-          const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps);
-          if (zf) {
-            vfFilter = `${scaleFilt},${zf}`;
-            logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`);
-          }
-        }
-        if (isImage) {
-          await ffmpegRun$1([
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            mediaPath,
-            "-vf",
-            vfFilter,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "20",
-            "-t",
-            String(scene.duration),
-            "-r",
-            String(fps),
-            "-pix_fmt",
-            "yuv420p",
-            outClip
-          ]);
-        } else {
-          await ffmpegRun$1([
-            "-y",
-            "-i",
-            mediaPath,
-            "-vf",
-            vfFilter,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "20",
-            "-t",
-            String(scene.duration),
-            "-r",
-            String(fps),
-            "-an",
-            "-pix_fmt",
-            "yuv420p",
-            outClip
-          ]);
-        }
+      if (!fs__namespace.existsSync(captionedPath) || fs__namespace.statSync(captionedPath).size === 0) {
+        safeUnlink(captionedPath);
+        throw new Error("Caption overlay compositing failed to produce a valid file.");
       }
-    }
-    sceneClips.push(outClip);
-  }
-  progress("Concatenating scenes...", 0.78);
-  const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
-  const validSettings = validateTransitionSettings(params.transitionSettings);
-  const shouldAttemptTransitions = validSettings && validSettings.enabled && sceneEntries.length > 1;
-  let usedTransitions = false;
-  if (shouldAttemptTransitions) {
-    try {
-      progress("Resolving scene transitions...", 0.78);
-      usedTransitions = await concatSceneClipsWithTransitions({
-        sceneEntries,
-        sceneClips,
-        settings: validSettings,
-        fps,
-        tmpDir,
-        rawVideoPath: rawVideo,
-        onProgress: (stage, pct) => progress(stage, pct)
-      });
-    } catch (err) {
-      logger.warn(
-        `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
+      const captionedProbe = await probeVideoInfo(captionedPath);
+      if (!captionedProbe || !captionedProbe.hasVideo || captionedProbe.duration <= 0) {
+        safeUnlink(captionedPath);
+        throw new Error("Caption overlay composited file has no valid video stream.");
+      }
+      logger.info(
+        `[RENDER] Caption overlay composited: path=${captionedPath} sizeBytes=${fs__namespace.statSync(captionedPath).size} duration=${captionedProbe.duration.toFixed(3)}s`
       );
-      progress("Transitions failed — using standard cuts...", 0.79);
+      safeUnlink(workingOutputPath);
+      fs__namespace.renameSync(captionedPath, workingOutputPath);
+      safeUnlink(overlayPath);
+      logger.info("[RENDER] Caption overlay composited");
+    }
+    progress("Finalizing output...", 0.96);
+    if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
+      throw new Error("Final render working file is missing or empty.");
+    }
+    const finalProbe = await probeVideoInfo(workingOutputPath);
+    if (!finalProbe || !finalProbe.hasVideo || finalProbe.duration <= 0) {
+      throw new Error("Final output does not contain a valid video stream.");
+    }
+    safeUnlink(outputPath);
+    fs__namespace.renameSync(workingOutputPath, outputPath);
+    progress("Cleaning up...", 0.98);
+    for (const clip of sceneClips) {
+      safeUnlink(clip);
+    }
+    safeUnlink(rawVideo);
+    try {
+      fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
+      logger.info(`[RENDER] Removed temporary directory: ${tmpDir}`);
+    } catch (error) {
+      logger.warn(`[RENDER] Could not remove temporary directory ${tmpDir}: ${String(error)}`);
+    }
+    const stat = fs__namespace.statSync(outputPath);
+    const durationSecs = finalProbe.duration || scenes.reduce((a, s) => a + s.duration, 0);
+    progress(`Done → ${outputPath}`, 1);
+    logger.info("[RENDER] Complete", {
+      outputPath,
+      durationSecs: Math.round(durationSecs * 100) / 100,
+      resolution: `${finalProbe.width}x${finalProbe.height}`,
+      fileSizeMB: (stat.size / 1024 / 1024).toFixed(2)
+    });
+    return { outputPath, durationSecs, fileSizeBytes: stat.size };
+  } catch (err) {
+    if (workingOutputPath) safeUnlink(workingOutputPath);
+    if (tmpDir && fs__namespace.existsSync(tmpDir)) {
       try {
-        if (fs__namespace.existsSync(rawVideo)) fs__namespace.unlinkSync(rawVideo);
+        fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
       } catch {
       }
-      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo);
     }
+    throw err;
   }
-  if (!usedTransitions && !fs__namespace.existsSync(rawVideo)) {
-    await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo);
-  }
-  progress("Loading audio plan…", 0.86);
-  const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
-  const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;
-  const approvedMusic = audioPlan?.sections.filter(
-    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
-  ) ?? [];
-  const approvedSfx = audioPlan?.sfxAssignments.filter(
-    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
-  ) ?? [];
-  const hasAudio = fs__namespace.existsSync(voiceoverPath);
-  const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0;
-  logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`);
-  progress("Mixing audio tracks…", 0.9);
-  const outputDir = path__namespace.join(projectDir, "output");
-  fs__namespace.mkdirSync(outputDir, { recursive: true });
-  const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
-  if (!hasAudio && !hasMusicOrSfx) {
-    fs__namespace.copyFileSync(rawVideo, outputPath);
-  } else if (!hasMusicOrSfx && hasAudio) {
-    await ffmpegRun$1([
-      "-y",
-      "-i",
-      rawVideo,
-      "-i",
-      voiceoverPath,
-      "-c:v",
-      "copy",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "192k",
-      "-map",
-      "0:v:0",
-      "-map",
-      "1:a:0",
-      "-shortest",
-      outputPath
-    ]);
-  } else {
-    const ffArgs = ["-y", "-i", rawVideo];
-    let inputIdx = 1;
-    const voiceoverIdx = hasAudio ? inputIdx++ : -1;
-    if (hasAudio) ffArgs.push("-i", voiceoverPath);
-    const musicInputs = [];
-    for (const sec of approvedMusic) {
-      ffArgs.push("-i", normalizePathForFFmpeg(sec.approvedLocalPath));
-      musicInputs.push({ idx: inputIdx++, section: sec });
-    }
-    const sfxInputs = [];
-    for (const sfx of approvedSfx) {
-      ffArgs.push("-i", normalizePathForFFmpeg(sfx.approvedLocalPath));
-      sfxInputs.push({ idx: inputIdx++, sfx });
-    }
-    const filterParts = [];
-    const mixLabels = [];
-    if (hasAudio) {
-      filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`);
-      mixLabels.push("[vo]");
-    }
-    for (const { idx, section } of musicInputs) {
-      const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6);
-      const fadeIn = section.fadeInSecs ?? 2;
-      const fadeOut = section.fadeOutSecs ?? 3;
-      const dur = section.durationSecs;
-      const label = `music_${idx}`;
-      filterParts.push(
-        `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(section.startTime * 1e3)}|${Math.round(section.startTime * 1e3)},apad[${label}]`
-      );
-      mixLabels.push(`[${label}]`);
-    }
-    for (const { idx, sfx } of sfxInputs) {
-      const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6);
-      const fadeIn = sfx.fadeInSecs ?? 0.5;
-      const fadeOut = sfx.fadeOutSecs ?? 0.5;
-      const dur = sfx.endTime - sfx.startTime;
-      const label = `sfx_${idx}`;
-      filterParts.push(
-        `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(sfx.startTime * 1e3)}|${Math.round(sfx.startTime * 1e3)},apad[${label}]`
-      );
-      mixLabels.push(`[${label}]`);
-    }
-    const nInputs = mixLabels.length;
-    filterParts.push(
-      // normalize=1 scales by 1/nInputs to prevent summing clips
-      `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
-    );
-    const filterComplex = filterParts.join(";");
-    logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`);
-    await ffmpegRun$1([
-      ...ffArgs,
-      "-filter_complex",
-      filterComplex,
-      "-map",
-      "0:v:0",
-      "-map",
-      "[amixed]",
-      "-c:v",
-      "copy",
-      "-c:a",
-      "aac",
-      "-b:a",
-      "192k",
-      "-shortest",
-      outputPath
-    ]);
-  }
-  if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-    let proofVisuals = [];
-    if (retentionSettings.proofVisualsEnabled) {
-      try {
-        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan);
-        logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
-        try {
-          const pvPlanPath = path__namespace.join(projectDir, "analysis", "proof-visual-plan.json");
-          fs__namespace.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map((pv) => ({
-            type: pv.type,
-            text: pv.primaryText,
-            startTime: pv.absoluteStartTime,
-            endTime: pv.absoluteEndTime,
-            position: pv.position
-          })), null, 2), "utf-8");
-        } catch {
-        }
-      } catch (err) {
-        logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`);
-        proofVisuals = [];
-      }
-    }
-    progress("Rendering caption overlay (Remotion)...", 0.91);
-    const captionsDir = path__namespace.join(projectDir, "assets", "captions");
-    fs__namespace.mkdirSync(captionsDir, { recursive: true });
-    const overlayPath = path__namespace.join(captionsDir, "overlay.mp4");
-    const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
-    await renderCaptionsOverlay({
-      captionPlan: params.captionPlan,
-      proofVisuals,
-      videoDurationInSeconds: videoDurationSecs,
-      outputPath: overlayPath,
-      fps,
-      resolution,
-      onBundleProgress: (pct) => {
-        progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 2e-3);
-      },
-      onRenderProgress: (pct) => {
-        progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01);
-      }
-    });
-    progress("Compositing captions overlay...", 0.93);
-    const captionedPath = path__namespace.join(path__namespace.dirname(outputPath), "_captioned_tmp.mp4");
-    logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${outputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`);
-    await ffmpegRun$1([
-      "-y",
-      "-i",
-      outputPath,
-      // [0] video có audio
-      "-i",
-      overlayPath,
-      // [1] caption MP4 green screen từ Remotion
-      "-filter_complex",
-      "[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]",
-      "-map",
-      "[outv]",
-      "-map",
-      "0:a",
-      "-c:v",
-      "libx264",
-      "-preset",
-      "fast",
-      "-crf",
-      "20",
-      "-c:a",
-      "copy",
-      "-pix_fmt",
-      "yuv420p",
-      captionedPath
-    ]);
-    fs__namespace.renameSync(captionedPath, outputPath);
-    try {
-      fs__namespace.unlinkSync(overlayPath);
-    } catch {
-    }
-    logger.info("[RENDER] Caption overlay composited");
-  }
-  progress("Cleaning up...", 0.97);
-  try {
-    for (const clip of sceneClips) fs__namespace.unlinkSync(clip);
-    fs__namespace.unlinkSync(concatList);
-    fs__namespace.unlinkSync(rawVideo);
-  } catch {
-  }
-  const stat = fs__namespace.statSync(outputPath);
-  const durationSecs = scenes.reduce((a, s) => a + s.duration, 0);
-  progress(`Done → ${outputPath}`, 1);
-  logger.info("[RENDER] Complete", {
-    outputPath,
-    durationSecs: Math.round(durationSecs),
-    fileSizeMB: (stat.size / 1024 / 1024).toFixed(1)
-  });
-  return { outputPath, durationSecs, fileSizeBytes: stat.size };
 }
 function buildProofVisualList(scenes, retentionDecisions, captionPlan) {
   const result = [];
