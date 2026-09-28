@@ -63,3 +63,8 @@ export function atomicReadJson<T>(filePath: string, defaultValue: T): T {
     return defaultValue
   }
 }
+
+export const readJsonFile = atomicReadJson
+export const readJsonSafe = atomicReadJson
+
+

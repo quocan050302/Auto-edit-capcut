@@ -29,23 +29,35 @@ const YEAR_REGEX = /\b(1[6-9]\d{2}|20\d{2})('?s)?\b/
 const CENTURY_REGEX = /\b(\d{1,2}(?:st|nd|rd|th))\s+century\b/i
 const MONTH_YEAR_REGEX = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(1[6-9]\d{2}|20\d{2})\b/i
 
-// Stats, Money, Percentages (e.g. $12,000, 40%, 25.5%, 60,000 people, 500 colonies)
-const STAT_PERCENT_REGEX = /\b(\d+(?:\.\d+)?%)\b/
-const STAT_MONEY_REGEX = /(\$\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|trillion))?|\b\d+(?:\.\d+)?\s*(?:million|billion)\s*dollars\b)/i
+// Stats, Money, Percentages (e.g. $12,000, 40%, 25.5%, 60,000 people, 500 triệu đô la)
+const STAT_PERCENT_REGEX = /\b(\d+(?:\.\d+)?%)(?!\w)/
+const STAT_MONEY_REGEX = /(\$\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|trillion))?|\b\d+(?:\.\d+)?\s*(?:million|billion|triệu|tỷ)\s*(?:dollars|đô la|đồng|usd|vnd)?\b)/i
 const STAT_COUNT_REGEX = /\b(\d+(?:,\d{3})+|\d{2,}\s*(?:thousand|hundred))\s+([a-zA-Z]+)\b/i
 
-// Location patterns (e.g. Montana, Manitoba, South Dakota, New York, Manitoba, Canada)
-const LOCATION_INDICATOR_REGEX = /\b(?:in|at|near|across|from)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*(?:,\s*[A-Z][a-z]+)?)\b/
+// Location patterns (e.g. Montana, Manitoba, South Dakota, New York, Manitoba, Canada, Tokyo, Paris)
+const LOCATION_INDICATOR_REGEX = /(?:^|\s|\b)(?:in|at|near|across|from|tại|ở)\s+(?:thành phố|thủ đô|city|capital)?\s*([A-Za-zÀ-ỹ]+(?:\s+[A-Za-zÀ-ỹ]+)*(?:,\s*[A-Za-zÀ-ỹ]+)?)/iu
 
 // Quote patterns (quotation marks or "said", "declared", "stated")
 const QUOTE_MARK_REGEX = /["“]([^"”]{6,100})["”]/
 const QUOTE_VERB_REGEX = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:said|declared|stated|proclaimed|whispered|wrote)\b[:,\s]*["“]?([^"”.!]{6,80})["”]?/i
 
-// Comparison patterns (A vs B, instead of, compared to, on the other hand)
-const COMPARISON_REGEX = /\b(?:instead of|compared to|versus|\bvs\.?\b|on the other hand|while [a-z]+ [a-z]+, [a-z]+|rather than)\b/i
+// Comparison patterns (A vs B, instead of, compared to, on the other hand, trong khi, so với, thay vì)
+const COMPARISON_REGEX = /(?:instead of|compared to|versus|\bvs\.?\b|on the other hand|while [a-z]+ [a-z]+, [a-z]+|rather than|trong khi|thay vì|so với|ngược lại|mặt khác|trái ngược)/i
 
-// Document / Legal / Official records (contracts, bills, laws, docket, files, charter)
-const DOCUMENT_REGEX = /\b(?:document|contract|treaty|accord|constitution|charter|bill|law|docket|manifesto|record|file|deed|license|affidavit)\b/i
+// Document / Legal / Official records (contracts, bills, laws, docket, files, charter, hợp đồng, giấy tờ, hồ sơ)
+const DOCUMENT_REGEX = /(?:document|contract|treaty|accord|constitution|charter|bill|law|docket|manifesto|record|file|deed|license|affidavit|hợp đồng|giấy tờ|hồ sơ|văn bản|nghị quyết|nghị định|hóa đơn|luật|hiến pháp)/iu
+
+export function classifyVisualGrammar(opts: {
+  narration: string
+  visualIntent?: string
+  sceneIndex: number
+  duration?: number
+  isFirstInChapter?: boolean
+  chapterTitle?: string
+  mediaType?: string
+}): GrammarDetectionResult {
+  return classifyNarrationGrammar(opts.narration, opts)
+}
 
 /**
  * Classifies narration into a candidate Visual Scene Grammar decision.
@@ -56,6 +68,7 @@ export function classifyNarrationGrammar(
   scene: { isFirstInChapter?: boolean; chapterTitle?: string; sceneIndex: number; mediaType?: string }
 ): GrammarDetectionResult {
   const text = narration.trim()
+
 
   // 1. Chapter Title Card: First scene in chapter
   if (scene.isFirstInChapter && scene.chapterTitle && scene.sceneIndex > 1) {
@@ -169,11 +182,26 @@ export function classifyNarrationGrammar(
   }
 
   // 5. Comparison Card
-  if (COMPARISON_REGEX.test(text) && text.length > 25) {
-    const parts = text.split(COMPARISON_REGEX)
-    if (parts.length >= 2 && parts[0].trim() && parts[1].trim()) {
-      const a = parts[0].trim().split(/\s+/).slice(-4).join(' ')
-      const b = parts[1].trim().split(/\s+/).slice(0, 4).join(' ')
+  if (COMPARISON_REGEX.test(text) && text.length > 20) {
+    if (text.includes(',')) {
+      const commaParts = text.split(',')
+      const a = commaParts[0].replace(COMPARISON_REGEX, '').trim().split(/\s+/).slice(-4).join(' ')
+      const b = commaParts[1].trim().split(/\s+/).slice(0, 4).join(' ')
+      if (a && b) {
+        return {
+          type: 'comparison_card',
+          confidence: 0.8,
+          reason: 'Contrastive statement structure',
+          primaryText: a.toUpperCase(),
+          secondaryText: `VS. ${b.toUpperCase()}`,
+          position: 'center_bottom'
+        }
+      }
+    }
+    const parts = text.split(COMPARISON_REGEX).map((p) => p.trim()).filter(Boolean)
+    if (parts.length >= 2) {
+      const a = parts[0].split(/\s+/).slice(-4).join(' ')
+      const b = parts[1].split(/\s+/).slice(0, 4).join(' ')
       return {
         type: 'comparison_card',
         confidence: 0.78,

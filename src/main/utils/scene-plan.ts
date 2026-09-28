@@ -45,8 +45,8 @@ export function flattenEditPlanScenes<T = ScenePlan>(plan: PlanLike): FlattenedS
 
   for (let chIdx = 0; chIdx < chapters.length; chIdx++) {
     const ch = chapters[chIdx]
-    const chapterIndex = ch.chapterIndex ?? chIdx + 1
-    const chapterTitle = ch.title ?? `Chapter ${chapterIndex}`
+    const chapterIndex = typeof ch.chapterIndex === 'number' ? ch.chapterIndex : chIdx
+    const chapterTitle = ch.title ?? `Chapter ${chapterIndex + 1}`
     const chapterPurpose = ch.purpose ?? ''
 
     const rawSequences = ch.sequences ?? ch.chapters_seq ?? []
@@ -54,8 +54,8 @@ export function flattenEditPlanScenes<T = ScenePlan>(plan: PlanLike): FlattenedS
 
     for (let seqIdx = 0; seqIdx < rawSequences.length; seqIdx++) {
       const seq = rawSequences[seqIdx]
-      const sequenceIndex = seq.sequenceIndex ?? seqIdx + 1
-      const sequenceTitle = seq.title ?? `Sequence ${sequenceIndex}`
+      const sequenceIndex = typeof seq.sequenceIndex === 'number' ? seq.sequenceIndex : seqIdx
+      const sequenceTitle = seq.title ?? `Sequence ${sequenceIndex + 1}`
       const scenes = (seq.scenes ?? []) as T[]
       let isFirstInSequence = true
 
@@ -63,12 +63,12 @@ export function flattenEditPlanScenes<T = ScenePlan>(plan: PlanLike): FlattenedS
         const rawScene = scenes[scIdx] as Record<string, unknown>
         const sceneIndex = typeof rawScene.sceneIndex === 'number'
           ? rawScene.sceneIndex
-          : (result.length + 1)
+          : result.length
 
         // Generate deterministic sceneId if not present
         const sceneId = typeof rawScene.sceneId === 'string' && rawScene.sceneId.trim().length > 0
           ? rawScene.sceneId
-          : `scene_${sceneIndex}`
+          : `chapter-${chapterIndex}-sequence-${sequenceIndex}-scene-${sceneIndex}`
 
         const isLastInSequence = scIdx === scenes.length - 1
         const isLastInChapter = isLastInSequence && seqIdx === rawSequences.length - 1

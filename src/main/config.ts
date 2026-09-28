@@ -5,7 +5,10 @@ import { logger } from "./logger";
 
 // ─── App config (API keys, preferences) — stored locally, never in git ───────
 
-const CONFIG_PATH = join(app.getPath("userData"), "app-config.json");
+const CONFIG_PATH = join(
+  app && typeof app.getPath === 'function' ? app.getPath('userData') : process.cwd(),
+  'app-config.json'
+);
 
 export interface AppConfig {
   geminiApiKey?: string;

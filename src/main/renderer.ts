@@ -266,7 +266,7 @@ export interface ResolvedSceneMedia {
     | 'missing'
 }
 
-function resolveSceneMediaWithSource(
+export function resolveSceneMediaWithSource(
   scene: ScenePlan,
   mediaIndex: Array<{ filename: string; path: string }>,
   projectDir: string

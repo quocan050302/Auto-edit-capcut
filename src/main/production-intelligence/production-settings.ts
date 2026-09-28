@@ -4,6 +4,8 @@ import {
   type ProductionIntelligenceSettings,
   DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS
 } from '../../../shared/types'
+
+export { DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS }
 import { loadConfig, saveConfig } from '../config'
 import { atomicReadJson, atomicWriteJson } from './json-store'
 import { logger } from '../logger'

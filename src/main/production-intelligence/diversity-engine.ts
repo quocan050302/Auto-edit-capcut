@@ -18,16 +18,13 @@ export function normalizeUrl(rawUrl?: string): string {
   if (!rawUrl || typeof rawUrl !== 'string') return ''
   try {
     const parsed = new URL(rawUrl.trim())
-    // Strip common tracking params
-    const trackingParams = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'ref', 'h']
-    trackingParams.forEach((p) => parsed.searchParams.delete(p))
     let path = parsed.pathname
     if (path.length > 1 && path.endsWith('/')) {
       path = path.slice(0, -1)
     }
-    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${path}${parsed.search}`
+    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${path}`
   } catch {
-    return rawUrl.trim().toLowerCase().replace(/\/+$/, '')
+    return rawUrl.trim().toLowerCase().split('?')[0].split('#')[0].replace(/\/+$/, '')
   }
 }
 
@@ -179,3 +176,41 @@ export function calculateDiversityScoreAndPenalty(
     penaltyReasons
   }
 }
+
+export const normalizeAssetUrl = normalizeUrl
+
+export function isDuplicateCandidate(
+  candidate: StockSearchResult,
+  existing: Array<{ result: StockSearchResult }>
+): boolean {
+  return existing.some((e) => areCandidatesDuplicate(candidate, e.result))
+}
+
+export function calculateDiversityScore(
+  candidate: StockSearchResult,
+  history: HistoricalAssignmentSummary[]
+): number {
+  return calculateDiversityScoreAndPenalty(candidate, history).diversityScore
+}
+
+export function calculateReusePenalty(
+  params: {
+    result: StockSearchResult
+    sceneIndex: number
+    usedAssetKeys?: Set<string>
+    isUserLocked?: boolean
+    isManualUpload?: boolean
+  }
+): number {
+  const isExempt = params.isUserLocked || params.isManualUpload
+  const history: HistoricalAssignmentSummary[] = []
+  if (params.usedAssetKeys && params.usedAssetKeys.has(`${params.result.provider}:${params.result.assetId}`)) {
+    history.push({
+      sceneIndex: Math.max(0, params.sceneIndex - 1),
+      provider: params.result.provider,
+      assetId: params.result.assetId
+    })
+  }
+  return calculateDiversityScoreAndPenalty(params.result, history, isExempt).reusePenalty
+}
+

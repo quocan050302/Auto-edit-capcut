@@ -77,10 +77,15 @@ export async function runRenderPreflight(options: PreflightOptions): Promise<Ren
   }
 
   // 2. Plan Validation
-  const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
+  let planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   if (!fs.existsSync(planPath)) {
-    addIssue('fatal', 'plan', 'master-edit-plan.json not found. Run AI Planning first.', 'Generate an edit plan in AI Planning step')
-    return buildReport(0, 0, 0, issues)
+    const rootPlan = join(projectDir, 'master-edit-plan.json')
+    if (fs.existsSync(rootPlan)) {
+      planPath = rootPlan
+    } else {
+      addIssue('fatal', 'plan', 'master-edit-plan.json not found. Run AI Planning first.', 'Generate an edit plan in AI Planning step')
+      return buildReport(0, 0, 0, issues)
+    }
   }
 
   let plan: Record<string, unknown>

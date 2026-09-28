@@ -3,7 +3,10 @@ import { join } from 'path'
 import * as winston from 'winston'
 import * as fs from 'fs'
 
-const logsDir = join(app.getPath('userData'), 'logs')
+const logsDir = join(
+  app && typeof app.getPath === 'function' ? app.getPath('userData') : process.cwd(),
+  'logs'
+)
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true })
 }

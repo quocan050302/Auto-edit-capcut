@@ -362,16 +362,78 @@ export function scoreStockCandidate(
   }
 }
 
+export function scoreCandidate(params: {
+  candidate: StockSearchResult
+  sceneId: string
+  sceneIndex: number
+  targetDuration: number
+  narration: string
+  visualIntent?: string
+  currentQuery?: string
+}): StockCandidateScore {
+  return scoreStockCandidate(params.candidate, {
+    narration: params.narration,
+    visualIntent: params.visualIntent,
+    sceneDurationSecs: params.targetDuration,
+    preferredAspectRatio: '16:9',
+    assignmentHistory: []
+  })
+}
+
+export interface RankCandidatesOptions {
+  sceneId: string
+  sceneIndex: number
+  searchResults?: StockSearchResult[]
+  candidates?: StockSearchResult[]
+  narration?: string
+  visualIntent?: string
+  targetDuration?: number
+  currentQuery?: string
+  ctx?: CandidateScoringContext
+  maxCandidates?: number
+}
+
 /**
  * Aggregate search results, deduplicate, score, and rank top candidates.
  */
 export function rankCandidatesForScene(
-  sceneId: string,
-  sceneIndex: number,
-  candidates: StockSearchResult[],
-  ctx: CandidateScoringContext,
-  maxCandidates = 3
+  arg1: string | RankCandidatesOptions,
+  arg2?: number,
+  arg3?: StockSearchResult[],
+  arg4?: CandidateScoringContext,
+  arg5?: number
 ): StockCandidate[] {
+  let sceneId: string
+  let sceneIndex: number
+  let candidates: StockSearchResult[]
+  let ctx: CandidateScoringContext
+  let maxCandidates = 3
+
+  if (typeof arg1 === 'object') {
+    sceneId = arg1.sceneId
+    sceneIndex = arg1.sceneIndex
+    candidates = arg1.searchResults || arg1.candidates || []
+    maxCandidates = arg1.maxCandidates ?? 3
+    ctx = arg1.ctx ?? {
+      narration: arg1.narration || '',
+      visualIntent: arg1.visualIntent,
+      sceneDurationSecs: arg1.targetDuration || 6,
+      preferredAspectRatio: '16:9',
+      assignmentHistory: []
+    }
+  } else {
+    sceneId = arg1
+    sceneIndex = arg2 ?? 0
+    candidates = arg3 || []
+    ctx = arg4 || {
+      narration: '',
+      sceneDurationSecs: 6,
+      preferredAspectRatio: '16:9',
+      assignmentHistory: []
+    }
+    maxCandidates = arg5 ?? 3
+  }
+
   const deduped = deduplicateCandidates(candidates)
 
   const scored: StockCandidate[] = deduped.map((result) => {
