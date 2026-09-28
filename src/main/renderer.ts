@@ -27,6 +27,9 @@ import {
 } from './production-intelligence/visual-grammar-engine'
 
 
+import { runRenderPreflight } from './qa/render-preflight'
+import { runRenderPostflight } from './qa/render-postflight'
+
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const ffmpegPath: string = require('ffmpeg-static')
@@ -45,7 +48,10 @@ export interface RenderResult {
   outputPath: string
   durationSecs: number
   fileSizeBytes: number
+  preflightReport?: RenderQaReport
+  qaReport?: RenderQaReport
 }
+
 
 interface ScenePlan {
   sceneIndex: number
@@ -591,8 +597,25 @@ export async function renderVideo(params: {
     const totalScenes = scenes.length
     progress(`Processing ${totalScenes} scenes...`, 0.06)
 
+    // ── 3a. Production Intelligence: Preflight QA ────────────────────────────
+    progress('Running preflight QA checks...', 0.07)
+    const preflightReport = await runRenderPreflight({
+      projectDir,
+      voiceoverPath,
+      captionPlan: params.captionPlan,
+      resolution,
+      fps
+    })
+
+    if (preflightReport.status === 'failed') {
+      const fatalIssues = preflightReport.issues.filter((i) => i.severity === 'fatal')
+      const msg = fatalIssues.map((i) => i.message).join('; ')
+      throw new Error(`Render Preflight QA failed: ${msg}`)
+    }
+
     // ── 3b. Media Preflight ──────────────────────────────────────────────────
     progress('Validating scene media...', 0.08)
+
     const preflightResults: ResolvedSceneMedia[] = []
     let resolvedMediaCount = 0
     let missingMediaCount = 0
@@ -1205,7 +1228,28 @@ export async function renderVideo(params: {
       logger.info('[RENDER] Caption overlay composited')
     }
 
-    // ── 8. Final output validation & publishing ────────────────────────────────
+    // ── 8. Production Intelligence: Postflight QA ─────────────────────────────
+    let qaReport: RenderQaReport | undefined
+    if (prodSettings.enabled && prodSettings.renderQaEnabled) {
+      progress('Running postflight QA inspection...', 0.95)
+      qaReport = await runRenderPostflight({
+        projectDir,
+        workingOutputPath,
+        expectedDuration: scenes.reduce((a, s) => a + s.duration, 0),
+        totalScenes: scenes.length,
+        hasVoiceover: hasAudio,
+        targetResolution: resolution,
+        targetFps: fps
+      })
+
+      if (qaReport.status === 'failed') {
+        const fatalIssues = qaReport.issues.filter((i) => i.severity === 'fatal')
+        const msg = fatalIssues.map((i) => i.message).join('; ')
+        throw new Error(`Render Postflight QA failed: ${msg}`)
+      }
+    }
+
+    // ── 8b. Final output validation & publishing ────────────────────────────────
     progress('Finalizing output...', 0.96)
     if (!fs.existsSync(workingOutputPath) || fs.statSync(workingOutputPath).size === 0) {
       throw new Error('Final render working file is missing or empty.')
@@ -1244,7 +1288,14 @@ export async function renderVideo(params: {
       fileSizeMB: (stat.size / 1024 / 1024).toFixed(2)
     })
 
-    return { outputPath, durationSecs, fileSizeBytes: stat.size }
+    return {
+      outputPath,
+      durationSecs,
+      fileSizeBytes: stat.size,
+      preflightReport,
+      qaReport
+    }
+
 
   } catch (err) {
     if (workingOutputPath) safeUnlink(workingOutputPath)

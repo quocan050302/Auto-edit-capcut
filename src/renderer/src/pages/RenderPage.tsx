@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react'
-import type { ProjectState, VideoTransitionType, TransitionRenderMode } from '../../../../shared/types'
+import type {
+  ProjectState,
+  VideoTransitionType,
+  TransitionRenderMode,
+  RenderQaReport,
+  RenderQaIssue
+} from '../../../../shared/types'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -14,6 +20,8 @@ interface RenderResult {
   outputPath: string
   durationSecs: number
   fileSizeBytes: number
+  preflightReport?: RenderQaReport
+  qaReport?: RenderQaReport
 }
 
 interface RenderPageProps {
@@ -36,6 +44,10 @@ function fmtBytes(bytes: number): string {
 
 export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [isRendering, setIsRendering] = useState(false)
+  const [isPreflightRunning, setIsPreflightRunning] = useState(false)
+  const [preflightReport, setPreflightReport] = useState<RenderQaReport | null>(null)
+  const [showIssuesList, setShowIssuesList] = useState(false)
+  const [copied, setCopied] = useState(false)
   const [progress, setProgress] = useState<RenderProgress | null>(null)
   const [captionProgress, setCaptionProgress] = useState<{ message: string; progress: number } | null>(null)
   const [result, setResult] = useState<RenderResult | null>(null)
@@ -67,6 +79,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
     '3840x2160': { width: 3840, height: 2160 }
   }
 
+  // Load plan and initial preflight
   useEffect(() => {
     window.api.plan.get(project.projectDir).then(async (p) => {
       if (p) {
@@ -98,6 +111,12 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
           )
         }).length
         setMediaReadyCount(ready)
+
+        // Run background preflight check
+        try {
+          const initialPreflight = await window.api.render.runPreflight({ projectDir: project.projectDir })
+          setPreflightReport(initialPreflight)
+        } catch { /* ignore initial preflight error */ }
       }
     })
     // Check audio plan
@@ -120,19 +139,63 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
     if (timerRef.current) clearInterval(timerRef.current)
   }
 
+  async function handleCheckPreflight(): Promise<void> {
+    setIsPreflightRunning(true)
+    setError(null)
+    try {
+      const pf = await window.api.render.runPreflight({ projectDir: project.projectDir })
+      setPreflightReport(pf)
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setIsPreflightRunning(false)
+    }
+  }
+
   async function handleRender(): Promise<void> {
     setIsRendering(true)
     setError(null)
     setResult(null)
     setCaptionProgress(null)
-    setProgress({ stage: 'Starting...', progress: 0 })
+
+    // Step 1: Run preflight QA
+    setIsPreflightRunning(true)
+    setProgress({ stage: 'Running Preflight QA check...', progress: 0.02 })
+    let pfReport: RenderQaReport | null = null
+    try {
+      pfReport = await window.api.render.runPreflight({ projectDir: project.projectDir })
+      setPreflightReport(pfReport)
+    } catch (pfErr) {
+      console.warn('[RenderPage] Preflight check error:', pfErr)
+    } finally {
+      setIsPreflightRunning(false)
+    }
+
+    if (pfReport && pfReport.status === 'failed') {
+      setIsRendering(false)
+      setProgress(null)
+      setShowIssuesList(true)
+      const fatalIssues = pfReport.issues.filter((i) => i.severity === 'fatal')
+      setError(`Preflight QA failed with ${fatalIssues.length} fatal error(s). Render blocked until resolved.`)
+      return
+    }
+
+    // Step 2: Start render pipeline
+    setProgress({ stage: 'Starting render...', progress: 0.05 })
     startTimer()
 
     const unsub = window.api.render.onProgress((data) => setProgress(data))
 
-    // Subscribe to Remotion caption overlay progress (separate phase)
+    // Subscribe to Remotion caption overlay progress
     const unsubCaption = window.api.captions?.onRenderProgress?.(
       (data: { message: string; progress: number }) => setCaptionProgress(data)
+    )
+
+    // Subscribe to Postflight QA progress
+    const unsubQa = window.api.render.onQaProgress?.(
+      (data: { stage: string; progress: number; message: string }) => {
+        setProgress({ stage: `QA: ${data.stage} (${data.message})`, progress: data.progress })
+      }
     )
 
     try {
@@ -166,6 +229,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
       stopTimer()
       unsub()
       unsubCaption?.()
+      unsubQa?.()
     }
   }
 
@@ -246,6 +310,182 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               )}
             </div>
           )}
+
+          {/* ── Production Intelligence: Preflight QA Panel ── */}
+          <div style={{
+            marginBottom: '20px',
+            padding: '16px',
+            background: 'var(--bg-elevated)',
+            borderRadius: 'var(--radius-md)',
+            border: `1px solid ${
+              !preflightReport
+                ? 'var(--border-default)'
+                : preflightReport.status === 'failed'
+                  ? 'rgba(239, 68, 68, 0.4)'
+                  : preflightReport.status === 'passed_with_warnings'
+                    ? 'rgba(245, 158, 11, 0.4)'
+                    : 'rgba(16, 185, 129, 0.4)'
+            }`
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '16px' }}>🛡️</span>
+                <div>
+                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    Production Intelligence Preflight QA
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                    Automated validation of edit plan, media assets, audio tracks, and transitions before render
+                  </div>
+                </div>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                {isPreflightRunning ? (
+                  <span style={{
+                    fontSize: '11px', padding: '4px 10px', borderRadius: 999,
+                    background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', fontWeight: 600
+                  }}>
+                    ⏳ Running Preflight...
+                  </span>
+                ) : preflightReport ? (
+                  <span style={{
+                    fontSize: '11px', padding: '4px 10px', borderRadius: 999,
+                    fontWeight: 700,
+                    background:
+                      preflightReport.status === 'failed'
+                        ? 'rgba(239, 68, 68, 0.15)'
+                        : preflightReport.status === 'passed_with_warnings'
+                          ? 'rgba(245, 158, 11, 0.15)'
+                          : 'rgba(16, 185, 129, 0.15)',
+                    color:
+                      preflightReport.status === 'failed'
+                        ? '#f87171'
+                        : preflightReport.status === 'passed_with_warnings'
+                          ? '#fbbf24'
+                          : '#34d399'
+                  }}>
+                    {preflightReport.status === 'failed' && '❌ Preflight: Failed'}
+                    {preflightReport.status === 'passed_with_warnings' && `⚠️ Preflight: Passed with warnings (${preflightReport.warningCount})`}
+                    {preflightReport.status === 'passed' && '✓ Preflight: Passed'}
+                  </span>
+                ) : (
+                  <button
+                    className="btn btn-secondary btn-sm"
+                    onClick={handleCheckPreflight}
+                    disabled={isRendering || isPreflightRunning}
+                    style={{ fontSize: '11px', padding: '4px 10px' }}
+                  >
+                    🔍 Check Preflight
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {preflightReport && (
+              <>
+                {/* 7 Preflight Metrics */}
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
+                  gap: '8px',
+                  marginBottom: preflightReport.issues.length > 0 ? '12px' : '0'
+                }}>
+                  {[
+                    { label: 'Scenes checked', value: preflightReport.totalScenes, ok: preflightReport.totalScenes > 0 },
+                    { label: 'Media resolved', value: `${preflightReport.resolvedScenes}/${preflightReport.totalScenes}`, ok: preflightReport.resolvedScenes === preflightReport.totalScenes },
+                    { label: 'Missing media', value: preflightReport.missingScenes, ok: preflightReport.missingScenes === 0, isWarn: preflightReport.missingScenes > 0 },
+                    { label: 'Duration expected', value: fmt(preflightReport.expectedDuration), ok: preflightReport.expectedDuration > 0 },
+                    {
+                      label: 'Caption issues',
+                      value: preflightReport.issues.filter((i) => i.category === 'caption').length,
+                      ok: preflightReport.issues.filter((i) => i.category === 'caption').length === 0,
+                      isWarn: preflightReport.issues.filter((i) => i.category === 'caption').length > 0
+                    },
+                    {
+                      label: 'Audio issues',
+                      value: preflightReport.issues.filter((i) => i.category === 'audio').length,
+                      ok: preflightReport.issues.filter((i) => i.category === 'audio').length === 0,
+                      isWarn: preflightReport.issues.filter((i) => i.category === 'audio').length > 0
+                    },
+                    {
+                      label: 'Transition issues',
+                      value: preflightReport.issues.filter((i) => i.category === 'transition').length,
+                      ok: preflightReport.issues.filter((i) => i.category === 'transition').length === 0,
+                      isWarn: preflightReport.issues.filter((i) => i.category === 'transition').length > 0
+                    }
+                  ].map((m) => (
+                    <div key={m.label} style={{
+                      padding: '8px 10px',
+                      background: 'var(--bg-base)',
+                      borderRadius: 'var(--radius-sm)',
+                      border: '1px solid var(--border-subtle)',
+                      textAlign: 'center'
+                    }}>
+                      <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{m.label}</div>
+                      <div style={{
+                        fontSize: '12px',
+                        fontWeight: 700,
+                        color: m.ok ? 'var(--color-success)' : m.isWarn ? '#fbbf24' : 'var(--color-error)'
+                      }}>
+                        {m.value}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                {preflightReport.issues.length > 0 && (
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => setShowIssuesList((prev) => !prev)}
+                      style={{
+                        background: 'none', border: 'none', color: 'var(--brand-accent)',
+                        cursor: 'pointer', fontSize: '11px', fontWeight: 600, padding: 0,
+                        display: 'flex', alignItems: 'center', gap: '4px'
+                      }}
+                    >
+                      {showIssuesList ? '▼ Hide QA issues' : `▶ Show ${preflightReport.issues.length} QA notice(s)`}
+                    </button>
+
+                    {showIssuesList && (
+                      <div style={{
+                        marginTop: '8px', maxHeight: '160px', overflowY: 'auto',
+                        display: 'flex', flexDirection: 'column', gap: '6px',
+                        background: 'var(--bg-base)', padding: '8px', borderRadius: 'var(--radius-sm)'
+                      }}>
+                        {preflightReport.issues.map((issue) => (
+                          <div key={issue.id} style={{
+                            fontSize: '11px',
+                            display: 'flex',
+                            gap: '8px',
+                            alignItems: 'flex-start',
+                            color: issue.severity === 'fatal' ? '#f87171' : issue.severity === 'warning' ? '#fbbf24' : 'var(--text-secondary)'
+                          }}>
+                            <span>{issue.severity === 'fatal' ? '❌' : issue.severity === 'warning' ? '⚠️' : 'ℹ️'}</span>
+                            <div style={{ flex: 1 }}>
+                              <span style={{
+                                textTransform: 'uppercase', fontSize: '9px', fontWeight: 700,
+                                padding: '1px 4px', borderRadius: '3px', marginRight: '6px',
+                                background: issue.severity === 'fatal' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)'
+                              }}>
+                                {issue.category}
+                              </span>
+                              <span>{issue.message}</span>
+                              {issue.suggestion && (
+                                <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                                  💡 {issue.suggestion}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
 
           {/* Settings row */}
           <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap' }}>
@@ -442,20 +682,30 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               id="btn-start-render"
               className={`btn btn-primary btn-lg`}
               onClick={handleRender}
-              disabled={isRendering || !hasPlan}
+              disabled={isRendering || isPreflightRunning || !hasPlan}
               style={{ minWidth: '200px' }}
             >
-              {isRendering ? (
+              {isRendering || isPreflightRunning ? (
                 <><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
                   style={{ animation: 'spin 1s linear infinite', marginRight: '8px' }}>
                   <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
                   <path d="M12 2a10 10 0 0110 10" strokeLinecap="round" />
-                </svg>Rendering... {pct}%</>
+                </svg>{isPreflightRunning ? 'Running Preflight...' : `Rendering... ${pct}%`}</>
               ) : result ? (
                 '🔄 Re-render'
               ) : (
                 '▶ Start Render'
               )}
+            </button>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleCheckPreflight}
+              disabled={isRendering || isPreflightRunning || !hasPlan}
+              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
+            >
+              <span>🛡️</span>
+              <span>Re-check Preflight</span>
             </button>
             {isRendering && (
               <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
@@ -561,9 +811,33 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               </div>
               Render Complete!
             </div>
-            <span style={{ fontSize: '11px', color: 'var(--color-success)', fontWeight: 700 }}>
-              ✓ {fmtBytes(result.fileSizeBytes)}
-            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {result.qaReport && (
+                <span style={{
+                  fontSize: '11px',
+                  fontWeight: 700,
+                  padding: '3px 8px',
+                  borderRadius: '999px',
+                  background:
+                    result.qaReport.status === 'passed'
+                      ? 'rgba(16, 185, 129, 0.15)'
+                      : result.qaReport.status === 'passed_with_warnings'
+                        ? 'rgba(245, 158, 11, 0.15)'
+                        : 'rgba(239, 68, 68, 0.15)',
+                  color:
+                    result.qaReport.status === 'passed'
+                      ? '#34d399'
+                      : result.qaReport.status === 'passed_with_warnings'
+                        ? '#fbbf24'
+                        : '#f87171'
+                }}>
+                  QA: {result.qaReport.status.replace(/_/g, ' ').toUpperCase()}
+                </span>
+              )}
+              <span style={{ fontSize: '11px', color: 'var(--color-success)', fontWeight: 700 }}>
+                ✓ {fmtBytes(result.fileSizeBytes)}
+              </span>
+            </div>
           </div>
           <div className="panel-body">
             <div className="stats-grid" style={{ marginBottom: '16px' }}>
@@ -580,6 +854,28 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               ))}
             </div>
 
+            {/* Postflight QA Notes */}
+            {result.qaReport && result.qaReport.issues.length > 0 && (
+              <div style={{
+                background: 'var(--bg-elevated)',
+                padding: '12px 14px',
+                borderRadius: 'var(--radius-md)',
+                marginBottom: '14px',
+                border: '1px solid var(--border-default)'
+              }}>
+                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+                  🛡️ Postflight QA Audit ({result.qaReport.issues.length} notice{result.qaReport.issues.length > 1 ? 's' : ''})
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  {result.qaReport.issues.map((iss) => (
+                    <div key={iss.id} style={{ fontSize: '11px', color: iss.severity === 'warning' ? '#fbbf24' : 'var(--text-muted)' }}>
+                      {iss.severity === 'warning' ? '⚠️' : 'ℹ️'} {iss.message}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             <div style={{
               padding: '12px 16px',
               background: 'var(--bg-base)',
@@ -593,17 +889,18 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               📁 {result.outputPath}
             </div>
 
-            <button
-              className="btn btn-secondary"
-              onClick={() => {
-                // Copy path to clipboard as fallback
-                navigator.clipboard.writeText(result!.outputPath)
-                alert(`Output saved to:\n${result!.outputPath}\n\n(Path copied to clipboard)`)
-              }}
-              style={{ marginRight: '8px' }}
-            >
-              📋 Copy Output Path
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <button
+                className="btn btn-secondary"
+                onClick={() => {
+                  navigator.clipboard.writeText(result!.outputPath)
+                  setCopied(true)
+                  setTimeout(() => setCopied(false), 3000)
+                }}
+              >
+                {copied ? '✓ Path Copied to Clipboard!' : '📋 Copy Output Path'}
+              </button>
+            </div>
           </div>
         </div>
       )}
