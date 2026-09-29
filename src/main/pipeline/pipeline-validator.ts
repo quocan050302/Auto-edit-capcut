@@ -105,20 +105,38 @@ export async function validatePipelinePrerequisites(
     fatalErrors.push(`Project directory is not writable: ${projectDir}`)
   }
 
-  // 2. Kiểm tra script file
-  if (!scriptPath) {
+  // 2. Kiểm tra script file (hỗ trợ resolve đường dẫn tương đối hoặc file đã chuyển vào thư mục dự án)
+  let resolvedScriptPath = scriptPath
+  if (scriptPath && !fs.existsSync(scriptPath)) {
+    if (!path.isAbsolute(scriptPath)) {
+      const candidate = path.join(projectDir, scriptPath)
+      if (fs.existsSync(candidate)) resolvedScriptPath = candidate
+    }
+    if (!fs.existsSync(resolvedScriptPath)) {
+      const basename = path.basename(scriptPath)
+      const inSource = path.join(projectDir, 'source', basename)
+      const inRoot = path.join(projectDir, basename)
+      if (fs.existsSync(inSource)) resolvedScriptPath = inSource
+      else if (fs.existsSync(inRoot)) resolvedScriptPath = inRoot
+    }
+  }
+  if (resolvedScriptPath && fs.existsSync(resolvedScriptPath)) {
+    options.scriptPath = resolvedScriptPath
+  }
+
+  if (!resolvedScriptPath) {
     fatalErrors.push('Script path is required for Auto Production.')
-  } else if (!fs.existsSync(scriptPath)) {
-    fatalErrors.push(`Script file not found: ${scriptPath}`)
+  } else if (!fs.existsSync(resolvedScriptPath)) {
+    fatalErrors.push(`Script file not found: ${resolvedScriptPath}`)
   } else {
     try {
-      const stat = fs.statSync(scriptPath)
+      const stat = fs.statSync(resolvedScriptPath)
       if (stat.size === 0) {
-        fatalErrors.push(`Script file is empty: ${scriptPath}`)
+        fatalErrors.push(`Script file is empty: ${resolvedScriptPath}`)
       } else {
-        const text = fs.readFileSync(scriptPath, 'utf-8')
+        const text = fs.readFileSync(resolvedScriptPath, 'utf-8')
         if (!text.trim()) {
-          fatalErrors.push(`Script file contains only whitespace: ${scriptPath}`)
+          fatalErrors.push(`Script file contains only whitespace: ${resolvedScriptPath}`)
         }
       }
     } catch (err) {
@@ -126,19 +144,37 @@ export async function validatePipelinePrerequisites(
     }
   }
 
-  // 3. Kiểm tra voiceover file
+  // 3. Kiểm tra voiceover file (hỗ trợ resolve tương đối hoặc file trong projectDir/source)
+  let resolvedVoiceoverPath = voiceoverPath
+  if (voiceoverPath && !fs.existsSync(voiceoverPath)) {
+    if (!path.isAbsolute(voiceoverPath)) {
+      const candidate = path.join(projectDir, voiceoverPath)
+      if (fs.existsSync(candidate)) resolvedVoiceoverPath = candidate
+    }
+    if (!fs.existsSync(resolvedVoiceoverPath)) {
+      const basename = path.basename(voiceoverPath)
+      const inSource = path.join(projectDir, 'source', basename)
+      const inRoot = path.join(projectDir, basename)
+      if (fs.existsSync(inSource)) resolvedVoiceoverPath = inSource
+      else if (fs.existsSync(inRoot)) resolvedVoiceoverPath = inRoot
+    }
+  }
+  if (resolvedVoiceoverPath && fs.existsSync(resolvedVoiceoverPath)) {
+    options.voiceoverPath = resolvedVoiceoverPath
+  }
+
   let duration: number | null = null
-  if (!voiceoverPath) {
+  if (!resolvedVoiceoverPath) {
     fatalErrors.push('Voiceover audio path is required for Auto Production.')
-  } else if (!fs.existsSync(voiceoverPath)) {
-    fatalErrors.push(`Voiceover audio file not found: ${voiceoverPath}`)
+  } else if (!fs.existsSync(resolvedVoiceoverPath)) {
+    fatalErrors.push(`Voiceover audio file not found: ${resolvedVoiceoverPath}`)
   } else {
     try {
-      const stat = fs.statSync(voiceoverPath)
+      const stat = fs.statSync(resolvedVoiceoverPath)
       if (stat.size === 0) {
-        fatalErrors.push(`Voiceover audio file is empty: ${voiceoverPath}`)
+        fatalErrors.push(`Voiceover audio file is empty: ${resolvedVoiceoverPath}`)
       } else {
-        duration = await probeAudioDuration(voiceoverPath)
+        duration = await probeAudioDuration(resolvedVoiceoverPath)
         if (duration !== null && duration <= 0) {
           fatalErrors.push(`Voiceover audio has invalid duration: ${duration}s`)
         }

@@ -55,6 +55,7 @@ export function PipelineTimeline({
   const isCompleted = overallStatus === 'completed'
   const isNeedsAttention = overallStatus === 'needs-attention'
   const isFailed = overallStatus === 'failed'
+  const isInterrupted = overallStatus === 'interrupted' || overallStatus === 'recovering'
 
   function getStatusIcon(status?: StageStatus, isCurrent?: boolean) {
     if (status === 'completed') return <span style={{ color: 'var(--color-success, #22c55e)' }}>✓</span>
@@ -73,7 +74,7 @@ export function PipelineTimeline({
         />
       )
     }
-    if (status === 'warning') return <span style={{ color: '#f59e0b' }}>⚠️</span>
+    if (status === 'warning' || status === 'interrupted') return <span style={{ color: '#f59e0b' }}>⚠️</span>
     if (status === 'failed') return <span style={{ color: '#ef4444' }}>✕</span>
     if (status === 'cancelled') return <span style={{ color: '#6b7280' }}>⊘</span>
     return <span style={{ color: '#4b5563' }}>○</span>
@@ -82,7 +83,7 @@ export function PipelineTimeline({
   function getStatusBadgeClass(status?: StageStatus) {
     if (status === 'completed') return 'badge-success'
     if (status === 'running') return 'badge-progress'
-    if (status === 'warning') return 'badge-warning'
+    if (status === 'warning' || status === 'interrupted') return 'badge-warning'
     if (status === 'failed') return 'badge-error'
     if (status === 'cancelled') return 'badge-secondary'
     return 'badge-secondary'
@@ -92,7 +93,7 @@ export function PipelineTimeline({
     <div
       className="panel"
       style={{
-        border: isNeedsAttention
+        border: isNeedsAttention || isInterrupted
           ? '1px solid #f59e0b'
           : isFailed
           ? '1px solid #ef4444'
@@ -109,7 +110,7 @@ export function PipelineTimeline({
             className={`panel-badge ${
               isCompleted
                 ? 'badge-success'
-                : isNeedsAttention
+                : isNeedsAttention || isInterrupted
                 ? 'badge-warning'
                 : isFailed
                 ? 'badge-error'
@@ -135,7 +136,7 @@ export function PipelineTimeline({
             </button>
           )}
 
-          {(isNeedsAttention || isFailed || (!isRunning && !isCompleted && overallStatus !== 'idle')) && (
+          {(isNeedsAttention || isFailed || isInterrupted || (!isRunning && !isCompleted && overallStatus !== 'idle')) && (
             <button className="btn btn-primary btn-sm" onClick={onResume}>
               Resume Pipeline
             </button>
@@ -153,6 +154,35 @@ export function PipelineTimeline({
       </div>
 
       <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+        {/* Banner phục hồi pipeline bị gián đoạn */}
+        {isInterrupted && (
+          <div
+            style={{
+              padding: '10px 14px',
+              borderRadius: 'var(--radius-sm, 6px)',
+              background: 'rgba(59, 130, 246, 0.12)',
+              border: '1px solid rgba(59, 130, 246, 0.35)',
+              color: '#60a5fa',
+              fontSize: '13px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: '12px'
+            }}
+          >
+            <div>
+              <strong>Pipeline Interrupted:</strong> Process was interrupted or closed unexpectedly. Artifacts are preserved. Ready to resume from current stage.
+            </div>
+            <button
+              className="btn btn-primary btn-sm"
+              style={{ flexShrink: 0 }}
+              onClick={onResume}
+            >
+              Resume
+            </button>
+          </div>
+        )}
+
         {/* Banner nếu có cảnh báo hoặc fatal error */}
         {fatalErrors && fatalErrors.length > 0 && (
           <div

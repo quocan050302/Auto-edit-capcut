@@ -6,7 +6,8 @@ import type {
   CaptionPlan,
   AudioPlan,
   RenderQaReport,
-  StockSceneAssignment
+  StockSceneAssignment,
+  AutoPipelineOptions
 } from '../../../shared/types'
 
 export interface StockCompletionResult {
@@ -25,15 +26,17 @@ export function isTranscriptionValid(
   const transcriptPath = path.join(projectDir, 'analysis', 'transcript.json')
   const cacheMetaPath = path.join(projectDir, 'analysis', 'transcript-meta.json')
 
-  if (!fs.existsSync(transcriptPath) || !fs.existsSync(cacheMetaPath)) {
+  if (!fs.existsSync(transcriptPath)) {
     return false
   }
 
   try {
-    const meta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf-8'))
-    const stat = fs.statSync(voiceoverPath)
-    const expectedHash = `${voiceoverPath}:${stat.size}:${stat.mtimeMs}`
-    if (meta.hash !== expectedHash) return false
+    if (voiceoverPath && fs.existsSync(voiceoverPath) && fs.existsSync(cacheMetaPath)) {
+      const meta = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf-8'))
+      const stat = fs.statSync(voiceoverPath)
+      const expectedHash = `${voiceoverPath}:${stat.size}:${stat.mtimeMs}`
+      if (meta.hash && meta.hash !== expectedHash) return false
+    }
 
     const transcript = JSON.parse(fs.readFileSync(transcriptPath, 'utf-8')) as TranscriptResult
     return !!(transcript && transcript.segments && transcript.segments.length > 0)
@@ -130,13 +133,29 @@ export function checkStockCompletion(projectDir: string): StockCompletionResult 
   }
 
   const assignmentsPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
-  const assignments: StockSceneAssignment[] = fs.existsSync(assignmentsPath)
-    ? readJsonSafe<StockSceneAssignment[]>(assignmentsPath, [])
-    : []
+  let assignmentList: StockSceneAssignment[] = []
+  if (fs.existsSync(assignmentsPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(assignmentsPath, 'utf-8'))
+      if (Array.isArray(parsed)) {
+        assignmentList = parsed
+      } else if (parsed && typeof parsed === 'object') {
+        if (Array.isArray(parsed.assignments)) {
+          assignmentList = parsed.assignments
+        } else if (parsed.assignments && typeof parsed.assignments === 'object') {
+          assignmentList = Object.values(parsed.assignments)
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
 
   const assignmentMap = new Map<number, StockSceneAssignment>()
-  for (const a of assignments) {
-    assignmentMap.set(a.sceneIndex, a)
+  for (const a of assignmentList) {
+    if (a && typeof a.sceneIndex === 'number') {
+      assignmentMap.set(a.sceneIndex, a)
+    }
   }
 
   let assignedScenes = 0
@@ -153,15 +172,45 @@ export function checkStockCompletion(projectDir: string): StockCompletionResult 
 
     assignedScenes++
 
-    // Kiểm tra media file có tồn tại trên disk không
-    const localPath = assign.asset?.localPath
-    if (localPath && fs.existsSync(localPath) && fs.statSync(localPath).size > 0) {
+    // Kiểm tra media file có tồn tại trên disk không với các đường dẫn dự phòng
+    let mediaExists = false
+    const candidates: string[] = []
+
+    if (assign.asset?.localPath) {
+      candidates.push(assign.asset.localPath)
+      if (!path.isAbsolute(assign.asset.localPath)) {
+        candidates.push(path.join(projectDir, assign.asset.localPath))
+      }
+    }
+    if (assign.asset?.filename) {
+      candidates.push(path.join(projectDir, 'assets', 'stock', assign.asset.filename))
+    }
+    const anyAsset = assign.asset as { mediaFile?: string; localAsset?: string } | null
+    if (anyAsset?.mediaFile) {
+      candidates.push(path.join(projectDir, 'assets', 'stock', anyAsset.mediaFile))
+    }
+    if (anyAsset?.localAsset) {
+      candidates.push(path.join(projectDir, 'assets', 'stock', anyAsset.localAsset))
+    }
+
+    for (const candidatePath of candidates) {
+      try {
+        if (fs.existsSync(candidatePath) && fs.statSync(candidatePath).size > 0) {
+          mediaExists = true
+          break
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
+    if (mediaExists) {
       downloadedScenes++
     } else {
       missingSceneIndices.push(idx)
     }
 
-    // Check low confidence (score < 50 hoặc confidence low)
+    // Check low confidence (score < 50)
     if (assign.score !== undefined && assign.score < 50) {
       lowConfidenceScenes++
     }
@@ -205,5 +254,66 @@ export function isPreflightValid(projectDir: string): boolean {
     return report && report.status !== 'failed'
   } catch {
     return false
+  }
+}
+
+export interface ArtifactReconciliationSummary {
+  transcribingValid: boolean
+  planningValid: boolean
+  captionsValid: boolean
+  globalContextValid: boolean
+  stockCompletion: StockCompletionResult
+  audioValid: boolean
+  preflightValid: boolean
+  renderValid: boolean
+  postflightValid: boolean
+}
+
+/**
+ * Reconcile toàn bộ artifact thực tế của project qua từng stage.
+ */
+export function reconcileProjectArtifacts(
+  projectDir: string,
+  options?: AutoPipelineOptions
+): ArtifactReconciliationSummary {
+  const voPath = options?.voiceoverPath || ''
+  const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs.existsSync(path.join(projectDir, 'analysis', 'transcript.json'))
+  const planningValid = isPlanningValid(projectDir)
+  const captionsValid = isCaptionsValid(projectDir)
+  const globalContextValid = isGlobalContextValid(projectDir)
+  const stockCompletion = checkStockCompletion(projectDir)
+  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic)
+  const preflightValid = isPreflightValid(projectDir)
+
+  // Render valid: kiểm tra output mp4 hoàn chỉnh (không phải .partial.mp4)
+  const outputDir = path.join(projectDir, 'output')
+  let renderValid = false
+  if (fs.existsSync(outputDir)) {
+    try {
+      const files = fs.readdirSync(outputDir).filter(
+        (f) => f.endsWith('.mp4') && !f.startsWith('_') && !f.includes('.partial') && !f.includes('.working')
+      )
+      if (files.length > 0) {
+        const stat = fs.statSync(path.join(outputDir, files[0]))
+        if (stat.size > 1024) renderValid = true
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const qaPath = path.join(projectDir, 'analysis', 'render-qa.json')
+  const postflightValid = renderValid && fs.existsSync(qaPath)
+
+  return {
+    transcribingValid,
+    planningValid,
+    captionsValid,
+    globalContextValid,
+    stockCompletion,
+    audioValid,
+    preflightValid,
+    renderValid,
+    postflightValid
   }
 }

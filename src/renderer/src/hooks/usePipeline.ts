@@ -2,7 +2,8 @@ import { useState, useEffect, useCallback, useRef } from 'react'
 import type {
   AutoPipelineState,
   AutoPipelineOptions,
-  PipelineStage
+  PipelineStage,
+  PipelineRecoveryResult
 } from '../../../../shared/types'
 
 export function usePipeline(projectDir?: string | null) {
@@ -18,7 +19,24 @@ export function usePipeline(projectDir?: string | null) {
     }
   }, [])
 
-  // Tải trạng thái hiện tại khi mở project
+  // Cập nhật snapshot theo thứ tự version đơn điệu, bỏ qua late events
+  const updateStateIfNewer = useCallback((incoming: AutoPipelineState | null) => {
+    if (!incoming) {
+      setPipelineState(null)
+      return
+    }
+    setPipelineState((prev) => {
+      if (!prev) return incoming
+      const prevVersion = prev.version ?? 0
+      const incomingVersion = incoming.version ?? 0
+      if (incomingVersion >= prevVersion) {
+        return incoming
+      }
+      return prev
+    })
+  }, [])
+
+  // Tải trạng thái hiện tại từ main process
   const refreshStatus = useCallback(async () => {
     if (!projectDir) {
       setPipelineState(null)
@@ -26,34 +44,36 @@ export function usePipeline(projectDir?: string | null) {
     }
     try {
       const state = await window.api.pipeline.getStatus(projectDir)
-      if (isMountedRef.current) {
-        setPipelineState(state)
+      if (isMountedRef.current && state) {
+        updateStateIfNewer(state)
       }
     } catch (err) {
       if (isMountedRef.current) {
         setError(err instanceof Error ? err.message : String(err))
       }
     }
-  }, [projectDir])
+  }, [projectDir, updateStateIfNewer])
 
+  // Lắng nghe progress event qua IPC với snapshot version check và cleanup đúng callback
   useEffect(() => {
-    refreshStatus()
-  }, [refreshStatus])
-
-  // Lắng nghe progress event qua IPC với unsubscribe cleanup
-  useEffect(() => {
-    if (!projectDir) return
+    if (!projectDir) {
+      setPipelineState(null)
+      return
+    }
 
     const unsubscribe = window.api.pipeline.onProgress((state) => {
       if (isMountedRef.current && state.projectDir === projectDir) {
-        setPipelineState(state)
+        updateStateIfNewer(state)
       }
     })
+
+    // Lấy snapshot mới nhất khi mount hoặc projectDir thay đổi
+    refreshStatus()
 
     return () => {
       unsubscribe()
     }
-  }, [projectDir])
+  }, [projectDir, refreshStatus, updateStateIfNewer])
 
   const startPipeline = useCallback(
     async (options: AutoPipelineOptions): Promise<boolean> => {
@@ -66,7 +86,7 @@ export function usePipeline(projectDir?: string | null) {
           return false
         }
         if (res.state && isMountedRef.current) {
-          setPipelineState(res.state)
+          updateStateIfNewer(res.state)
         }
         return true
       } catch (err) {
@@ -77,7 +97,7 @@ export function usePipeline(projectDir?: string | null) {
         if (isMountedRef.current) setIsLoading(false)
       }
     },
-    []
+    [updateStateIfNewer]
   )
 
   const resumePipeline = useCallback(async (): Promise<boolean> => {
@@ -91,7 +111,7 @@ export function usePipeline(projectDir?: string | null) {
         return false
       }
       if (res.state && isMountedRef.current) {
-        setPipelineState(res.state)
+        updateStateIfNewer(res.state)
       }
       return true
     } catch (err) {
@@ -101,13 +121,37 @@ export function usePipeline(projectDir?: string | null) {
     } finally {
       if (isMountedRef.current) setIsLoading(false)
     }
-  }, [projectDir])
+  }, [projectDir, updateStateIfNewer])
+
+  const recoverPipeline = useCallback(async (): Promise<PipelineRecoveryResult | null> => {
+    if (!projectDir) return null
+    setIsLoading(true)
+    setError(null)
+    try {
+      const res = await window.api.pipeline.recover(projectDir)
+      if (!res.success) {
+        setError(res.error || 'Failed to recover pipeline')
+        return null
+      }
+      if (res.state && isMountedRef.current) {
+        updateStateIfNewer(res.state)
+      }
+      return res.result ?? null
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      setError(msg)
+      return null
+    } finally {
+      if (isMountedRef.current) setIsLoading(false)
+    }
+  }, [projectDir, updateStateIfNewer])
 
   const cancelPipeline = useCallback(async (): Promise<boolean> => {
-    if (!pipelineState?.runId) return false
+    const target = pipelineState?.runId || projectDir
+    if (!target) return false
     setIsLoading(true)
     try {
-      const res = await window.api.pipeline.cancel(pipelineState.runId)
+      const res = await window.api.pipeline.cancel(target)
       if (res.success && isMountedRef.current) {
         setPipelineState((prev) =>
           prev ? { ...prev, overallStatus: 'cancelled' } : null
@@ -121,7 +165,7 @@ export function usePipeline(projectDir?: string | null) {
     } finally {
       if (isMountedRef.current) setIsLoading(false)
     }
-  }, [pipelineState?.runId])
+  }, [pipelineState?.runId, projectDir])
 
   const retryStage = useCallback(
     async (stage: PipelineStage): Promise<boolean> => {
@@ -135,7 +179,7 @@ export function usePipeline(projectDir?: string | null) {
           return false
         }
         if (res.state && isMountedRef.current) {
-          setPipelineState(res.state)
+          updateStateIfNewer(res.state)
         }
         return true
       } catch (err) {
@@ -146,7 +190,7 @@ export function usePipeline(projectDir?: string | null) {
         if (isMountedRef.current) setIsLoading(false)
       }
     },
-    [projectDir]
+    [projectDir, updateStateIfNewer]
   )
 
   const runFromStage = useCallback(
@@ -161,7 +205,7 @@ export function usePipeline(projectDir?: string | null) {
           return false
         }
         if (res.state && isMountedRef.current) {
-          setPipelineState(res.state)
+          updateStateIfNewer(res.state)
         }
         return true
       } catch (err) {
@@ -172,7 +216,7 @@ export function usePipeline(projectDir?: string | null) {
         if (isMountedRef.current) setIsLoading(false)
       }
     },
-    [projectDir]
+    [projectDir, updateStateIfNewer]
   )
 
   const isRunning = pipelineState?.overallStatus === 'running'
@@ -184,6 +228,7 @@ export function usePipeline(projectDir?: string | null) {
     error,
     startPipeline,
     resumePipeline,
+    recoverPipeline,
     cancelPipeline,
     retryStage,
     runFromStage,

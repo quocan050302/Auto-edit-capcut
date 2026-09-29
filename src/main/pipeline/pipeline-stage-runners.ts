@@ -19,7 +19,8 @@ import {
   isPlanningValid,
   isCaptionsValid,
   isGlobalContextValid,
-  checkStockCompletion
+  checkStockCompletion,
+  isAudioValid
 } from './pipeline-artifacts'
 import type {
   AutoPipelineOptions,
@@ -356,6 +357,35 @@ export async function runStockSearchStage(
     }
   }
 
+  // Pre-check: Kiểm tra artifact stock thực tế trên đĩa trước khi gọi engine
+  // Nếu đã đủ 100% scenes hợp lệ, hoàn tất ngay lập tức mà không gọi Pexels/Pixabay
+  const initialStockSummary = checkStockCompletion(options.projectDir)
+  if (
+    initialStockSummary.totalScenes > 0 &&
+    initialStockSummary.assignedScenes === initialStockSummary.totalScenes &&
+    initialStockSummary.missingScenes === 0
+  ) {
+    logger.info(
+      `[StockStage] Reconciled stock on disk: all ${initialStockSummary.totalScenes}/${initialStockSummary.totalScenes} scenes assigned & verified. Reusing.`
+    )
+    const completionMsg = `Stock search completed — ${initialStockSummary.totalScenes}/${initialStockSummary.totalScenes} scenes assigned`
+    onProgress(completionMsg, 1.0)
+    return {
+      success: true,
+      cached: true,
+      stats: {
+        totalScenes: initialStockSummary.totalScenes,
+        assignedScenes: initialStockSummary.assignedScenes,
+        downloadedScenes: initialStockSummary.downloadedScenes,
+        missingScenes: 0,
+        failedScenes: 0,
+        percent: 100,
+        completionMessage: completionMsg,
+        lowConfidenceScenes: initialStockSummary.lowConfidenceScenes
+      }
+    }
+  }
+
   const appCfg = loadConfig()
   const apiKey = resolveGeminiApiKey()
   const pexelsKey = normalizeApiKey(appCfg.pexelsApiKey ?? '')
@@ -397,7 +427,7 @@ export async function runStockSearchStage(
 
   checkAborted(signal)
 
-  // Kiểm tra điều kiện hoàn thành stock
+  // Kiểm tra điều kiện hoàn thành stock từ file thực tế trên đĩa (Single source of truth)
   const stockSummary = checkStockCompletion(options.projectDir)
 
   if (stockSummary.missingScenes > 0) {
@@ -423,7 +453,9 @@ export async function runStockSearchStage(
     warning = `${stockSummary.lowConfidenceScenes} scenes have low-confidence stock matches.`
   }
 
-  onProgress(`Stock media assigned & verified for all ${stockSummary.totalScenes} scenes`, 1.0)
+  // Đảm bảo message và stats chính xác 100%, không bị kẹt ở progress trung gian
+  const finalMsg = `Stock search completed — ${stockSummary.totalScenes}/${stockSummary.totalScenes} scenes assigned`
+  onProgress(finalMsg, 1.0)
   return {
     success: true,
     warning,
@@ -432,6 +464,9 @@ export async function runStockSearchStage(
       assignedScenes: stockSummary.assignedScenes,
       downloadedScenes: stockSummary.downloadedScenes,
       missingScenes: 0,
+      failedScenes: 0,
+      percent: 100,
+      completionMessage: finalMsg,
       lowConfidenceScenes: stockSummary.lowConfidenceScenes
     }
   }
@@ -446,6 +481,28 @@ export async function runAudioSearchStage(
 ): Promise<StageRunResult> {
   checkAborted(signal)
   const audioPlanPath = path.join(options.projectDir, 'analysis', 'audio-plan.json')
+
+  // Check cache nếu audio plan đã tồn tại và hợp lệ
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic)) {
+    const cachedPlan = loadAudioPlan(options.projectDir)
+    if (cachedPlan) {
+      const downloadedMusicCount = cachedPlan.sections.filter(
+        (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+      ).length
+      onProgress(`Using existing audio plan (${downloadedMusicCount} music tracks)`, 1.0)
+      return {
+        success: true,
+        cached: true,
+        artifactPath: audioPlanPath,
+        data: cachedPlan,
+        stats: {
+          sectionsCount: cachedPlan.sections.length,
+          downloadedMusicCount,
+          sfxCount: cachedPlan.sfxAssignments?.length ?? 0
+        }
+      }
+    }
+  }
 
   onProgress('Searching and downloading background music & SFX...', 0.05)
   checkAborted(signal)
@@ -561,6 +618,56 @@ export async function runRenderStage(
 ): Promise<StageRunResult<{ outputPath: string; durationSecs: number; fileSizeBytes: number }>> {
   checkAborted(signal)
 
+  const outputDir = path.join(options.projectDir, 'output')
+  fs.mkdirSync(outputDir, { recursive: true })
+
+  // Clean up any stale partial files from an interrupted prior run
+  try {
+    const outputFiles = fs.readdirSync(outputDir)
+    for (const file of outputFiles) {
+      if (file.endsWith('.partial.mp4') || file.includes('_working.mp4')) {
+        const partialPath = path.join(outputDir, file)
+        try {
+          fs.unlinkSync(partialPath)
+          logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${file}`)
+        } catch {
+          /* ignore */
+        }
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  // Kiểm tra xem đã có video render hoàn chỉnh và hợp lệ trên đĩa chưa
+  const baseTargetName = options.outputName || 'final_output'
+  const defaultCompletedVideo = path.join(outputDir, `${baseTargetName}.mp4`)
+  if (fs.existsSync(defaultCompletedVideo)) {
+    try {
+      const stat = fs.statSync(defaultCompletedVideo)
+      if (stat.size > 1024 * 1024) {
+        onProgress('Found valid completed video output, skipping render', 1.0)
+        return {
+          success: true,
+          cached: true,
+          artifactPath: defaultCompletedVideo,
+          data: {
+            outputPath: defaultCompletedVideo,
+            durationSecs: 0,
+            fileSizeBytes: stat.size
+          },
+          stats: {
+            outputPath: defaultCompletedVideo,
+            fileSizeBytes: stat.size,
+            reused: true
+          }
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
   // Load CaptionPlan nếu có
   let captionPlan: CaptionPlan | undefined
   try {
@@ -573,12 +680,12 @@ export async function runRenderStage(
   }
 
   // Đảm bảo không ghi đè file output đang tồn tại
-  let targetName = options.outputName || 'final_output'
-  let candidatePath = path.join(options.projectDir, 'output', `${targetName}.mp4`)
+  let targetName = baseTargetName
+  let candidatePath = path.join(outputDir, `${targetName}.mp4`)
   let counter = 1
   while (fs.existsSync(candidatePath)) {
-    targetName = `${options.outputName || 'final_output'}_${counter}`
-    candidatePath = path.join(options.projectDir, 'output', `${targetName}.mp4`)
+    targetName = `${baseTargetName}_${counter}`
+    candidatePath = path.join(outputDir, `${targetName}.mp4`)
     counter++
   }
 

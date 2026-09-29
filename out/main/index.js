@@ -6,7 +6,7 @@ const fs = require("fs");
 const uuid = require("uuid");
 const winston = require("winston");
 const crypto = require("crypto");
-const ffprobeStatic = require("ffprobe-static");
+const ffprobeStatic$1 = require("ffprobe-static");
 const os = require("os");
 const child_process = require("child_process");
 const genai = require("@google/genai");
@@ -34,9 +34,20 @@ function _interopNamespaceDefault(e) {
 const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
 const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const winston__namespace = /* @__PURE__ */ _interopNamespaceDefault(winston);
+const crypto__namespace = /* @__PURE__ */ _interopNamespaceDefault(crypto);
 const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
+const DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS = {
+  enabled: true,
+  candidateRankingEnabled: true,
+  storyboardReviewEnabled: true,
+  visualSceneGrammarEnabled: true,
+  renderQaEnabled: true,
+  strictMissingMedia: false,
+  candidatesPerScene: 3,
+  maxVisualGrammarDensity: 0.25
+};
 const IPC_CHANNELS = {
   // File dialogs
   SELECT_FILE: "select-file",
@@ -55,6 +66,8 @@ const IPC_CHANNELS = {
   TRANSCRIBE_PROGRESS: "transcribe:progress",
   TRANSCRIBE_GET: "transcribe:get",
   TRANSCRIBE_CHECK_MODEL: "transcribe:check-model",
+  // Logging
+  LOG_ENTRY: "log:entry",
   // App info
   GET_APP_VERSION: "app:get-version",
   GET_PROJECTS_DIR: "app:get-projects-dir",
@@ -70,6 +83,7 @@ const IPC_CHANNELS = {
   // Video Rendering
   RENDER_START: "render:start",
   RENDER_PROGRESS: "render:progress",
+  RENDER_CANCEL: "render:cancel",
   // Stock Media Engine
   STOCK_SEARCH_START: "stock:search-start",
   STOCK_SEARCH_PROGRESS: "stock:search-progress",
@@ -91,6 +105,11 @@ const IPC_CHANNELS = {
   AUDIO_APPROVE_SFX: "audio:approve-sfx",
   AUDIO_DOWNLOAD_APPROVED: "audio:download-approved",
   AUDIO_DOWNLOAD_PROGRESS: "audio:download-progress",
+  // Retention Engine — Script Doctor
+  SCRIPT_DOCTOR_RUN: "script:doctor-run",
+  // Retention Engine — Retention QA Pass
+  RETENTION_QA_RUN: "retention:qa-run",
+  RETENTION_QA_PROGRESS: "retention:qa-progress",
   // Dynamic Kinetic Captions Engine
   CAPTIONS_GENERATE_PLAN: "captions:generate-plan",
   CAPTIONS_GET_PLAN: "captions:get-plan",
@@ -101,7 +120,28 @@ const IPC_CHANNELS = {
   CAPTIONS_PREVIEW_RENDER: "captions:preview-render",
   CAPTIONS_PROGRESS: "captions:progress",
   // Remotion caption overlay render progress (separate from main FFmpeg render)
-  CAPTIONS_RENDER_PROGRESS: "captions:render-progress"
+  CAPTIONS_RENDER_PROGRESS: "captions:render-progress",
+  // Production Intelligence — Storyboard & Candidates
+  STOCK_CANDIDATES_GET: "stock:candidates-get",
+  STOCK_CANDIDATE_SELECT: "stock:candidate-select",
+  STOCK_CANDIDATE_APPROVE: "stock:candidate-approve",
+  STOCK_STORYBOARD_SUMMARY_GET: "stock:storyboard-summary-get",
+  // Production Intelligence — Settings
+  PRODUCTION_SETTINGS_GET: "production-settings:get",
+  PRODUCTION_SETTINGS_SET: "production-settings:set",
+  // Production Intelligence — Render QA
+  RENDER_PREFLIGHT_RUN: "render:preflight-run",
+  RENDER_QA_GET: "render:qa-get",
+  RENDER_QA_PROGRESS: "render:qa-progress",
+  // Auto Production Pipeline
+  PIPELINE_START: "pipeline:start",
+  PIPELINE_RESUME: "pipeline:resume",
+  PIPELINE_CANCEL: "pipeline:cancel",
+  PIPELINE_STATUS_GET: "pipeline:status-get",
+  PIPELINE_PROGRESS: "pipeline:progress",
+  PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
+  PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
+  PIPELINE_RECOVER: "pipeline:recover"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -137,7 +177,10 @@ function registerFsHandlers(ipcMain) {
     }
   );
 }
-const logsDir = path.join(electron.app.getPath("userData"), "logs");
+const logsDir = path.join(
+  electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
+  "logs"
+);
 if (!fs__namespace.existsSync(logsDir)) {
   fs__namespace.mkdirSync(logsDir, { recursive: true });
 }
@@ -146,7 +189,8 @@ const logFormat = winston__namespace.format.combine(
   winston__namespace.format.errors({ stack: true }),
   winston__namespace.format.printf(({ level, message, timestamp, ...meta }) => {
     const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : "";
-    return `[${timestamp}] ${level.toUpperCase()}: ${message}${metaStr}`;
+    const safeMsg = String(message).replace(/—/g, "-").replace(/→/g, "->").replace(/…/g, "...");
+    return `[${timestamp}] ${level.toUpperCase()}: ${safeMsg}${metaStr}`;
   })
 );
 const logger = winston__namespace.createLogger({
@@ -237,9 +281,9 @@ function defaultSettings() {
     pacing: "balanced"
   };
 }
-function saveProjectState(state) {
-  const statePath = path.join(state.projectDir, "project-state.json");
-  fs__namespace.writeFileSync(statePath, JSON.stringify(state, null, 2), "utf-8");
+function saveProjectState(state2) {
+  const statePath = path.join(state2.projectDir, "project-state.json");
+  fs__namespace.writeFileSync(statePath, JSON.stringify(state2, null, 2), "utf-8");
 }
 function registerProjectHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.PROJECT_CREATE, async (_event, name) => {
@@ -253,7 +297,7 @@ function registerProjectHandlers(ipcMain) {
         );
       }
       createProjectFolderStructure(projectDir);
-      const state = {
+      const state2 = {
         id: uuid.v4(),
         name: safeName,
         projectDir,
@@ -281,9 +325,9 @@ function registerProjectHandlers(ipcMain) {
         lastOperation: null,
         error: null
       };
-      saveProjectState(state);
+      saveProjectState(state2);
       logger.info(`Project created: ${safeName}`, { projectDir });
-      return { success: true, state };
+      return { success: true, state: state2 };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error(`Failed to create project: ${msg}`);
@@ -298,11 +342,11 @@ function registerProjectHandlers(ipcMain) {
         if (!fs__namespace.existsSync(statePath)) {
           throw new Error(`No project-state.json found in ${projectDir}`);
         }
-        const state = JSON.parse(
+        const state2 = JSON.parse(
           fs__namespace.readFileSync(statePath, "utf-8")
         );
-        logger.info(`Project opened: ${state.name}`, { projectDir });
-        return { success: true, state };
+        logger.info(`Project opened: ${state2.name}`, { projectDir });
+        return { success: true, state: state2 };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`Failed to open project: ${msg}`);
@@ -312,10 +356,10 @@ function registerProjectHandlers(ipcMain) {
   );
   ipcMain.handle(
     IPC_CHANNELS.PROJECT_SAVE,
-    async (_event, state) => {
+    async (_event, state2) => {
       try {
-        state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        saveProjectState(state);
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state2);
         return { success: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -329,13 +373,13 @@ function registerProjectHandlers(ipcMain) {
     async (_event, projectDir, inputs) => {
       try {
         const statePath = path.join(projectDir, "project-state.json");
-        const state = JSON.parse(
+        const state2 = JSON.parse(
           fs__namespace.readFileSync(statePath, "utf-8")
         );
-        state.inputs = { ...state.inputs, ...inputs };
-        state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        saveProjectState(state);
-        return { success: true, state };
+        state2.inputs = { ...state2.inputs, ...inputs };
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state2);
+        return { success: true, state: state2 };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`Failed to update inputs: ${msg}`);
@@ -348,13 +392,13 @@ function registerProjectHandlers(ipcMain) {
     async (_event, projectDir, settings) => {
       try {
         const statePath = path.join(projectDir, "project-state.json");
-        const state = JSON.parse(
+        const state2 = JSON.parse(
           fs__namespace.readFileSync(statePath, "utf-8")
         );
-        state.settings = { ...state.settings, ...settings };
-        state.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        saveProjectState(state);
-        return { success: true, state };
+        state2.settings = { ...state2.settings, ...settings };
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state2);
+        return { success: true, state: state2 };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`Failed to update settings: ${msg}`);
@@ -381,7 +425,7 @@ function registerProjectHandlers(ipcMain) {
   });
   ipcMain.handle(IPC_CHANNELS.GET_APP_VERSION, () => electron.app.getVersion());
 }
-const FFPROBE_PATH = ffprobeStatic.path;
+const FFPROBE_PATH = ffprobeStatic$1.path;
 const IMAGE_EXTS = /* @__PURE__ */ new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]);
 const VIDEO_EXTS = /* @__PURE__ */ new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"]);
 const AUDIO_EXTS = /* @__PURE__ */ new Set([".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac", ".opus"]);
@@ -761,6 +805,118 @@ function registerTranscribeHandlers(ipcMain) {
     }
   );
 }
+const healthRegistry = /* @__PURE__ */ new Map();
+function getOrCreateState(model) {
+  let state2 = healthRegistry.get(model);
+  if (!state2) {
+    state2 = {
+      model,
+      status: "available",
+      blockedUntil: 0,
+      consecutiveFailures: 0
+    };
+    healthRegistry.set(model, state2);
+  }
+  return state2;
+}
+function isModelAvailable(model) {
+  const state2 = healthRegistry.get(model);
+  if (!state2) return true;
+  if (state2.status === "available") return true;
+  if (Date.now() >= state2.blockedUntil) {
+    state2.status = "available";
+    return true;
+  }
+  return false;
+}
+function recordModelRateLimit(model, retryAfterMs) {
+  const now = Date.now();
+  const blockDuration = Math.max(6e4, 6e4);
+  const state2 = getOrCreateState(model);
+  state2.status = "rate_limited";
+  state2.blockedUntil = now + blockDuration;
+  state2.consecutiveFailures++;
+  state2.lastErrorKind = "RATE_LIMIT";
+  state2.lastErrorTime = now;
+  logger.warn(`[ModelHealth] Model ${model} rate-limited. Blocked for ${Math.round(blockDuration / 1e3)}s for current job.`);
+}
+function recordModelUnavailable(model, durationMs = 3e4, reason = "SERVICE_UNAVAILABLE") {
+  const now = Date.now();
+  const state2 = getOrCreateState(model);
+  state2.status = "unavailable";
+  state2.blockedUntil = now + durationMs;
+  state2.consecutiveFailures++;
+  state2.lastErrorKind = reason;
+  state2.lastErrorTime = now;
+  logger.warn(`[ModelHealth] Model ${model} unavailable (${reason}). Blocked for ${Math.round(durationMs / 1e3)}s.`);
+}
+function recordModelNotFound(model) {
+  const now = Date.now();
+  const state2 = getOrCreateState(model);
+  state2.status = "unavailable";
+  state2.blockedUntil = now + 24 * 60 * 60 * 1e3;
+  state2.consecutiveFailures++;
+  state2.lastErrorKind = "MODEL_NOT_FOUND";
+  state2.lastErrorTime = now;
+  logger.warn(`[ModelHealth] Model ${model} not found/unsupported. Blocked for entire job.`);
+}
+function recordModelSuccess(model) {
+  const state2 = getOrCreateState(model);
+  state2.status = "available";
+  state2.blockedUntil = 0;
+  state2.consecutiveFailures = 0;
+}
+function recordModelFailure(model, kind, retryAfterMs) {
+  if (kind === "RATE_LIMIT") {
+    recordModelRateLimit(model);
+  } else if (kind === "SERVICE_UNAVAILABLE") {
+    recordModelUnavailable(model, 3e4, "SERVICE_UNAVAILABLE");
+  } else if (kind === "MODEL_NOT_FOUND") {
+    recordModelNotFound(model);
+  } else if (kind === "AUTH_ERROR") {
+    recordModelUnavailable(model, 24 * 60 * 60 * 1e3, "AUTH_ERROR");
+  } else {
+    const state2 = getOrCreateState(model);
+    state2.consecutiveFailures++;
+    state2.lastErrorKind = String(kind);
+    state2.lastErrorTime = Date.now();
+  }
+}
+const DEPRECATED_TEXT_MODELS = /* @__PURE__ */ new Set([
+  "gemini-2.5-flash",
+  "gemini-1.5-flash",
+  "gemini-1.5-flash-latest"
+]);
+function normalizePreferredTextModel(savedModel) {
+  if (!savedModel || DEPRECATED_TEXT_MODELS.has(savedModel.trim())) {
+    return "gemini-3.8-flash";
+  }
+  return savedModel.trim();
+}
+function classifyGeminiErrorKind(err) {
+  if (!err) return { kind: "UNKNOWN", message: "Unknown error" };
+  const anyErr = err;
+  const status = typeof anyErr.status === "number" ? anyErr.status : void 0;
+  const statusText = typeof anyErr.statusText === "string" ? anyErr.statusText : "";
+  const msg = err instanceof Error ? err.message : String(err);
+  const combined = `${status ?? ""} ${statusText} ${msg}`.toLowerCase();
+  if (status === 404 || statusText === "NOT_FOUND" || combined.includes("404") || combined.includes("not_found") || combined.includes("model not found") || combined.includes("model is not found") || combined.includes("is no longer available") || combined.includes("no longer available") || combined.includes("is not supported for this api version") || combined.includes("is not found for api version")) {
+    return { kind: "MODEL_NOT_FOUND", message: msg };
+  }
+  if (status === 401 || status === 403 || combined.includes("api_key_invalid") || combined.includes("api key not valid") || combined.includes("invalid api key") || combined.includes("key is invalid") || combined.includes("permission_denied") || combined.includes("unregistered callers")) {
+    return { kind: "AUTH_ERROR", message: msg };
+  }
+  if (status === 429 || statusText === "RESOURCE_EXHAUSTED" || combined.includes("429") || combined.includes("resource_exhausted") || combined.includes("rate limit") || combined.includes("quota")) {
+    return { kind: "RATE_LIMIT", message: msg };
+  }
+  if (status === 503 || status === 502 || status === 504 || status === 500 || statusText === "UNAVAILABLE" || combined.includes("503") || combined.includes("unavailable") || combined.includes("overloaded") || combined.includes("high demand")) {
+    return { kind: "SERVICE_UNAVAILABLE", message: msg };
+  }
+  if (status === 400 || combined.includes("400") || combined.includes("invalid argument")) {
+    return { kind: "BAD_REQUEST", message: msg };
+  }
+  return { kind: "UNKNOWN", message: msg };
+}
 function normalizeApiKey(raw) {
   let value = raw ?? "";
   value = value.trim();
@@ -861,9 +1017,10 @@ async function verifyGeminiApiKey(rawKey, model) {
       firstModelName = m.name ?? "";
       break;
     }
-    if (model) {
+    const testModel = normalizePreferredTextModel(model);
+    if (testModel) {
       try {
-        await ai.models.get({ model });
+        await ai.models.get({ model: testModel });
       } catch (modelErr) {
         const classified = classifyGeminiError(modelErr);
         if (classified.status === "MODEL_UNAVAILABLE") {
@@ -878,12 +1035,137 @@ async function verifyGeminiApiKey(rawKey, model) {
       valid: true,
       status: "VERIFIED",
       message: "API key hợp lệ và đã sẵn sàng sử dụng.",
-      modelTested: model ?? (firstModelName ? firstModelName.replace(/^models\//, "") : "gemini-3.8-flash")
+      modelTested: testModel || (firstModelName ? firstModelName.replace(/^models\//, "") : "gemini-3.8-flash")
     };
   } catch (err) {
     logger.warn(`[GeminiKeyVerification] Failed: ${err}`);
     return classifyGeminiError(err);
   }
+}
+const MODEL_ROUTES = {
+  planning: ["gemini-3.8-flash", "gemini-3.5-flash"],
+  global_context: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  caption_planning: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  stock_query: ["gemini-3.5-flash-lite", "gemini-3.5-flash"],
+  retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+};
+function getModelRoute(taskType, preferredModel) {
+  const defaultRoute = [...MODEL_ROUTES[taskType]];
+  let pref = preferredModel ? preferredModel.trim() : void 0;
+  if (pref && DEPRECATED_TEXT_MODELS.has(pref)) {
+    pref = normalizePreferredTextModel(pref);
+  }
+  if (!pref) {
+    return defaultRoute;
+  }
+  if (taskType === "stock_query") {
+    if (pref.includes("3.8")) {
+      logger.info(`[ModelRouter] preferredModel "${pref}" ignored for stock_query; enforcing [${defaultRoute.join(", ")}].`);
+      return defaultRoute;
+    }
+    if (defaultRoute.includes(pref)) {
+      return [pref, ...defaultRoute.filter((m) => m !== pref)];
+    }
+    return defaultRoute;
+  }
+  if (taskType === "planning") {
+    if (defaultRoute.includes(pref)) {
+      return [pref, ...defaultRoute.filter((m) => m !== pref)];
+    }
+    return [pref, ...defaultRoute];
+  }
+  if (pref.includes("3.8")) {
+    logger.info(`[ModelRouter] preferredModel "${pref}" reserved for planning; using task default for ${taskType}.`);
+    return defaultRoute;
+  }
+  if (defaultRoute.includes(pref)) {
+    return [pref, ...defaultRoute.filter((m) => m !== pref)];
+  }
+  return defaultRoute;
+}
+function getAvailableModelsForTask(taskType, preferredModel) {
+  const fullRoute = getModelRoute(taskType, preferredModel);
+  const available = fullRoute.filter((m) => isModelAvailable(m));
+  if (available.length === 0 && fullRoute.length > 0) {
+    logger.warn(`[ModelRouter] All candidate models for ${taskType} are currently blocked by circuit breaker: [${fullRoute.join(", ")}].`);
+  }
+  return available;
+}
+const FILLER_PHRASES = [
+  /\bnot\s+specified\b/gi,
+  /\bnot\s+available\b/gi,
+  /\bunknown\b/gi,
+  /\bn\/?a\b/gi,
+  /\bnone\b/gi,
+  /\bnull\b/gi,
+  /\bundefined\b/gi,
+  /\bstock\s+footage\s+of\b/gi,
+  /\bfootage\s+of\b/gi,
+  /\bpicture\s+of\b/gi,
+  /\bimage\s+of\b/gi,
+  /\bphoto\s+of\b/gi,
+  /\bvideo\s+of\b/gi,
+  /\bclip\s+of\b/gi,
+  /\bscene\s+showing\b/gi,
+  /\bshow\s+a\b/gi,
+  /\bpicture\b/gi,
+  /\bphoto\b/gi,
+  /\bfootage\b/gi
+];
+const CHARACTER_NAME_REGEX = /\b(man|woman|person|boy|girl|guy|worker|farmer|shopper|customer|doctor|lawyer|teacher|driver|passenger|elder|child)\s+(?:named|called)\s+[A-ZÀ-Ỹa-zà-ỹ0-9_-]+/gi;
+const PUNCTUATION_REGEX = /[.,;:!?"'()[\]{}<>\\/|_~`#@*+=]/g;
+function sanitizeStockQuery(query, fallback = "") {
+  if (!query || typeof query !== "string") {
+    return fallback.trim();
+  }
+  let cleaned = query.trim();
+  cleaned = cleaned.replace(CHARACTER_NAME_REGEX, "$1");
+  for (const pattern of FILLER_PHRASES) {
+    cleaned = cleaned.replace(pattern, " ");
+  }
+  cleaned = cleaned.replace(PUNCTUATION_REGEX, " ");
+  const words = cleaned.split(/\s+/).map((w) => w.trim()).filter((w) => w.length > 0);
+  const dedupedWords = [];
+  const seenLower = /* @__PURE__ */ new Set();
+  for (const word of words) {
+    const lower = word.toLowerCase();
+    if (lower.length === 1 && lower !== "a") continue;
+    if (!seenLower.has(lower)) {
+      seenLower.add(lower);
+      dedupedWords.push(word);
+    }
+  }
+  let result = dedupedWords.join(" ").trim();
+  if (result.length > 100) {
+    result = result.slice(0, 100).trim();
+    const lastSpace = result.lastIndexOf(" ");
+    if (lastSpace > 20) {
+      result = result.slice(0, lastSpace).trim();
+    }
+  }
+  if (!result || result.length < 2) {
+    if (fallback && fallback.trim().length > 0) {
+      return sanitizeStockQuery(fallback);
+    }
+    return "documentary scene";
+  }
+  return result;
+}
+function normalizeStockQueryKey(query) {
+  return (query || "").toLowerCase().trim().replace(/[^\w\sà-ỹ]/g, " ").replace(/\s+/g, " ").trim();
+}
+function dedupeStockQueries(queries, fallback) {
+  const result = [];
+  const seenKeys = /* @__PURE__ */ new Set();
+  for (const raw of queries) {
+    const sanitized = sanitizeStockQuery(raw, fallback);
+    const key = normalizeStockQueryKey(sanitized);
+    if (key && !seenKeys.has(key)) {
+      seenKeys.add(key);
+      result.push(sanitized);
+    }
+  }
+  return result;
 }
 const DEFAULT_CONFIG = {
   maxMonotoneEnergySeconds: 150,
@@ -1419,7 +1701,7 @@ async function analyzeGlobalContext(params) {
   const { projectDir, apiKey, forceRegenerate = false } = params;
   const progress = params.onProgress ?? (() => {
   });
-  const modelId = params.model ?? "gemini-3.8-flash";
+  const modelId = params.model ?? "gemini-3.5-flash";
   const fullText = params.scriptText ?? params.transcript?.fullText ?? params.transcript?.segments.map((s) => s.text).join(" ") ?? "";
   if (!fullText.trim()) throw new Error("No script or transcript text for global context analysis.");
   let projectId = "unknown";
@@ -1445,42 +1727,76 @@ async function analyzeGlobalContext(params) {
   }
   let rawJson = "";
   let aiError = null;
+  let successfulModel = "";
   const cleanKey = normalizeApiKey(apiKey);
   if (cleanKey.length > 0) {
     progress("Analyzing full script for global context...", 0.05);
     try {
       const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
       const prompt = buildGeminiPrompt$1(fullText, projectId, language);
-      const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
-      const maxRetries = 3;
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
-        try {
-          progress(attempt === 1 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.15);
-          const response = await ai.models.generateContent({
-            model: currentModel,
-            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
-            config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
-          });
-          rawJson = response.text ?? "";
-          if (rawJson) break;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          aiError = msg;
-          logger.warn(`[GlobalContext] Gemini attempt ${attempt} failed: ${msg}`);
-          if (msg.includes("401") || msg.includes("UNAUTHENTICATED") || msg.includes("API_KEY") || msg.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
-            break;
-          }
-          const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
-          if (overloaded && attempt < maxRetries) {
-            const wait = Math.min(attempt * 2, 6);
-            for (let s = wait; s > 0; s--) {
-              progress(`Gemini overloaded, retrying in ${s}s...`, 0.2);
-              await new Promise((r) => setTimeout(r, 1e3));
+      const rawModel = params.model;
+      if (rawModel && DEPRECATED_TEXT_MODELS.has(rawModel)) {
+        logger.warn(`[GeminiModel] Saved model ${rawModel} is unavailable for this account.`);
+        logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(rawModel)}.`);
+      }
+      const fallbackModels = getAvailableModelsForTask("global_context", rawModel);
+      for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+        const currentModel = fallbackModels[mIdx];
+        let retryCount = 0;
+        const maxRetries = 1;
+        while (retryCount <= maxRetries) {
+          try {
+            progress(
+              retryCount === 0 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
+              0.05 + mIdx * 0.15 + retryCount * 0.05
+            );
+            const response = await ai.models.generateContent({
+              model: currentModel,
+              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
+              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+            });
+            rawJson = response.text ?? "";
+            if (rawJson) {
+              successfulModel = currentModel;
+              recordModelSuccess(currentModel);
+              break;
             }
-            continue;
+          } catch (err) {
+            const { kind, message } = classifyGeminiErrorKind(err);
+            recordModelFailure(currentModel, kind);
+            aiError = message;
+            if (kind === "MODEL_NOT_FOUND") {
+              const nextModel = fallbackModels[mIdx + 1];
+              logger.warn(`[GeminiModel] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`);
+              break;
+            }
+            if (kind === "AUTH_ERROR") {
+              logger.error(`[GlobalContext] Gemini authentication error. Check API key.`);
+              mIdx = fallbackModels.length;
+              break;
+            }
+            if (kind === "BAD_REQUEST") {
+              logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`);
+              break;
+            }
+            if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
+              const nextModel = fallbackModels[mIdx + 1];
+              logger.warn(`[GlobalContext] Gemini ${currentModel} encountered ${kind}. Circuit breaker tripped. Switching immediately to ${nextModel ?? "fallback"}...`);
+              break;
+            }
+            retryCount++;
+            if (retryCount <= maxRetries) {
+              const wait = Math.pow(2, retryCount);
+              progress(`Gemini overloaded, retrying in ${wait}s...`, 0.2);
+              await new Promise((r) => setTimeout(r, wait * 1e3 + Math.floor(Math.random() * 500)));
+              continue;
+            } else {
+              logger.warn(`[GlobalContext] Gemini ${currentModel} exhausted retries, switching model...`);
+              break;
+            }
           }
         }
+        if (rawJson) break;
       }
     } catch (outerErr) {
       aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
@@ -1494,7 +1810,7 @@ async function analyzeGlobalContext(params) {
     try {
       const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
       ctx = JSON.parse(clean);
-      ctx.modelUsed = modelId;
+      ctx.modelUsed = successfulModel || modelId;
     } catch {
       logger.warn("[GlobalContext] JSON parse failed, using fallback context");
       ctx = buildFallbackContext(projectId, language, fullText);
@@ -1502,7 +1818,7 @@ async function analyzeGlobalContext(params) {
     }
   } else {
     logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
-    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.7);
+    progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.7);
     ctx = buildFallbackContext(projectId, language, fullText);
     ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
   }
@@ -1512,7 +1828,7 @@ async function analyzeGlobalContext(params) {
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
   fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
   logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
-  progress(`Global context ready — "${ctx.primarySubject}"`, 1);
+  progress(`Global context ready - "${ctx.primarySubject}"`, 1);
   return ctx;
 }
 function buildFallbackContext(projectId, language, text) {
@@ -1722,7 +2038,7 @@ function buildFallbackContext(projectId, language, text) {
     documentaryAngle: "observational documentary",
     targetAudience: "general audience",
     geography: {
-      primaryCountry: "Not specified",
+      primaryCountry: "",
       secondaryLocations: []
     },
     timeContext: {
@@ -1907,12 +2223,20 @@ Return ONLY valid JSON matching this schema:
           }
         }
         if (valid && covered.size === skeletons.length && !skeletons.some((s) => !covered.has(s.sceneIndex))) {
+          recordModelSuccess(model);
           logger.info(`[PLAN] Gemini chapter outline successfully generated: ${data.chapters.length} chapters`);
           return data.chapters;
         }
       }
     } catch (err) {
-      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed: ${err}`);
+      const { kind } = classifyGeminiErrorKind(err);
+      recordModelFailure(model, kind);
+      if (kind === "MODEL_NOT_FOUND") {
+        const nextModel = modelChain[attempt + 1];
+        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic outline fallback"}.`);
+      } else {
+        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
+      }
     }
   }
   logger.info("[PLAN] Using algorithmic chapter outline fallback");
@@ -2018,14 +2342,27 @@ async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalCo
             enrichedMap.set(item.sceneIndex, item);
           }
         }
+        recordModelSuccess(currentModel);
         successModel = currentModel;
         break;
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       lastError = msg;
+      const { kind } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      if (kind === "MODEL_NOT_FOUND") {
+        const nextModel = modelChain[activeModelIndex + 1];
+        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic fallback"}.`);
+        if (activeModelIndex + 1 < modelChain.length) {
+          activeModelIndex++;
+          continue;
+        } else {
+          break;
+        }
+      }
       logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`);
-      const isOverloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
+      const isOverloaded = kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE" || msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
       if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
         activeModelIndex++;
         await new Promise((r) => setTimeout(r, 1500));
@@ -2264,13 +2601,11 @@ async function buildEditPlan(params) {
     apiKey: cleanApiKey,
     httpOptions: { apiVersion: "v1beta" }
   });
-  const fallbackModelChain = [
-    modelId,
-    "gemini-3.8-flash",
-    "gemini-3.6-flash",
-    "gemini-2.5-flash",
-    "gemini-1.5-flash-latest"
-  ].filter((v, i, a) => a.indexOf(v) === i);
+  if (modelId && DEPRECATED_TEXT_MODELS.has(modelId)) {
+    logger.warn(`[GeminiModel] Saved model ${modelId} is unavailable for this account.`);
+    logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(modelId)}.`);
+  }
+  const fallbackModelChain = getAvailableModelsForTask("planning", modelId);
   progress("Creating chapter and sequence outline...", 0.2);
   const outline = await generateChapterOutlineWithGemini(
     ai,
@@ -2284,7 +2619,7 @@ async function buildEditPlan(params) {
   const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE);
   const allEnrichedMap = /* @__PURE__ */ new Map();
   let hadAnyBatchFallback = false;
-  let primaryModelUsed = modelId;
+  let primaryModelUsed = fallbackModelChain[0];
   for (let b = 0; b < totalBatches; b++) {
     const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
     const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
@@ -2319,7 +2654,8 @@ async function buildEditPlan(params) {
         const skel = skeletonMap.get(idx);
         if (!skel) continue;
         const aiData = allEnrichedMap.get(skel.sceneIndex);
-        const queries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
+        const rawQueries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
+        const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)));
         const sc = {
           sceneIndex: skel.sceneIndex,
           // will be globally normalized below
@@ -2421,11 +2757,18 @@ async function buildEditPlan(params) {
   );
   return plan;
 }
-const CONFIG_PATH = path.join(electron.app.getPath("userData"), "app-config.json");
+const CONFIG_PATH = path.join(
+  electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
+  "app-config.json"
+);
 function loadConfig() {
   try {
     if (fs__namespace.existsSync(CONFIG_PATH)) {
-      return JSON.parse(fs__namespace.readFileSync(CONFIG_PATH, "utf-8"));
+      const cfg = JSON.parse(fs__namespace.readFileSync(CONFIG_PATH, "utf-8"));
+      if (cfg.preferredModel) {
+        cfg.preferredModel = normalizePreferredTextModel(cfg.preferredModel);
+      }
+      return cfg;
     }
   } catch {
     logger.warn("Failed to read app config, using defaults");
@@ -2506,10 +2849,10 @@ function registerPlannerHandlers(ipcMain) {
 let cachedBundleUrl = null;
 async function getBundle(onProgress) {
   if (cachedBundleUrl) {
-    logger.info("[RemotionRenderer] Dùng bundle cache");
+    logger.info("[RemotionRenderer] Using bundle cache");
     return cachedBundleUrl;
   }
-  logger.info("[RemotionRenderer] Đang bundle Remotion composition...");
+  logger.info("[RemotionRenderer] Bundling Remotion composition...");
   const entryPoint = path__namespace.join(__dirname, "../../src/remotion/index.ts");
   cachedBundleUrl = await bundler.bundle({
     entryPoint,
@@ -2525,6 +2868,7 @@ async function renderCaptionsOverlay(options) {
   const {
     captionPlan,
     proofVisuals,
+    visualGrammar,
     videoDurationInSeconds,
     outputPath,
     fps = 30,
@@ -2536,12 +2880,14 @@ async function renderCaptionsOverlay(options) {
   const bundleUrl = await getBundle(onBundleProgress);
   const durationInFrames = Math.ceil(videoDurationInSeconds * fps);
   logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)`);
-  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}×${resolution.height}`);
-  logger.info(`[RemotionRenderer] Phrases: ${captionPlan.phrases.length}`);
+  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}x${resolution.height}`);
+  logger.info(`[RemotionRenderer] Phrases: ${captionPlan?.phrases?.length ?? 0}`);
   logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`);
+  logger.info(`[RemotionRenderer] VisualGrammar: ${visualGrammar?.length ?? 0}`);
   const inputProps = {
-    captionPlan,
-    proofVisuals: proofVisuals ?? []
+    captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
+    proofVisuals: proofVisuals ?? [],
+    visualGrammar: visualGrammar ?? []
   };
   const composition = await renderer.selectComposition({
     serveUrl: bundleUrl,
@@ -2566,7 +2912,7 @@ async function renderCaptionsOverlay(options) {
       logger.debug(`[RemotionRenderer] Render: ${pct}%`);
     }
   });
-  logger.info(`[RemotionRenderer] Overlay xong: ${outputPath}`);
+  logger.info(`[RemotionRenderer] Overlay complete: ${outputPath}`);
 }
 const ffmpegPath$2 = require("ffmpeg-static");
 function normalizeTransitionType(raw) {
@@ -2863,7 +3209,7 @@ async function concatSceneClipsWithTransitions(params) {
   );
   logger.info(`[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s`);
   if (cutCount === transitions.length) {
-    logger.info("[Transitions] All boundaries are hard cuts — skipping xfade filter_complex");
+    logger.info("[Transitions] All boundaries are hard cuts -- skipping xfade filter_complex");
     return false;
   }
   onProgress?.("Applying scene transitions...", 0.78);
@@ -3536,6 +3882,1023 @@ const DEFAULT_RETENTION_SETTINGS = {
   semanticCropEnabled: true,
   patternInterruptEnabled: true
 };
+function atomicWriteJson(filePath, data, indent = 2) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const serialized = JSON.stringify(data, null, indent);
+  if (!serialized || serialized.length === 0) {
+    throw new Error(`Cannot write empty JSON data to ${filePath}`);
+  }
+  try {
+    fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+    } catch {
+      if (fs__namespace.existsSync(filePath)) {
+        fs__namespace.unlinkSync(filePath);
+      }
+      fs__namespace.renameSync(tmpPath, filePath);
+    }
+  } catch (err) {
+    try {
+      if (fs__namespace.existsSync(tmpPath)) {
+        fs__namespace.unlinkSync(tmpPath);
+      }
+    } catch {
+    }
+    logger.error(`[AtomicJsonStore] Failed to write ${filePath}: ${String(err)}`);
+    throw err;
+  }
+}
+function atomicReadJson(filePath, defaultValue) {
+  try {
+    if (!fs__namespace.existsSync(filePath)) {
+      return defaultValue;
+    }
+    const raw = fs__namespace.readFileSync(filePath, "utf-8").trim();
+    if (!raw) {
+      return defaultValue;
+    }
+    return JSON.parse(raw);
+  } catch (err) {
+    logger.warn(`[AtomicJsonStore] Failed to read ${filePath}, returning default: ${String(err)}`);
+    return defaultValue;
+  }
+}
+const readJsonSafe = atomicReadJson;
+function getProjectSettingsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "production-settings.json");
+}
+function loadProductionSettings(projectDir) {
+  if (projectDir) {
+    const projectSettingsPath = getProjectSettingsPath(projectDir);
+    if (fs__namespace.existsSync(projectSettingsPath)) {
+      const projectSettings = atomicReadJson(
+        projectSettingsPath,
+        {}
+      );
+      return {
+        ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
+        ...projectSettings
+      };
+    }
+  }
+  try {
+    const config = loadConfig();
+    if (config.productionIntelligenceSettings) {
+      return {
+        ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
+        ...config.productionIntelligenceSettings
+      };
+    }
+  } catch (err) {
+    logger.warn(`[ProductionSettings] Error reading global config: ${String(err)}`);
+  }
+  return { ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS };
+}
+function saveProductionSettings(settings, projectDir) {
+  const current = loadProductionSettings(projectDir);
+  const updated = {
+    ...current,
+    ...settings
+  };
+  if (projectDir) {
+    const projectSettingsPath = getProjectSettingsPath(projectDir);
+    try {
+      atomicWriteJson(projectSettingsPath, updated);
+      logger.info(`[ProductionSettings] Saved project settings: ${projectSettingsPath}`);
+    } catch (err) {
+      logger.error(`[ProductionSettings] Failed saving project settings: ${String(err)}`);
+    }
+  }
+  try {
+    const config = loadConfig();
+    config.productionIntelligenceSettings = updated;
+    saveConfig(config);
+  } catch (err) {
+    logger.warn(`[ProductionSettings] Failed saving to global config: ${String(err)}`);
+  }
+  return updated;
+}
+function flattenEditPlanScenes(plan) {
+  const result = [];
+  const chapters = plan.chapters ?? [];
+  for (let chIdx = 0; chIdx < chapters.length; chIdx++) {
+    const ch = chapters[chIdx];
+    const chapterIndex = typeof ch.chapterIndex === "number" ? ch.chapterIndex : chIdx;
+    const chapterTitle = ch.title ?? `Chapter ${chapterIndex + 1}`;
+    const chapterPurpose = ch.purpose ?? "";
+    const rawSequences = ch.sequences ?? ch.chapters_seq ?? [];
+    let isFirstInChapter = true;
+    for (let seqIdx = 0; seqIdx < rawSequences.length; seqIdx++) {
+      const seq = rawSequences[seqIdx];
+      const sequenceIndex = typeof seq.sequenceIndex === "number" ? seq.sequenceIndex : seqIdx;
+      const sequenceTitle = seq.title ?? `Sequence ${sequenceIndex + 1}`;
+      const scenes = seq.scenes ?? [];
+      let isFirstInSequence = true;
+      for (let scIdx = 0; scIdx < scenes.length; scIdx++) {
+        const rawScene = scenes[scIdx];
+        const sceneIndex = typeof rawScene.sceneIndex === "number" ? rawScene.sceneIndex : result.length;
+        const sceneId = typeof rawScene.sceneId === "string" && rawScene.sceneId.trim().length > 0 ? rawScene.sceneId : `chapter-${chapterIndex}-sequence-${sequenceIndex}-scene-${sceneIndex}`;
+        const isLastInSequence = scIdx === scenes.length - 1;
+        const isLastInChapter = isLastInSequence && seqIdx === rawSequences.length - 1;
+        result.push({
+          scene: rawScene,
+          sceneId,
+          sceneIndex,
+          chapterIndex,
+          chapterTitle,
+          chapterPurpose,
+          sequenceIndex,
+          sequenceTitle,
+          isFirstInChapter,
+          isFirstInSequence,
+          isLastInChapter,
+          isLastInSequence
+        });
+        isFirstInChapter = false;
+        isFirstInSequence = false;
+      }
+    }
+  }
+  return result;
+}
+const YEAR_REGEX = /\b(1[6-9]\d{2}|20\d{2})('?s)?\b/;
+const CENTURY_REGEX = /\b(\d{1,2}(?:st|nd|rd|th))\s+century\b/i;
+const MONTH_YEAR_REGEX = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(1[6-9]\d{2}|20\d{2})\b/i;
+const STAT_PERCENT_REGEX = /\b(\d+(?:\.\d+)?%)(?!\w)/;
+const STAT_MONEY_REGEX = /(\$\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|trillion))?|\b\d+(?:\.\d+)?\s*(?:million|billion|triệu|tỷ)\s*(?:dollars|đô la|đồng|usd|vnd)?\b)/i;
+const STAT_COUNT_REGEX = /\b(\d+(?:,\d{3})+|\d{2,}\s*(?:thousand|hundred))\s+([a-zA-Z]+)\b/i;
+const LOCATION_INDICATOR_REGEX = /(?:^|\s|\b)(?:in|at|near|across|from|tại|ở)\s+(?:thành phố|thủ đô|city|capital)?\s*([A-Za-zÀ-ỹ]+(?:\s+[A-Za-zÀ-ỹ]+)*(?:,\s*[A-Za-zÀ-ỹ]+)?)/iu;
+const QUOTE_MARK_REGEX = /["“]([^"”]{6,100})["”]/;
+const QUOTE_VERB_REGEX = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:said|declared|stated|proclaimed|whispered|wrote)\b[:,\s]*["“]?([^"”.!]{6,80})["”]?/i;
+const COMPARISON_REGEX = /(?:instead of|compared to|versus|\bvs\.?\b|on the other hand|while [a-z]+ [a-z]+, [a-z]+|rather than|trong khi|thay vì|so với|ngược lại|mặt khác|trái ngược)/i;
+const DOCUMENT_REGEX = /(?:document|contract|treaty|accord|constitution|charter|bill|law|docket|manifesto|record|file|deed|license|affidavit|hợp đồng|giấy tờ|hồ sơ|văn bản|nghị quyết|nghị định|hóa đơn|luật|hiến pháp)/iu;
+function classifyNarrationGrammar(narration, scene) {
+  const text = narration.trim();
+  if (scene.isFirstInChapter && scene.chapterTitle && scene.sceneIndex > 1) {
+    return {
+      type: "chapter_title",
+      confidence: 0.95,
+      reason: `First scene in chapter: "${scene.chapterTitle}"`,
+      primaryText: scene.chapterTitle.toUpperCase(),
+      secondaryText: `CHAPTER ${scene.chapterTitle}`,
+      position: "center"
+    };
+  }
+  const monthYearMatch = text.match(MONTH_YEAR_REGEX);
+  if (monthYearMatch) {
+    return {
+      type: "date_card",
+      confidence: 0.9,
+      reason: `Temporal anchor: "${monthYearMatch[0]}"`,
+      primaryText: monthYearMatch[0].toUpperCase(),
+      secondaryText: "HISTORICAL TIMELINE",
+      position: "top_right"
+    };
+  }
+  const yearMatch = text.match(YEAR_REGEX);
+  if (yearMatch) {
+    return {
+      type: "date_card",
+      confidence: 0.88,
+      reason: `Year reference: "${yearMatch[0]}"`,
+      primaryText: yearMatch[0],
+      secondaryText: "CHRONOLOGY",
+      position: "top_right"
+    };
+  }
+  const centuryMatch = text.match(CENTURY_REGEX);
+  if (centuryMatch) {
+    return {
+      type: "date_card",
+      confidence: 0.85,
+      reason: `Era reference: "${centuryMatch[0]}"`,
+      primaryText: centuryMatch[0].toUpperCase(),
+      secondaryText: "HISTORICAL ERA",
+      position: "top_right"
+    };
+  }
+  const moneyMatch = text.match(STAT_MONEY_REGEX);
+  if (moneyMatch) {
+    return {
+      type: "stat_card",
+      confidence: 0.92,
+      reason: `Financial figure: "${moneyMatch[0]}"`,
+      primaryText: moneyMatch[0].trim(),
+      secondaryText: "KEY DATA POINT",
+      position: "bottom_left"
+    };
+  }
+  const percentMatch = text.match(STAT_PERCENT_REGEX);
+  if (percentMatch) {
+    return {
+      type: "stat_card",
+      confidence: 0.9,
+      reason: `Percentage metric: "${percentMatch[0]}"`,
+      primaryText: percentMatch[0],
+      secondaryText: "STATISTICAL METRIC",
+      position: "bottom_left"
+    };
+  }
+  const countMatch = text.match(STAT_COUNT_REGEX);
+  if (countMatch && !countMatch[2].match(/^(seconds|minutes|hours|days|weeks|months|years)$/i)) {
+    return {
+      type: "stat_card",
+      confidence: 0.85,
+      reason: `Quantifiable count: "${countMatch[0]}"`,
+      primaryText: countMatch[1],
+      secondaryText: countMatch[2].toUpperCase(),
+      position: "bottom_left"
+    };
+  }
+  const quoteMarkMatch = text.match(QUOTE_MARK_REGEX);
+  if (quoteMarkMatch && quoteMarkMatch[1].length > 10) {
+    return {
+      type: "quote_card",
+      confidence: 0.88,
+      reason: "Quotation in narration",
+      primaryText: `"${quoteMarkMatch[1].trim()}"`,
+      secondaryText: "RECORDED TESTIMONY",
+      position: "bottom_right"
+    };
+  }
+  const quoteVerbMatch = text.match(QUOTE_VERB_REGEX);
+  if (quoteVerbMatch && quoteVerbMatch[2].length > 8) {
+    return {
+      type: "quote_card",
+      confidence: 0.82,
+      reason: `Attributed statement: ${quoteVerbMatch[1]}`,
+      primaryText: `"${quoteVerbMatch[2].trim()}"`,
+      secondaryText: quoteVerbMatch[1].toUpperCase(),
+      position: "bottom_right"
+    };
+  }
+  if (COMPARISON_REGEX.test(text) && text.length > 20) {
+    if (text.includes(",")) {
+      const commaParts = text.split(",");
+      const a = commaParts[0].replace(COMPARISON_REGEX, "").trim().split(/\s+/).slice(-4).join(" ");
+      const b = commaParts[1].trim().split(/\s+/).slice(0, 4).join(" ");
+      if (a && b) {
+        return {
+          type: "comparison_card",
+          confidence: 0.8,
+          reason: "Contrastive statement structure",
+          primaryText: a.toUpperCase(),
+          secondaryText: `VS. ${b.toUpperCase()}`,
+          position: "center_bottom"
+        };
+      }
+    }
+    const parts = text.split(COMPARISON_REGEX).map((p) => p.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const a = parts[0].split(/\s+/).slice(-4).join(" ");
+      const b = parts[1].split(/\s+/).slice(0, 4).join(" ");
+      return {
+        type: "comparison_card",
+        confidence: 0.78,
+        reason: "Contrastive statement structure",
+        primaryText: a.toUpperCase(),
+        secondaryText: `VS. ${b.toUpperCase()}`,
+        position: "center_bottom"
+      };
+    }
+  }
+  if (DOCUMENT_REGEX.test(text)) {
+    const docMatch = text.match(DOCUMENT_REGEX);
+    return {
+      type: "document_card",
+      confidence: 0.8,
+      reason: `Historical or official record reference: "${docMatch?.[0]}"`,
+      primaryText: (docMatch?.[0] || "OFFICIAL RECORD").toUpperCase(),
+      secondaryText: "ARCHIVAL DOSSIER",
+      position: "bottom_right"
+    };
+  }
+  const locMatch = text.match(LOCATION_INDICATOR_REGEX);
+  if (locMatch && !locMatch[1].match(/^(January|February|March|April|May|June|July|August|September|October|November|December|Chapter|Scene|Part)$/i)) {
+    return {
+      type: "location_card",
+      confidence: 0.75,
+      reason: `Geographic location reference: "${locMatch[1]}"`,
+      primaryText: locMatch[1].toUpperCase(),
+      secondaryText: "LOCATION",
+      position: "top_left"
+    };
+  }
+  if (scene.mediaType === "image") {
+    return {
+      type: "photo_parallax",
+      confidence: 0.7,
+      reason: "Still photo suitable for documentary parallax depth movement",
+      position: "center"
+    };
+  }
+  return {
+    type: "stock_video",
+    confidence: 0.6,
+    reason: "Standard contextual footage"
+  };
+}
+function enforceGrammarDensityAndSpacing(rawDecisions, scenes, maxDensity = 0.25, minSpacingSecs = 6, captionPlan, proofVisuals) {
+  const totalScenes = scenes.length;
+  const maxAllowedGraphics = Math.max(1, Math.floor(totalScenes * maxDensity));
+  let lastGraphicEndTime = -999;
+  let lastGraphicType = "stock_video";
+  let graphicCount = 0;
+  const results = [];
+  for (let i = 0; i < rawDecisions.length; i++) {
+    const dec = { ...rawDecisions[i] };
+    const sc = scenes.find((s) => s.sceneIndex === dec.sceneIndex);
+    if (!sc) {
+      results.push(dec);
+      continue;
+    }
+    const isGraphic = dec.type !== "stock_video" && dec.type !== "stock_image" && dec.type !== "photo_parallax";
+    if (!isGraphic) {
+      dec.enabled = true;
+      results.push(dec);
+      continue;
+    }
+    if (graphicCount >= maxAllowedGraphics) {
+      dec.enabled = false;
+      dec.reason += " (disabled: reached max 25% density limit)";
+      results.push(dec);
+      continue;
+    }
+    if (lastGraphicType !== "stock_video" && lastGraphicType !== "stock_image" && lastGraphicType !== "photo_parallax" && dec.type !== "chapter_title" && lastGraphicType !== "chapter_title") {
+      dec.enabled = false;
+      dec.reason += " (disabled: anti-clutter rule — avoid consecutive graphic cards)";
+      results.push(dec);
+      continue;
+    }
+    const proposedStartTime = sc.startTime + dec.startOffset;
+    if (proposedStartTime - lastGraphicEndTime < minSpacingSecs && dec.type !== "chapter_title") {
+      dec.enabled = false;
+      dec.reason += ` (disabled: min ${minSpacingSecs}s spacing from previous graphic)`;
+      results.push(dec);
+      continue;
+    }
+    if (captionPlan?.phrases) {
+      const collision = captionPlan.phrases.some((p) => {
+        if (p.presetType === "big_statement" || p.emphasisType === "hook") {
+          const pStart = p.startTime;
+          const pEnd = p.endTime;
+          const gStart = proposedStartTime;
+          const gEnd = proposedStartTime + dec.duration;
+          return Math.max(pStart, gStart) < Math.min(pEnd, gEnd);
+        }
+        return false;
+      });
+      if (collision) {
+        dec.enabled = false;
+        dec.reason += " (disabled: collision avoidance with prominent kinetic caption)";
+        results.push(dec);
+        continue;
+      }
+    }
+    if (proofVisuals) {
+      const proofCollision = proofVisuals.some((pv) => {
+        if (pv.absoluteStartTime != null && pv.absoluteEndTime != null) {
+          const pvStart = pv.absoluteStartTime;
+          const pvEnd = pv.absoluteEndTime;
+          const gStart = proposedStartTime;
+          const gEnd = proposedStartTime + dec.duration;
+          return Math.max(pvStart, gStart) < Math.min(pvEnd, gEnd);
+        }
+        return false;
+      });
+      if (proofCollision) {
+        dec.enabled = false;
+        dec.reason += " (disabled: avoided duplicate overlay with active proof visual)";
+        results.push(dec);
+        continue;
+      }
+    }
+    dec.enabled = true;
+    lastGraphicEndTime = proposedStartTime + dec.duration;
+    lastGraphicType = dec.type;
+    graphicCount++;
+    results.push(dec);
+  }
+  return results;
+}
+function generateVisualGrammarPlan(params) {
+  const { projectDir, editPlan, captionPlan, proofVisuals } = params;
+  const prodSettings = params.settings ?? loadProductionSettings(projectDir);
+  const flattened = flattenEditPlanScenes(editPlan);
+  const rawDecisions = flattened.map((entry) => {
+    const narration = entry.scene.narrativeText ?? "";
+    const classification = classifyNarrationGrammar(narration, {
+      isFirstInChapter: entry.isFirstInChapter,
+      chapterTitle: entry.chapterTitle,
+      sceneIndex: entry.sceneIndex,
+      mediaType: entry.scene.mediaType
+    });
+    const duration = entry.scene.duration ?? (entry.scene.endTime ?? 0) - (entry.scene.startTime ?? 0);
+    const graphicDuration = Math.min(Math.max(2.5, duration * 0.6), 4.5);
+    const startOffset = Math.min(0.5, Math.max(0, duration - graphicDuration));
+    return {
+      sceneId: entry.sceneId,
+      sceneIndex: entry.sceneIndex,
+      type: classification.type,
+      confidence: classification.confidence,
+      reason: classification.reason,
+      primaryText: classification.primaryText,
+      secondaryText: classification.secondaryText,
+      sourceNarration: narration.slice(0, 100),
+      startOffset,
+      duration: graphicDuration,
+      position: classification.position ?? "bottom_right",
+      enabled: prodSettings.enabled && prodSettings.visualSceneGrammarEnabled
+    };
+  });
+  const sceneInfos = flattened.map((f) => ({
+    sceneIndex: f.sceneIndex,
+    startTime: f.scene.startTime ?? 0,
+    endTime: f.scene.endTime ?? 0,
+    duration: f.scene.duration ?? (f.scene.endTime ?? 0) - (f.scene.startTime ?? 0)
+  }));
+  const finalDecisions = enforceGrammarDensityAndSpacing(
+    rawDecisions,
+    sceneInfos,
+    prodSettings.maxVisualGrammarDensity || 0.25,
+    6,
+    captionPlan,
+    proofVisuals
+  );
+  const activeGraphics = finalDecisions.filter(
+    (d) => d.enabled && d.type !== "stock_video" && d.type !== "stock_image" && d.type !== "photo_parallax"
+  );
+  const plan = {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    density: flattened.length > 0 ? activeGraphics.length / flattened.length : 0,
+    totalScenes: flattened.length,
+    graphicCount: activeGraphics.length,
+    decisions: finalDecisions
+  };
+  const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
+  atomicWriteJson(planPath, plan);
+  logger.info(
+    `[VisualGrammar] Generated plan with ${activeGraphics.length}/${flattened.length} graphics (${Math.round(plan.density * 100)}% density)`
+  );
+  return plan;
+}
+function loadVisualGrammarPlan(projectDir) {
+  const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
+  if (!fs__namespace.existsSync(planPath)) return null;
+  return readJsonSafe(planPath, null);
+}
+const ffmpegStatic = require("ffmpeg-static");
+const ffprobeStatic = require("ffprobe-static");
+const probeCache = /* @__PURE__ */ new Map();
+async function probeMediaDetailed(filePath) {
+  if (!filePath || !fs__namespace.existsSync(filePath)) return null;
+  try {
+    const stat = fs__namespace.statSync(filePath);
+    const cached = probeCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return cached.probe;
+    }
+    if (!ffprobeStatic?.path || !fs__namespace.existsSync(ffprobeStatic.path)) {
+      logger.warn("[QA-Probe] ffprobe binary not found");
+      return null;
+    }
+    return new Promise((resolve) => {
+      const proc = child_process.spawn(
+        ffprobeStatic.path,
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "stream=codec_type,codec_name,width,height,r_frame_rate,duration:format=duration,size",
+          "-of",
+          "json",
+          filePath
+        ],
+        { windowsHide: true }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("close", (code) => {
+        if (code !== 0) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout);
+          const streams = parsed.streams ?? [];
+          const videoStream = streams.find((s) => s.codec_type === "video");
+          const audioStream = streams.find((s) => s.codec_type === "audio");
+          const formatDuration = parseFloat(parsed.format?.duration ?? "0");
+          const videoDuration = parseFloat(videoStream?.duration ?? "0");
+          const durationSecs = formatDuration > 0 ? formatDuration : videoDuration;
+          let fps = 30;
+          if (videoStream?.r_frame_rate) {
+            const [num, den] = videoStream.r_frame_rate.split("/").map(Number);
+            if (num && den) fps = Math.round(num / den * 100) / 100;
+          }
+          const details = {
+            hasVideo: !!videoStream,
+            hasAudio: !!audioStream,
+            width: Number(videoStream?.width) || 0,
+            height: Number(videoStream?.height) || 0,
+            durationSecs,
+            fps,
+            codecVideo: videoStream?.codec_name,
+            codecAudio: audioStream?.codec_name,
+            fileSizeBytes: stat.size
+          };
+          probeCache.set(filePath, { probe: details, mtimeMs: stat.mtimeMs });
+          resolve(details);
+        } catch {
+          resolve(null);
+        }
+      });
+      proc.on("error", () => resolve(null));
+    });
+  } catch (err) {
+    logger.warn(`[QA-Probe] Error probing file ${filePath}: ${String(err)}`);
+    return null;
+  }
+}
+async function analyzeVideoQuality(filePath, totalDuration) {
+  const result = {
+    durationSecs: totalDuration,
+    blackSegments: [],
+    totalBlackDuration: 0,
+    blackCoveragePct: 0,
+    freezeSegments: [],
+    silenceSegments: []
+  };
+  if (!ffmpegStatic || !fs__namespace.existsSync(filePath)) {
+    return result;
+  }
+  return new Promise((resolve) => {
+    const proc = child_process.spawn(
+      ffmpegStatic,
+      [
+        "-v",
+        "info",
+        "-i",
+        filePath,
+        "-vf",
+        "blackdetect=d=1.5:pix_th=0.10,freezedetect=n=-50dB:d=3.0",
+        "-af",
+        "silencedetect=noise=-50dB:d=3.0",
+        "-f",
+        "null",
+        "-"
+      ],
+      { windowsHide: true }
+    );
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+    });
+    proc.on("close", () => {
+      const blackMatches = stderr.matchAll(/black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)/g);
+      for (const m of blackMatches) {
+        const start = parseFloat(m[1]);
+        const end = parseFloat(m[2]);
+        const duration = parseFloat(m[3]);
+        result.blackSegments.push({ start, end, duration });
+        result.totalBlackDuration += duration;
+      }
+      if (totalDuration > 0) {
+        result.blackCoveragePct = Math.round(result.totalBlackDuration / totalDuration * 100);
+      }
+      const freezeStartMatches = stderr.matchAll(/freeze_start:\s*([\d.]+)/g);
+      const freezeDurMatches = stderr.matchAll(/freeze_duration:\s*([\d.]+)/g);
+      const freezeStarts = Array.from(freezeStartMatches).map((m) => parseFloat(m[1]));
+      const freezeDurs = Array.from(freezeDurMatches).map((m) => parseFloat(m[1]));
+      for (let i = 0; i < Math.min(freezeStarts.length, freezeDurs.length); i++) {
+        const start = freezeStarts[i];
+        const dur = freezeDurs[i];
+        result.freezeSegments.push({ start, end: start + dur, duration: dur });
+      }
+      const silStarts = Array.from(stderr.matchAll(/silence_start:\s*([\d.]+)/g)).map((m) => parseFloat(m[1]));
+      const silDurs = Array.from(stderr.matchAll(/silence_duration:\s*([\d.]+)/g)).map((m) => parseFloat(m[1]));
+      for (let i = 0; i < Math.min(silStarts.length, silDurs.length); i++) {
+        const start = silStarts[i];
+        const dur = silDurs[i];
+        result.silenceSegments.push({ start, end: start + dur, duration: dur });
+      }
+      resolve(result);
+    });
+    proc.on("error", () => resolve(result));
+  });
+}
+async function generateContactSheet(videoPath, outputPath, durationSecs) {
+  if (!ffmpegStatic || !fs__namespace.existsSync(videoPath) || durationSecs <= 0) {
+    return false;
+  }
+  try {
+    const tmpDir = fs__namespace.mkdtempSync("contact_sheet_");
+    const frameCount = 5;
+    const timestamps = [
+      0.5,
+      Math.max(1, durationSecs * 0.25),
+      Math.max(2, durationSecs * 0.5),
+      Math.max(3, durationSecs * 0.75),
+      Math.max(4, durationSecs - 0.8)
+    ];
+    const extractedFiles = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = Math.min(timestamps[i], Math.max(0, durationSecs - 0.2));
+      const framePath = `${tmpDir}/frame_${i}.jpg`;
+      await new Promise((resolve) => {
+        const p = child_process.spawn(
+          ffmpegStatic,
+          [
+            "-y",
+            "-ss",
+            String(ts),
+            "-i",
+            videoPath,
+            "-vframes",
+            "1",
+            "-q:v",
+            "3",
+            framePath
+          ],
+          { windowsHide: true }
+        );
+        p.on("close", () => resolve());
+        p.on("error", () => resolve());
+      });
+      if (fs__namespace.existsSync(framePath) && fs__namespace.statSync(framePath).size > 0) {
+        extractedFiles.push(framePath);
+      }
+    }
+    if (extractedFiles.length === 0) {
+      fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
+      return false;
+    }
+    const tileFilter = extractedFiles.length >= 5 ? "tile=5x1" : `tile=${extractedFiles.length}x1`;
+    const concatInputArgs = extractedFiles.flatMap((f) => ["-i", f]);
+    await new Promise((resolve, reject) => {
+      const p = child_process.spawn(
+        ffmpegStatic,
+        [
+          "-y",
+          ...concatInputArgs,
+          "-filter_complex",
+          `${extractedFiles.map((_, idx) => `[${idx}:v]scale=384:216[v${idx}]`).join(";")};${extractedFiles.map((_, idx) => `[v${idx}]`).join("")}${tileFilter}`,
+          outputPath
+        ],
+        { windowsHide: true }
+      );
+      p.on("close", (code) => {
+        if (code === 0 && fs__namespace.existsSync(outputPath) && fs__namespace.statSync(outputPath).size > 0) {
+          resolve();
+        } else {
+          reject(new Error(`FFmpeg contact sheet tile exited with ${code}`));
+        }
+      });
+      p.on("error", reject);
+    });
+    fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
+    return true;
+  } catch (err) {
+    logger.warn(`[QA-ContactSheet] Failed to generate contact sheet: ${String(err)}`);
+    return false;
+  }
+}
+async function runRenderPreflight(options) {
+  const {
+    projectDir,
+    voiceoverPath,
+    captionPlan,
+    resolution = { width: 1920, height: 1080 },
+    fps = 30
+  } = options;
+  const prodSettings = options.settings ?? loadProductionSettings(projectDir);
+  const strictMode = options.strictMissingMedia ?? prodSettings.strictMissingMedia ?? false;
+  const issues = [];
+  let issueId = 1;
+  function addIssue(severity, category, message, suggestion, sceneId, sceneIndex, details) {
+    issues.push({
+      id: `preflight_${issueId++}`,
+      stage: "preflight",
+      severity,
+      category,
+      message,
+      suggestion,
+      sceneId,
+      sceneIndex,
+      details
+    });
+  }
+  const outputDir = path.join(projectDir, "output");
+  try {
+    fs__namespace.mkdirSync(outputDir, { recursive: true });
+    const testFile = path.join(outputDir, `.qa_write_test_${Date.now()}`);
+    fs__namespace.writeFileSync(testFile, "ok", "utf-8");
+    fs__namespace.unlinkSync(testFile);
+  } catch (err) {
+    addIssue("fatal", "output", `Output directory is not writable: ${outputDir} (${String(err)})`, "Check folder permissions");
+  }
+  if (resolution.width <= 0 || resolution.height <= 0 || fps <= 0) {
+    addIssue("fatal", "output", `Invalid render output configuration: ${resolution.width}x${resolution.height} @ ${fps}fps`, "Use standard resolution (e.g. 1920x1080 @ 30fps)");
+  }
+  let planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    const rootPlan = path.join(projectDir, "master-edit-plan.json");
+    if (fs__namespace.existsSync(rootPlan)) {
+      planPath = rootPlan;
+    } else {
+      addIssue("fatal", "plan", "master-edit-plan.json not found. Run AI Planning first.", "Generate an edit plan in AI Planning step");
+      return buildReport$1(0, 0, 0, issues);
+    }
+  }
+  let plan;
+  try {
+    plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  } catch (err) {
+    addIssue("fatal", "plan", `Failed to parse master-edit-plan.json: ${String(err)}`, "Re-run AI Planning");
+    return buildReport$1(0, 0, 0, issues);
+  }
+  const flattened = flattenEditPlanScenes(plan);
+  if (flattened.length === 0) {
+    addIssue("fatal", "plan", "Edit plan contains 0 scenes.", "Run AI Planning to generate scenes");
+    return buildReport$1(0, 0, 0, issues);
+  }
+  const seenIndices = /* @__PURE__ */ new Set();
+  let expectedTotalDuration = 0;
+  for (let i = 0; i < flattened.length; i++) {
+    const entry = flattened[i];
+    const { scene, sceneIndex, sceneId } = entry;
+    if (seenIndices.has(sceneIndex)) {
+      addIssue("fatal", "plan", `Duplicate sceneIndex ${sceneIndex} detected.`, "Ensure all scenes have unique scene indices", sceneId, sceneIndex);
+    }
+    seenIndices.add(sceneIndex);
+    const dur = scene.duration ?? (scene.endTime ?? 0) - (scene.startTime ?? 0);
+    if (dur <= 0) {
+      addIssue("fatal", "plan", `Scene ${sceneIndex} has invalid duration: ${dur}s`, "Ensure scene duration is greater than 0", sceneId, sceneIndex);
+    } else {
+      expectedTotalDuration += dur;
+    }
+  }
+  let mediaIndex = [];
+  const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
+  if (fs__namespace.existsSync(mediaIndexPath)) {
+    mediaIndex = readJsonSafe(mediaIndexPath, []);
+  }
+  let resolvedScenesCount = 0;
+  for (const entry of flattened) {
+    const { scene, sceneIndex, sceneId } = entry;
+    const resolved = resolveSceneMediaWithSource(
+      scene,
+      mediaIndex,
+      projectDir
+    );
+    if (resolved.mediaPath && fs__namespace.existsSync(resolved.mediaPath) && fs__namespace.statSync(resolved.mediaPath).size > 0) {
+      resolvedScenesCount++;
+      const probe = await probeMediaDetailed(resolved.mediaPath);
+      if (probe) {
+        if (probe.hasVideo && probe.durationSecs < (scene.duration ?? 2) * 0.5) {
+          addIssue("warning", "media", `Scene ${sceneIndex} video asset duration (${probe.durationSecs.toFixed(1)}s) is shorter than scene duration`, "Stock video may loop or freeze", sceneId, sceneIndex);
+        }
+        if (probe.hasVideo && (probe.width < 720 || probe.height < 480)) {
+          addIssue("warning", "media", `Scene ${sceneIndex} has low resolution asset: ${probe.width}x${probe.height}`, "Replace with higher quality footage in Stock Media", sceneId, sceneIndex);
+        }
+      }
+    } else {
+      const severity = strictMode ? "fatal" : "warning";
+      addIssue(
+        severity,
+        "media",
+        `Scene ${sceneIndex} media is missing (${resolved.source}). ${strictMode ? "Strict mode on: render blocked." : "Black placeholder fallback will be used."}`,
+        "Search or upload media in Stock Media tab",
+        sceneId,
+        sceneIndex
+      );
+    }
+  }
+  if (resolvedScenesCount === 0 && flattened.length > 0) {
+    addIssue("fatal", "media", "All scenes are missing media files. Cannot render video without footage.", "Run Stock Media search or upload media");
+  }
+  if (voiceoverPath) {
+    if (!fs__namespace.existsSync(voiceoverPath) || fs__namespace.statSync(voiceoverPath).size === 0) {
+      addIssue("fatal", "audio", `Specified voiceover file not found or empty: ${voiceoverPath}`, "Check Voiceover path in Inputs step");
+    } else {
+      const voProbe = await probeMediaDetailed(voiceoverPath);
+      if (!voProbe || !voProbe.hasAudio) {
+        addIssue("warning", "audio", "Voiceover file could not be verified as valid audio stream", "Check audio format");
+      }
+    }
+  }
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  if (fs__namespace.existsSync(audioPlanPath)) {
+    const audioPlan = readJsonSafe(audioPlanPath, {});
+    if (audioPlan.musicTrack?.filePath && !fs__namespace.existsSync(audioPlan.musicTrack.filePath)) {
+      addIssue("warning", "audio", `Approved background music file missing: ${audioPlan.musicTrack.filePath}`, "Check audio library");
+    }
+  }
+  if (captionPlan?.enabled && captionPlan.phrases) {
+    for (const phrase of captionPlan.phrases) {
+      if (phrase.startTime < 0 || phrase.endTime < 0 || phrase.endTime < phrase.startTime) {
+        addIssue("warning", "caption", `Caption phrase "${phrase.text.slice(0, 30)}" has invalid timing: ${phrase.startTime}s - ${phrase.endTime}s`, "Adjust timing in Captions step");
+      }
+      if (expectedTotalDuration > 0 && phrase.startTime > expectedTotalDuration + 2) {
+        addIssue("warning", "caption", `Caption phrase starts after video ends (${phrase.startTime.toFixed(1)}s > ${expectedTotalDuration.toFixed(1)}s)`, "Trim caption plan");
+      }
+    }
+  }
+  for (const entry of flattened) {
+    const { scene, sceneIndex, sceneId } = entry;
+    if (scene.transitionIn && scene.transitionIn !== "none" && scene.transitionIn !== "cut") {
+      const dur = scene.duration ?? (scene.endTime ?? 0) - (scene.startTime ?? 0);
+      if (dur < 1) {
+        addIssue("info", "transition", `Scene ${sceneIndex} is short (${dur.toFixed(1)}s). Transition will automatically fallback to clean cut.`, void 0, sceneId, sceneIndex);
+      }
+    }
+  }
+  const report = buildReport$1(expectedTotalDuration, flattened.length, resolvedScenesCount, issues);
+  const reportPath = path.join(projectDir, "analysis", "render-preflight.json");
+  atomicWriteJson(reportPath, report);
+  logger.info(`[QA-Preflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning, ${report.infoCount} info)`);
+  return report;
+}
+function buildReport$1(expectedDuration, totalScenes, resolvedScenes, issues) {
+  const fatalCount = issues.filter((i) => i.severity === "fatal").length;
+  const warningCount = issues.filter((i) => i.severity === "warning").length;
+  const infoCount = issues.filter((i) => i.severity === "info").length;
+  let status = "passed";
+  if (fatalCount > 0) {
+    status = "failed";
+  } else if (warningCount > 0) {
+    status = "passed_with_warnings";
+  }
+  return {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status,
+    expectedDuration: Math.round(expectedDuration * 100) / 100,
+    totalScenes,
+    resolvedScenes,
+    missingScenes: totalScenes - resolvedScenes,
+    fatalCount,
+    warningCount,
+    infoCount,
+    issues
+  };
+}
+const POSTFLIGHT_THRESHOLDS = {
+  MAX_BENIGN_BLACK_SEGMENT_SECS: 2,
+  // Black transition dip <= 2s is benign
+  FATAL_BLACK_COVERAGE_PERCENT: 80,
+  // > 80% black coverage across entire video is fatal
+  WARNING_FREEZE_SEGMENT_SECS: 4,
+  // Freeze frame > 4.0s triggers warning
+  DURATION_MISMATCH_WARN_SECS: 1,
+  // Duration difference > 1.0s triggers warning
+  DURATION_MISMATCH_FATAL_PERCENT: 15
+  // > 15% duration mismatch is fatal
+};
+async function runRenderPostflight(options) {
+  const {
+    projectDir,
+    workingOutputPath,
+    expectedDuration,
+    totalScenes,
+    hasVoiceover,
+    targetResolution = { width: 1920, height: 1080 }
+  } = options;
+  const issues = [];
+  let issueId = 1;
+  function addIssue(severity, category, message, suggestion, details) {
+    issues.push({
+      id: `postflight_${issueId++}`,
+      stage: "postflight",
+      severity,
+      category,
+      message,
+      suggestion,
+      details
+    });
+  }
+  if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
+    addIssue("fatal", "output", "Render output file is missing or has 0 bytes.", "Check FFmpeg logs for render crash");
+    return buildReport(expectedDuration, 0, totalScenes, issues);
+  }
+  const probe = await probeMediaDetailed(workingOutputPath);
+  if (!probe) {
+    addIssue("fatal", "output", "FFprobe failed to inspect render output.", "The output file is corrupt or unreadable");
+    return buildReport(expectedDuration, 0, totalScenes, issues);
+  }
+  if (!probe.hasVideo || probe.durationSecs <= 0) {
+    addIssue("fatal", "output", "Render output has no valid video stream or duration is 0.", "Ensure input media files are valid and FFmpeg arguments are correct");
+  }
+  if (hasVoiceover && !probe.hasAudio) {
+    addIssue("fatal", "audio", "Render output is missing audio stream while voiceover was expected.", "Check audio mixing and codec settings");
+  }
+  if (probe.width !== targetResolution.width || probe.height !== targetResolution.height) {
+    addIssue(
+      "warning",
+      "output",
+      `Rendered resolution (${probe.width}x${probe.height}) differs from target (${targetResolution.width}x${targetResolution.height})`,
+      "Verify scaling filter in render pipeline"
+    );
+  }
+  const durationDiff = Math.abs(probe.durationSecs - expectedDuration);
+  const durationMismatchPercent = expectedDuration > 0 ? durationDiff / expectedDuration * 100 : 0;
+  if (durationDiff > POSTFLIGHT_THRESHOLDS.DURATION_MISMATCH_WARN_SECS) {
+    if (durationMismatchPercent > POSTFLIGHT_THRESHOLDS.DURATION_MISMATCH_FATAL_PERCENT && expectedDuration > 10) {
+      addIssue(
+        "fatal",
+        "output",
+        `Rendered duration (${probe.durationSecs.toFixed(1)}s) deviates by ${durationMismatchPercent.toFixed(1)}% from expected (${expectedDuration.toFixed(1)}s)`,
+        "Check scene transition and audio alignment"
+      );
+    } else {
+      addIssue(
+        "warning",
+        "output",
+        `Rendered duration (${probe.durationSecs.toFixed(1)}s) deviates slightly from expected (${expectedDuration.toFixed(1)}s)`,
+        "Normal variation from transition xfade"
+      );
+    }
+  }
+  const quality = await analyzeVideoQuality(workingOutputPath, probe.durationSecs);
+  if (quality.blackCoveragePct >= POSTFLIGHT_THRESHOLDS.FATAL_BLACK_COVERAGE_PERCENT) {
+    addIssue(
+      "fatal",
+      "output",
+      `Severe black screen detected: ${quality.blackCoveragePct}% of the video is completely black`,
+      "Check if video codecs or transition offsets are producing black frames"
+    );
+  } else {
+    for (const b of quality.blackSegments) {
+      if (b.duration > POSTFLIGHT_THRESHOLDS.MAX_BENIGN_BLACK_SEGMENT_SECS) {
+        addIssue(
+          "warning",
+          "output",
+          `Prolonged black segment of ${b.duration.toFixed(1)}s detected at ${b.start.toFixed(1)}s - ${b.end.toFixed(1)}s`,
+          "Check missing media or long transition dip"
+        );
+      }
+    }
+  }
+  for (const f of quality.freezeSegments) {
+    if (f.duration > POSTFLIGHT_THRESHOLDS.WARNING_FREEZE_SEGMENT_SECS) {
+      addIssue(
+        "warning",
+        "output",
+        `Freeze frame of ${f.duration.toFixed(1)}s detected at ${f.start.toFixed(1)}s - ${f.end.toFixed(1)}s`,
+        "Check if source footage duration is too short for scene duration"
+      );
+    }
+  }
+  const contactSheetPath = path.join(projectDir, "output", "render-contact-sheet.jpg");
+  try {
+    const csSuccess = await generateContactSheet(workingOutputPath, contactSheetPath, probe.durationSecs);
+    if (csSuccess) {
+      addIssue("info", "output", "Contact sheet generated successfully at output/render-contact-sheet.jpg");
+    } else {
+      addIssue("warning", "output", "Failed to generate visual contact sheet (non-fatal)");
+    }
+  } catch (err) {
+    addIssue("warning", "output", `Contact sheet error: ${String(err)} (non-fatal)`);
+  }
+  const report = buildReport(expectedDuration, probe.durationSecs, totalScenes, issues);
+  const reportPath = path.join(projectDir, "analysis", "render-qa.json");
+  atomicWriteJson(reportPath, report);
+  logger.info(`[QA-Postflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning)`);
+  return report;
+}
+function buildReport(expectedDuration, actualDuration, totalScenes, issues) {
+  const fatalCount = issues.filter((i) => i.severity === "fatal").length;
+  const warningCount = issues.filter((i) => i.severity === "warning").length;
+  const infoCount = issues.filter((i) => i.severity === "info").length;
+  let status = "passed";
+  if (fatalCount > 0) {
+    status = "failed";
+  } else if (warningCount > 0) {
+    status = "passed_with_warnings";
+  }
+  return {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status,
+    expectedDuration: Math.round(expectedDuration * 100) / 100,
+    actualDuration: Math.round(actualDuration * 100) / 100,
+    totalScenes,
+    resolvedScenes: totalScenes,
+    missingScenes: 0,
+    fatalCount,
+    warningCount,
+    infoCount,
+    issues
+  };
+}
 const ffmpegPath$1 = require("ffmpeg-static");
 function ffmpegRun$1(args) {
   return new Promise((resolve, reject) => {
@@ -3968,6 +5331,19 @@ async function renderVideo(params) {
     const scenes = sceneEntries.map((entry) => entry.scene);
     const totalScenes = scenes.length;
     progress(`Processing ${totalScenes} scenes...`, 0.06);
+    progress("Running preflight QA checks...", 0.07);
+    const preflightReport = await runRenderPreflight({
+      projectDir,
+      voiceoverPath,
+      captionPlan: params.captionPlan,
+      resolution,
+      fps
+    });
+    if (preflightReport.status === "failed") {
+      const fatalIssues = preflightReport.issues.filter((i) => i.severity === "fatal");
+      const msg = fatalIssues.map((i) => i.message).join("; ");
+      throw new Error(`Render Preflight QA failed: ${msg}`);
+    }
     progress("Validating scene media...", 0.08);
     const preflightResults = [];
     let resolvedMediaCount = 0;
@@ -4358,7 +5734,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
       );
       const filterComplex = filterParts.join(";");
-      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`);
+      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`);
       await ffmpegRun$1([
         ...ffArgs,
         "-filter_complex",
@@ -4387,36 +5763,70 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     logger.info(
       `[RENDER] Audio mixing output validated: path=${workingOutputPath} sizeBytes=${fs__namespace.statSync(workingOutputPath).size} duration=${audioProbe.duration.toFixed(3)}s`
     );
-    if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-      let proofVisuals = [];
-      if (retentionSettings.proofVisualsEnabled) {
+    let proofVisuals = [];
+    if (retentionSettings.proofVisualsEnabled) {
+      try {
+        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan);
+        logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
         try {
-          proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan);
-          logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
-          try {
-            const pvPlanPath = path__namespace.join(projectDir, "analysis", "proof-visual-plan.json");
-            fs__namespace.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map((pv) => ({
-              type: pv.type,
-              text: pv.primaryText,
-              startTime: pv.absoluteStartTime,
-              endTime: pv.absoluteEndTime,
-              position: pv.position
-            })), null, 2), "utf-8");
-          } catch {
-          }
-        } catch (err) {
-          logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`);
-          proofVisuals = [];
+          const pvPlanPath = path__namespace.join(projectDir, "analysis", "proof-visual-plan.json");
+          fs__namespace.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map((pv) => ({
+            type: pv.type,
+            text: pv.primaryText,
+            startTime: pv.absoluteStartTime,
+            endTime: pv.absoluteEndTime,
+            position: pv.position
+          })), null, 2), "utf-8");
+        } catch {
         }
+      } catch (err) {
+        logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`);
+        proofVisuals = [];
       }
-      progress("Rendering caption overlay (Remotion)...", 0.91);
+    }
+    const prodSettings = loadProductionSettings(projectDir);
+    let visualGrammar = [];
+    if (prodSettings.enabled && prodSettings.visualSceneGrammarEnabled) {
+      try {
+        let vgPlan = loadVisualGrammarPlan(projectDir);
+        if (!vgPlan) {
+          vgPlan = generateVisualGrammarPlan({
+            projectDir,
+            editPlan: plan,
+            captionPlan: params.captionPlan,
+            proofVisuals,
+            settings: prodSettings
+          });
+        }
+        visualGrammar = (vgPlan.decisions ?? []).filter((d) => d.enabled).map((d) => {
+          const sc = scenes.find((s) => s.sceneIndex === d.sceneIndex);
+          const sceneStart = sc?.startTime ?? 0;
+          const absStart = sceneStart + d.startOffset;
+          return {
+            ...d,
+            absoluteStartTime: absStart,
+            absoluteEndTime: absStart + d.duration
+          };
+        });
+        logger.info(`[RENDER] VisualSceneGrammar: ${visualGrammar.length} decisions active for overlay`);
+      } catch (vgErr) {
+        logger.warn(`[RENDER] VisualGrammar processing failed (non-blocking): ${String(vgErr)}`);
+        visualGrammar = [];
+      }
+    }
+    const hasCaptions = !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0);
+    const hasProofVisuals = proofVisuals.length > 0;
+    const hasVisualGrammar = visualGrammar.length > 0;
+    if (hasCaptions || hasProofVisuals || hasVisualGrammar) {
+      progress("Rendering video overlay (Remotion)...", 0.91);
       const captionsDir = path__namespace.join(projectDir, "assets", "captions");
       fs__namespace.mkdirSync(captionsDir, { recursive: true });
       const overlayPath = path__namespace.join(captionsDir, "overlay.mp4");
       const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
       await renderCaptionsOverlay({
-        captionPlan: params.captionPlan,
+        captionPlan: params.captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
         proofVisuals,
+        visualGrammar,
         videoDurationInSeconds: videoDurationSecs,
         outputPath: overlayPath,
         fps,
@@ -4425,13 +5835,13 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 2e-3);
         },
         onRenderProgress: (pct) => {
-          progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01);
+          progress(`Rendering overlays... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01);
         }
       });
       progress("Compositing captions overlay...", 0.93);
       const captionedPath = path__namespace.join(outputDir, "_captioned_tmp.mp4");
       safeUnlink(captionedPath);
-      logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`);
+      logger.info(`[RENDER] Overlay merge: ${overlayPath} -> ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`);
       await ffmpegRun$1([
         "-y",
         "-i",
@@ -4473,6 +5883,24 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       safeUnlink(overlayPath);
       logger.info("[RENDER] Caption overlay composited");
     }
+    let qaReport;
+    if (prodSettings.enabled && prodSettings.renderQaEnabled) {
+      progress("Running postflight QA inspection...", 0.95);
+      qaReport = await runRenderPostflight({
+        projectDir,
+        workingOutputPath,
+        expectedDuration: scenes.reduce((a, s) => a + s.duration, 0),
+        totalScenes: scenes.length,
+        hasVoiceover: hasAudio,
+        targetResolution: resolution,
+        targetFps: fps
+      });
+      if (qaReport.status === "failed") {
+        const fatalIssues = qaReport.issues.filter((i) => i.severity === "fatal");
+        const msg = fatalIssues.map((i) => i.message).join("; ");
+        throw new Error(`Render Postflight QA failed: ${msg}`);
+      }
+    }
     progress("Finalizing output...", 0.96);
     if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
       throw new Error("Final render working file is missing or empty.");
@@ -4503,7 +5931,13 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       resolution: `${finalProbe.width}x${finalProbe.height}`,
       fileSizeMB: (stat.size / 1024 / 1024).toFixed(2)
     });
-    return { outputPath, durationSecs, fileSizeBytes: stat.size };
+    return {
+      outputPath,
+      durationSecs,
+      fileSizeBytes: stat.size,
+      preflightReport,
+      qaReport
+    };
   } catch (err) {
     if (workingOutputPath) safeUnlink(workingOutputPath);
     if (tmpDir && fs__namespace.existsSync(tmpDir)) {
@@ -4533,16 +5967,16 @@ function buildProofVisualList(scenes, retentionDecisions, captionPlan) {
     const normText = pv.primaryText.replace(/[\s,.$%]/g, "").toUpperCase();
     const dedupKey = `${normText}_${Math.floor(absStart / 15)}`;
     if (seenKeys.has(dedupKey)) {
-      logger.debug(`[ProofVisual] scene ${i} skipped — duplicate: ${pv.primaryText}`);
+      logger.debug(`[ProofVisual] scene ${i} skipped -- duplicate: ${pv.primaryText}`);
       continue;
     }
     if (isDuplicateOfDataNote(pv.primaryText, captionPlan, absStart, absEnd)) {
-      logger.info(`[ProofVisual] scene ${i} skipped — duplicate DataNote: ${pv.primaryText}`);
+      logger.info(`[ProofVisual] scene ${i} skipped -- duplicate DataNote: ${pv.primaryText}`);
       continue;
     }
     const captionState = getCaptionStateAt(absStart, absEnd, captionPlan);
     if (captionState === "strong") {
-      logger.info(`[ProofVisual] scene ${i} skipped — overlaps big_statement caption`);
+      logger.info(`[ProofVisual] scene ${i} skipped -- overlaps big_statement caption`);
       continue;
     }
     const resolvedPosition = resolveProofPosition(pv, captionState, i);
@@ -4553,7 +5987,7 @@ function buildProofVisualList(scenes, retentionDecisions, captionPlan) {
       absoluteEndTime: parseFloat(absEnd.toFixed(3)),
       position: resolvedPosition
     });
-    logger.info(`[ProofVisual] scene ${i} → ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`);
+    logger.info(`[ProofVisual] scene ${i} -> ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`);
   }
   return result;
 }
@@ -4562,11 +5996,11 @@ function getCaptionStateAt(start, end, captionPlan) {
   let maxState = "none";
   for (const phrase of captionPlan.phrases) {
     if (phrase.startTime >= end || phrase.endTime <= start) continue;
-    let state = "normal";
-    if (phrase.presetType === "big_statement") state = "strong";
-    else if (phrase.presetType === "data_note") state = "data_note";
-    else if (phrase.presetType === "news_chyron") state = "news_chyron";
-    if (stateOrder.indexOf(state) > stateOrder.indexOf(maxState)) maxState = state;
+    let state2 = "normal";
+    if (phrase.presetType === "big_statement") state2 = "strong";
+    else if (phrase.presetType === "data_note") state2 = "data_note";
+    else if (phrase.presetType === "news_chyron") state2 = "news_chyron";
+    if (stateOrder.indexOf(state2) > stateOrder.indexOf(maxState)) maxState = state2;
   }
   return maxState;
 }
@@ -4619,10 +6053,10 @@ function registerRenderHandlers(ipcMain) {
               logger.info(`[RenderIPC] Caption plan exists but disabled or empty (enabled=${loaded.enabled}, phrases=${loaded.phrases?.length ?? 0})`);
             }
           } catch (e) {
-            logger.warn(`[RenderIPC] Không đọc được caption-plan.json: ${String(e)}`);
+            logger.warn(`[RenderIPC] Could not read caption-plan.json: ${String(e)}`);
           }
         } else {
-          logger.info("[RenderIPC] Không có caption-plan.json — bỏ qua burn captions");
+          logger.info("[RenderIPC] No caption-plan.json -- skipping caption burn");
         }
         const result = await renderVideo({
           ...params,
@@ -4638,6 +6072,59 @@ function registerRenderHandlers(ipcMain) {
       }
     }
   );
+  ipcMain.handle(
+    IPC_CHANNELS.RENDER_PREFLIGHT_RUN,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      win?.webContents.send(IPC_CHANNELS.RENDER_QA_PROGRESS, {
+        stage: "preflight",
+        progress: 0.2,
+        message: "Running preflight checks..."
+      });
+      let captionPlan = void 0;
+      const captionPlanPath = path__namespace.join(params.projectDir, "analysis", "caption-plan.json");
+      if (fs__namespace.existsSync(captionPlanPath)) {
+        try {
+          captionPlan = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+        } catch {
+        }
+      }
+      let voiceoverPath;
+      try {
+        const stateFile = fs__namespace.existsSync(path__namespace.join(params.projectDir, "project-state.json")) ? path__namespace.join(params.projectDir, "project-state.json") : path__namespace.join(params.projectDir, "project.json");
+        if (fs__namespace.existsSync(stateFile)) {
+          const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+          voiceoverPath = st?.inputs?.voiceoverPath;
+        }
+      } catch {
+      }
+      const report = await runRenderPreflight({
+        projectDir: params.projectDir,
+        voiceoverPath,
+        captionPlan
+      });
+      win?.webContents.send(IPC_CHANNELS.RENDER_QA_PROGRESS, {
+        stage: "preflight",
+        progress: 1,
+        message: `Preflight completed: ${report.status}`
+      });
+      return report;
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.RENDER_QA_GET,
+    (_event, params) => {
+      const qaPath = path__namespace.join(params.projectDir, "analysis", "render-qa.json");
+      const preflightPath = path__namespace.join(params.projectDir, "analysis", "render-preflight.json");
+      if (fs__namespace.existsSync(qaPath)) {
+        return readJsonSafe(qaPath, null);
+      }
+      if (fs__namespace.existsSync(preflightPath)) {
+        return readJsonSafe(preflightPath, null);
+      }
+      return null;
+    }
+  );
 }
 const PEXELS_BASE = "https://api.pexels.com";
 async function pexelsFetch(url2, apiKey, attempt = 0) {
@@ -4647,7 +6134,7 @@ async function pexelsFetch(url2, apiKey, attempt = 0) {
   if (res.status === 429 && attempt < 3) {
     const retryAfter = Number(res.headers.get("Retry-After") ?? 5) || 5;
     const delay = Math.max(retryAfter, Math.pow(2, attempt) * 3) * 1e3;
-    logger.warn(`[Pexels] 429 rate-limited — waiting ${delay / 1e3}s (attempt ${attempt + 1}/3)`);
+    logger.warn(`[Pexels] 429 rate-limited - waiting ${delay / 1e3}s (request ${attempt + 1}/3)`);
     await new Promise((r) => setTimeout(r, delay));
     return pexelsFetch(url2, apiKey, attempt + 1);
   }
@@ -4721,79 +6208,349 @@ async function pexelsSearchPhotos(query, apiKey, perPage = 8, orientation = "lan
     pageUrl: p.url
   }));
 }
-const PIXABAY_BASE = "https://pixabay.com/api";
-async function pixabayFetch(url2, attempt = 0) {
-  const res = await fetch(url2);
-  if (res.status === 429 && attempt < 3) {
-    const delay = Math.pow(2, attempt) * 4e3;
-    logger.warn(`[Pixabay] 429 rate-limited — waiting ${delay / 1e3}s (attempt ${attempt + 1}/3)`);
-    await new Promise((r) => setTimeout(r, delay));
-    return pixabayFetch(url2, attempt + 1);
-  }
-  return res;
+const MIN_INTERVAL_MS = 850;
+const DEFAULT_429_WAIT_SECS = 60;
+const MAX_RETRIES_AFTER_RESET = 2;
+const CACHE_TTL_MS$1 = 24 * 60 * 60 * 1e3;
+const EMPTY_CACHE_TTL_MS = 60 * 60 * 1e3;
+const state = {
+  remaining: null,
+  limit: null,
+  resetAt: null,
+  pausedUntil: 0,
+  consecutive429: 0
+};
+let lastRequestEndTime = 0;
+let queuePromise = Promise.resolve();
+const inFlightRequests = /* @__PURE__ */ new Map();
+let activeProjectDir = null;
+function setPixabayProjectDir(projectDir) {
+  activeProjectDir = projectDir;
 }
-async function pixabaySearchVideos(query, apiKey, perPage = 8, orientation = "horizontal") {
-  const url2 = `${PIXABAY_BASE}/videos/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=${perPage}&video_type=all&orientation=${orientation}`;
-  let res;
+function isPixabayPaused() {
+  return Date.now() < state.pausedUntil;
+}
+function getPixabayPauseRemainingSecs() {
+  const diff = state.pausedUntil - Date.now();
+  return diff > 0 ? Math.ceil(diff / 1e3) : 0;
+}
+function parseRateLimitHeaders(headers) {
+  const retryAfterHeader = headers.get("retry-after");
+  const limitHeader = headers.get("x-ratelimit-limit");
+  const remainingHeader = headers.get("x-ratelimit-remaining");
+  const resetHeader = headers.get("x-ratelimit-reset");
+  let retryAfterSecs = null;
+  if (retryAfterHeader) {
+    const val = parseFloat(retryAfterHeader);
+    if (!isNaN(val) && val > 0) {
+      retryAfterSecs = val;
+    }
+  }
+  let limit = null;
+  if (limitHeader) {
+    const val = parseInt(limitHeader, 10);
+    if (!isNaN(val) && val >= 0) limit = val;
+  }
+  let remaining = null;
+  if (remainingHeader) {
+    const val = parseInt(remainingHeader, 10);
+    if (!isNaN(val) && val >= 0) remaining = val;
+  }
+  let resetSecs = null;
+  if (resetHeader) {
+    const val = parseFloat(resetHeader);
+    if (!isNaN(val) && val > 0) {
+      resetSecs = val;
+    }
+  }
+  return { retryAfterSecs, limit, remaining, resetSecs };
+}
+function schedulePixabayRequest(task) {
+  const run = async () => {
+    let attempt = 0;
+    const maxAttempts = 1 + MAX_RETRIES_AFTER_RESET;
+    while (attempt < maxAttempts) {
+      attempt++;
+      if (Date.now() < state.pausedUntil) {
+        const waitMs = state.pausedUntil - Date.now();
+        logger.info(`[Pixabay] Provider paused due to rate limit - waiting ${(waitMs / 1e3).toFixed(1)}s before request ${attempt}/${maxAttempts}`);
+        await new Promise((r) => setTimeout(r, waitMs));
+        logger.info(`[Pixabay] Provider resumed after rate-limit reset.`);
+      }
+      const now = Date.now();
+      const elapsedSinceLast = now - lastRequestEndTime;
+      if (elapsedSinceLast < MIN_INTERVAL_MS) {
+        await new Promise((r) => setTimeout(r, MIN_INTERVAL_MS - elapsedSinceLast));
+      }
+      try {
+        const result = await task({ requestNumber: attempt, totalRequests: maxAttempts });
+        lastRequestEndTime = Date.now();
+        const anyResult = result;
+        const response = anyResult?.response instanceof Response ? anyResult.response : anyResult instanceof Response ? anyResult : void 0;
+        if (response) {
+          const parsedHeaders = parseRateLimitHeaders(response.headers);
+          state.remaining = parsedHeaders.remaining;
+          state.limit = parsedHeaders.limit;
+          if (response.status === 429) {
+            state.consecutive429++;
+            let waitSecs = DEFAULT_429_WAIT_SECS;
+            if (parsedHeaders.retryAfterSecs && parsedHeaders.retryAfterSecs > 0) {
+              waitSecs = parsedHeaders.retryAfterSecs;
+            } else if (parsedHeaders.resetSecs && parsedHeaders.resetSecs > 0) {
+              waitSecs = parsedHeaders.resetSecs;
+            }
+            const jitterMs = Math.floor(Math.random() * 1250) + 250;
+            const totalWaitMs = Math.round(waitSecs * 1e3) + jitterMs;
+            state.pausedUntil = Date.now() + totalWaitMs;
+            logger.warn(
+              `[Pixabay] Rate limit reached (status 429, request ${attempt}/${maxAttempts}). Pausing provider for ${(totalWaitMs / 1e3).toFixed(1)}s.`
+            );
+            if (attempt >= maxAttempts) {
+              logger.warn(`[Pixabay] Rate limit persisted. Skipping Pixabay for this scene.`);
+              return null;
+            }
+            continue;
+          }
+        }
+        state.consecutive429 = 0;
+        return result;
+      } catch (err) {
+        lastRequestEndTime = Date.now();
+        logger.error(`[Pixabay] Request execution error: ${err instanceof Error ? err.message : String(err)}`);
+        return null;
+      }
+    }
+    return null;
+  };
+  const nextPromise = queuePromise.then(run, run);
+  queuePromise = nextPromise;
+  return nextPromise;
+}
+function getCacheFilePath() {
+  if (activeProjectDir) {
+    const stockDir = path__namespace.join(activeProjectDir, "assets", "stock");
+    return path__namespace.join(stockDir, ".pixabay-search-cache.json");
+  }
+  return path__namespace.join(process.cwd(), ".pixabay-search-cache.json");
+}
+function loadPixabayCache() {
+  const filePath = getCacheFilePath();
+  if (!filePath || !fs__namespace.existsSync(filePath)) {
+    return {};
+  }
   try {
-    res = await pixabayFetch(url2);
+    const raw = fs__namespace.readFileSync(filePath, "utf-8").trim();
+    if (!raw) return {};
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+function savePixabayCache(store) {
+  const filePath = getCacheFilePath();
+  if (!filePath) return;
+  try {
+    const dir = path__namespace.dirname(filePath);
+    if (!fs__namespace.existsSync(dir)) {
+      fs__namespace.mkdirSync(dir, { recursive: true });
+    }
+    const tmpPath = `${filePath}.tmp.${Date.now()}`;
+    fs__namespace.writeFileSync(tmpPath, JSON.stringify(store, null, 2), "utf-8");
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+    } catch {
+      if (fs__namespace.existsSync(filePath)) {
+        fs__namespace.unlinkSync(filePath);
+      }
+      fs__namespace.renameSync(tmpPath, filePath);
+    }
   } catch (err) {
-    logger.error(`[Pixabay] Network error searching videos: ${err}`);
+    logger.warn(`[PixabayCache] Failed to persist cache: ${String(err)}`);
+  }
+}
+function buildPixabayCacheKey(params) {
+  const normQ = normalizeStockQueryKey(params.query);
+  return `${params.mediaType}:${params.orientation}:${params.perPage}:${normQ}`;
+}
+function getCachedPixabayResults(key) {
+  const store = loadPixabayCache();
+  const entry = store[key];
+  if (!entry) return null;
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (entry.expiresAt && entry.expiresAt < now) {
+    delete store[key];
+    savePixabayCache(store);
+    return null;
+  }
+  return entry.results;
+}
+function setCachedPixabayResults(key, results) {
+  const store = loadPixabayCache();
+  const now = Date.now();
+  const ttl = results.length > 0 ? CACHE_TTL_MS$1 : EMPTY_CACHE_TTL_MS;
+  store[key] = {
+    createdAt: new Date(now).toISOString(),
+    expiresAt: new Date(now + ttl).toISOString(),
+    results
+  };
+  savePixabayCache(store);
+}
+function executeWithInFlightDedup(arg1, arg2, arg3, arg4, arg5) {
+  let key;
+  let fetcher;
+  if (typeof arg2 === "function") {
+    key = arg1;
+    fetcher = arg2;
+  } else {
+    key = buildPixabayCacheKey({
+      mediaType: arg1,
+      query: arg2,
+      orientation: arg3,
+      perPage: arg4
+    });
+    fetcher = arg5;
+  }
+  const existing = inFlightRequests.get(key);
+  if (existing) {
+    return existing;
+  }
+  const promise = (async () => {
+    try {
+      return await fetcher();
+    } finally {
+      inFlightRequests.delete(key);
+    }
+  })();
+  inFlightRequests.set(key, promise);
+  return promise;
+}
+const PIXABAY_BASE = "https://pixabay.com/api";
+async function pixabaySearchVideos(query, apiKey, perPage = 8, orientation = "horizontal") {
+  const sanitized = sanitizeStockQuery(query);
+  if (!sanitized || !apiKey) {
     return [];
   }
-  if (!res.ok) {
-    logger.warn(`[Pixabay] Video search returned ${res.status} for query "${query}"`);
-    return [];
+  const cacheKey = buildPixabayCacheKey({
+    mediaType: "video",
+    query: sanitized,
+    orientation,
+    perPage
+  });
+  const cached = getCachedPixabayResults(cacheKey);
+  if (cached) {
+    logger.info(`[Pixabay] Cache hit (video): query="${sanitized}" (${cached.length} results)`);
+    return cached;
   }
-  const data = await res.json();
-  return (data.hits ?? []).map((v) => {
-    const best = v.videos?.large?.url ? v.videos.large : v.videos?.medium ?? v.videos?.small;
-    const thumb = `https://i.vimeocdn.com/video/${v.picture_id}_640x360.jpg`;
-    return {
-      assetId: `pixabay_v_${v.id}`,
-      provider: "pixabay",
-      mediaType: "video",
-      title: `Pixabay video ${v.id}`,
-      tags: (v.tags ?? "").split(",").map((t) => t.trim()),
-      thumbnailUrl: thumb,
-      previewUrl: thumb,
-      downloadUrl: best?.url ?? "",
-      width: best?.width ?? 1920,
-      height: best?.height ?? 1080,
-      durationSecs: v.duration,
-      creator: v.user ?? "Unknown",
-      pageUrl: v.pageURL
-    };
+  return executeWithInFlightDedup(cacheKey, async () => {
+    if (isPixabayPaused()) {
+      const waitSecs = getPixabayPauseRemainingSecs();
+      logger.info(
+        `[Pixabay] Rate limit pause active (${waitSecs}s remaining). Skipping Pixabay video search for "${sanitized}".`
+      );
+      return [];
+    }
+    const scheduled = await schedulePixabayRequest(async (attemptInfo) => {
+      logger.info(
+        `[Pixabay] video search: query="${sanitized}" perPage=${perPage} orientation=${orientation} (request ${attemptInfo.requestNumber}/${attemptInfo.totalRequests})`
+      );
+      const url2 = `${PIXABAY_BASE}/videos/?key=${apiKey}&q=${encodeURIComponent(sanitized)}&per_page=${perPage}&video_type=all&orientation=${orientation}`;
+      const response = await fetch(url2);
+      if (response.status === 429) {
+        return { response, data: [] };
+      }
+      if (!response.ok) {
+        logger.warn(`[Pixabay] Video search returned status ${response.status} for query "${sanitized}"`);
+        return { response, data: [] };
+      }
+      const rawJson = await response.json();
+      const items = (rawJson.hits ?? []).map((v) => {
+        const best = v.videos?.large?.url ? v.videos.large : v.videos?.medium ?? v.videos?.small;
+        const thumb = `https://i.vimeocdn.com/video/${v.picture_id}_640x360.jpg`;
+        return {
+          assetId: `pixabay_v_${v.id}`,
+          provider: "pixabay",
+          mediaType: "video",
+          title: `Pixabay video ${v.id}`,
+          tags: (v.tags ?? "").split(",").map((t) => t.trim()),
+          thumbnailUrl: thumb,
+          previewUrl: thumb,
+          downloadUrl: best?.url ?? "",
+          width: best?.width ?? 1920,
+          height: best?.height ?? 1080,
+          durationSecs: v.duration,
+          creator: v.user ?? "Unknown",
+          pageUrl: v.pageURL
+        };
+      });
+      return { response, data: items };
+    });
+    const results = scheduled?.data ?? [];
+    if (results.length > 0 || scheduled && scheduled.response.ok) {
+      setCachedPixabayResults(cacheKey, results);
+    }
+    return results;
   });
 }
 async function pixabaySearchPhotos(query, apiKey, perPage = 8, orientation = "horizontal") {
-  const url2 = `${PIXABAY_BASE}/?key=${apiKey}&q=${encodeURIComponent(query)}&per_page=${perPage}&image_type=photo&orientation=${orientation}`;
-  let res;
-  try {
-    res = await pixabayFetch(url2);
-  } catch (err) {
-    logger.error(`[Pixabay] Network error searching photos: ${err}`);
+  const sanitized = sanitizeStockQuery(query);
+  if (!sanitized || !apiKey) {
     return [];
   }
-  if (!res.ok) {
-    logger.warn(`[Pixabay] Photo search returned ${res.status} for query "${query}"`);
-    return [];
-  }
-  const data = await res.json();
-  return (data.hits ?? []).map((p) => ({
-    assetId: `pixabay_p_${p.id}`,
-    provider: "pixabay",
+  const cacheKey = buildPixabayCacheKey({
     mediaType: "photo",
-    title: `Pixabay photo ${p.id}`,
-    tags: (p.tags ?? "").split(",").map((t) => t.trim()),
-    thumbnailUrl: p.webformatURL ?? "",
-    previewUrl: p.webformatURL ?? "",
-    downloadUrl: p.largeImageURL ?? p.webformatURL ?? "",
-    width: p.imageWidth ?? 1920,
-    height: p.imageHeight ?? 1080,
-    creator: p.user ?? "Unknown",
-    pageUrl: p.pageURL
-  }));
+    query: sanitized,
+    orientation,
+    perPage
+  });
+  const cached = getCachedPixabayResults(cacheKey);
+  if (cached) {
+    logger.info(`[Pixabay] Cache hit (photo): query="${sanitized}" (${cached.length} results)`);
+    return cached;
+  }
+  return executeWithInFlightDedup(cacheKey, async () => {
+    if (isPixabayPaused()) {
+      const waitSecs = getPixabayPauseRemainingSecs();
+      logger.info(
+        `[Pixabay] Rate limit pause active (${waitSecs}s remaining). Skipping Pixabay photo search for "${sanitized}".`
+      );
+      return [];
+    }
+    const scheduled = await schedulePixabayRequest(async (attemptInfo) => {
+      logger.info(
+        `[Pixabay] photo search: query="${sanitized}" perPage=${perPage} orientation=${orientation} (request ${attemptInfo.requestNumber}/${attemptInfo.totalRequests})`
+      );
+      const url2 = `${PIXABAY_BASE}/?key=${apiKey}&q=${encodeURIComponent(sanitized)}&per_page=${perPage}&image_type=photo&orientation=${orientation}`;
+      const response = await fetch(url2);
+      if (response.status === 429) {
+        return { response, data: [] };
+      }
+      if (!response.ok) {
+        logger.warn(`[Pixabay] Photo search returned status ${response.status} for query "${sanitized}"`);
+        return { response, data: [] };
+      }
+      const rawJson = await response.json();
+      const items = (rawJson.hits ?? []).map((p) => ({
+        assetId: `pixabay_p_${p.id}`,
+        provider: "pixabay",
+        mediaType: "photo",
+        title: `Pixabay photo ${p.id}`,
+        tags: (p.tags ?? "").split(",").map((t) => t.trim()),
+        thumbnailUrl: p.webformatURL ?? "",
+        previewUrl: p.webformatURL ?? "",
+        downloadUrl: p.largeImageURL ?? p.webformatURL ?? "",
+        width: p.imageWidth ?? 1920,
+        height: p.imageHeight ?? 1080,
+        creator: p.user ?? "Unknown",
+        pageUrl: p.pageURL
+      }));
+      return { response, data: items };
+    });
+    const results = scheduled?.data ?? [];
+    if (results.length > 0 || scheduled && scheduled.response.ok) {
+      setCachedPixabayResults(cacheKey, results);
+    }
+    return results;
+  });
 }
 const CACHE_TTL_MS = 24 * 60 * 60 * 1e3;
 class QueryCache {
@@ -4846,7 +6603,7 @@ class QueryCache {
     return Object.keys(this.data).length;
   }
 }
-function tokenize$1(text) {
+function tokenize$3(text) {
   return new Set(
     text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2)
   );
@@ -4861,10 +6618,10 @@ function jaccardSimilarity(a, b) {
   return union === 0 ? 0 : intersection / union;
 }
 function semanticScore(candidate, ctx) {
-  const intentTokens = tokenize$1(ctx.visualIntent);
-  const narrationTokens = tokenize$1(ctx.narrationText);
+  const intentTokens = tokenize$3(ctx.visualIntent);
+  const narrationTokens = tokenize$3(ctx.narrationText);
   const refTokens = /* @__PURE__ */ new Set([...intentTokens, ...narrationTokens]);
-  const titleTokens = tokenize$1(candidate.title);
+  const titleTokens = tokenize$3(candidate.title);
   const tagTokens = new Set(candidate.tags.flatMap((t) => t.toLowerCase().split(/\s+/)));
   const candidateTokens2 = /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
   return Math.min(1, jaccardSimilarity(refTokens, candidateTokens2) * 5);
@@ -4972,7 +6729,7 @@ async function downloadAsset(candidate, sceneIndex, searchQuery, stockDir, exist
   const ext = guessExtension(candidate.downloadUrl, candidate.mediaType);
   const filename = `S${String(sceneIndex).padStart(3, "0")}_${candidate.provider}_${candidate.assetId}${ext}`;
   const destPath = path.join(stockDir, filename);
-  logger.info(`[Downloader] Downloading ${candidate.assetId} → ${filename}`);
+  logger.info(`[Downloader] Downloading ${candidate.assetId} -> ${filename}`);
   let fileSizeBytes;
   try {
     fileSizeBytes = await downloadToFile(candidate.downloadUrl, destPath);
@@ -4996,8 +6753,424 @@ async function downloadAsset(candidate, sceneIndex, searchQuery, stockDir, exist
   logger.info(`[Downloader] Downloaded ${filename} (${Math.round((fileSizeBytes ?? 0) / 1024)} KB)`);
   return asset;
 }
-function flattenScenes$1(plan) {
-  return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+function normalizeUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") return "";
+  try {
+    const parsed = new URL(rawUrl.trim());
+    let path2 = parsed.pathname;
+    if (path2.length > 1 && path2.endsWith("/")) {
+      path2 = path2.slice(0, -1);
+    }
+    return `${parsed.protocol}//${parsed.hostname.toLowerCase()}${path2}`;
+  } catch {
+    return rawUrl.trim().toLowerCase().split("?")[0].split("#")[0].replace(/\/+$/, "");
+  }
+}
+function deduplicateCandidates(candidates) {
+  const result = [];
+  const seenIds = /* @__PURE__ */ new Set();
+  const seenPages = /* @__PURE__ */ new Set();
+  const seenDownloads = /* @__PURE__ */ new Set();
+  const seenThumbs = /* @__PURE__ */ new Set();
+  for (const c of candidates) {
+    const idKey = `${c.provider}:${c.assetId}`;
+    const pageKey = normalizeUrl(c.pageUrl);
+    const downloadKey = normalizeUrl(c.downloadUrl);
+    const thumbKey = normalizeUrl(c.thumbnailUrl);
+    if (seenIds.has(idKey)) continue;
+    if (pageKey && seenPages.has(pageKey)) continue;
+    if (downloadKey && seenDownloads.has(downloadKey)) continue;
+    if (thumbKey && seenThumbs.has(thumbKey)) continue;
+    seenIds.add(idKey);
+    if (pageKey) seenPages.add(pageKey);
+    if (downloadKey) seenDownloads.add(downloadKey);
+    if (thumbKey) seenThumbs.add(thumbKey);
+    result.push(c);
+  }
+  return result;
+}
+function calculateJaccardSimilarity(wordsA, wordsB) {
+  if (wordsA.size === 0 || wordsB.size === 0) return 0;
+  let intersection = 0;
+  for (const w of wordsA) {
+    if (wordsB.has(w)) intersection++;
+  }
+  const union = wordsA.size + wordsB.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+function tokenize$2(text) {
+  if (!text) return /* @__PURE__ */ new Set();
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2)
+  );
+}
+function calculateDiversityScoreAndPenalty(candidate, history, isExemptMotif = false) {
+  let diversityScore = 15;
+  let reusePenalty = 0;
+  const penaltyReasons = [];
+  if (history.length === 0) {
+    return { diversityScore, reusePenalty: 0, penaltyReasons };
+  }
+  const prevScene = history[history.length - 1];
+  const prevPrevScene = history.length > 1 ? history[history.length - 2] : null;
+  const isReused = history.some(
+    (h) => h.provider === candidate.provider && h.assetId === candidate.assetId || h.downloadUrl && normalizeUrl(h.downloadUrl) === normalizeUrl(candidate.downloadUrl)
+  );
+  if (isReused) {
+    if (isExemptMotif) ;
+    else {
+      reusePenalty = -25;
+      penaltyReasons.push(`Asset ${candidate.assetId} was already used in a previous scene`);
+      diversityScore = Math.max(0, diversityScore - 10);
+    }
+  }
+  if (prevScene?.provider === candidate.provider && prevPrevScene?.provider === candidate.provider) {
+    reusePenalty = Math.max(-30, reusePenalty - 5);
+    penaltyReasons.push(`Provider '${candidate.provider}' repeated for 3 consecutive scenes`);
+    diversityScore = Math.max(0, diversityScore - 3);
+  }
+  if (prevScene) {
+    const candidateTokens2 = /* @__PURE__ */ new Set([
+      ...tokenize$2(candidate.title),
+      ...candidate.tags.flatMap((t) => [...tokenize$2(t)])
+    ]);
+    const prevTokens = /* @__PURE__ */ new Set([
+      ...tokenize$2(prevScene.title),
+      ...(prevScene.tags ?? []).flatMap((t) => [...tokenize$2(t)])
+    ]);
+    const similarity = calculateJaccardSimilarity(candidateTokens2, prevTokens);
+    if (similarity > 0.6) {
+      reusePenalty = Math.max(-30, reusePenalty - 10);
+      penaltyReasons.push(`High visual/metadata similarity (${Math.round(similarity * 100)}%) with previous scene`);
+      diversityScore = Math.max(0, diversityScore - 5);
+    } else if (similarity > 0.4) {
+      diversityScore = Math.max(0, diversityScore - 2);
+    }
+  }
+  if (prevScene?.creator && candidate.creator && prevScene.creator.toLowerCase() === candidate.creator.toLowerCase()) {
+    reusePenalty = Math.max(-30, reusePenalty - 5);
+    penaltyReasons.push(`Same creator '${candidate.creator}' repeated from previous scene`);
+  }
+  return {
+    diversityScore: Math.max(0, Math.min(15, diversityScore)),
+    reusePenalty: Math.max(-30, Math.min(0, reusePenalty)),
+    penaltyReasons
+  };
+}
+function tokenize$1(text) {
+  if (!text) return /* @__PURE__ */ new Set();
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((w) => w.length > 2)
+  );
+}
+function tokenOverlap(ref, candidateTokens2) {
+  if (ref.size === 0) return 0;
+  let hits = 0;
+  for (const t of ref) {
+    if (candidateTokens2.has(t)) hits++;
+  }
+  return Math.min(1, hits / Math.max(1, Math.min(ref.size, 5)));
+}
+function extractCandidateTokens(c) {
+  const titleTokens = tokenize$1(c.title);
+  const tagTokens = new Set(
+    (c.tags ?? []).flatMap(
+      (t) => t.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((x) => x.length > 2)
+    )
+  );
+  return /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
+}
+function calculateLocalRelevance(c, narration, visualIntent, searchPlan) {
+  const cTokens = extractCandidateTokens(c);
+  const reasons = [];
+  const rejectionReasons = [];
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$1(visualIntent), ...tokenize$1(narration)]);
+  const overlap = tokenOverlap(refTokens, cTokens);
+  let score = overlap * 25;
+  if (searchPlan?.requiredTerms?.length) {
+    const reqTokens = new Set(searchPlan.requiredTerms.flatMap((t) => [...tokenize$1(t)]));
+    const reqOverlap = tokenOverlap(reqTokens, cTokens);
+    if (reqOverlap > 0) {
+      score += 5;
+      reasons.push("Matches required search terms");
+    }
+  } else if (overlap > 0.4) {
+    score += 5;
+    reasons.push("High visual intent alignment");
+  }
+  if (searchPlan?.negativeTerms?.length) {
+    for (const neg of searchPlan.negativeTerms) {
+      const negTokens = tokenize$1(neg);
+      if ([...negTokens].some((t) => cTokens.has(t))) {
+        rejectionReasons.push(`Contains negative term: ${neg}`);
+        score = Math.max(0, score - 15);
+      }
+    }
+  }
+  return {
+    score: Math.min(30, Math.round(score)),
+    reasons,
+    rejectionReasons
+  };
+}
+function calculateGlobalContextFit(c, globalContext) {
+  if (!globalContext) {
+    return { score: 14, reasons: ["Neutral global context (no AI script context)"], rejectionReasons: [] };
+  }
+  const cTokens = extractCandidateTokens(c);
+  const reasons = [];
+  const rejectionReasons = [];
+  let score = 0;
+  const anchors = new Set(
+    [
+      ...globalContext.exactTopicAnchors,
+      ...globalContext.contextualAnchors,
+      globalContext.primarySubject
+    ].flatMap((a) => a ? [...tokenize$1(a)] : [])
+  );
+  const anchorOverlap = tokenOverlap(anchors, cTokens);
+  score += anchorOverlap * 10;
+  if (anchorOverlap > 0.3) {
+    reasons.push("Matches central documentary subject");
+  }
+  const geos = [
+    globalContext.geography.primaryCountry,
+    globalContext.geography.primaryRegion,
+    ...globalContext.geography.secondaryLocations
+  ].filter(Boolean);
+  if (geos.length > 0) {
+    const geoTokens = new Set(geos.flatMap((g) => [...tokenize$1(g)]));
+    const geoOverlap = tokenOverlap(geoTokens, cTokens);
+    score += geoOverlap * 5;
+    if (geoOverlap > 0) {
+      reasons.push("Consistent with target region/geography");
+    }
+  } else {
+    score += 3;
+  }
+  const period = (globalContext.timeContext.primaryPeriod || "").toLowerCase();
+  const isModern = period.includes("modern") || period.includes("contemporary") || period.includes("current");
+  const historicTokens = /* @__PURE__ */ new Set(["vintage", "historical", "antique", "archival", "century", "retro", "black and white"]);
+  const hasHistoric = [...historicTokens].some((t) => cTokens.has(t));
+  if (isModern) {
+    if (hasHistoric) {
+      score += 1;
+      rejectionReasons.push("Historic imagery in contemporary context");
+    } else {
+      score += 5;
+    }
+  } else if (period) {
+    if (hasHistoric) {
+      score += 5;
+      reasons.push("Authentic historical aesthetic match");
+    } else {
+      score += 3;
+    }
+  } else {
+    score += 4;
+  }
+  for (const forbidden of globalContext.forbiddenSubstitutions ?? []) {
+    const fTokens = tokenize$1(forbidden);
+    if ([...fTokens].filter((t) => t.length > 3).some((t) => cTokens.has(t))) {
+      rejectionReasons.push(`Violates forbidden substitution: "${forbidden}"`);
+      score = Math.max(0, score - 15);
+    }
+  }
+  for (const neg of globalContext.negativeKeywords ?? []) {
+    const nTokens = tokenize$1(neg);
+    if ([...nTokens].some((t) => cTokens.has(t))) {
+      rejectionReasons.push(`Matches global negative keyword: "${neg}"`);
+      score = Math.max(0, score - 10);
+    }
+  }
+  return {
+    score: Math.max(0, Math.min(20, Math.round(score))),
+    reasons,
+    rejectionReasons
+  };
+}
+function calculateChapterContextFit(c, chapterTitle, chapterPurpose) {
+  if (!chapterTitle && !chapterPurpose) {
+    return { score: 7, reasons: [] };
+  }
+  const cTokens = extractCandidateTokens(c);
+  const chapterTokens = /* @__PURE__ */ new Set([...tokenize$1(chapterTitle), ...tokenize$1(chapterPurpose)]);
+  const overlap = tokenOverlap(chapterTokens, cTokens);
+  const score = Math.round(Math.max(4, overlap * 10));
+  const reasons = [];
+  if (overlap > 0.3) {
+    reasons.push(`Supports chapter theme "${chapterTitle ?? ""}"`);
+  }
+  return { score: Math.min(10, score), reasons };
+}
+function calculateTechnicalQuality(c) {
+  const minDim = Math.min(c.width, c.height);
+  let score = 5;
+  const reasons = [];
+  if (minDim >= 2160) {
+    score = 10;
+    reasons.push("4K UHD resolution");
+  } else if (minDim >= 1080) {
+    score = 9;
+    reasons.push("Full HD 1080p resolution");
+  } else if (minDim >= 720) {
+    score = 7;
+    reasons.push("HD 720p resolution");
+  } else if (minDim >= 480) {
+    score = 4;
+  } else {
+    score = 2;
+  }
+  return { score, reasons };
+}
+function calculateMotionSuitability(c, sceneDurationSecs) {
+  let score = 5;
+  const reasons = [];
+  if (c.mediaType === "video") {
+    const clipDur = c.durationSecs ?? 0;
+    if (clipDur >= sceneDurationSecs) {
+      score = 10;
+      reasons.push(`Video clip duration (${clipDur}s) covers scene length (${sceneDurationSecs}s)`);
+    } else if (clipDur > 0) {
+      score = Math.max(6, Math.round(7 * (clipDur / sceneDurationSecs)));
+      reasons.push(`Video clip duration (${clipDur}s)`);
+    } else {
+      score = 7;
+    }
+  } else {
+    score = 6;
+    reasons.push("High-res photo suitable for motion pan/zoom");
+  }
+  if (c.previewUrl) {
+    score = Math.min(10, score + 1);
+  }
+  return { score: Math.min(10, score), reasons };
+}
+function calculateAspectRatioFit(c, preferredAspectRatio) {
+  const [pw, ph] = preferredAspectRatio.split(":").map(Number);
+  const target = pw && ph ? pw / ph : 16 / 9;
+  const actual = c.width && c.height ? c.width / c.height : target;
+  const diff = Math.abs(target - actual) / target;
+  let score = 5;
+  const reasons = [];
+  if (diff < 0.05) {
+    score = 5;
+    reasons.push(`Exact aspect ratio match (${preferredAspectRatio})`);
+  } else if (diff < 0.25) {
+    score = 4;
+  } else if (diff < 0.5) {
+    score = 3;
+  } else {
+    score = 1;
+  }
+  return { score, reasons };
+}
+function scoreStockCandidate(c, ctx) {
+  const local = calculateLocalRelevance(c, ctx.narration, ctx.visualIntent, ctx.searchPlan);
+  const global = calculateGlobalContextFit(c, ctx.globalContext);
+  const chapter = calculateChapterContextFit(c, ctx.chapterTitle, ctx.chapterPurpose);
+  const tech = calculateTechnicalQuality(c);
+  const motion = calculateMotionSuitability(c, ctx.sceneDurationSecs);
+  const aspect = calculateAspectRatioFit(c, ctx.preferredAspectRatio);
+  const diversity = calculateDiversityScoreAndPenalty(c, ctx.assignmentHistory, ctx.isMotif || ctx.isLocked);
+  const positiveSubtotal = local.score + global.score + chapter.score + tech.score + motion.score + aspect.score + diversity.diversityScore;
+  const totalScore = Math.max(0, Math.min(100, positiveSubtotal + diversity.reusePenalty));
+  const allReasons = [
+    ...local.reasons,
+    ...global.reasons,
+    ...chapter.reasons,
+    ...tech.reasons,
+    ...motion.reasons,
+    ...aspect.reasons
+  ];
+  const allRejections = [
+    ...local.rejectionReasons,
+    ...global.rejectionReasons,
+    ...diversity.penaltyReasons
+  ];
+  return {
+    localRelevance: local.score,
+    globalContextFit: global.score,
+    chapterContextFit: chapter.score,
+    technicalQuality: tech.score,
+    motionSuitability: motion.score,
+    aspectRatioFit: aspect.score,
+    diversityScore: diversity.diversityScore,
+    reusePenalty: diversity.reusePenalty,
+    totalScore,
+    reasons: Array.from(new Set(allReasons)),
+    rejectionReasons: Array.from(new Set(allRejections))
+  };
+}
+function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
+  let sceneId;
+  let sceneIndex;
+  let candidates;
+  let ctx;
+  let maxCandidates = 3;
+  if (typeof arg1 === "object") {
+    sceneId = arg1.sceneId;
+    sceneIndex = arg1.sceneIndex;
+    candidates = arg1.searchResults || arg1.candidates || [];
+    maxCandidates = arg1.maxCandidates ?? 3;
+    ctx = arg1.ctx ?? {
+      narration: arg1.narration || "",
+      visualIntent: arg1.visualIntent,
+      sceneDurationSecs: arg1.targetDuration || 6,
+      preferredAspectRatio: "16:9",
+      assignmentHistory: []
+    };
+  } else {
+    sceneId = arg1;
+    sceneIndex = arg2 ?? 0;
+    candidates = arg3 || [];
+    ctx = arg4 || {
+      narration: "",
+      sceneDurationSecs: 6,
+      preferredAspectRatio: "16:9",
+      assignmentHistory: []
+    };
+    maxCandidates = arg5 ?? 3;
+  }
+  const deduped = deduplicateCandidates(candidates);
+  const scored = deduped.map((result) => {
+    const score = scoreStockCandidate(result, ctx);
+    const isRejected = score.rejectionReasons.length > 0 && score.totalScore < 30;
+    return {
+      candidateId: `${sceneId}_${result.provider}_${result.assetId}`,
+      sceneId,
+      sceneIndex,
+      result,
+      score,
+      rank: 0,
+      selected: false,
+      approved: false,
+      rejected: isRejected
+    };
+  });
+  scored.sort((a, b) => {
+    if (a.rejected !== b.rejected) return a.rejected ? 1 : -1;
+    return b.score.totalScore - a.score.totalScore;
+  });
+  const top = scored.slice(0, maxCandidates);
+  top.forEach((c, idx) => {
+    c.rank = idx + 1;
+    if (idx === 0 && !c.rejected) {
+      c.selected = true;
+    }
+  });
+  return top;
+}
+function getCandidatesStorePath(projectDir) {
+  return path.join(projectDir, "analysis", "stock-candidates.json");
+}
+function loadStockCandidates(projectDir) {
+  const filePath = getCandidatesStorePath(projectDir);
+  return readJsonSafe(filePath, {});
+}
+function saveStockCandidates(projectDir, data) {
+  const filePath = getCandidatesStorePath(projectDir);
+  return atomicWriteJson(filePath, data);
 }
 async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
   const allCandidates = [];
@@ -5010,52 +7183,75 @@ async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOri
       }
     }
   };
-  for (const query of queries) {
-    let cached = cache.get(`pexels_v:${query}`);
-    if (cached) {
-      addCandidates(cached);
+  const cleanQueries = dedupeStockQueries(queries.map((q) => sanitizeStockQuery(q)));
+  if (pexelsApiKey) {
+    for (const query of cleanQueries) {
+      const cached = cache.get(`pexels_v:${query}`);
+      if (cached) {
+        addCandidates(cached);
+      } else {
+        const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation);
+        cache.set(`pexels_v:${query}`, res);
+        addCandidates(res);
+      }
+      if (allCandidates.length >= 10) break;
+    }
+  }
+  if (allCandidates.length >= 3) {
+    logger.info(`[StockEngine] Pexels returned enough candidates (${allCandidates.length}). Pixabay skipped to preserve API quota.`);
+    return allCandidates;
+  }
+  if (pixabayApiKey) {
+    if (isPixabayPaused()) {
+      const waitSec = getPixabayPauseRemainingSecs();
+      logger.info(`[Pixabay] Rate limit paused (${waitSec}s remaining). Skipping Pixabay for this scene.`);
     } else {
-      const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation);
-      cache.set(`pexels_v:${query}`, res);
-      addCandidates(res);
-    }
-    if (allCandidates.length >= 6) break;
-  }
-  if (allCandidates.length < 3 && pixabayApiKey) {
-    for (const query of queries.slice(0, 2)) {
-      const cached = cache.get(`pixabay_v:${query}`);
-      if (cached) {
-        addCandidates(cached);
-      } else {
-        const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
-        const res = await pixabaySearchVideos(query, pixabayApiKey, 8, orientation);
-        cache.set(`pixabay_v:${query}`, res);
-        addCandidates(res);
+      const pxOrientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
+      const pixabayQueries = cleanQueries.slice(0, 2);
+      for (const query of pixabayQueries) {
+        if (isPixabayPaused()) break;
+        const cached = cache.get(`pixabay_v:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          try {
+            const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation);
+            cache.set(`pixabay_v:${query}`, res);
+            addCandidates(res);
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Video search failed for query "${query}": ${pxErr}`);
+          }
+        }
+        if (allCandidates.length >= 10) break;
       }
     }
   }
-  if (allCandidates.length < 2) {
-    for (const query of queries.slice(0, 2)) {
-      const cached = cache.get(`pexels_p:${query}`);
-      if (cached) {
-        addCandidates(cached);
-      } else {
-        const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation);
-        cache.set(`pexels_p:${query}`, res);
-        addCandidates(res);
+  if (allCandidates.length < 3) {
+    for (const query of cleanQueries.slice(0, 2)) {
+      if (pexelsApiKey) {
+        const cached = cache.get(`pexels_p:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation);
+          cache.set(`pexels_p:${query}`, res);
+          addCandidates(res);
+        }
       }
-    }
-  }
-  if (allCandidates.length < 2 && pixabayApiKey) {
-    for (const query of queries.slice(0, 1)) {
-      const cached = cache.get(`pixabay_p:${query}`);
-      if (cached) {
-        addCandidates(cached);
-      } else {
-        const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
-        const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation);
-        cache.set(`pixabay_p:${query}`, res);
-        addCandidates(res);
+      if (pixabayApiKey && !isPixabayPaused() && allCandidates.length < 2) {
+        const cached = cache.get(`pixabay_p:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          try {
+            const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
+            const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation);
+            cache.set(`pixabay_p:${query}`, res);
+            addCandidates(res);
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Photo search failed for query "${query}": ${pxErr}`);
+          }
+        }
       }
     }
   }
@@ -5069,6 +7265,7 @@ function toOrientation$1(ar) {
 async function runStockEngine(params, onProgress = () => {
 }) {
   const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9" } = params;
+  setPixabayProjectDir(projectDir);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) {
     return {
@@ -5083,31 +7280,52 @@ async function runStockEngine(params, onProgress = () => {
   const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
   const stockDir = path.join(projectDir, "assets", "stock");
   fs__namespace.mkdirSync(stockDir, { recursive: true });
+  const prodSettings = loadProductionSettings(projectDir);
+  const stockCandidatesStore = loadStockCandidates(projectDir);
   const cache = new QueryCache(stockDir);
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
-  const allScenes = flattenScenes$1(plan);
-  const scenesNeedingStock = allScenes.filter(
-    (s) => !s.locked && (!s.localPath || !fs__namespace.existsSync(s.localPath))
-  );
+  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe(reviewPath, []) : [];
+  const existingMap = /* @__PURE__ */ new Map();
+  for (const a of existingAssignments) {
+    existingMap.set(a.sceneIndex, a);
+  }
+  const flattenedEntries = flattenEditPlanScenes(plan);
+  const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    const existing = existingMap.get(scene.sceneIndex);
+    if (scene.locked || existing?.locked) return false;
+    if (existing?.manualOverride) return false;
+    if (existing?.approvalStatus === "approved") return false;
+    return true;
+  });
   const assignments = [];
   let assignedCount = 0;
   let failedCount = 0;
   const orientation = toOrientation$1(preferredAspectRatio);
-  onProgress(`Starting stock search for ${scenesNeedingStock.length} scenes…`, 0.01);
-  for (let i = 0; i < scenesNeedingStock.length; i++) {
-    const scene = scenesNeedingStock[i];
-    const pct = 0.05 + i / scenesNeedingStock.length * 0.85;
+  for (const entry of flattenedEntries) {
+    const existing = existingMap.get(entry.sceneIndex);
+    const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved";
+    if (isLocked && existing) {
+      assignments.push(existing);
+      if (existing.status === "assigned") assignedCount++;
+    }
+  }
+  onProgress(`Starting stock search for ${scenesToProcess.length} scenes...`, 0.01);
+  for (let i = 0; i < scenesToProcess.length; i++) {
+    const entry = scenesToProcess[i];
+    const { scene, sceneId, chapterTitle, chapterPurpose } = entry;
+    const pct = 0.05 + i / scenesToProcess.length * 0.85;
     const queries = scene.searchQueries?.length ? scene.searchQueries : [scene.visualIntent ?? scene.narrativeText ?? "nature background"].slice(0, 4);
     const visualIntent = scene.visualIntent ?? queries[0] ?? "";
     const narrationText = scene.narrativeText ?? "";
     const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
     onProgress(
-      `[${i + 1}/${scenesNeedingStock.length}] Scene ${scene.sceneIndex} — "${queries[0]}"`,
+      `[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - "${queries[0]}"`,
       pct
     );
     const assignment = {
-      sceneId: `scene_${scene.sceneIndex}`,
+      sceneId,
       sceneIndex: scene.sceneIndex,
       narrationText,
       startTime: scene.startTime,
@@ -5134,35 +7352,90 @@ async function runStockEngine(params, onProgress = () => {
         assignment.errorMessage = "No candidates found from any provider";
         failedCount++;
       } else {
-        const ranked = rankCandidates(candidates, {
-          visualIntent,
-          narrationText,
-          sceneDurationSecs: sceneDuration,
-          preferredAspectRatio,
-          usedAssetIds
-        });
-        const winner = ranked[0];
-        const usedQuery = queries.find(
-          (q) => winner.searchQuery !== void 0 ? winner.searchQuery === q : true
-        ) ?? queries[0];
-        const downloadedAsset = await downloadAsset(
-          winner,
-          scene.sceneIndex,
-          usedQuery,
-          stockDir,
-          manifest
-        );
-        manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
-        manifest.push(downloadedAsset);
-        usedAssetIds.add(downloadedAsset.assetId);
-        scene.localPath = downloadedAsset.localPath;
-        scene.mediaFile = path.basename(downloadedAsset.localPath);
-        scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
-        assignment.asset = downloadedAsset;
-        assignment.score = winner.score;
-        assignment.usedQuery = usedQuery;
-        assignment.status = "assigned";
-        assignedCount++;
+        const assignmentHistory = assignments.map((a) => ({
+          sceneIndex: a.sceneIndex,
+          provider: a.asset?.provider,
+          assetId: a.asset?.assetId,
+          creator: a.asset?.creator,
+          title: a.asset?.searchQuery,
+          downloadUrl: a.asset?.downloadUrl,
+          thumbnailUrl: a.asset?.thumbnailUrl,
+          isLocked: a.locked
+        }));
+        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+          const scoringCtx = {
+            narration: narrationText,
+            visualIntent,
+            chapterTitle,
+            chapterPurpose,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            assignmentHistory,
+            isLocked: scene.locked
+          };
+          const topCandidates = rankCandidatesForScene(
+            sceneId,
+            scene.sceneIndex,
+            candidates,
+            scoringCtx,
+            prodSettings.candidatesPerScene || 3
+          );
+          stockCandidatesStore[sceneId] = topCandidates;
+          const winner = topCandidates.find((c) => c.selected) || topCandidates[0];
+          const usedQuery = queries[0];
+          const downloadedAsset = await downloadAsset(
+            winner.result,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          );
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+          manifest.push(downloadedAsset);
+          usedAssetIds.add(downloadedAsset.assetId);
+          scene.localPath = downloadedAsset.localPath;
+          scene.mediaFile = path.basename(downloadedAsset.localPath);
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          assignment.asset = downloadedAsset;
+          assignment.score = winner.score.totalScore;
+          assignment.usedQuery = usedQuery;
+          assignment.status = "assigned";
+          assignment.candidates = topCandidates;
+          assignment.selectedCandidateId = winner.candidateId;
+          assignment.approvalStatus = "auto_selected";
+          assignment.scoreBreakdown = winner.score;
+          assignedCount++;
+        } else {
+          const ranked = rankCandidates(candidates, {
+            visualIntent,
+            narrationText,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            usedAssetIds
+          });
+          const winner = ranked[0];
+          const usedQuery = queries.find(
+            (q) => winner.searchQuery !== void 0 ? winner.searchQuery === q : true
+          ) ?? queries[0];
+          const downloadedAsset = await downloadAsset(
+            winner,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          );
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+          manifest.push(downloadedAsset);
+          usedAssetIds.add(downloadedAsset.assetId);
+          scene.localPath = downloadedAsset.localPath;
+          scene.mediaFile = path.basename(downloadedAsset.localPath);
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          assignment.asset = downloadedAsset;
+          assignment.score = winner.score;
+          assignment.usedQuery = usedQuery;
+          assignment.status = "assigned";
+          assignedCount++;
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5175,16 +7448,19 @@ async function runStockEngine(params, onProgress = () => {
     cache.save();
     saveAssetsManifest(stockDir, manifest);
   }
-  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  fs__namespace.writeFileSync(reviewPath, JSON.stringify(assignments, null, 2), "utf-8");
+  assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  atomicWriteJson(planPath, plan);
+  atomicWriteJson(reviewPath, assignments);
+  if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+    saveStockCandidates(projectDir, stockCandidatesStore);
+  }
   onProgress(
-    `Done — ${assignedCount}/${scenesNeedingStock.length} scenes assigned, ${failedCount} failed`,
+    `Done - ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`,
     1
   );
   return {
     success: true,
-    totalScenes: scenesNeedingStock.length,
+    totalScenes: flattenedEntries.length,
     assignedScenes: assignedCount,
     failedScenes: failedCount,
     assignments
@@ -5195,14 +7471,15 @@ async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey,
   const cache = new QueryCache(stockDir);
   const manifest = loadAssetsManifest(stockDir);
   const orientation = toOrientation$1(preferredAspectRatio);
+  const sanitizedQuery = sanitizeStockQuery(newQuery);
   const candidates = await searchForScene(
-    [newQuery],
+    [sanitizedQuery],
     pexelsApiKey,
     pixabayApiKey,
     orientation,
     cache
   );
-  if (candidates.length === 0) throw new Error(`No results for query "${newQuery}"`);
+  if (candidates.length === 0) throw new Error(`No results for query "${sanitizedQuery}"`);
   const usedIds = new Set(manifest.map((a) => a.assetId));
   const ranked = rankCandidates(candidates, {
     visualIntent: newQuery,
@@ -5220,16 +7497,18 @@ async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey,
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   if (fs__namespace.existsSync(planPath)) {
     const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    const scene = flattenScenes$1(plan).find((s) => s.sceneIndex === sceneIndex);
-    if (scene) {
-      scene.localPath = asset.localPath;
-      scene.mediaFile = path.basename(asset.localPath);
-      scene.mediaType = asset.mediaType === "photo" ? "image" : "video";
-      fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+    const flat = flattenEditPlanScenes(plan);
+    const sceneEntry = flat.find((s) => s.sceneIndex === sceneIndex);
+    if (sceneEntry) {
+      sceneEntry.scene.localPath = asset.localPath;
+      sceneEntry.scene.mediaFile = path.basename(asset.localPath);
+      sceneEntry.scene.mediaType = asset.mediaType === "photo" ? "image" : "video";
+      atomicWriteJson(planPath, plan);
     }
   }
   return asset;
 }
+const STOCK_QUERY_BATCH_SIZE = 12;
 function getQueryCachePath(projectDir) {
   return path.join(projectDir, "assets", "stock", ".context-query-cache.json");
 }
@@ -5242,10 +7521,26 @@ function loadQueryCache(projectDir) {
     return {};
   }
 }
-function saveQueryCache(projectDir, cache) {
+function saveQueryCacheEntries(projectDir, newEntries) {
   const p = getQueryCachePath(projectDir);
-  fs__namespace.mkdirSync(path.join(projectDir, "assets", "stock"), { recursive: true });
-  fs__namespace.writeFileSync(p, JSON.stringify(cache, null, 2), "utf-8");
+  const dir = path.join(projectDir, "assets", "stock");
+  fs__namespace.mkdirSync(dir, { recursive: true });
+  const cache = loadQueryCache(projectDir);
+  for (const [k, v] of Object.entries(newEntries)) {
+    cache[k] = v;
+  }
+  const tmpPath = `${p}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(cache, null, 2), "utf-8");
+  try {
+    fs__namespace.renameSync(tmpPath, p);
+  } catch {
+    try {
+      fs__namespace.copyFileSync(tmpPath, p);
+      fs__namespace.unlinkSync(tmpPath);
+    } catch {
+      fs__namespace.writeFileSync(p, JSON.stringify(cache, null, 2), "utf-8");
+    }
+  }
 }
 function makeCacheKey(globalContext, sceneId, narration) {
   const narrationHash = crypto.createHash("md5").update(narration).digest("hex").slice(0, 8);
@@ -5256,7 +7551,7 @@ const SYSTEM_PROMPT = `You are the Context-Aware Visual Research Engine for a do
 You must NEVER interpret a scene in isolation.
 Every scene belongs to a complete documentary with a defined primary subject, central thesis, geography, historical period, community, visual identity and story arc.
 
-Analyze the current scene using four levels:
+Analyze each scene using four levels:
 1. Complete script context (GlobalScriptContext).
 2. Current chapter context.
 3. Exact current narration.
@@ -5314,31 +7609,84 @@ Generate a context-aware StockSearchPlan. Return ONLY this JSON:
   "desiredOrientation": "landscape"
 }`;
 }
+function buildBatchPrompt(scenes, globalCtx) {
+  const globalContextData = {
+    primarySubject: globalCtx.primarySubject,
+    centralThesis: globalCtx.centralThesis,
+    geography: [
+      globalCtx.geography.primaryCountry,
+      globalCtx.geography.primaryRegion,
+      ...globalCtx.geography.secondaryLocations
+    ].filter(Boolean),
+    timePeriod: [globalCtx.timeContext.primaryPeriod, ...globalCtx.timeContext.historicalPeriods].filter(Boolean),
+    exactTopicAnchors: globalCtx.exactTopicAnchors,
+    negativeKeywords: globalCtx.negativeKeywords
+  };
+  const scenesData = scenes.map((s) => ({
+    sceneId: s.sceneId,
+    chapterTitle: s.packet.chapterContext.chapterTitle,
+    chapterPurpose: s.packet.chapterContext.chapterPurpose,
+    previousScene: s.packet.neighboringContext.previousScene || "none",
+    narration: s.packet.localContext.narration,
+    nextScene: s.packet.neighboringContext.nextScene || "none",
+    scenePurpose: s.packet.localContext.scenePurpose,
+    visibleSubject: s.packet.localContext.visibleSubject,
+    visibleAction: s.packet.localContext.visibleAction
+  }));
+  return `GLOBAL SCRIPT CONTEXT:
+${JSON.stringify(globalContextData, null, 2)}
+
+REQUESTED SCENES (${scenes.length} scenes):
+${JSON.stringify(scenesData, null, 2)}
+
+Generate a context-aware StockSearchPlan for EACH requested scene.
+Every scene in the response MUST map accurately to its requested sceneId.
+Return ONLY valid JSON matching this exact structure:
+{
+  "scenes": [
+    {
+      "sceneId": "exact sceneId matching requested scene",
+      "visualIntent": "short visual concept (5-12 words)",
+      "exactQueries": ["Tier A query 1", "Tier A query 2"],
+      "subjectQueries": ["Tier B query 1", "Tier B query 2"],
+      "contextualQueries": ["Tier C query 1", "Tier C query 2"],
+      "fallbackQueries": ["Tier D query 1", "Tier D query 2"],
+      "requiredTerms": ["term that must appear in Tier A"],
+      "preferredTerms": ["preferred search term"],
+      "negativeTerms": ["term to exclude"],
+      "targetMediaType": "video",
+      "desiredShotTypes": ["medium shot", "close-up"],
+      "desiredOrientation": "landscape"
+    }
+  ]
+}`;
+}
 function buildFallbackPlan(packet, globalCtx) {
   const anchor = globalCtx.exactTopicAnchors[0] ?? globalCtx.primarySubject;
   const env = globalCtx.visualWorld.environment[0] ?? "rural";
   const action = packet.localContext.visibleAction || "community life";
-  const location = globalCtx.geography.primaryRegion ?? globalCtx.geography.primaryCountry ?? "";
-  return {
-    visualIntent: `${anchor} ${action}`,
-    exactQueries: [
-      `${anchor} ${action} ${location}`.trim(),
-      `${anchor} ${action}`.trim(),
-      `${anchor} community ${env}`.trim()
-    ],
-    subjectQueries: [
-      `${anchor} ${env}`,
-      `${anchor} community`
-    ],
-    contextualQueries: [
-      `${env} community ${action}`,
-      `rural ${action}`,
-      packet.chapterContext.chapterTitle.toLowerCase()
-    ],
-    fallbackQueries: [
-      action,
-      env + " landscape"
-    ],
+  const locRaw = globalCtx.geography.primaryRegion ?? globalCtx.geography.primaryCountry ?? "";
+  const location = locRaw.toLowerCase().includes("not specified") ? "" : locRaw;
+  const plan = {
+    visualIntent: sanitizeStockQuery(`${anchor} ${action}`),
+    exactQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${anchor} ${action} ${location}`.trim()),
+      sanitizeStockQuery(`${anchor} ${action}`.trim()),
+      sanitizeStockQuery(`${anchor} community ${env}`.trim())
+    ]),
+    subjectQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${anchor} ${env}`),
+      sanitizeStockQuery(`${anchor} community`)
+    ]),
+    contextualQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${env} community ${action}`),
+      sanitizeStockQuery(`rural ${action}`),
+      sanitizeStockQuery(packet.chapterContext.chapterTitle.toLowerCase())
+    ]),
+    fallbackQueries: dedupeStockQueries([
+      sanitizeStockQuery(action),
+      sanitizeStockQuery(env + " landscape")
+    ]),
     requiredTerms: [anchor],
     preferredTerms: globalCtx.contextualAnchors.slice(0, 3),
     negativeTerms: globalCtx.negativeKeywords,
@@ -5346,55 +7694,356 @@ function buildFallbackPlan(packet, globalCtx) {
     desiredShotTypes: ["wide shot", "medium shot"],
     desiredOrientation: "landscape"
   };
+  return plan;
+}
+function sanitizePlan$1(plan) {
+  const fallback = sanitizeStockQuery(plan.visualIntent || "documentary footage");
+  return {
+    ...plan,
+    visualIntent: sanitizeStockQuery(plan.visualIntent, fallback),
+    exactQueries: dedupeStockQueries((plan.exactQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    subjectQueries: dedupeStockQueries((plan.subjectQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    contextualQueries: dedupeStockQueries((plan.contextualQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    fallbackQueries: dedupeStockQueries((plan.fallbackQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5)
+  };
+}
+function isValidScenePlan(obj, expectedSceneId) {
+  if (!obj || typeof obj !== "object") return false;
+  const p = obj;
+  if (expectedSceneId && p.sceneId !== expectedSceneId) return false;
+  if (typeof p.visualIntent !== "string" || !p.visualIntent.trim()) return false;
+  if (p.visualIntent.toLowerCase().includes("not specified")) return false;
+  const allQueries = [
+    ...Array.isArray(p.exactQueries) ? p.exactQueries : [],
+    ...Array.isArray(p.subjectQueries) ? p.subjectQueries : [],
+    ...Array.isArray(p.contextualQueries) ? p.contextualQueries : [],
+    ...Array.isArray(p.fallbackQueries) ? p.fallbackQueries : []
+  ].filter((q) => typeof q === "string" && q.trim().length > 0 && !q.toLowerCase().includes("not specified"));
+  return allQueries.length > 0;
 }
 async function generateContextAwareSearchPlan(params) {
   const { projectDir, apiKey, packet, globalContext, sceneId, useCache = true } = params;
-  const modelId = params.model ?? "gemini-3.8-flash";
+  const rawModel = params.model;
   const cacheKey = makeCacheKey(globalContext, sceneId, packet.localContext.narration);
   const cache = useCache ? loadQueryCache(projectDir) : {};
   if (useCache && cache[cacheKey] && cache[cacheKey].contextVersion === globalContext.version) {
     logger.info(`[QueryGen] Cache hit for scene ${sceneId}`);
-    return cache[cacheKey].plan;
+    return sanitizePlan$1(cache[cacheKey].plan);
   }
-  const ai = new genai.GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } });
-  const prompt = buildScenePrompt(packet, globalContext);
-  const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
+  const candidateModels = getAvailableModelsForTask("stock_query", rawModel);
+  const cleanKey = normalizeApiKey(apiKey);
   let rawJson = "";
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)];
-    try {
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-        config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 2048 }
-      });
-      rawJson = response.text ?? "";
-      break;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE");
-      if (overloaded && attempt < 3) {
-        await new Promise((r) => setTimeout(r, 2e3 * attempt));
-        continue;
+  let modelUsed = "";
+  if (cleanKey.length > 0 && candidateModels.length > 0) {
+    const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+    const prompt = buildScenePrompt(packet, globalContext);
+    for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+      const currentModel = candidateModels[mIdx];
+      try {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+          config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 2048 }
+        });
+        rawJson = response.text ?? "";
+        if (rawJson) {
+          modelUsed = currentModel;
+          recordModelSuccess(currentModel);
+          logger.info(`[QueryGen] Scene ${sceneId} generated successfully with ${currentModel}.`);
+          break;
+        }
+      } catch (err) {
+        const { kind, message } = classifyGeminiErrorKind(err);
+        recordModelFailure(currentModel, kind);
+        if (kind === "MODEL_NOT_FOUND") {
+          logger.warn(`[QueryGen] Model ${currentModel} not found for this account. Switching model immediately.`);
+        } else if (kind === "RATE_LIMIT") {
+          logger.warn(`[QueryGen] Model ${currentModel} rate-limited. Circuit breaker tripped. Switching immediately.`);
+        } else if (kind === "SERVICE_UNAVAILABLE") {
+          logger.warn(`[QueryGen] Model ${currentModel} service unavailable. Switching immediately.`);
+        } else if (kind === "AUTH_ERROR") {
+          logger.error(`[QueryGen] Gemini authentication error. Check API key.`);
+          break;
+        } else {
+          logger.warn(`[QueryGen] Model ${currentModel} failed (${kind}): ${message.slice(0, 100)}`);
+        }
       }
-      logger.warn(`[QueryGen] Scene ${sceneId} AI failed (${msg}), using rule-based fallback`);
-      return buildFallbackPlan(packet, globalContext);
     }
   }
   let plan;
-  try {
-    const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-    plan = JSON.parse(clean);
-    if (!plan.exactQueries?.length) throw new Error("Missing exactQueries");
-  } catch {
-    logger.warn(`[QueryGen] Scene ${sceneId} JSON parse failed, using rule-based fallback`);
+  let generationMode = "single_ai";
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const parsed = JSON.parse(clean);
+      if (!isValidScenePlan(parsed)) throw new Error("Parsed search plan failed validation");
+      plan = parsed;
+    } catch {
+      logger.warn(`[QueryGen] Scene ${sceneId} JSON parse failed, using rule-based fallback`);
+      plan = buildFallbackPlan(packet, globalContext);
+      generationMode = "rule_fallback";
+    }
+  } else {
+    logger.warn(`[QueryGen] Scene ${sceneId} AI failed or models blocked, using rule-based fallback`);
     plan = buildFallbackPlan(packet, globalContext);
+    generationMode = "rule_fallback";
   }
+  plan = sanitizePlan$1(plan);
   if (useCache) {
-    cache[cacheKey] = { plan, generatedAt: (/* @__PURE__ */ new Date()).toISOString(), contextVersion: globalContext.version };
-    saveQueryCache(projectDir, cache);
+    saveQueryCacheEntries(projectDir, {
+      [cacheKey]: {
+        plan,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        contextVersion: globalContext.version,
+        modelUsed: modelUsed || void 0,
+        generationMode
+      }
+    });
   }
   return plan;
+}
+async function processBatchChunk(params) {
+  const { projectDir, apiKey, model, batch, globalContext, batchIndex, totalBatches, onProgress } = params;
+  const results = /* @__PURE__ */ new Map();
+  const candidateModels = getAvailableModelsForTask("stock_query", model);
+  const cleanKey = normalizeApiKey(apiKey);
+  let batchSuccess = false;
+  let rawJson = "";
+  let successfulModel = "";
+  if (cleanKey.length > 0 && candidateModels.length > 0) {
+    const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+    const prompt = buildBatchPrompt(batch, globalContext);
+    for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+      const currentModel = candidateModels[mIdx];
+      const modelNotice = `Using ${currentModel} for batch ${batchIndex + 1}/${totalBatches} (${batch.length} scenes)...`;
+      logger.info(`[QueryGen] ${modelNotice}`);
+      onProgress?.(modelNotice, batchIndex / totalBatches, {
+        phase: "query_generation",
+        currentBatch: batchIndex + 1,
+        totalBatches,
+        processedScenes: batchIndex * STOCK_QUERY_BATCH_SIZE,
+        totalScenes: totalBatches * STOCK_QUERY_BATCH_SIZE,
+        cachedScenes: 0,
+        modelUsed: currentModel
+      });
+      try {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+          config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 8192 }
+        });
+        rawJson = response.text ?? "";
+        if (rawJson) {
+          successfulModel = currentModel;
+          recordModelSuccess(currentModel);
+          batchSuccess = true;
+          logger.info(`[QueryGen] Batch ${batchIndex + 1}/${totalBatches} generated successfully with ${currentModel}.`);
+          break;
+        }
+      } catch (err) {
+        const { kind, message } = classifyGeminiErrorKind(err);
+        recordModelFailure(currentModel, kind);
+        const nextModel = candidateModels[mIdx + 1];
+        if (kind === "RATE_LIMIT") {
+          const switchMsg = nextModel ? `${currentModel} temporarily rate-limited. Switching to ${nextModel}...` : `${currentModel} rate-limited. No other AI models available, using rule-based fallback...`;
+          logger.warn(`[QueryGen] ${switchMsg}`);
+          onProgress?.(switchMsg, batchIndex / totalBatches);
+        } else if (kind === "SERVICE_UNAVAILABLE") {
+          const switchMsg = nextModel ? `${currentModel} high demand/unavailable. Switching to ${nextModel}...` : `${currentModel} unavailable. Using rule-based fallback...`;
+          logger.warn(`[QueryGen] ${switchMsg}`);
+          onProgress?.(switchMsg, batchIndex / totalBatches);
+        } else if (kind === "MODEL_NOT_FOUND") {
+          logger.warn(`[QueryGen] Model ${currentModel} not found for this account.`);
+        } else if (kind === "AUTH_ERROR") {
+          logger.error(`[QueryGen] Gemini authentication error. Check API key.`);
+          break;
+        } else {
+          logger.warn(`[QueryGen] Batch call with ${currentModel} error (${kind}): ${message.slice(0, 100)}`);
+        }
+      }
+    }
+  }
+  if (batchSuccess && rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const parsed = JSON.parse(clean);
+      if (Array.isArray(parsed.scenes)) {
+        const returnedMap = /* @__PURE__ */ new Map();
+        const seenIds = /* @__PURE__ */ new Set();
+        for (const item of parsed.scenes) {
+          const sId = typeof item.sceneId === "string" ? item.sceneId.trim() : "";
+          if (sId && !seenIds.has(sId)) {
+            seenIds.add(sId);
+            returnedMap.set(sId, item);
+          }
+        }
+        for (const item of batch) {
+          const found = returnedMap.get(item.sceneId);
+          if (found && isValidScenePlan(found, item.sceneId)) {
+            const sanitized = sanitizePlan$1(found);
+            results.set(item.sceneId, { plan: sanitized, modelUsed: successfulModel, mode: "batch_ai" });
+          } else {
+            logger.warn(`[QueryGen] Missing or invalid response for scene ${item.sceneId}, falling back to rule-based plan`);
+            const fb = sanitizePlan$1(buildFallbackPlan(item.packet, globalContext));
+            results.set(item.sceneId, { plan: fb, mode: "rule_fallback" });
+          }
+        }
+        return results;
+      }
+    } catch {
+      logger.warn(`[QueryGen] Batch ${batchIndex + 1} JSON parse failed. Attempting batch split fallback.`);
+    }
+  }
+  if (batch.length >= 4) {
+    const mid = Math.floor(batch.length / 2);
+    const firstHalf = batch.slice(0, mid);
+    const secondHalf = batch.slice(mid);
+    logger.info(`[QueryGen] Splitting batch of ${batch.length} into two sub-batches (${firstHalf.length} and ${secondHalf.length})...`);
+    const half1Res = await processBatchChunk({
+      ...params,
+      batch: firstHalf
+    });
+    const half2Res = await processBatchChunk({
+      ...params,
+      batch: secondHalf
+    });
+    for (const [k, v] of half1Res.entries()) results.set(k, v);
+    for (const [k, v] of half2Res.entries()) results.set(k, v);
+    return results;
+  }
+  logger.warn(`[QueryGen] All AI models failed for batch ${batchIndex + 1}, using rule-based fallback for ${batch.length} scenes.`);
+  for (const item of batch) {
+    const fb = sanitizePlan$1(buildFallbackPlan(item.packet, globalContext));
+    results.set(item.sceneId, { plan: fb, mode: "rule_fallback" });
+  }
+  return results;
+}
+async function batchGenerateSearchPlans(params) {
+  const { projectDir, apiKey, model, scenes, globalContext, useCache = true, onProgress } = params;
+  const plans = /* @__PURE__ */ new Map();
+  if (scenes.length === 0) {
+    return plans;
+  }
+  const existingCache = useCache ? loadQueryCache(projectDir) : {};
+  const uncachedScenes = [];
+  let cachedCount = 0;
+  for (const s of scenes) {
+    const cacheKey = makeCacheKey(globalContext, s.sceneId, s.packet.localContext.narration);
+    const entry = existingCache[cacheKey];
+    if (useCache && entry && entry.contextVersion === globalContext.version) {
+      plans.set(s.sceneId, sanitizePlan$1(entry.plan));
+      cachedCount++;
+    } else {
+      uncachedScenes.push({
+        sceneId: s.sceneId,
+        packet: s.packet,
+        cacheKey
+      });
+    }
+  }
+  if (cachedCount > 0) {
+    logger.info(`[QueryGen] ${cachedCount} cached scenes found out of ${scenes.length}.`);
+  }
+  if (uncachedScenes.length === 0) {
+    onProgress?.(`All ${cachedCount} scenes loaded from cache.`, 1, {
+      phase: "query_generation",
+      currentBatch: 0,
+      totalBatches: 0,
+      processedScenes: scenes.length,
+      totalScenes: scenes.length,
+      cachedScenes: cachedCount
+    });
+    return plans;
+  }
+  const batches = [];
+  for (let i = 0; i < uncachedScenes.length; i += STOCK_QUERY_BATCH_SIZE) {
+    batches.push(uncachedScenes.slice(i, i + STOCK_QUERY_BATCH_SIZE));
+  }
+  const totalBatches = batches.length;
+  logger.info(`[QueryGen] Generating stock queries: ${uncachedScenes.length} uncached scenes partitioned into ${totalBatches} batches (batch size ${STOCK_QUERY_BATCH_SIZE}).`);
+  onProgress?.(`Preparing stock queries... ${cachedCount} cached scenes found. Generating ${totalBatches} batches...`, 0.02, {
+    phase: "query_generation",
+    currentBatch: 0,
+    totalBatches,
+    processedScenes: cachedCount,
+    totalScenes: scenes.length,
+    cachedScenes: cachedCount
+  });
+  let processedScenesCount = cachedCount;
+  for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+    const currentBatch = batches[bIdx];
+    const batchProgressPct = bIdx / totalBatches * 0.95;
+    onProgress?.(
+      `Generating stock queries: batch ${bIdx + 1}/${totalBatches} (${currentBatch.length} scenes)...`,
+      batchProgressPct,
+      {
+        phase: "query_generation",
+        currentBatch: bIdx + 1,
+        totalBatches,
+        processedScenes: processedScenesCount,
+        totalScenes: scenes.length,
+        cachedScenes: cachedCount
+      }
+    );
+    const batchResults = await processBatchChunk({
+      projectDir,
+      apiKey,
+      model,
+      batch: currentBatch,
+      globalContext,
+      batchIndex: bIdx,
+      totalBatches,
+      onProgress
+    });
+    const cacheEntriesToSave = {};
+    for (const item of currentBatch) {
+      const res = batchResults.get(item.sceneId);
+      if (res) {
+        plans.set(item.sceneId, res.plan);
+        cacheEntriesToSave[item.cacheKey] = {
+          plan: res.plan,
+          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          contextVersion: globalContext.version,
+          modelUsed: res.modelUsed,
+          generationMode: res.mode
+        };
+      } else {
+        const fb = sanitizePlan$1(buildFallbackPlan(item.packet, globalContext));
+        plans.set(item.sceneId, fb);
+        cacheEntriesToSave[item.cacheKey] = {
+          plan: fb,
+          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          contextVersion: globalContext.version,
+          generationMode: "rule_fallback"
+        };
+      }
+      processedScenesCount++;
+    }
+    if (useCache && Object.keys(cacheEntriesToSave).length > 0) {
+      saveQueryCacheEntries(projectDir, cacheEntriesToSave);
+    }
+    onProgress?.(
+      `Stock query batch ${bIdx + 1}/${totalBatches} completed.`,
+      (bIdx + 1) / totalBatches * 0.95,
+      {
+        phase: "query_generation",
+        currentBatch: bIdx + 1,
+        totalBatches,
+        processedScenes: processedScenesCount,
+        totalScenes: scenes.length,
+        cachedScenes: cachedCount
+      }
+    );
+  }
+  onProgress?.(`All ${scenes.length} stock query plans ready.`, 1, {
+    phase: "query_generation",
+    currentBatch: totalBatches,
+    totalBatches,
+    processedScenes: scenes.length,
+    totalScenes: scenes.length,
+    cachedScenes: cachedCount
+  });
+  return plans;
 }
 function tokenize(text) {
   return new Set(
@@ -5554,29 +8203,15 @@ function scoreContextCandidate(candidate, ctx) {
 function rankContextCandidates(candidates, ctx) {
   return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
 }
-function flattenScenesWithChapter(plan) {
-  const result = [];
-  for (const ch of plan.chapters ?? []) {
-    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-    for (const seq of seqs) {
-      for (const scene of seq.scenes ?? []) {
-        result.push({
-          scene,
-          chapterId: `CH${ch.chapterIndex}`,
-          chapterTitle: ch.title,
-          chapterPurpose: ch.purpose ?? ""
-        });
-      }
-    }
-  }
-  return result;
-}
 function toOrientation(ar) {
   if (ar === "9:16") return "portrait";
   if (ar === "1:1") return "square";
   return "landscape";
 }
-async function searchWithTieredPlan(plan, pexelsApiKey, pixabayApiKey, orientation, cache) {
+const MIN_ACCEPTABLE_CANDIDATE_SCORE = 55;
+const TARGET_CANDIDATES_PER_SCENE = 3;
+const MAX_PIXABAY_QUERIES_PER_SCENE = 2;
+async function searchWithTieredPlan(plan, pexelsApiKey, pixabayApiKey, orientation, cache, onProgressMsg, scoreEvaluator) {
   const allCandidates = [];
   const seenIds = /* @__PURE__ */ new Set();
   const addCandidates = (results) => {
@@ -5587,36 +8222,30 @@ async function searchWithTieredPlan(plan, pexelsApiKey, pixabayApiKey, orientati
       }
     }
   };
-  const searchTier = async (queries, minNeeded) => {
+  const fallback = sanitizeStockQuery(plan.visualIntent || "documentary footage");
+  const sanitizedPlan = {
+    ...plan,
+    exactQueries: dedupeStockQueries((plan.exactQueries || []).map((q) => sanitizeStockQuery(q, fallback))),
+    subjectQueries: dedupeStockQueries((plan.subjectQueries || []).map((q) => sanitizeStockQuery(q, fallback))),
+    contextualQueries: dedupeStockQueries((plan.contextualQueries || []).map((q) => sanitizeStockQuery(q, fallback))),
+    fallbackQueries: dedupeStockQueries((plan.fallbackQueries || []).map((q) => sanitizeStockQuery(q, fallback)))
+  };
+  const searchPexelsList = async (queries) => {
+    if (!pexelsApiKey) return;
     for (const query of queries) {
-      let cached = cache.get(`pexels_v:${query}`);
+      const cached = cache.get(`pexels_v:${query}`);
       if (cached) {
         addCandidates(cached);
       } else {
-        const res = await pexelsSearchVideos(query, pexelsApiKey, 10, orientation);
+        const res = await pexelsSearchVideos(query, pexelsApiKey, 8, orientation);
         cache.set(`pexels_v:${query}`, res);
         addCandidates(res);
       }
-      if (allCandidates.length >= 10) return true;
+      if (allCandidates.length >= 10) break;
     }
-    if (allCandidates.length >= minNeeded) return true;
-    if (pixabayApiKey) {
-      for (const query of queries.slice(0, 2)) {
-        const cached = cache.get(`pixabay_v:${query}`);
-        if (cached) {
-          addCandidates(cached);
-        } else {
-          const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal";
-          const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation);
-          cache.set(`pixabay_v:${query}`, res);
-          addCandidates(res);
-        }
-        if (allCandidates.length >= minNeeded) return true;
-      }
-    }
-    return allCandidates.length >= minNeeded;
   };
-  const photoFallback = async (queries) => {
+  const pexelsPhotoFallback = async (queries) => {
+    if (!pexelsApiKey) return;
     for (const query of queries.slice(0, 2)) {
       const cached = cache.get(`pexels_p:${query}`);
       if (cached) {
@@ -5628,24 +8257,83 @@ async function searchWithTieredPlan(plan, pexelsApiKey, pixabayApiKey, orientati
       }
     }
   };
-  const tierAok = await searchTier(plan.exactQueries, 3);
-  if (tierAok && allCandidates.length >= 3) {
-    if (allCandidates.length < 2) await photoFallback(plan.exactQueries);
-    return { candidates: allCandidates, tierUsed: "A" };
+  let pexelsTier = "D";
+  await searchPexelsList(sanitizedPlan.exactQueries);
+  if (allCandidates.length > 0) pexelsTier = "A";
+  if (allCandidates.length < TARGET_CANDIDATES_PER_SCENE) {
+    await searchPexelsList(sanitizedPlan.subjectQueries);
+    if (pexelsTier === "D" && allCandidates.length > 0) pexelsTier = "B";
   }
-  const tierBok = await searchTier(plan.subjectQueries, 3);
-  if (tierBok && allCandidates.length >= 3) {
-    if (allCandidates.length < 2) await photoFallback(plan.subjectQueries);
-    return { candidates: allCandidates, tierUsed: "B" };
+  if (allCandidates.length < TARGET_CANDIDATES_PER_SCENE) {
+    await searchPexelsList(sanitizedPlan.contextualQueries);
+    if (pexelsTier === "D" && allCandidates.length > 0) pexelsTier = "C";
   }
-  await searchTier(plan.contextualQueries, 2);
-  if (allCandidates.length >= 2) {
-    if (allCandidates.length < 2) await photoFallback(plan.contextualQueries);
-    return { candidates: allCandidates, tierUsed: "C" };
+  if (allCandidates.length < 2) {
+    await pexelsPhotoFallback([...sanitizedPlan.exactQueries, ...sanitizedPlan.subjectQueries]);
   }
-  await searchTier(plan.fallbackQueries, 1);
-  await photoFallback(plan.fallbackQueries);
-  return { candidates: allCandidates, tierUsed: "D" };
+  const bestScore = scoreEvaluator ? scoreEvaluator(allCandidates) : 60;
+  const hasEnoughCandidates = allCandidates.length >= TARGET_CANDIDATES_PER_SCENE && bestScore >= MIN_ACCEPTABLE_CANDIDATE_SCORE;
+  if (hasEnoughCandidates) {
+    onProgressMsg?.("Pexels returned enough candidates. Pixabay skipped to preserve API quota.");
+    logger.info(`[StockEngine] Pexels returned enough candidates (${allCandidates.length}, best score ${bestScore}). Pixabay skipped to preserve API quota.`);
+    return { candidates: allCandidates, tierUsed: pexelsTier };
+  }
+  if (pixabayApiKey) {
+    if (isPixabayPaused()) {
+      const waitSec = getPixabayPauseRemainingSecs();
+      if (waitSec > 0) {
+        onProgressMsg?.(`Pixabay rate limit reached. Waiting ${waitSec} seconds while Pexels continues...`);
+        logger.info(`[Pixabay] Rate limit paused (${waitSec}s remaining). Skipping Pixabay for this scene.`);
+      } else {
+        onProgressMsg?.("Pixabay temporarily unavailable. Continuing with Pexels and cached assets.");
+        logger.info("[Pixabay] Provider temporarily unavailable. Continuing with Pexels and cached assets.");
+      }
+    } else {
+      const pixabayQueries = dedupeStockQueries([
+        ...sanitizedPlan.exactQueries,
+        ...sanitizedPlan.subjectQueries,
+        ...sanitizedPlan.contextualQueries,
+        ...sanitizedPlan.fallbackQueries
+      ]).slice(0, MAX_PIXABAY_QUERIES_PER_SCENE);
+      const pxOrientation = orientation === "portrait" ? "vertical" : "horizontal";
+      for (const query of pixabayQueries) {
+        if (isPixabayPaused()) break;
+        const cached = cache.get(`pixabay_v:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          try {
+            const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation);
+            cache.set(`pixabay_v:${query}`, res);
+            addCandidates(res);
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Video search failed for query "${query}": ${pxErr}`);
+          }
+        }
+        if (allCandidates.length >= 10) break;
+      }
+      if (allCandidates.length < 2 && pixabayQueries.length > 0 && !isPixabayPaused()) {
+        const topQuery = pixabayQueries[0];
+        const cached = cache.get(`pixabay_p:${topQuery}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          try {
+            const res = await pixabaySearchPhotos(topQuery, pixabayApiKey, 6, pxOrientation);
+            cache.set(`pixabay_p:${topQuery}`, res);
+            addCandidates(res);
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Photo search failed for query "${topQuery}": ${pxErr}`);
+          }
+        }
+      }
+    }
+  }
+  if (allCandidates.length === 0 && pexelsApiKey) {
+    await searchPexelsList(sanitizedPlan.fallbackQueries);
+    await pexelsPhotoFallback(sanitizedPlan.fallbackQueries);
+  }
+  return { candidates: allCandidates, tierUsed: pexelsTier };
 }
 async function runContextAwareStockEngine(params, onProgress = () => {
 }) {
@@ -5658,21 +8346,41 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     model,
     forceReanalysis = false
   } = params;
+  setPixabayProjectDir(projectDir);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) {
-    return { success: false, totalScenes: 0, assignedScenes: 0, failedScenes: 0, assignments: [], error: "No edit plan found. Run AI Planning first." };
+    return {
+      success: false,
+      totalScenes: 0,
+      assignedScenes: 0,
+      failedScenes: 0,
+      assignments: [],
+      error: "No edit plan found. Run AI Planning first."
+    };
   }
   const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
   const stockDir = path.join(projectDir, "assets", "stock");
   fs__namespace.mkdirSync(stockDir, { recursive: true });
+  const prodSettings = loadProductionSettings(projectDir);
+  const stockCandidatesStore = loadStockCandidates(projectDir);
   const cache = new QueryCache(stockDir);
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
-  const flatScenes = flattenScenesWithChapter(plan);
-  const scenesNeedingStock = flatScenes.filter(
-    ({ scene }) => !scene.locked && (!scene.localPath || !fs__namespace.existsSync(scene.localPath))
-  );
-  onProgress(`Starting context-aware stock search for ${scenesNeedingStock.length} scenes...`, 0.01);
+  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe(reviewPath, []) : [];
+  const existingMap = /* @__PURE__ */ new Map();
+  for (const a of existingAssignments) {
+    existingMap.set(a.sceneIndex, a);
+  }
+  const flattenedEntries = flattenEditPlanScenes(plan);
+  const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    const existing = existingMap.get(scene.sceneIndex);
+    if (scene.locked || existing?.locked) return false;
+    if (existing?.manualOverride) return false;
+    if (existing?.approvalStatus === "approved") return false;
+    return true;
+  });
+  onProgress(`Starting context-aware stock search for ${scenesToProcess.length} scenes...`, 0.01);
   let globalContext = null;
   if (apiKey) {
     try {
@@ -5711,27 +8419,88 @@ async function runContextAwareStockEngine(params, onProgress = () => {
   }
   const hasGlobalContext = globalContext !== null;
   if (!hasGlobalContext) {
-    logger.warn("[StockEngine] No GlobalContext available. Running in legacy mode.");
+    logger.warn("[StockEngine] No GlobalContext available. Running in basic query mode.");
     onProgress("Warning: No global context. Running in basic query mode.", 0.05);
   }
   const orientation = toOrientation(preferredAspectRatio);
   const assignments = [];
   let assignedCount = 0;
   let failedCount = 0;
-  for (let i = 0; i < scenesNeedingStock.length; i++) {
-    const { scene, chapterId, chapterTitle, chapterPurpose } = scenesNeedingStock[i];
-    const pct = 0.1 + i / scenesNeedingStock.length * 0.85;
-    const sceneId = `scene_${scene.sceneIndex}`;
+  for (const entry of flattenedEntries) {
+    const existing = existingMap.get(entry.sceneIndex);
+    const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved";
+    if (isLocked && existing) {
+      assignments.push(existing);
+      if (existing.status === "assigned") assignedCount++;
+    }
+  }
+  let preGeneratedPlans = /* @__PURE__ */ new Map();
+  if (hasGlobalContext && apiKey && scenesToProcess.length > 0) {
+    try {
+      const batchInput = scenesToProcess.map((entry, idx) => {
+        const prevEntry = idx > 0 ? scenesToProcess[idx - 1] : null;
+        const nextEntry = idx < scenesToProcess.length - 1 ? scenesToProcess[idx + 1] : null;
+        const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : "";
+        const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : "";
+        const narration = entry.scene.narrativeText ?? "";
+        const packet = {
+          globalContext: {
+            primarySubject: globalContext.primarySubject,
+            centralThesis: globalContext.centralThesis,
+            geography: [
+              globalContext.geography.primaryCountry,
+              globalContext.geography.primaryRegion,
+              ...globalContext.geography.secondaryLocations
+            ].filter(Boolean),
+            timePeriod: [globalContext.timeContext.primaryPeriod, ...globalContext.timeContext.historicalPeriods],
+            exactTopicAnchors: globalContext.exactTopicAnchors,
+            contextualAnchors: globalContext.contextualAnchors,
+            forbiddenSubstitutions: globalContext.forbiddenSubstitutions,
+            negativeKeywords: globalContext.negativeKeywords
+          },
+          chapterContext: { chapterId: `CH${entry.chapterIndex}`, chapterTitle: entry.chapterTitle, chapterPurpose: entry.chapterPurpose },
+          localContext: {
+            narration,
+            scenePurpose: entry.scene.visualIntent ?? "",
+            visibleSubject: entry.scene.visualIntent ?? globalContext.primarySubject,
+            visibleAction: entry.scene.visualIntent ?? "community activity",
+            preferredLocation: globalContext.geography.primaryRegion ?? globalContext.geography.primaryCountry ?? "",
+            preferredTimePeriod: globalContext.timeContext.primaryPeriod
+          },
+          neighboringContext: { previousScene: previousSceneSummary, nextScene: nextSceneSummary }
+        };
+        return { sceneId: entry.sceneId, packet };
+      });
+      preGeneratedPlans = await batchGenerateSearchPlans({
+        projectDir,
+        apiKey,
+        model,
+        scenes: batchInput,
+        globalContext,
+        useCache: !forceReanalysis,
+        onProgress: (msg, pct) => {
+          onProgress(msg, 0.05 + pct * 0.15);
+        }
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[StockEngine] Batch search plan generation failed (${msg}), falling back to per-scene generation`);
+    }
+  }
+  for (let i = 0; i < scenesToProcess.length; i++) {
+    const entry = scenesToProcess[i];
+    const { scene, sceneId, chapterTitle, chapterPurpose } = entry;
+    const pct = 0.2 + i / scenesToProcess.length * 0.75;
     const narration = scene.narrativeText ?? "";
     const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
-    onProgress(`[${i + 1}/${scenesNeedingStock.length}] Scene ${scene.sceneIndex} — context-aware search...`, pct);
-    const prevEntry = i > 0 ? scenesNeedingStock[i - 1] : null;
-    const nextEntry = i < scenesNeedingStock.length - 1 ? scenesNeedingStock[i + 1] : null;
+    onProgress(`[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - candidate search...`, pct);
+    const prevEntry = i > 0 ? scenesToProcess[i - 1] : null;
+    const nextEntry = i < scenesToProcess.length - 1 ? scenesToProcess[i + 1] : null;
     const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : "";
     const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : "";
-    let searchPlan = null;
+    let searchPlan = preGeneratedPlans.get(sceneId) ?? null;
     let tierUsed = "D";
-    if (hasGlobalContext && apiKey) {
+    if (!searchPlan && hasGlobalContext && apiKey) {
       const packet = {
         globalContext: {
           primarySubject: globalContext.primarySubject,
@@ -5747,7 +8516,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
           forbiddenSubstitutions: globalContext.forbiddenSubstitutions,
           negativeKeywords: globalContext.negativeKeywords
         },
-        chapterContext: { chapterId, chapterTitle, chapterPurpose },
+        chapterContext: { chapterId: `CH${entry.chapterIndex}`, chapterTitle, chapterPurpose },
         localContext: {
           narration,
           scenePurpose: scene.visualIntent ?? "",
@@ -5801,28 +8570,16 @@ async function runContextAwareStockEngine(params, onProgress = () => {
       locked: false,
       manualOverride: false,
       status: "searching",
-      chapterId,
+      chapterId: `CH${entry.chapterIndex}`,
       chapterTitle,
       scenePurpose: scene.visualIntent ?? "",
       searchPlan: planToUse
     };
     try {
-      const { candidates, tierUsed: tu } = await searchWithTieredPlan(
-        planToUse,
-        pexelsApiKey,
-        pixabayApiKey,
-        orientation,
-        cache
-      );
-      tierUsed = tu;
-      if (candidates.length === 0) {
-        assignment.status = "failed";
-        assignment.errorMessage = "No candidates found from any provider or tier";
-        failedCount++;
-      } else {
-        let ranked;
-        if (hasGlobalContext) {
-          const ctx = {
+      const scoreEvaluator = (candidatesToScore) => {
+        if (!candidatesToScore.length) return 0;
+        if (hasGlobalContext && globalContext) {
+          const evalCtx = {
             globalContext,
             chapterTitle,
             chapterPurpose,
@@ -5833,37 +8590,135 @@ async function runContextAwareStockEngine(params, onProgress = () => {
             preferredAspectRatio,
             usedAssetIds
           };
-          ranked = rankContextCandidates(candidates, ctx);
-          if (ranked.length === 0) {
-            ranked = candidates.map((c) => ({ ...c, contextScore: void 0 }));
-          }
-        } else {
-          ranked = candidates;
+          const ranked = rankContextCandidates(candidatesToScore, evalCtx);
+          return ranked[0]?.contextScore.totalScore ?? 0;
         }
-        const winner = ranked[0];
-        const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
-        const downloadedAsset = await downloadAsset(winner, scene.sceneIndex, usedQuery, stockDir, manifest);
-        manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
-        manifest.push(downloadedAsset);
-        usedAssetIds.add(downloadedAsset.assetId);
-        scene.localPath = downloadedAsset.localPath;
-        scene.mediaFile = path.basename(downloadedAsset.localPath);
-        scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
-        const contextScore = winner.contextScore;
-        assignment.asset = downloadedAsset;
-        assignment.score = contextScore?.totalScore ?? 75;
-        assignment.usedQuery = usedQuery;
-        assignment.status = "assigned";
-        assignment.tierUsed = tierUsed;
-        assignment.matchLabel = contextScore?.matchLabel;
-        assignment.visualTruthLabel = contextScore?.visualTruthLabel;
-        assignment.scoreBreakdown = contextScore;
-        assignment.rejectedCandidates = ranked.slice(1, 4).map((c) => ({
-          title: c.title,
-          score: c.contextScore?.totalScore ?? 0,
-          reason: c.contextScore?.penaltyReasons?.[0] ?? "lower score"
+        return 60;
+      };
+      const { candidates, tierUsed: tu } = await searchWithTieredPlan(
+        planToUse,
+        pexelsApiKey,
+        pixabayApiKey,
+        orientation,
+        cache,
+        (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct),
+        scoreEvaluator
+      );
+      tierUsed = tu;
+      if (candidates.length === 0) {
+        assignment.status = "failed";
+        assignment.errorMessage = "No candidates found from any provider or tier";
+        failedCount++;
+      } else {
+        const assignmentHistory = assignments.map((a) => ({
+          sceneIndex: a.sceneIndex,
+          provider: a.asset?.provider,
+          assetId: a.asset?.assetId,
+          creator: a.asset?.creator,
+          title: a.asset?.searchQuery,
+          downloadUrl: a.asset?.downloadUrl,
+          thumbnailUrl: a.asset?.thumbnailUrl,
+          isLocked: a.locked
         }));
-        assignedCount++;
+        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+          const scoringCtx = {
+            narration,
+            visualIntent: planToUse.visualIntent,
+            searchPlan: planToUse,
+            globalContext,
+            chapterTitle,
+            chapterPurpose,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            assignmentHistory,
+            isLocked: scene.locked
+          };
+          const topCandidates = rankCandidatesForScene(
+            sceneId,
+            scene.sceneIndex,
+            candidates,
+            scoringCtx,
+            prodSettings.candidatesPerScene || 3
+          );
+          stockCandidatesStore[sceneId] = topCandidates;
+          const winner = topCandidates.find((c) => c.selected) || topCandidates[0];
+          const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
+          const downloadedAsset = await downloadAsset(
+            winner.result,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          );
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+          manifest.push(downloadedAsset);
+          usedAssetIds.add(downloadedAsset.assetId);
+          scene.localPath = downloadedAsset.localPath;
+          scene.mediaFile = path.basename(downloadedAsset.localPath);
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          assignment.asset = downloadedAsset;
+          assignment.score = winner.score.totalScore;
+          assignment.usedQuery = usedQuery;
+          assignment.status = "assigned";
+          assignment.tierUsed = tierUsed;
+          assignment.matchLabel = winner.score.totalScore >= 80 ? "STRONG_MATCH" : winner.score.totalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE";
+          assignment.visualTruthLabel = winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH";
+          assignment.scoreBreakdown = winner.score;
+          assignment.candidates = topCandidates;
+          assignment.selectedCandidateId = winner.candidateId;
+          assignment.approvalStatus = "auto_selected";
+          assignment.rejectedCandidates = topCandidates.slice(1).map((c) => ({
+            title: c.result.title,
+            score: c.score.totalScore,
+            reason: c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
+          }));
+          assignedCount++;
+        } else {
+          let ranked;
+          if (hasGlobalContext) {
+            const ctx = {
+              globalContext,
+              chapterTitle,
+              chapterPurpose,
+              narration,
+              visualIntent: planToUse.visualIntent,
+              scenePurpose: scene.visualIntent ?? "",
+              sceneDurationSecs: sceneDuration,
+              preferredAspectRatio,
+              usedAssetIds
+            };
+            ranked = rankContextCandidates(candidates, ctx);
+            if (ranked.length === 0) {
+              ranked = candidates.map((c) => ({ ...c, contextScore: void 0 }));
+            }
+          } else {
+            ranked = candidates;
+          }
+          const winner = ranked[0];
+          const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
+          const downloadedAsset = await downloadAsset(winner, scene.sceneIndex, usedQuery, stockDir, manifest);
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+          manifest.push(downloadedAsset);
+          usedAssetIds.add(downloadedAsset.assetId);
+          scene.localPath = downloadedAsset.localPath;
+          scene.mediaFile = path.basename(downloadedAsset.localPath);
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          const contextScore = winner.contextScore;
+          assignment.asset = downloadedAsset;
+          assignment.score = contextScore?.totalScore ?? 75;
+          assignment.usedQuery = usedQuery;
+          assignment.status = "assigned";
+          assignment.tierUsed = tierUsed;
+          assignment.matchLabel = contextScore?.matchLabel;
+          assignment.visualTruthLabel = contextScore?.visualTruthLabel;
+          assignment.scoreBreakdown = contextScore;
+          assignment.rejectedCandidates = ranked.slice(1, 4).map((c) => ({
+            title: c.title,
+            score: c.contextScore?.totalScore ?? 0,
+            reason: c.contextScore?.penaltyReasons?.[0] ?? "lower score"
+          }));
+          assignedCount++;
+        }
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -5876,16 +8731,187 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     cache.save();
     saveAssetsManifest(stockDir, manifest);
   }
-  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  fs__namespace.writeFileSync(reviewPath, JSON.stringify(assignments, null, 2), "utf-8");
-  onProgress(`Done -- ${assignedCount}/${scenesNeedingStock.length} scenes assigned, ${failedCount} failed`, 1);
+  assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  atomicWriteJson(planPath, plan);
+  atomicWriteJson(reviewPath, assignments);
+  if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+    saveStockCandidates(projectDir, stockCandidatesStore);
+  }
+  onProgress(`Done -- ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`, 1);
   return {
     success: true,
-    totalScenes: scenesNeedingStock.length,
+    totalScenes: flattenedEntries.length,
     assignedScenes: assignedCount,
     failedScenes: failedCount,
     assignments
+  };
+}
+function getStockCandidatesForProject(projectDir, sceneIndex) {
+  const all = loadStockCandidates(projectDir);
+  if (typeof sceneIndex === "number") {
+    const key = `scene_${sceneIndex}`;
+    return all[key] || all[String(sceneIndex)] || [];
+  }
+  return all;
+}
+async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
+  try {
+    const candidatesStore = loadStockCandidates(projectDir);
+    const sceneKey = `scene_${sceneIndex}`;
+    const sceneCandidates = candidatesStore[sceneKey] || candidatesStore[String(sceneIndex)] || [];
+    const candidate = sceneCandidates.find((c) => c.candidateId === candidateId);
+    if (!candidate) {
+      return { success: false, error: `Candidate ${candidateId} not found for scene ${sceneIndex}` };
+    }
+    const stockDir = path.join(projectDir, "assets", "stock");
+    fs__namespace.mkdirSync(stockDir, { recursive: true });
+    let manifest = loadAssetsManifest(stockDir);
+    let asset = manifest.find((a) => a.assetId === candidate.result.assetId);
+    if (!asset || !fs__namespace.existsSync(asset.localPath) || fs__namespace.statSync(asset.localPath).size === 0) {
+      logger.info(`[Storyboard] Downloading candidate asset ${candidate.result.assetId} for scene ${sceneIndex}`);
+      const queryUsed = candidate.result.searchQuery || candidate.result.title || `scene_${sceneIndex}`;
+      try {
+        asset = await downloadAsset(candidate.result, sceneIndex, queryUsed, stockDir, manifest);
+      } catch (dlErr) {
+        const msg = dlErr instanceof Error ? dlErr.message : String(dlErr);
+        logger.error(`[Storyboard] Download failed for candidate ${candidateId}: ${msg}`);
+        return { success: false, error: `Download failed: ${msg}. Existing media retained.` };
+      }
+      if (!fs__namespace.existsSync(asset.localPath) || fs__namespace.statSync(asset.localPath).size === 0) {
+        return { success: false, error: "Downloaded file is missing or empty. Existing media retained." };
+      }
+      manifest = manifest.filter((a) => a.assetId !== asset.assetId);
+      manifest.push(asset);
+      saveAssetsManifest(stockDir, manifest);
+    }
+    for (const c of sceneCandidates) {
+      c.selected = c.candidateId === candidateId;
+    }
+    candidatesStore[sceneKey] = sceneCandidates;
+    saveStockCandidates(projectDir, candidatesStore);
+    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+    if (fs__namespace.existsSync(assignmentsPath)) {
+      const assignments = readJsonSafe(assignmentsPath, []);
+      const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
+      if (idx >= 0) {
+        assignments[idx].asset = asset;
+        assignments[idx].selectedCandidateId = candidateId;
+        assignments[idx].candidates = sceneCandidates;
+        assignments[idx].score = candidate.score.totalScore;
+        assignments[idx].status = "assigned";
+        if (assignments[idx].approvalStatus !== "approved") {
+          assignments[idx].approvalStatus = "auto_selected";
+        }
+        atomicWriteJson(assignmentsPath, assignments);
+      }
+    }
+    const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+    if (fs__namespace.existsSync(planPath)) {
+      const plan = readJsonSafe(planPath, {});
+      for (const ch of plan.chapters ?? []) {
+        const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+        for (const seq of seqs) {
+          for (const sc of seq.scenes ?? []) {
+            if (sc.sceneIndex === sceneIndex) {
+              sc.localPath = asset.localPath;
+              sc.mediaFile = path.basename(asset.localPath);
+              sc.mediaType = asset.mediaType === "photo" ? "image" : "video";
+            }
+          }
+        }
+      }
+      atomicWriteJson(planPath, plan);
+    }
+    logger.info(`[Storyboard] Successfully switched scene ${sceneIndex} to candidate ${candidateId}`);
+    return { success: true, asset };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Storyboard] Selection error: ${msg}`);
+    return { success: false, error: msg };
+  }
+}
+function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
+  try {
+    const candidatesStore = loadStockCandidates(projectDir);
+    const sceneKey = `scene_${sceneIndex}`;
+    const sceneCandidates = candidatesStore[sceneKey] || candidatesStore[String(sceneIndex)] || [];
+    if (candidateId) {
+      for (const c of sceneCandidates) {
+        if (c.candidateId === candidateId) {
+          c.approved = true;
+          c.selected = true;
+        } else {
+          c.approved = false;
+        }
+      }
+      candidatesStore[sceneKey] = sceneCandidates;
+      saveStockCandidates(projectDir, candidatesStore);
+    }
+    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+    if (fs__namespace.existsSync(assignmentsPath)) {
+      const assignments = readJsonSafe(assignmentsPath, []);
+      const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
+      if (idx >= 0) {
+        assignments[idx].approvalStatus = "approved";
+        assignments[idx].reviewedAt = (/* @__PURE__ */ new Date()).toISOString();
+        if (candidateId) {
+          assignments[idx].selectedCandidateId = candidateId;
+        }
+        atomicWriteJson(assignmentsPath, assignments);
+      }
+    }
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: msg };
+  }
+}
+function calculateStoryboardSummary(projectDir) {
+  const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe(assignmentsPath, []) : [];
+  const totalScenes = assignments.length;
+  let assignedScenes = 0;
+  let approvedScenes = 0;
+  let needsReviewScenes = 0;
+  let missingScenes = 0;
+  let totalScoreSum = 0;
+  let scoredScenesCount = 0;
+  const seenAssetIds = /* @__PURE__ */ new Set();
+  let duplicateAvoidedCount = 0;
+  for (const a of assignments) {
+    if (a.asset && a.asset.localPath && fs__namespace.existsSync(a.asset.localPath)) {
+      assignedScenes++;
+      if (seenAssetIds.has(a.asset.assetId)) ;
+      else {
+        seenAssetIds.add(a.asset.assetId);
+      }
+    } else {
+      missingScenes++;
+    }
+    if (a.approvalStatus === "approved") {
+      approvedScenes++;
+    } else if (a.status === "failed" || !a.asset || a.score < 50) {
+      needsReviewScenes++;
+    }
+    if (typeof a.score === "number" && a.score > 0) {
+      totalScoreSum += a.score;
+      scoredScenesCount++;
+    }
+    for (const c of a.candidates ?? []) {
+      if (c.score?.reusePenalty < 0) {
+        duplicateAvoidedCount++;
+      }
+    }
+  }
+  const averageScore = scoredScenesCount > 0 ? Math.round(totalScoreSum / scoredScenesCount) : 0;
+  return {
+    totalScenes,
+    assignedScenes,
+    approvedScenes,
+    needsReviewScenes,
+    missingScenes,
+    averageScore,
+    duplicateAssetsAvoided: duplicateAvoidedCount
   };
 }
 function registerStockHandlers(ipcMain) {
@@ -6095,7 +9121,7 @@ function registerStockHandlers(ipcMain) {
         const ctx = await analyzeGlobalContext({
           projectDir: params.projectDir,
           apiKey: geminiKey,
-          model: config.preferredModel ?? "gemini-3.8-flash",
+          model: config.preferredModel ?? "gemini-3.5-flash",
           scriptText,
           transcript,
           forceRegenerate: params.forceRegenerate ?? false,
@@ -6131,6 +9157,42 @@ function registerStockHandlers(ipcMain) {
         const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: msg };
       }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATES_GET,
+    (_event, params) => {
+      return getStockCandidatesForProject(params.projectDir, params.sceneIndex);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATE_SELECT,
+    async (_event, params) => {
+      return selectCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATE_APPROVE,
+    (_event, params) => {
+      return approveCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_STORYBOARD_SUMMARY_GET,
+    (_event, projectDir) => {
+      return calculateStoryboardSummary(projectDir);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_SETTINGS_GET,
+    (_event, projectDir) => {
+      return loadProductionSettings(projectDir);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_SETTINGS_SET,
+    (_event, params) => {
+      return saveProductionSettings(params.projectDir, params.settings);
     }
   );
 }
@@ -6194,7 +9256,7 @@ async function openverseSearchAudio(query, category, limit = 6, accessToken) {
     logger.warn(`[Openverse] Search "${query}" failed: ${msg}`);
     return [];
   }
-  logger.info(`[Openverse] "${query}" → ${data.result_count ?? 0} results`);
+  logger.info(`[Openverse] "${query}" -> ${data.result_count ?? 0} results`);
   return (data.results ?? []).map((item) => ({
     assetId: item.id,
     provider: "openverse",
@@ -6397,7 +9459,7 @@ async function runAudioDirector(projectDir, onProgress = () => {
       const best = pickBest(results);
       if (best) {
         musicResult = { ...best, searchQuery: q };
-        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → "${q}" (music category): ${best.title}`);
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (music category): ${best.title}`);
         break;
       }
     }
@@ -6407,7 +9469,7 @@ async function runAudioDirector(projectDir, onProgress = () => {
         const best = pickBest(results);
         if (best) {
           musicResult = { ...best, searchQuery: q };
-          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → "${q}" (no category): ${best.title}`);
+          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (no category): ${best.title}`);
           break;
         }
       }
@@ -6417,7 +9479,7 @@ async function runAudioDirector(projectDir, onProgress = () => {
       const best = pickBest(results);
       if (best) {
         musicResult = { ...best, searchQuery: "ambient background music" };
-        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → fallback generic: ${best.title}`);
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> fallback generic: ${best.title}`);
       }
     }
     if (!musicResult) {
@@ -6474,7 +9536,7 @@ async function runAudioDirector(projectDir, onProgress = () => {
       const localPath = await downloadAudio(sec.musicCandidate, audioDir);
       sec.approvedLocalPath = localPath;
       sec.approvedFilename = path.basename(localPath);
-      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} → ${localPath}`);
+      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} -> ${localPath}`);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn(`[AudioDirector] Download failed for ${sec.sectionLabel}: ${msg}`);
@@ -6685,7 +9747,7 @@ function groupWordsIntoPhrases(words, sceneId, emphasisType) {
   return phrases;
 }
 function buildFallbackCaptionPlan(transcript, scenes) {
-  logger.warn("[CaptionPlanner] Dùng fallback thuật toán — caption sẽ cơ bản, nên rà lại thủ công");
+  logger.warn("[CaptionPlanner] Using algorithmic fallback -- basic captions generated, please review manually");
   const activeRanges = [];
   const phrases = [];
   const hookEnd = Math.min(HOOK_WINDOW_SECONDS, transcript.duration);
@@ -6815,22 +9877,22 @@ async function generateCaptionPlan(params) {
   const { projectDir, apiKey, forceRegenerate = false } = params;
   const progress = params.onProgress ?? (() => {
   });
-  const modelId = params.model ?? "gemini-3.8-flash";
+  const modelId = params.model ?? "gemini-3.5-flash";
   const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
   if (!forceRegenerate && fs__namespace.existsSync(captionPlanPath)) {
-    logger.info("[CaptionPlanner] Dùng caption-plan.json đã cache");
+    logger.info("[CaptionPlanner] Using cached caption-plan.json");
     return JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
   }
-  progress("Đang tải transcript...", 0.05);
+  progress("Loading transcript...", 0.05);
   const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
   if (!fs__namespace.existsSync(transcriptPath)) {
-    throw new Error("Chưa có transcript.json — chạy bước Transcription trước");
+    throw new Error("Missing transcript.json -- please run Transcription step first");
   }
   const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-  progress("Đang tải edit plan...", 0.1);
+  progress("Loading edit plan...", 0.1);
   const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) {
-    throw new Error("Chưa có master-edit-plan.json — chạy bước Planning trước");
+    throw new Error("Missing master-edit-plan.json -- please run Planning step first");
   }
   const editPlan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
   const scenes = [];
@@ -6853,13 +9915,13 @@ async function generateCaptionPlan(params) {
   }
   logger.info(`[CaptionPlanner] ${scenes.length} scenes, ${transcript.segments.length} segments`);
   const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
-  const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i);
+  const fallbackModels = getAvailableModelsForTask("caption_planning", modelId);
   let plan = null;
   for (let attempt = 0; attempt < fallbackModels.length; attempt++) {
     const currentModel = fallbackModels[attempt];
     try {
       progress(
-        attempt === 0 ? `Đang gửi lên Gemini (${currentModel})...` : `Thử lại với ${currentModel}...`,
+        attempt === 0 ? `Sending caption planning request to Gemini (${currentModel})...` : `Retrying with ${currentModel}...`,
         0.2 + attempt * 0.1
       );
       const ai = new genai.GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } });
@@ -6878,28 +9940,39 @@ async function generateCaptionPlan(params) {
       parsed.sourceDuration = transcript.duration;
       parsed.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
       if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
-        throw new Error("Response JSON thiếu phrases hoặc activeRanges");
+        throw new Error("Response JSON missing phrases or activeRanges");
       }
-      progress("Đang validate kết quả Gemini...", 0.6 + attempt * 0.05);
+      progress("Validating Gemini caption plan...", 0.6 + attempt * 0.05);
       sanitizePlan(parsed, transcript.duration);
       plan = parsed;
-      logger.info(`[CaptionPlanner] Gemini thành công với model ${currentModel}, ${plan.phrases.length} phrases`);
+      recordModelSuccess(currentModel);
+      logger.info(`[CaptionPlanner] Gemini succeeded with ${currentModel}, ${plan.phrases.length} phrases`);
       break;
     } catch (err) {
-      logger.warn(`[CaptionPlanner] ${currentModel} thất bại: ${String(err)}`);
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      if (kind === "MODEL_NOT_FOUND") {
+        const nextModel = fallbackModels[attempt + 1];
+        logger.warn(`[CaptionPlanner] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`);
+      } else if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
+        const nextModel = fallbackModels[attempt + 1];
+        logger.warn(`[CaptionPlanner] ${currentModel} failed (${kind}): ${message.slice(0, 100)}. Switching immediately to ${nextModel ?? "fallback"}...`);
+      } else {
+        logger.warn(`[CaptionPlanner] ${currentModel} failed: ${message.slice(0, 100)}`);
+      }
     }
   }
   if (!plan) {
-    progress("Gemini không khả dụng — dùng fallback thuật toán...", 0.7);
+    progress("Gemini AI unavailable -- using algorithmic fallback...", 0.7);
     plan = buildFallbackCaptionPlan(transcript, scenes);
   }
-  progress("Đang lưu caption-plan.json...", 0.9);
+  progress("Saving caption-plan.json...", 0.9);
   fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
   const tmpPath = captionPlanPath + ".tmp";
   fs__namespace.writeFileSync(tmpPath, JSON.stringify(plan, null, 2), "utf-8");
   fs__namespace.renameSync(tmpPath, captionPlanPath);
-  logger.info(`[CaptionPlanner] Đã lưu ${plan.phrases.length} phrases vào caption-plan.json`);
-  progress("Hoàn thành!", 1);
+  logger.info(`[CaptionPlanner] Saved ${plan.phrases.length} phrases to caption-plan.json`);
+  progress("Complete!", 1);
   return plan;
 }
 function sanitizePlan(plan, sourceDuration) {
@@ -6911,13 +9984,13 @@ function sanitizePlan(plan, sourceDuration) {
     p.endTime = Math.max(p.startTime + 0.1, Math.min(p.endTime, dur));
     if (!p.id || seenIds.has(p.id)) {
       p.id = `cap_${String(++autoIdx).padStart(4, "0")}`;
-      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed → ${p.id}`);
+      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed -> ${p.id}`);
     }
     seenIds.add(p.id);
   }
   const validRanges = plan.activeRanges.filter((r) => {
     const valid = r.endTime > r.startTime && r.startTime >= 0 && r.endTime <= dur + 1;
-    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime}→${r.endTime}`);
+    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime} -> ${r.endTime}`);
     return valid;
   });
   plan.activeRanges = validRanges;
@@ -6930,11 +10003,11 @@ function sanitizePlan(plan, sourceDuration) {
   const hookEnd = Math.min(HOOK_WINDOW_SECONDS, dur);
   const hookRange = plan.activeRanges.find((r) => r.reason === "hook");
   if (!hookRange) {
-    logger.warn("[CaptionPlanner] Gemini missing hook range — adding default 0→" + hookEnd);
+    logger.warn("[CaptionPlanner] Gemini missing hook range -- adding default 0 -> " + hookEnd);
     plan.activeRanges.unshift({ startTime: 0, endTime: hookEnd, reason: "hook" });
     plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
   } else if (hookRange.endTime < hookEnd - 0.5) {
-    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s — extending to ${hookEnd}s`);
+    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s -- extending to ${hookEnd}s`);
     hookRange.endTime = hookEnd;
   }
 }
@@ -6951,7 +10024,7 @@ function saveCaptionPlan(projectDir, plan) {
   const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
   fs__namespace.mkdirSync(path__namespace.dirname(planPath), { recursive: true });
   fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  logger.info(`[CaptionPlanner] Đã lưu thủ công caption-plan.json (${plan.phrases.length} phrases)`);
+  logger.info(`[CaptionPlanner] Saved caption-plan.json manually (${plan.phrases.length} phrases)`);
 }
 const ffmpegPath = require("ffmpeg-static");
 function ffmpegRun(args) {
@@ -6996,7 +10069,7 @@ function registerCaptionHandlers(ipcMain) {
       return { success: true, plan };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[CaptionsIPC] generate-plan lỗi: ${msg}`);
+      logger.error(`[CaptionsIPC] generate-plan failed: ${msg}`);
       return { success: false, error: msg };
     }
   });
@@ -7016,7 +10089,7 @@ function registerCaptionHandlers(ipcMain) {
       if (idx === -1) return { success: false, error: `Không tìm thấy phrase id=${params.phraseId}` };
       plan.phrases[idx] = { ...plan.phrases[idx], ...params.updates };
       saveCaptionPlan(params.projectDir, plan);
-      logger.info(`[CaptionsIPC] Đã cập nhật phrase ${params.phraseId}`);
+      logger.info(`[CaptionsIPC] Updated phrase ${params.phraseId}`);
       return { success: true, plan };
     } catch (err) {
       return { success: false, error: String(err) };
@@ -7058,11 +10131,11 @@ function registerCaptionHandlers(ipcMain) {
         onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.05 + pct * 4e-3),
         onRenderProgress: (pct) => sendProgress(`Render: ${Math.round(pct * 100)}%`, 0.5 + pct * 0.48)
       });
-      logger.info(`[CaptionsIPC] Đã tạo lại overlay Remotion: ${overlayPath}`);
+      logger.info(`[CaptionsIPC] Regenerated Remotion overlay: ${overlayPath}`);
       return { success: true, overlayPath };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[CaptionsIPC] regenerate-overlay lỗi: ${msg}`);
+      logger.error(`[CaptionsIPC] regenerate-overlay failed: ${msg}`);
       return { success: false, error: msg };
     }
   });
@@ -7158,10 +10231,2125 @@ function registerCaptionHandlers(ipcMain) {
       return { success: true, previewPath: previewOutput };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[CaptionsIPC] preview-render lỗi: ${msg}`);
+      logger.error(`[CaptionsIPC] preview-render failed: ${msg}`);
       return { success: false, error: msg };
     }
   });
+}
+const PIPELINE_SCHEMA_VERSION = 1;
+const PIPELINE_EXECUTION_STAGES = [
+  "validating",
+  "transcribing",
+  "planning",
+  "captions",
+  "global-context",
+  "stock-search",
+  "audio-search",
+  "preflight",
+  "rendering",
+  "postflight"
+];
+const APP_INSTANCE_ID$1 = uuid.v4();
+function normalizeProjectDir(projectDir) {
+  if (!projectDir) return "";
+  const resolved = path__namespace.resolve(projectDir);
+  return path__namespace.normalize(resolved);
+}
+function getPipelineStatePath(projectDir) {
+  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.json");
+}
+function getPipelineStateBackupPath(projectDir) {
+  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.backup.json");
+}
+function isProcessAlive$1(pid) {
+  if (!pid || pid <= 0) return false;
+  try {
+    return process.kill(pid, 0);
+  } catch (err) {
+    const code = err.code;
+    return code === "EPERM";
+  }
+}
+function createLease(runId, currentStage) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  return {
+    runId,
+    appInstanceId: APP_INSTANCE_ID$1,
+    pid: process.pid,
+    acquiredAt: now,
+    heartbeatAt: now,
+    currentStage
+  };
+}
+function updateHeartbeat(state2) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (state2.lease) {
+    state2.lease.heartbeatAt = now;
+    state2.lease.currentStage = state2.currentStage;
+  } else {
+    state2.lease = createLease(state2.runId, state2.currentStage);
+  }
+  state2.updatedAt = now;
+}
+function releaseLease(state2) {
+  delete state2.lease;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+}
+function isLeaseStale(lease, heartbeatTimeoutMs = 15e3) {
+  if (!lease) return false;
+  if (lease.appInstanceId !== APP_INSTANCE_ID$1) {
+    if (!isProcessAlive$1(lease.pid)) {
+      return true;
+    }
+    const lastHeartbeat2 = new Date(lease.heartbeatAt).getTime();
+    if (isNaN(lastHeartbeat2) || Date.now() - lastHeartbeat2 > heartbeatTimeoutMs) {
+      return true;
+    }
+    return true;
+  }
+  const lastHeartbeat = new Date(lease.heartbeatAt).getTime();
+  if (!isNaN(lastHeartbeat) && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
+    return true;
+  }
+  return false;
+}
+function toSnapshot(state2) {
+  return {
+    version: state2.version,
+    runId: state2.runId,
+    projectDir: state2.projectDir,
+    currentStage: state2.currentStage,
+    overallStatus: state2.overallStatus,
+    stages: state2.stages,
+    updatedAt: state2.updatedAt,
+    lease: state2.lease,
+    warnings: state2.warnings,
+    fatalErrors: state2.fatalErrors,
+    renderOutputPath: state2.renderOutputPath,
+    preflightReportPath: state2.preflightReportPath,
+    postflightReportPath: state2.postflightReportPath
+  };
+}
+function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
+  let scriptHash2;
+  if (scriptPath && fs__namespace.existsSync(scriptPath)) {
+    try {
+      const content = fs__namespace.readFileSync(scriptPath);
+      scriptHash2 = crypto__namespace.createHash("md5").update(content).digest("hex");
+    } catch {
+    }
+  }
+  let voiceoverSize;
+  let voiceoverMtimeMs;
+  if (voiceoverPath && fs__namespace.existsSync(voiceoverPath)) {
+    try {
+      const stat = fs__namespace.statSync(voiceoverPath);
+      voiceoverSize = stat.size;
+      voiceoverMtimeMs = stat.mtimeMs;
+    } catch {
+    }
+  }
+  return {
+    scriptPath,
+    scriptHash: scriptHash2,
+    voiceoverPath,
+    voiceoverSize,
+    voiceoverMtimeMs
+  };
+}
+function createDefaultStageStates() {
+  const stages = {};
+  for (const stage of PIPELINE_EXECUTION_STAGES) {
+    stages[stage] = {
+      status: "pending",
+      progress: 0
+    };
+  }
+  return stages;
+}
+function createInitialPipelineState(options, fingerprint, runId) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const rId = runId ?? uuid.v4();
+  return {
+    schemaVersion: PIPELINE_SCHEMA_VERSION,
+    version: 1,
+    runId: rId,
+    projectDir: normalizeProjectDir(options.projectDir),
+    currentStage: "idle",
+    overallStatus: "idle",
+    startedAt: now,
+    updatedAt: now,
+    inputFingerprint: fingerprint,
+    options: {
+      ...options,
+      projectDir: normalizeProjectDir(options.projectDir)
+    },
+    stages: createDefaultStageStates(),
+    warnings: [],
+    fatalErrors: []
+  };
+}
+function loadPipelineState(projectDir) {
+  const statePath = getPipelineStatePath(projectDir);
+  const backupPath = getPipelineStateBackupPath(projectDir);
+  if (fs__namespace.existsSync(statePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(statePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && parsed.stages) {
+        if (!parsed.version) parsed.version = 1;
+        return parsed;
+      }
+    } catch (err) {
+      logger.warn(`[PipelineState] Primary state corrupt, trying backup: ${String(err)}`);
+    }
+  }
+  if (fs__namespace.existsSync(backupPath)) {
+    try {
+      const rawBackup = fs__namespace.readFileSync(backupPath, "utf-8");
+      const parsedBackup = JSON.parse(rawBackup);
+      if (parsedBackup && typeof parsedBackup === "object" && parsedBackup.stages) {
+        logger.info(`[PipelineState] Successfully recovered pipeline state from backup`);
+        if (!parsedBackup.version) parsedBackup.version = 1;
+        return parsedBackup;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function savePipelineStateAtomic(projectDir, state2) {
+  const normDir = normalizeProjectDir(projectDir);
+  state2.projectDir = normDir;
+  state2.version = (state2.version || 0) + 1;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const finalPath = getPipelineStatePath(normDir);
+  const backupPath = getPipelineStateBackupPath(normDir);
+  const dir = path__namespace.dirname(finalPath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  if (fs__namespace.existsSync(finalPath)) {
+    try {
+      fs__namespace.copyFileSync(finalPath, backupPath);
+    } catch {
+    }
+  }
+  const tmpPath = path__namespace.join(
+    dir,
+    `auto-pipeline-state.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+  );
+  const content = JSON.stringify(state2, null, 2);
+  fs__namespace.writeFileSync(tmpPath, content, "utf-8");
+  fs__namespace.renameSync(tmpPath, finalPath);
+  try {
+    fs__namespace.copyFileSync(finalPath, backupPath);
+  } catch {
+  }
+}
+function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
+  const invalidated = /* @__PURE__ */ new Set();
+  const voiceoverChanged = oldState.inputFingerprint.voiceoverPath !== newFingerprint.voiceoverPath || oldState.inputFingerprint.voiceoverSize !== newFingerprint.voiceoverSize || oldState.inputFingerprint.voiceoverMtimeMs !== newFingerprint.voiceoverMtimeMs;
+  const scriptChanged = oldState.inputFingerprint.scriptPath !== newFingerprint.scriptPath || oldState.inputFingerprint.scriptHash !== newFingerprint.scriptHash;
+  if (voiceoverChanged) {
+    return [
+      "transcribing",
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (scriptChanged) {
+    return [
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (oldState.options.whisperModel !== newOptions.whisperModel && newOptions.whisperModel) {
+    return [
+      "transcribing",
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (oldState.options.forceRegenerateCaptions !== newOptions.forceRegenerateCaptions && newOptions.forceRegenerateCaptions) {
+    invalidated.add("captions");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.preferredStockProvider !== newOptions.preferredStockProvider) {
+    invalidated.add("stock-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
+    invalidated.add("audio-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.fps !== newOptions.fps || oldState.options.resolution?.width !== newOptions.resolution?.width || oldState.options.resolution?.height !== newOptions.resolution?.height || oldState.options.outputName !== newOptions.outputName) {
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  return Array.from(invalidated);
+}
+function applyInvalidation(state2, invalidatedStages) {
+  for (const stage of invalidatedStages) {
+    if (state2.stages[stage]) {
+      state2.stages[stage] = {
+        status: "pending",
+        progress: 0,
+        message: "Invalidated due to input/setting change"
+      };
+    }
+  }
+}
+function isTranscriptionValid(projectDir, voiceoverPath) {
+  const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
+  const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
+  if (!fs__namespace.existsSync(transcriptPath)) {
+    return false;
+  }
+  try {
+    if (voiceoverPath && fs__namespace.existsSync(voiceoverPath) && fs__namespace.existsSync(cacheMetaPath)) {
+      const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
+      const stat = fs__namespace.statSync(voiceoverPath);
+      const expectedHash = `${voiceoverPath}:${stat.size}:${stat.mtimeMs}`;
+      if (meta.hash && meta.hash !== expectedHash) return false;
+    }
+    const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+    return !!(transcript && transcript.segments && transcript.segments.length > 0);
+  } catch {
+    return false;
+  }
+}
+function isPlanningValid(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) return false;
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    if (!plan || !Array.isArray(plan.chapters) || plan.chapters.length === 0) {
+      return false;
+    }
+    const sceneCount = plan.chapters.reduce(
+      (acc, ch) => {
+        const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+        return acc + seqs.reduce((sAcc, seq) => sAcc + (seq.scenes?.length ?? 0), 0);
+      },
+      0
+    );
+    return sceneCount > 0;
+  } catch {
+    return false;
+  }
+}
+function isCaptionsValid(projectDir) {
+  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!fs__namespace.existsSync(captionPlanPath)) return false;
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+    return !!(plan && typeof plan.enabled === "boolean");
+  } catch {
+    return false;
+  }
+}
+function isGlobalContextValid(projectDir, scriptHash2) {
+  const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+  if (!fs__namespace.existsSync(contextPath)) return false;
+  try {
+    const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    if (!ctx || !ctx.primarySubject) return false;
+    if (scriptHash2 && ctx._scriptHash && ctx._scriptHash !== scriptHash2) ;
+    return true;
+  } catch {
+    return false;
+  }
+}
+function checkStockCompletion(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    return {
+      totalScenes: 0,
+      assignedScenes: 0,
+      downloadedScenes: 0,
+      missingScenes: 0,
+      lowConfidenceScenes: 0,
+      missingSceneIndices: []
+    };
+  }
+  let totalScenes = 0;
+  const sceneIndices = [];
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    const chapters = plan.chapters ?? [];
+    for (const ch of chapters) {
+      const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+      for (const seq of seqs) {
+        for (const sc of seq.scenes ?? []) {
+          totalScenes++;
+          sceneIndices.push(sc.sceneIndex);
+        }
+      }
+    }
+  } catch {
+  }
+  const assignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+  let assignmentList = [];
+  if (fs__namespace.existsSync(assignmentsPath)) {
+    try {
+      const parsed = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      if (Array.isArray(parsed)) {
+        assignmentList = parsed;
+      } else if (parsed && typeof parsed === "object") {
+        if (Array.isArray(parsed.assignments)) {
+          assignmentList = parsed.assignments;
+        } else if (parsed.assignments && typeof parsed.assignments === "object") {
+          assignmentList = Object.values(parsed.assignments);
+        }
+      }
+    } catch {
+    }
+  }
+  const assignmentMap = /* @__PURE__ */ new Map();
+  for (const a of assignmentList) {
+    if (a && typeof a.sceneIndex === "number") {
+      assignmentMap.set(a.sceneIndex, a);
+    }
+  }
+  let assignedScenes = 0;
+  let downloadedScenes = 0;
+  let lowConfidenceScenes = 0;
+  const missingSceneIndices = [];
+  for (const idx of sceneIndices) {
+    const assign = assignmentMap.get(idx);
+    if (!assign || assign.status !== "assigned") {
+      missingSceneIndices.push(idx);
+      continue;
+    }
+    assignedScenes++;
+    let mediaExists = false;
+    const candidates = [];
+    if (assign.asset?.localPath) {
+      candidates.push(assign.asset.localPath);
+      if (!path__namespace.isAbsolute(assign.asset.localPath)) {
+        candidates.push(path__namespace.join(projectDir, assign.asset.localPath));
+      }
+    }
+    if (assign.asset?.filename) {
+      candidates.push(path__namespace.join(projectDir, "assets", "stock", assign.asset.filename));
+    }
+    const anyAsset = assign.asset;
+    if (anyAsset?.mediaFile) {
+      candidates.push(path__namespace.join(projectDir, "assets", "stock", anyAsset.mediaFile));
+    }
+    if (anyAsset?.localAsset) {
+      candidates.push(path__namespace.join(projectDir, "assets", "stock", anyAsset.localAsset));
+    }
+    for (const candidatePath of candidates) {
+      try {
+        if (fs__namespace.existsSync(candidatePath) && fs__namespace.statSync(candidatePath).size > 0) {
+          mediaExists = true;
+          break;
+        }
+      } catch {
+      }
+    }
+    if (mediaExists) {
+      downloadedScenes++;
+    } else {
+      missingSceneIndices.push(idx);
+    }
+    if (assign.score !== void 0 && assign.score < 50) {
+      lowConfidenceScenes++;
+    }
+  }
+  return {
+    totalScenes,
+    assignedScenes,
+    downloadedScenes,
+    missingScenes: missingSceneIndices.length,
+    lowConfidenceScenes,
+    missingSceneIndices
+  };
+}
+function isAudioValid(projectDir, requireMusic) {
+  const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+  if (!fs__namespace.existsSync(audioPlanPath)) return false;
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+    if (!plan || !Array.isArray(plan.sections)) return false;
+    if (requireMusic) {
+      const hasDownloadedMusic = plan.sections.some(
+        (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+      );
+      return hasDownloadedMusic;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+function isPreflightValid(projectDir) {
+  const preflightPath = path__namespace.join(projectDir, "analysis", "render-preflight.json");
+  if (!fs__namespace.existsSync(preflightPath)) return false;
+  try {
+    const report = JSON.parse(fs__namespace.readFileSync(preflightPath, "utf-8"));
+    return report && report.status !== "failed";
+  } catch {
+    return false;
+  }
+}
+function reconcileProjectArtifacts(projectDir, options) {
+  const voPath = options?.voiceoverPath || "";
+  const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs__namespace.existsSync(path__namespace.join(projectDir, "analysis", "transcript.json"));
+  const planningValid = isPlanningValid(projectDir);
+  const captionsValid = isCaptionsValid(projectDir);
+  const globalContextValid = isGlobalContextValid(projectDir);
+  const stockCompletion = checkStockCompletion(projectDir);
+  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic);
+  const preflightValid = isPreflightValid(projectDir);
+  const outputDir = path__namespace.join(projectDir, "output");
+  let renderValid = false;
+  if (fs__namespace.existsSync(outputDir)) {
+    try {
+      const files = fs__namespace.readdirSync(outputDir).filter(
+        (f) => f.endsWith(".mp4") && !f.startsWith("_") && !f.includes(".partial") && !f.includes(".working")
+      );
+      if (files.length > 0) {
+        const stat = fs__namespace.statSync(path__namespace.join(outputDir, files[0]));
+        if (stat.size > 1024) renderValid = true;
+      }
+    } catch {
+    }
+  }
+  const qaPath = path__namespace.join(projectDir, "analysis", "render-qa.json");
+  const postflightValid = renderValid && fs__namespace.existsSync(qaPath);
+  return {
+    transcribingValid,
+    planningValid,
+    captionsValid,
+    globalContextValid,
+    stockCompletion,
+    audioValid,
+    preflightValid,
+    renderValid,
+    postflightValid
+  };
+}
+function probeAudioDuration(filePath) {
+  return new Promise((resolve) => {
+    try {
+      const ffp = require("ffprobe-static");
+      const ffprobePath = ffp?.path || "ffprobe";
+      if (!ffp?.path && !fs__namespace.existsSync(ffprobePath)) {
+        return resolve(null);
+      }
+      const proc = child_process.spawn(
+        ffprobePath,
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          filePath
+        ],
+        { windowsHide: true }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("close", (code) => {
+        if (code === 0) {
+          const val = parseFloat(stdout.trim());
+          resolve(!isNaN(val) && val > 0 ? val : null);
+        } else {
+          resolve(null);
+        }
+      });
+      proc.on("error", () => resolve(null));
+    } catch {
+      resolve(null);
+    }
+  });
+}
+function resolveGeminiApiKey() {
+  try {
+    const appCfg = loadConfig();
+    const key = normalizeApiKey(appCfg.geminiApiKey ?? "");
+    if (key) return key;
+  } catch {
+  }
+  try {
+    const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
+    if (fs__namespace.existsSync(configPath)) {
+      const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
+      const key = normalizeApiKey(cfg.geminiApiKey ?? "");
+      if (key) return key;
+    }
+  } catch {
+  }
+  const envKey = normalizeApiKey(process.env.GEMINI_API_KEY ?? "");
+  return envKey;
+}
+async function validatePipelinePrerequisites(options) {
+  const fatalErrors = [];
+  const warnings = [];
+  const { projectDir, scriptPath, voiceoverPath } = options;
+  if (!projectDir || !fs__namespace.existsSync(projectDir)) {
+    fatalErrors.push(`Project directory does not exist: ${projectDir || "(empty)"}`);
+    return { valid: false, fatalErrors, warnings };
+  }
+  try {
+    fs__namespace.accessSync(projectDir, fs__namespace.constants.W_OK);
+  } catch {
+    fatalErrors.push(`Project directory is not writable: ${projectDir}`);
+  }
+  let resolvedScriptPath = scriptPath;
+  if (scriptPath && !fs__namespace.existsSync(scriptPath)) {
+    if (!path__namespace.isAbsolute(scriptPath)) {
+      const candidate = path__namespace.join(projectDir, scriptPath);
+      if (fs__namespace.existsSync(candidate)) resolvedScriptPath = candidate;
+    }
+    if (!fs__namespace.existsSync(resolvedScriptPath)) {
+      const basename = path__namespace.basename(scriptPath);
+      const inSource = path__namespace.join(projectDir, "source", basename);
+      const inRoot = path__namespace.join(projectDir, basename);
+      if (fs__namespace.existsSync(inSource)) resolvedScriptPath = inSource;
+      else if (fs__namespace.existsSync(inRoot)) resolvedScriptPath = inRoot;
+    }
+  }
+  if (resolvedScriptPath && fs__namespace.existsSync(resolvedScriptPath)) {
+    options.scriptPath = resolvedScriptPath;
+  }
+  if (!resolvedScriptPath) {
+    fatalErrors.push("Script path is required for Auto Production.");
+  } else if (!fs__namespace.existsSync(resolvedScriptPath)) {
+    fatalErrors.push(`Script file not found: ${resolvedScriptPath}`);
+  } else {
+    try {
+      const stat = fs__namespace.statSync(resolvedScriptPath);
+      if (stat.size === 0) {
+        fatalErrors.push(`Script file is empty: ${resolvedScriptPath}`);
+      } else {
+        const text = fs__namespace.readFileSync(resolvedScriptPath, "utf-8");
+        if (!text.trim()) {
+          fatalErrors.push(`Script file contains only whitespace: ${resolvedScriptPath}`);
+        }
+      }
+    } catch (err) {
+      fatalErrors.push(`Cannot read script file: ${String(err)}`);
+    }
+  }
+  let resolvedVoiceoverPath = voiceoverPath;
+  if (voiceoverPath && !fs__namespace.existsSync(voiceoverPath)) {
+    if (!path__namespace.isAbsolute(voiceoverPath)) {
+      const candidate = path__namespace.join(projectDir, voiceoverPath);
+      if (fs__namespace.existsSync(candidate)) resolvedVoiceoverPath = candidate;
+    }
+    if (!fs__namespace.existsSync(resolvedVoiceoverPath)) {
+      const basename = path__namespace.basename(voiceoverPath);
+      const inSource = path__namespace.join(projectDir, "source", basename);
+      const inRoot = path__namespace.join(projectDir, basename);
+      if (fs__namespace.existsSync(inSource)) resolvedVoiceoverPath = inSource;
+      else if (fs__namespace.existsSync(inRoot)) resolvedVoiceoverPath = inRoot;
+    }
+  }
+  if (resolvedVoiceoverPath && fs__namespace.existsSync(resolvedVoiceoverPath)) {
+    options.voiceoverPath = resolvedVoiceoverPath;
+  }
+  let duration = null;
+  if (!resolvedVoiceoverPath) {
+    fatalErrors.push("Voiceover audio path is required for Auto Production.");
+  } else if (!fs__namespace.existsSync(resolvedVoiceoverPath)) {
+    fatalErrors.push(`Voiceover audio file not found: ${resolvedVoiceoverPath}`);
+  } else {
+    try {
+      const stat = fs__namespace.statSync(resolvedVoiceoverPath);
+      if (stat.size === 0) {
+        fatalErrors.push(`Voiceover audio file is empty: ${resolvedVoiceoverPath}`);
+      } else {
+        duration = await probeAudioDuration(resolvedVoiceoverPath);
+        if (duration !== null && duration <= 0) {
+          fatalErrors.push(`Voiceover audio has invalid duration: ${duration}s`);
+        }
+      }
+    } catch (err) {
+      fatalErrors.push(`Cannot read voiceover audio file: ${String(err)}`);
+    }
+  }
+  try {
+    const ffmpeg = require("ffmpeg-static");
+    if (!ffmpeg || typeof ffmpeg === "string" && !fs__namespace.existsSync(ffmpeg)) {
+      warnings.push("ffmpeg-static binary path not found, relying on system ffmpeg.");
+    }
+  } catch {
+    warnings.push("ffmpeg-static package check threw an error.");
+  }
+  const geminiApiKey = resolveGeminiApiKey();
+  if (!geminiApiKey) {
+    fatalErrors.push(
+      "Gemini API key is not configured. Please add it in Settings or set GEMINI_API_KEY env."
+    );
+  }
+  const appCfg = loadConfig();
+  const pexelsKey = normalizeApiKey(appCfg.pexelsApiKey ?? "");
+  const pixabayKey = normalizeApiKey(appCfg.pixabayApiKey ?? "");
+  let hasLocalMedia = false;
+  try {
+    const stateFile = fs__namespace.existsSync(path__namespace.join(projectDir, "project-state.json")) ? path__namespace.join(projectDir, "project-state.json") : path__namespace.join(projectDir, "project.json");
+    if (fs__namespace.existsSync(stateFile)) {
+      const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+      const imgDir = st?.inputs?.imagesFolder;
+      const vidDir = st?.inputs?.videosFolder;
+      if (imgDir && fs__namespace.existsSync(imgDir) || vidDir && fs__namespace.existsSync(vidDir)) {
+        hasLocalMedia = true;
+      }
+    }
+  } catch {
+  }
+  if (!pexelsKey && !pixabayKey && !hasLocalMedia) {
+    fatalErrors.push(
+      "No stock API keys configured (Pexels or Pixabay required for auto stock search) and no local media folder provided."
+    );
+  } else if (!pexelsKey && !pixabayKey && hasLocalMedia) {
+    warnings.push(
+      "No stock API keys configured. Pipeline will rely exclusively on local media files."
+    );
+  }
+  const outputDir = path__namespace.join(projectDir, "output");
+  try {
+    if (!fs__namespace.existsSync(outputDir)) {
+      fs__namespace.mkdirSync(outputDir, { recursive: true });
+    }
+    fs__namespace.accessSync(outputDir, fs__namespace.constants.W_OK);
+  } catch (err) {
+    fatalErrors.push(`Output directory is not writable: ${String(err)}`);
+  }
+  logger.info("[PipelineValidator] Validation completed", {
+    valid: fatalErrors.length === 0,
+    errorsCount: fatalErrors.length,
+    warningsCount: warnings.length
+  });
+  return {
+    valid: fatalErrors.length === 0,
+    fatalErrors,
+    warnings,
+    detectedVoiceoverDuration: duration ?? void 0
+  };
+}
+function checkAborted(signal) {
+  if (signal?.aborted) {
+    throw new Error("Pipeline execution was cancelled.");
+  }
+}
+async function runValidationStage(options, onProgress, signal) {
+  checkAborted(signal);
+  onProgress("Validating inputs and environment...", 0.1);
+  const result = await validatePipelinePrerequisites(options);
+  checkAborted(signal);
+  if (!result.valid) {
+    const errorMsg = result.fatalErrors.join("; ");
+    return {
+      success: false,
+      error: errorMsg,
+      warning: result.warnings.join("; ")
+    };
+  }
+  onProgress("Validation completed successfully", 1);
+  return {
+    success: true,
+    warning: result.warnings.length > 0 ? result.warnings.join("; ") : void 0,
+    data: result
+  };
+}
+async function runTranscriptionStage(options, onProgress, signal) {
+  checkAborted(signal);
+  const transcriptPath = path__namespace.join(options.projectDir, "analysis", "transcript.json");
+  const cacheMetaPath = path__namespace.join(options.projectDir, "analysis", "transcript-meta.json");
+  if (isTranscriptionValid(options.projectDir, options.voiceoverPath)) {
+    try {
+      const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
+      if (meta.model === (options.whisperModel || "base")) {
+        const cached = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+        onProgress("Using cached transcript", 1);
+        return {
+          success: true,
+          cached: true,
+          artifactPath: transcriptPath,
+          data: cached
+        };
+      }
+    } catch {
+    }
+  }
+  onProgress("Initializing transcription engine...", 0.05);
+  checkAborted(signal);
+  const transcript = await transcribeAudio(
+    options.voiceoverPath,
+    options.whisperModel || "base",
+    (msg, prog) => {
+      checkAborted(signal);
+      onProgress(msg, prog ?? 0.3);
+    }
+  );
+  checkAborted(signal);
+  fs__namespace.mkdirSync(path__namespace.join(options.projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(transcriptPath, JSON.stringify(transcript, null, 2), "utf-8");
+  const stat = fs__namespace.statSync(options.voiceoverPath);
+  fs__namespace.writeFileSync(
+    cacheMetaPath,
+    JSON.stringify({
+      hash: `${options.voiceoverPath}:${stat.size}:${stat.mtimeMs}`,
+      model: options.whisperModel || "base",
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    }),
+    "utf-8"
+  );
+  onProgress(`Transcript generated (${transcript.segments.length} segments)`, 1);
+  return {
+    success: true,
+    cached: false,
+    artifactPath: transcriptPath,
+    data: transcript,
+    stats: {
+      segments: transcript.segments.length,
+      duration: transcript.duration
+    }
+  };
+}
+async function runPlanningStage(options, onProgress, signal) {
+  checkAborted(signal);
+  const planPath = path__namespace.join(options.projectDir, "analysis", "master-edit-plan.json");
+  if (isPlanningValid(options.projectDir)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+      onProgress("Using cached master edit plan", 1);
+      return {
+        success: true,
+        cached: true,
+        artifactPath: planPath,
+        data: cached,
+        stats: { totalScenes: cached.totalScenes }
+      };
+    } catch {
+    }
+  }
+  const apiKey = resolveGeminiApiKey();
+  onProgress("Building master edit plan...", 0.05);
+  checkAborted(signal);
+  const plan = await buildEditPlan({
+    projectDir: options.projectDir,
+    apiKey,
+    model: options.geminiModel,
+    onProgress: (msg, prog) => {
+      checkAborted(signal);
+      onProgress(msg, prog);
+    }
+  });
+  checkAborted(signal);
+  return {
+    success: true,
+    cached: false,
+    artifactPath: planPath,
+    data: plan,
+    stats: { totalScenes: plan.totalScenes }
+  };
+}
+async function runCaptionsStage(options, onProgress, signal) {
+  checkAborted(signal);
+  const captionPlanPath = path__namespace.join(options.projectDir, "analysis", "caption-plan.json");
+  if (!options.forceRegenerateCaptions && isCaptionsValid(options.projectDir)) {
+    try {
+      const cached = loadCaptionPlan(options.projectDir);
+      if (cached) {
+        onProgress("Using cached caption plan", 1);
+        return {
+          success: true,
+          cached: true,
+          artifactPath: captionPlanPath,
+          data: cached,
+          stats: { phrases: cached.phrases.length, enabled: cached.enabled }
+        };
+      }
+    } catch {
+    }
+  }
+  const apiKey = resolveGeminiApiKey();
+  onProgress("Generating dynamic kinetic captions...", 0.05);
+  checkAborted(signal);
+  let warning;
+  const plan = await generateCaptionPlan({
+    projectDir: options.projectDir,
+    apiKey,
+    model: options.geminiModel,
+    forceRegenerate: options.forceRegenerateCaptions ?? false,
+    onProgress: (msg, prog) => {
+      checkAborted(signal);
+      onProgress(msg, prog);
+    }
+  });
+  checkAborted(signal);
+  if (plan.generatedByFallback) {
+    warning = "Caption plan was generated using rule-based fallback algorithm.";
+  }
+  onProgress(`Captions plan ready (${plan.phrases.length} phrases)`, 1);
+  return {
+    success: true,
+    cached: false,
+    warning,
+    artifactPath: captionPlanPath,
+    data: plan,
+    stats: { phrases: plan.phrases.length, enabled: plan.enabled }
+  };
+}
+async function runGlobalContextStage(options, onProgress, signal) {
+  checkAborted(signal);
+  const contextPath = path__namespace.join(options.projectDir, "analysis", "global-script-context.json");
+  let scriptText = null;
+  if (options.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+    try {
+      scriptText = fs__namespace.readFileSync(options.scriptPath, "utf-8");
+    } catch {
+    }
+  }
+  let transcript = null;
+  const transcriptPath = path__namespace.join(options.projectDir, "analysis", "transcript.json");
+  if (fs__namespace.existsSync(transcriptPath)) {
+    try {
+      transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+    } catch {
+    }
+  }
+  if (isGlobalContextValid(options.projectDir)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+      onProgress("Using cached global script context", 1);
+      return {
+        success: true,
+        cached: true,
+        artifactPath: contextPath,
+        data: cached
+      };
+    } catch {
+    }
+  }
+  const apiKey = resolveGeminiApiKey();
+  onProgress("Analyzing script for Global Visual Context...", 0.05);
+  checkAborted(signal);
+  const ctx = await analyzeGlobalContext({
+    projectDir: options.projectDir,
+    apiKey,
+    model: options.geminiModel,
+    scriptText,
+    transcript,
+    forceRegenerate: false,
+    onProgress: (msg, pct) => {
+      checkAborted(signal);
+      onProgress(msg, pct);
+    }
+  });
+  checkAborted(signal);
+  onProgress("Global Visual Context completed", 1);
+  return {
+    success: true,
+    cached: false,
+    artifactPath: contextPath,
+    data: ctx,
+    stats: {
+      primarySubject: ctx.primarySubject,
+      anchorsCount: ctx.exactTopicAnchors?.length ?? 0
+    }
+  };
+}
+async function runStockSearchStage(options, onProgress, signal) {
+  checkAborted(signal);
+  if (!isGlobalContextValid(options.projectDir)) {
+    return {
+      success: false,
+      error: "Global Visual Context must complete before Stock Search can run."
+    };
+  }
+  const initialStockSummary = checkStockCompletion(options.projectDir);
+  if (initialStockSummary.totalScenes > 0 && initialStockSummary.assignedScenes === initialStockSummary.totalScenes && initialStockSummary.missingScenes === 0) {
+    logger.info(
+      `[StockStage] Reconciled stock on disk: all ${initialStockSummary.totalScenes}/${initialStockSummary.totalScenes} scenes assigned & verified. Reusing.`
+    );
+    const completionMsg = `Stock search completed — ${initialStockSummary.totalScenes}/${initialStockSummary.totalScenes} scenes assigned`;
+    onProgress(completionMsg, 1);
+    return {
+      success: true,
+      cached: true,
+      stats: {
+        totalScenes: initialStockSummary.totalScenes,
+        assignedScenes: initialStockSummary.assignedScenes,
+        downloadedScenes: initialStockSummary.downloadedScenes,
+        missingScenes: 0,
+        failedScenes: 0,
+        percent: 100,
+        completionMessage: completionMsg,
+        lowConfidenceScenes: initialStockSummary.lowConfidenceScenes
+      }
+    };
+  }
+  const appCfg = loadConfig();
+  const apiKey = resolveGeminiApiKey();
+  const pexelsKey = normalizeApiKey(appCfg.pexelsApiKey ?? "");
+  const pixabayKey = normalizeApiKey(appCfg.pixabayApiKey ?? "");
+  onProgress("Starting context-aware stock search...", 0.05);
+  checkAborted(signal);
+  if (apiKey) {
+    await runContextAwareStockEngine(
+      {
+        projectDir: options.projectDir,
+        pexelsApiKey: pexelsKey,
+        pixabayApiKey: pixabayKey,
+        preferredAspectRatio: (options.resolution?.width ?? 1920) >= (options.resolution?.height ?? 1080) ? "16:9" : "9:16",
+        apiKey,
+        model: options.geminiModel,
+        forceReanalysis: false
+        // Tái sử dụng Global Context cache, không gọi trùng lặp
+      },
+      (msg, pct) => {
+        checkAborted(signal);
+        onProgress(msg, pct);
+      }
+    );
+  } else {
+    await runStockEngine(
+      {
+        projectDir: options.projectDir,
+        pexelsApiKey: pexelsKey,
+        pixabayApiKey: pixabayKey,
+        preferredAspectRatio: "16:9"
+      },
+      (msg, pct) => {
+        checkAborted(signal);
+        onProgress(msg, pct);
+      }
+    );
+  }
+  checkAborted(signal);
+  const stockSummary = checkStockCompletion(options.projectDir);
+  if (stockSummary.missingScenes > 0) {
+    const errorMsg = `${stockSummary.missingScenes}/${stockSummary.totalScenes} scenes lack downloadable stock media.`;
+    logger.warn(`[StockStage] Needs attention: ${errorMsg}`);
+    return {
+      success: false,
+      needsAttention: true,
+      error: errorMsg,
+      stats: {
+        totalScenes: stockSummary.totalScenes,
+        assignedScenes: stockSummary.assignedScenes,
+        downloadedScenes: stockSummary.downloadedScenes,
+        missingScenes: stockSummary.missingScenes,
+        missingSceneIndices: stockSummary.missingSceneIndices,
+        lowConfidenceScenes: stockSummary.lowConfidenceScenes
+      }
+    };
+  }
+  let warning;
+  if (stockSummary.lowConfidenceScenes > 0) {
+    warning = `${stockSummary.lowConfidenceScenes} scenes have low-confidence stock matches.`;
+  }
+  const finalMsg = `Stock search completed — ${stockSummary.totalScenes}/${stockSummary.totalScenes} scenes assigned`;
+  onProgress(finalMsg, 1);
+  return {
+    success: true,
+    warning,
+    stats: {
+      totalScenes: stockSummary.totalScenes,
+      assignedScenes: stockSummary.assignedScenes,
+      downloadedScenes: stockSummary.downloadedScenes,
+      missingScenes: 0,
+      failedScenes: 0,
+      percent: 100,
+      completionMessage: finalMsg,
+      lowConfidenceScenes: stockSummary.lowConfidenceScenes
+    }
+  };
+}
+async function runAudioSearchStage(options, onProgress, signal) {
+  checkAborted(signal);
+  const audioPlanPath = path__namespace.join(options.projectDir, "analysis", "audio-plan.json");
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic)) {
+    const cachedPlan = loadAudioPlan(options.projectDir);
+    if (cachedPlan) {
+      const downloadedMusicCount2 = cachedPlan.sections.filter(
+        (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+      ).length;
+      onProgress(`Using existing audio plan (${downloadedMusicCount2} music tracks)`, 1);
+      return {
+        success: true,
+        cached: true,
+        artifactPath: audioPlanPath,
+        data: cachedPlan,
+        stats: {
+          sectionsCount: cachedPlan.sections.length,
+          downloadedMusicCount: downloadedMusicCount2,
+          sfxCount: cachedPlan.sfxAssignments?.length ?? 0
+        }
+      };
+    }
+  }
+  onProgress("Searching and downloading background music & SFX...", 0.05);
+  checkAborted(signal);
+  const result = await runAudioDirector(
+    options.projectDir,
+    (msg, pct) => {
+      checkAborted(signal);
+      onProgress(msg, pct);
+    }
+  );
+  checkAborted(signal);
+  const plan = loadAudioPlan(options.projectDir);
+  const downloadedMusicCount = plan?.sections.filter(
+    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+  ).length ?? 0;
+  if (downloadedMusicCount === 0 && options.requireBackgroundMusic) {
+    return {
+      success: false,
+      needsAttention: true,
+      error: "No background music found, but requireBackgroundMusic option is enabled."
+    };
+  }
+  let warning;
+  if (downloadedMusicCount === 0) {
+    warning = "No background music tracks were downloaded. Video will render voiceover-only.";
+  }
+  onProgress(`Audio plan ready (${downloadedMusicCount} music tracks)`, 1);
+  return {
+    success: true,
+    warning,
+    artifactPath: audioPlanPath,
+    data: result,
+    stats: {
+      sectionsCount: result.sections.length,
+      downloadedMusicCount,
+      sfxCount: result.sfxAssignments.length
+    }
+  };
+}
+async function runPreflightStage(options, onProgress, signal) {
+  checkAborted(signal);
+  onProgress("Running render preflight inspection...", 0.1);
+  let captionPlan;
+  try {
+    const loaded = loadCaptionPlan(options.projectDir);
+    if (loaded?.enabled && loaded.phrases.length > 0) {
+      captionPlan = loaded;
+    }
+  } catch {
+  }
+  checkAborted(signal);
+  const report = await runRenderPreflight({
+    projectDir: options.projectDir,
+    voiceoverPath: options.voiceoverPath,
+    captionPlan
+  });
+  checkAborted(signal);
+  const preflightPath = path__namespace.join(options.projectDir, "analysis", "render-preflight.json");
+  if (report.status === "failed") {
+    const fatalIssues = report.issues.filter((i) => i.severity === "fatal");
+    const msg = fatalIssues.map((i) => i.message).join("; ");
+    logger.warn(`[PreflightStage] Preflight QA failed with fatal issues: ${msg}`);
+    return {
+      success: false,
+      needsAttention: true,
+      error: `Preflight checks failed: ${msg}`,
+      artifactPath: preflightPath,
+      data: report
+    };
+  }
+  const warnings = report.issues.filter((i) => i.severity === "warning").map((i) => i.message);
+  onProgress("Preflight QA checks passed", 1);
+  return {
+    success: true,
+    warning: warnings.length > 0 ? warnings.join("; ") : void 0,
+    artifactPath: preflightPath,
+    data: report,
+    stats: {
+      status: report.status,
+      issuesCount: report.issues.length
+    }
+  };
+}
+async function runRenderStage(options, onProgress, signal) {
+  checkAborted(signal);
+  const outputDir = path__namespace.join(options.projectDir, "output");
+  fs__namespace.mkdirSync(outputDir, { recursive: true });
+  try {
+    const outputFiles = fs__namespace.readdirSync(outputDir);
+    for (const file of outputFiles) {
+      if (file.endsWith(".partial.mp4") || file.includes("_working.mp4")) {
+        const partialPath = path__namespace.join(outputDir, file);
+        try {
+          fs__namespace.unlinkSync(partialPath);
+          logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${file}`);
+        } catch {
+        }
+      }
+    }
+  } catch {
+  }
+  const baseTargetName = options.outputName || "final_output";
+  const defaultCompletedVideo = path__namespace.join(outputDir, `${baseTargetName}.mp4`);
+  if (fs__namespace.existsSync(defaultCompletedVideo)) {
+    try {
+      const stat = fs__namespace.statSync(defaultCompletedVideo);
+      if (stat.size > 1024 * 1024) {
+        onProgress("Found valid completed video output, skipping render", 1);
+        return {
+          success: true,
+          cached: true,
+          artifactPath: defaultCompletedVideo,
+          data: {
+            outputPath: defaultCompletedVideo,
+            durationSecs: 0,
+            fileSizeBytes: stat.size
+          },
+          stats: {
+            outputPath: defaultCompletedVideo,
+            fileSizeBytes: stat.size,
+            reused: true
+          }
+        };
+      }
+    } catch {
+    }
+  }
+  let captionPlan;
+  try {
+    const loaded = loadCaptionPlan(options.projectDir);
+    if (loaded?.enabled && loaded.phrases.length > 0) {
+      captionPlan = loaded;
+    }
+  } catch {
+  }
+  let targetName = baseTargetName;
+  let candidatePath = path__namespace.join(outputDir, `${targetName}.mp4`);
+  let counter = 1;
+  while (fs__namespace.existsSync(candidatePath)) {
+    targetName = `${baseTargetName}_${counter}`;
+    candidatePath = path__namespace.join(outputDir, `${targetName}.mp4`);
+    counter++;
+  }
+  onProgress(`Starting render (${targetName}.mp4)...`, 0.02);
+  checkAborted(signal);
+  const result = await renderVideo({
+    projectDir: options.projectDir,
+    voiceoverPath: options.voiceoverPath,
+    outputName: targetName,
+    resolution: options.resolution,
+    fps: options.fps,
+    transitionSettings: options.transitionSettings,
+    captionPlan,
+    onProgress: (p) => {
+      checkAborted(signal);
+      onProgress(p.stage, p.progress);
+    }
+  });
+  checkAborted(signal);
+  return {
+    success: true,
+    artifactPath: result.outputPath,
+    data: result,
+    stats: {
+      outputPath: result.outputPath,
+      durationSecs: result.durationSecs,
+      fileSizeBytes: result.fileSizeBytes
+    }
+  };
+}
+async function runPostflightStage(options, renderResult, onProgress, signal) {
+  checkAborted(signal);
+  onProgress("Validating final rendered video...", 0.2);
+  const { outputPath } = renderResult;
+  if (!outputPath || !fs__namespace.existsSync(outputPath)) {
+    return {
+      success: false,
+      error: `Render output file does not exist: ${outputPath || "(none)"}`
+    };
+  }
+  const stat = fs__namespace.statSync(outputPath);
+  if (stat.size === 0) {
+    return {
+      success: false,
+      error: `Render output file is empty: ${outputPath}`
+    };
+  }
+  const qaPath = path__namespace.join(options.projectDir, "analysis", "render-qa.json");
+  let qaReport = null;
+  if (fs__namespace.existsSync(qaPath)) {
+    try {
+      qaReport = JSON.parse(fs__namespace.readFileSync(qaPath, "utf-8"));
+    } catch {
+    }
+  }
+  onProgress("Video production completed successfully!", 1);
+  return {
+    success: true,
+    artifactPath: outputPath,
+    data: {
+      outputPath,
+      fileSizeMB: (stat.size / (1024 * 1024)).toFixed(2),
+      qaReport
+    },
+    stats: {
+      fileSizeMB: (stat.size / (1024 * 1024)).toFixed(2),
+      qaStatus: qaReport?.status ?? "passed"
+    }
+  };
+}
+class PipelineOrchestrator {
+  activeInstances = /* @__PURE__ */ new Map();
+  heartbeatTimers = /* @__PURE__ */ new Map();
+  projectMutexes = /* @__PURE__ */ new Map();
+  /**
+   * Chạy tác vụ với mutex trên projectDir để ngăn chặn start/resume/recover đồng thời.
+   */
+  async withProjectLock(projectDir, fn) {
+    const norm = normalizeProjectDir(projectDir);
+    const currentLock = this.projectMutexes.get(norm) ?? Promise.resolve();
+    let resolveLock;
+    const nextLock = new Promise((res) => {
+      resolveLock = res;
+    });
+    this.projectMutexes.set(norm, nextLock);
+    try {
+      await currentLock;
+      return await fn();
+    } finally {
+      resolveLock();
+      if (this.projectMutexes.get(norm) === nextLock) {
+        this.projectMutexes.delete(norm);
+      }
+    }
+  }
+  /**
+   * Phát snapshot trạng thái pipeline đến toàn bộ BrowserWindows.
+   */
+  broadcastProgress(state2) {
+    try {
+      const snapshot = toSnapshot(state2);
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        const windows = electron.BrowserWindow.getAllWindows();
+        for (const win of windows) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.PIPELINE_PROGRESS, snapshot);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  /**
+   * Bắt đầu timer heartbeat định kỳ (mỗi 3 giây) ghi nhận lease còn sống.
+   */
+  startHeartbeat(projectDir, runId) {
+    this.stopHeartbeat(projectDir);
+    const norm = normalizeProjectDir(projectDir);
+    const timer = setInterval(() => {
+      const instance = this.activeInstances.get(norm);
+      if (!instance || instance.runId !== runId) {
+        this.stopHeartbeat(norm);
+        return;
+      }
+      const state2 = loadPipelineState(norm);
+      if (state2 && state2.runId === runId && state2.overallStatus === "running") {
+        updateHeartbeat(state2);
+        savePipelineStateAtomic(norm, state2);
+      }
+    }, 3e3);
+    this.heartbeatTimers.set(norm, timer);
+  }
+  /**
+   * Dừng timer heartbeat.
+   */
+  stopHeartbeat(projectDir) {
+    const norm = normalizeProjectDir(projectDir);
+    const timer = this.heartbeatTimers.get(norm);
+    if (timer) {
+      clearInterval(timer);
+      this.heartbeatTimers.delete(norm);
+    }
+  }
+  /**
+   * Helper hoàn tất stage theo đúng thứ tự bắt buộc:
+   * 1. Service hoàn thành.
+   * 2. Validate artifact đầu ra.
+   * 3. Reconcile số liệu thực tế.
+   * 4. Mark stage completed trong memory.
+   * 5. Atomic write pipeline state (monotonic version++).
+   * 6. Emit snapshot hoàn chỉnh tới renderer.
+   */
+  async completeStage(state2, stage, result, stageStartTime) {
+    const norm = normalizeProjectDir(state2.projectDir);
+    const durationMs = Date.now() - stageStartTime;
+    state2.stages[stage] = {
+      status: "completed",
+      progress: 1,
+      startedAt: state2.stages[stage]?.startedAt || new Date(stageStartTime).toISOString(),
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      durationMs,
+      message: result.stats?.completionMessage ? String(result.stats.completionMessage) : result.cached ? "Using cached result" : "Completed",
+      warning: result.warning,
+      artifactPath: result.artifactPath || state2.stages[stage]?.artifactPath,
+      stats: {
+        ...state2.stages[stage]?.stats || {},
+        ...result.stats || {}
+      }
+    };
+    if (result.warning && !state2.warnings.includes(result.warning)) {
+      state2.warnings.push(result.warning);
+    }
+    state2.version = (state2.version ?? 0) + 1;
+    state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    if (state2.lease) {
+      state2.lease.heartbeatAt = state2.updatedAt;
+      state2.lease.currentStage = stage;
+    }
+    savePipelineStateAtomic(norm, state2);
+    this.broadcastProgress(state2);
+  }
+  /**
+   * Khởi động Auto Production Pipeline.
+   * Tự động reclaim stale lease nếu tiến trình trước đã chết.
+   */
+  async startPipeline(options) {
+    const { projectDir } = options;
+    if (!projectDir) throw new Error("projectDir is required to start Auto Production Pipeline.");
+    const norm = normalizeProjectDir(projectDir);
+    return this.withProjectLock(norm, async () => {
+      const existing = this.activeInstances.get(norm);
+      if (existing) {
+        logger.warn(`[Pipeline] Pipeline is already running in memory for project: ${norm}`);
+        const currentState = loadPipelineState(norm);
+        return {
+          runId: existing.runId,
+          state: currentState ?? createInitialPipelineState(options, computeInputFingerprint(norm, options.scriptPath, options.voiceoverPath), existing.runId)
+        };
+      }
+      let state2 = loadPipelineState(norm);
+      if (state2 && state2.overallStatus === "running") {
+        const isRunningInAnotherProcess = state2.lease && state2.lease.appInstanceId !== APP_INSTANCE_ID && isProcessAlive(state2.lease.pid) && !isLeaseStale(state2.lease);
+        if (isRunningInAnotherProcess) {
+          throw new Error(`Pipeline is currently running in another process (PID ${state2.lease?.pid || "unknown"}).`);
+        } else {
+          logger.info(`[Pipeline] Reclaiming lease from prior unmanaged/stale run for ${norm}`);
+          state2.overallStatus = "interrupted";
+          releaseLease(state2);
+          savePipelineStateAtomic(norm, state2);
+        }
+      }
+      const fingerprint = computeInputFingerprint(norm, options.scriptPath, options.voiceoverPath);
+      const runId = uuid.v4();
+      if (!state2) {
+        state2 = createInitialPipelineState(options, fingerprint, runId);
+      } else {
+        const invalidated = determineInvalidatedStages(state2, options, fingerprint);
+        if (invalidated.length > 0) {
+          applyInvalidation(state2, invalidated);
+          logger.info(`[Pipeline] Invalidated stages: ${invalidated.join(", ")}`);
+        }
+        state2.runId = runId;
+        state2.inputFingerprint = fingerprint;
+        state2.options = options;
+        state2.overallStatus = "running";
+        state2.version = (state2.version ?? 0) + 1;
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        state2.fatalErrors = [];
+      }
+      state2.lease = createLease(runId, "validating");
+      savePipelineStateAtomic(norm, state2);
+      this.broadcastProgress(state2);
+      const abortController = new AbortController();
+      this.startHeartbeat(norm, runId);
+      const instance = {
+        runId,
+        projectDir: norm,
+        abortController,
+        stageStartTime: Date.now(),
+        currentStage: "validating",
+        promise: Promise.resolve(state2)
+        // replaced below
+      };
+      instance.promise = this.executePipelineLoop(state2, abortController);
+      this.activeInstances.set(norm, instance);
+      return { runId, state: state2 };
+    });
+  }
+  /**
+   * Tiếp tục chạy pipeline từ stage chưa hoàn thành đầu tiên.
+   */
+  async resumePipeline(projectDir) {
+    if (!projectDir) throw new Error("projectDir is required to resume pipeline.");
+    const norm = normalizeProjectDir(projectDir);
+    return this.withProjectLock(norm, async () => {
+      const existing = this.activeInstances.get(norm);
+      if (existing) {
+        const currentState = loadPipelineState(norm);
+        return { runId: existing.runId, state: currentState };
+      }
+      let state2 = loadPipelineState(norm);
+      if (!state2) {
+        throw new Error(`No pipeline state found to resume for project: ${norm}`);
+      }
+      if (isLeaseStale(state2.lease)) {
+        logger.info(`[Pipeline] Reclaiming stale lease before resume on ${norm}`);
+        releaseLease(state2);
+      }
+      const recon = reconcileProjectArtifacts(norm, state2.options);
+      if (recon.transcribingValid && state2.stages.transcribing) state2.stages.transcribing.status = "completed";
+      if (recon.planningValid && state2.stages.planning) state2.stages.planning.status = "completed";
+      if (recon.captionsValid && state2.stages.captions) state2.stages.captions.status = "completed";
+      if (recon.globalContextValid && state2.stages["global-context"]) state2.stages["global-context"].status = "completed";
+      if (recon.stockCompletion.totalScenes > 0 && recon.stockCompletion.missingScenes === 0 && state2.stages["stock-search"]) {
+        state2.stages["stock-search"].status = "completed";
+        state2.stages["stock-search"].progress = 1;
+        state2.stages["stock-search"].message = `Stock search completed — ${recon.stockCompletion.totalScenes}/${recon.stockCompletion.totalScenes} scenes assigned`;
+      }
+      if (recon.audioValid && state2.stages["audio-search"]) state2.stages["audio-search"].status = "completed";
+      if (recon.preflightValid && state2.stages.preflight) state2.stages.preflight.status = "completed";
+      if (recon.renderValid && state2.stages.rendering) state2.stages.rendering.status = "completed";
+      if (recon.postflightValid && state2.stages.postflight) state2.stages.postflight.status = "completed";
+      const currentFingerprint = computeInputFingerprint(
+        norm,
+        state2.options.scriptPath,
+        state2.options.voiceoverPath
+      );
+      const invalidated = determineInvalidatedStages(state2, state2.options, currentFingerprint);
+      if (invalidated.length > 0) {
+        applyInvalidation(state2, invalidated);
+        state2.inputFingerprint = currentFingerprint;
+      }
+      const runId = uuid.v4();
+      state2.runId = runId;
+      state2.overallStatus = "running";
+      state2.version = (state2.version ?? 0) + 1;
+      state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      state2.fatalErrors = [];
+      const firstPending = PIPELINE_EXECUTION_STAGES.find((s) => state2.stages[s]?.status !== "completed") || "validating";
+      state2.currentStage = firstPending;
+      state2.lease = createLease(runId, firstPending);
+      savePipelineStateAtomic(norm, state2);
+      this.broadcastProgress(state2);
+      const abortController = new AbortController();
+      this.startHeartbeat(norm, runId);
+      const instance = {
+        runId,
+        projectDir: norm,
+        abortController,
+        stageStartTime: Date.now(),
+        currentStage: firstPending,
+        promise: Promise.resolve(state2)
+      };
+      instance.promise = this.executePipelineLoop(state2, abortController);
+      this.activeInstances.set(norm, instance);
+      return { runId, state: state2 };
+    });
+  }
+  /**
+   * Hủy pipeline đang chạy hoặc dọn dẹp state mồ côi.
+   */
+  cancelPipeline(projectDirOrRunId) {
+    let targetProjectDir = null;
+    for (const [projectDir, instance] of this.activeInstances.entries()) {
+      if (instance.runId === projectDirOrRunId || projectDir === projectDirOrRunId) {
+        logger.info(`[Pipeline] Cancelling active pipeline run ${instance.runId} for ${projectDir}`);
+        instance.abortController.abort();
+        targetProjectDir = projectDir;
+        break;
+      }
+    }
+    if (!targetProjectDir) {
+      targetProjectDir = normalizeProjectDir(projectDirOrRunId);
+    }
+    this.stopHeartbeat(targetProjectDir);
+    this.activeInstances.delete(targetProjectDir);
+    const state2 = loadPipelineState(targetProjectDir);
+    if (state2) {
+      state2.overallStatus = "cancelled";
+      if (state2.currentStage && state2.stages[state2.currentStage] && state2.stages[state2.currentStage].status === "running") {
+        state2.stages[state2.currentStage].status = "cancelled";
+        state2.stages[state2.currentStage].message = "Stage cancelled by user";
+      }
+      releaseLease(state2);
+      state2.version = (state2.version ?? 0) + 1;
+      state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      savePipelineStateAtomic(targetProjectDir, state2);
+      this.broadcastProgress(state2);
+      return true;
+    }
+    return false;
+  }
+  /**
+   * Lấy trạng thái hiện tại của pipeline. Tự động kiểm tra stale lease nếu app khởi động lại.
+   */
+  getStatus(projectDir) {
+    const norm = normalizeProjectDir(projectDir);
+    const state2 = loadPipelineState(norm);
+    if (!state2) return null;
+    if (state2.overallStatus === "running" && !this.activeInstances.has(norm)) {
+      logger.warn(`[Pipeline] Running state with no active in-memory orchestrator detected on getStatus for ${norm}. Marking interrupted.`);
+      state2.overallStatus = "interrupted";
+      releaseLease(state2);
+      state2.version = (state2.version ?? 0) + 1;
+      state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      savePipelineStateAtomic(norm, state2);
+    }
+    return state2;
+  }
+  /**
+   * Phục hồi pipeline bị gián đoạn (crash recovery / bootstrap recovery).
+   */
+  async recoverInterruptedPipeline(projectDir) {
+    const norm = normalizeProjectDir(projectDir);
+    return this.withProjectLock(norm, async () => {
+      if (this.activeInstances.has(norm)) {
+        const active = this.activeInstances.get(norm);
+        return {
+          recovered: false,
+          previousRunId: active.runId,
+          resumable: false,
+          completedStages: [],
+          invalidStages: [],
+          warnings: ["Pipeline is currently active in memory."]
+        };
+      }
+      const state2 = loadPipelineState(norm);
+      if (!state2) {
+        return {
+          recovered: false,
+          resumable: false,
+          completedStages: [],
+          invalidStages: [],
+          warnings: ["No auto-pipeline-state.json file found for project."]
+        };
+      }
+      const previousRunId = state2.runId;
+      const warnings = [];
+      const completedStages = [];
+      const invalidStages = [];
+      const recon = reconcileProjectArtifacts(norm, state2.options);
+      if (recon.transcribingValid) {
+        completedStages.push("transcribing");
+        state2.stages.transcribing = {
+          ...state2.stages.transcribing || {},
+          status: "completed",
+          progress: 1,
+          message: "Transcription artifact verified"
+        };
+      } else if (state2.stages.transcribing?.status === "completed") {
+        invalidStages.push("transcribing");
+        state2.stages.transcribing.status = "pending";
+        warnings.push("Transcript artifact is missing or invalid. Will re-transcribe.");
+      }
+      if (recon.planningValid) {
+        completedStages.push("planning");
+        state2.stages.planning = {
+          ...state2.stages.planning || {},
+          status: "completed",
+          progress: 1,
+          message: "Master edit plan verified"
+        };
+      } else if (state2.stages.planning?.status === "completed") {
+        invalidStages.push("planning");
+        state2.stages.planning.status = "pending";
+      }
+      if (recon.captionsValid) {
+        completedStages.push("captions");
+        state2.stages.captions = {
+          ...state2.stages.captions || {},
+          status: "completed",
+          progress: 1,
+          message: "Caption plan verified"
+        };
+      } else if (state2.stages.captions?.status === "completed") {
+        invalidStages.push("captions");
+        state2.stages.captions.status = "pending";
+      }
+      if (recon.globalContextValid) {
+        completedStages.push("global-context");
+        state2.stages["global-context"] = {
+          ...state2.stages["global-context"] || {},
+          status: "completed",
+          progress: 1,
+          message: "Global visual context verified"
+        };
+      } else if (state2.stages["global-context"]?.status === "completed") {
+        invalidStages.push("global-context");
+        state2.stages["global-context"].status = "pending";
+      }
+      if (recon.stockCompletion.totalScenes > 0 && recon.stockCompletion.assignedScenes === recon.stockCompletion.totalScenes && recon.stockCompletion.missingScenes === 0) {
+        completedStages.push("stock-search");
+        state2.stages["stock-search"] = {
+          ...state2.stages["stock-search"] || {},
+          status: "completed",
+          progress: 1,
+          message: `Stock search completed — ${recon.stockCompletion.totalScenes}/${recon.stockCompletion.totalScenes} scenes assigned`,
+          stats: {
+            totalScenes: recon.stockCompletion.totalScenes,
+            assignedScenes: recon.stockCompletion.assignedScenes,
+            downloadedScenes: recon.stockCompletion.downloadedScenes,
+            missingScenes: 0,
+            percent: 100
+          }
+        };
+      } else {
+        if (recon.stockCompletion.totalScenes > 0) {
+          warnings.push(
+            `Stock media incomplete: ${recon.stockCompletion.assignedScenes}/${recon.stockCompletion.totalScenes} scenes assigned (${recon.stockCompletion.missingScenes} missing).`
+          );
+        }
+        if (state2.stages["stock-search"]?.status === "completed") {
+          invalidStages.push("stock-search");
+          state2.stages["stock-search"].status = "pending";
+        }
+      }
+      if (recon.audioValid) {
+        completedStages.push("audio-search");
+        state2.stages["audio-search"] = {
+          ...state2.stages["audio-search"] || {},
+          status: "completed",
+          progress: 1,
+          message: "Audio plan verified"
+        };
+      } else if (state2.stages["audio-search"]?.status === "completed") {
+        invalidStages.push("audio-search");
+        state2.stages["audio-search"].status = "pending";
+      }
+      if (recon.preflightValid) {
+        completedStages.push("preflight");
+        state2.stages.preflight = {
+          ...state2.stages.preflight || {},
+          status: "completed",
+          progress: 1,
+          message: "Preflight report passed"
+        };
+      } else if (state2.stages.preflight?.status === "completed") {
+        invalidStages.push("preflight");
+        state2.stages.preflight.status = "pending";
+      }
+      if (recon.renderValid) {
+        completedStages.push("rendering");
+        state2.stages.rendering = {
+          ...state2.stages.rendering || {},
+          status: "completed",
+          progress: 1,
+          message: "Rendered video verified"
+        };
+      } else if (state2.stages.rendering?.status === "completed") {
+        invalidStages.push("rendering");
+        state2.stages.rendering.status = "pending";
+      }
+      if (recon.postflightValid) {
+        completedStages.push("postflight");
+        state2.stages.postflight = {
+          ...state2.stages.postflight || {},
+          status: "completed",
+          progress: 1,
+          message: "Postflight QA passed"
+        };
+      }
+      const resumeFrom = PIPELINE_EXECUTION_STAGES.find((s) => state2.stages[s]?.status !== "completed");
+      if (!resumeFrom) {
+        state2.overallStatus = "completed";
+        state2.currentStage = "completed";
+      } else {
+        state2.overallStatus = "interrupted";
+        state2.currentStage = resumeFrom;
+      }
+      releaseLease(state2);
+      state2.version = (state2.version ?? 0) + 1;
+      state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      savePipelineStateAtomic(norm, state2);
+      this.broadcastProgress(state2);
+      logger.info(`[Pipeline] Recovered interrupted pipeline for ${norm}. Next resume stage: ${resumeFrom || "all completed"}`);
+      return {
+        recovered: true,
+        previousRunId,
+        resumable: !!resumeFrom,
+        resumeFrom,
+        completedStages,
+        invalidStages,
+        warnings
+      };
+    });
+  }
+  /**
+   * Chạy lại một stage cụ thể (dành cho debugging hoặc sửa lỗi).
+   */
+  async retryStage(projectDir, targetStage) {
+    const norm = normalizeProjectDir(projectDir);
+    let state2 = loadPipelineState(norm);
+    if (!state2) throw new Error(`No pipeline state found for project: ${norm}`);
+    const stageIdx = PIPELINE_EXECUTION_STAGES.indexOf(targetStage);
+    if (stageIdx >= 0) {
+      const downstream = PIPELINE_EXECUTION_STAGES.slice(stageIdx);
+      applyInvalidation(state2, [...downstream]);
+    }
+    state2.version = (state2.version ?? 0) + 1;
+    savePipelineStateAtomic(norm, state2);
+    return this.resumePipeline(norm);
+  }
+  /**
+   * Chạy từ một stage chỉ định.
+   */
+  async runFromStage(projectDir, stage, overrideOptions) {
+    const norm = normalizeProjectDir(projectDir);
+    let state2 = loadPipelineState(norm);
+    if (!state2) throw new Error(`No pipeline state found for project: ${norm}`);
+    if (overrideOptions) {
+      state2.options = { ...state2.options, ...overrideOptions };
+    }
+    const stageIdx = PIPELINE_EXECUTION_STAGES.indexOf(stage);
+    if (stageIdx >= 0) {
+      const downstream = PIPELINE_EXECUTION_STAGES.slice(stageIdx);
+      applyInvalidation(state2, [...downstream]);
+    }
+    state2.version = (state2.version ?? 0) + 1;
+    savePipelineStateAtomic(norm, state2);
+    return this.resumePipeline(norm);
+  }
+  /**
+   * Xử lý khi ứng dụng sắp tắt (before-quit / will-quit).
+   * Đánh dấu các pipeline đang chạy thành interrupted và release lease an toàn.
+   */
+  handleAppQuit() {
+    logger.info(`[Pipeline] Application is closing. Gracefully saving active pipeline checkpoints...`);
+    for (const [projectDir, instance] of this.activeInstances.entries()) {
+      try {
+        instance.abortController.abort();
+        this.stopHeartbeat(projectDir);
+        const state2 = loadPipelineState(projectDir);
+        if (state2 && state2.overallStatus === "running") {
+          state2.overallStatus = "interrupted";
+          if (state2.currentStage && state2.stages[state2.currentStage]) {
+            state2.stages[state2.currentStage].message = "Interrupted: Application closed";
+          }
+          releaseLease(state2);
+          state2.version = (state2.version ?? 0) + 1;
+          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          savePipelineStateAtomic(projectDir, state2);
+        }
+      } catch (err) {
+        logger.error(`[Pipeline] Error saving checkpoint during quit for ${projectDir}: ${String(err)}`);
+      }
+    }
+    this.activeInstances.clear();
+  }
+  /**
+   * Vòng lặp chính thực thi tuần tự các stage.
+   */
+  async executePipelineLoop(state2, abortController) {
+    const norm = normalizeProjectDir(state2.projectDir);
+    const signal = abortController.signal;
+    const currentRunId = state2.runId;
+    let lastRenderResult = { outputPath: state2.renderOutputPath || "" };
+    try {
+      state2.overallStatus = "running";
+      state2.startedAt = state2.startedAt || (/* @__PURE__ */ new Date()).toISOString();
+      state2.version = (state2.version ?? 0) + 1;
+      savePipelineStateAtomic(norm, state2);
+      this.broadcastProgress(state2);
+      for (let i = 0; i < PIPELINE_EXECUTION_STAGES.length; i++) {
+        const stage = PIPELINE_EXECUTION_STAGES[i];
+        if (signal.aborted) {
+          state2.overallStatus = "cancelled";
+          break;
+        }
+        const stageState = state2.stages[stage];
+        if (stageState && stageState.status === "completed") {
+          logger.info(`[Pipeline] Stage ${stage} is already completed, skipping.`);
+          if (stage === "rendering" && stageState.artifactPath) {
+            lastRenderResult = { outputPath: stageState.artifactPath };
+          }
+          continue;
+        }
+        state2.currentStage = stage;
+        if (state2.lease) {
+          state2.lease.currentStage = stage;
+          state2.lease.heartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+        }
+        state2.stages[stage] = {
+          status: "running",
+          progress: 0,
+          startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          message: `Running ${stage}...`
+        };
+        state2.version = (state2.version ?? 0) + 1;
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        savePipelineStateAtomic(norm, state2);
+        this.broadcastProgress(state2);
+        const stageStartTime = Date.now();
+        const onProgress = (message, progress) => {
+          if (signal.aborted) return;
+          if (state2.runId !== currentRunId || state2.stages[stage]?.status === "completed") {
+            logger.debug(`[Pipeline] Ignoring late progress event for stage ${stage}`);
+            return;
+          }
+          state2.stages[stage].message = message;
+          state2.stages[stage].progress = Math.min(Math.max(progress, 0), 1);
+          state2.version = (state2.version ?? 0) + 1;
+          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          if (state2.lease) {
+            state2.lease.heartbeatAt = state2.updatedAt;
+          }
+          savePipelineStateAtomic(norm, state2);
+          this.broadcastProgress(state2);
+        };
+        let stageResult;
+        try {
+          switch (stage) {
+            case "validating":
+              stageResult = await runValidationStage(state2.options, onProgress, signal);
+              break;
+            case "transcribing":
+              stageResult = await runTranscriptionStage(state2.options, onProgress, signal);
+              break;
+            case "planning":
+              stageResult = await runPlanningStage(state2.options, onProgress, signal);
+              break;
+            case "captions":
+              stageResult = await runCaptionsStage(state2.options, onProgress, signal);
+              break;
+            case "global-context":
+              stageResult = await runGlobalContextStage(state2.options, onProgress, signal);
+              break;
+            case "stock-search":
+              stageResult = await runStockSearchStage(state2.options, onProgress, signal);
+              break;
+            case "audio-search":
+              stageResult = await runAudioSearchStage(state2.options, onProgress, signal);
+              break;
+            case "preflight":
+              stageResult = await runPreflightStage(state2.options, onProgress, signal);
+              break;
+            case "rendering":
+              stageResult = await runRenderStage(state2.options, onProgress, signal);
+              if (stageResult.success && stageResult.artifactPath) {
+                lastRenderResult = { outputPath: stageResult.artifactPath };
+                state2.renderOutputPath = stageResult.artifactPath;
+              }
+              break;
+            case "postflight":
+              stageResult = await runPostflightStage(state2.options, lastRenderResult, onProgress, signal);
+              break;
+            default:
+              throw new Error(`Unknown stage: ${stage}`);
+          }
+        } catch (err) {
+          if (signal.aborted) {
+            state2.overallStatus = "cancelled";
+            state2.stages[stage].status = "cancelled";
+            state2.stages[stage].message = "Cancelled by user";
+            break;
+          }
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.error(`[Pipeline] Stage ${stage} failed with unhandled error: ${msg}`);
+          stageResult = {
+            success: false,
+            error: msg
+          };
+        }
+        if (stageResult.needsAttention) {
+          logger.warn(`[Pipeline] Stage ${stage} requires user attention: ${stageResult.error}`);
+          state2.stages[stage].status = "warning";
+          state2.stages[stage].message = stageResult.error || "Needs user attention";
+          state2.stages[stage].error = stageResult.error;
+          state2.overallStatus = "needs-attention";
+          state2.currentStage = "needs-attention";
+          state2.version = (state2.version ?? 0) + 1;
+          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          releaseLease(state2);
+          savePipelineStateAtomic(norm, state2);
+          this.broadcastProgress(state2);
+          return state2;
+        }
+        if (!stageResult.success) {
+          logger.error(`[Pipeline] Stage ${stage} failed: ${stageResult.error}`);
+          state2.stages[stage].status = "failed";
+          state2.stages[stage].error = stageResult.error;
+          state2.stages[stage].message = stageResult.error || "Stage failed";
+          state2.overallStatus = "failed";
+          state2.currentStage = "failed";
+          state2.fatalErrors.push(`Stage [${stage}]: ${stageResult.error || "failed"}`);
+          state2.version = (state2.version ?? 0) + 1;
+          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          releaseLease(state2);
+          savePipelineStateAtomic(norm, state2);
+          this.broadcastProgress(state2);
+          return state2;
+        }
+        await this.completeStage(state2, stage, stageResult, stageStartTime);
+      }
+      if (state2.overallStatus === "running") {
+        state2.overallStatus = "completed";
+        state2.currentStage = "completed";
+        state2.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        state2.version = (state2.version ?? 0) + 1;
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        releaseLease(state2);
+        savePipelineStateAtomic(norm, state2);
+        this.broadcastProgress(state2);
+        logger.info(`[Pipeline] Pipeline ${state2.runId} completed successfully!`);
+      }
+    } finally {
+      this.stopHeartbeat(norm);
+      this.activeInstances.delete(norm);
+    }
+    return state2;
+  }
+}
+const pipelineOrchestrator = new PipelineOrchestrator();
+function registerPipelineHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_START,
+    async (_event, options) => {
+      try {
+        if (!options || typeof options !== "object") {
+          return { success: false, error: "Invalid pipeline options provided." };
+        }
+        if (!options.projectDir) {
+          return { success: false, error: "projectDir is required." };
+        }
+        if (!options.scriptPath) {
+          return { success: false, error: "scriptPath is required for Auto Production." };
+        }
+        if (!options.voiceoverPath) {
+          return { success: false, error: "voiceoverPath is required for Auto Production." };
+        }
+        const { runId, state: state2 } = await pipelineOrchestrator.startPipeline(options);
+        return { success: true, runId, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] Start failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_RESUME,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) {
+          return { success: false, error: "projectDir is required." };
+        }
+        const { runId, state: state2 } = await pipelineOrchestrator.resumePipeline(params.projectDir);
+        return { success: true, runId, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] Resume failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_CANCEL,
+    async (_event, params) => {
+      try {
+        const target = params?.runId || params?.projectDir;
+        if (!target) {
+          return { success: false, error: "runId or projectDir is required." };
+        }
+        const ok = pipelineOrchestrator.cancelPipeline(target);
+        return { success: ok };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] Cancel failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_STATUS_GET,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return null;
+        return pipelineOrchestrator.getStatus(params.projectDir);
+      } catch (err) {
+        logger.error(`[PipelineIPC] GetStatus failed: ${String(err)}`);
+        return null;
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_RETRY_STAGE,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir || !params?.stage) {
+          return { success: false, error: "projectDir and stage are required." };
+        }
+        const { runId, state: state2 } = await pipelineOrchestrator.retryStage(params.projectDir, params.stage);
+        return { success: true, runId, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] RetryStage failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_RUN_FROM_STAGE,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir || !params?.stage) {
+          return { success: false, error: "projectDir and stage are required." };
+        }
+        const { runId, state: state2 } = await pipelineOrchestrator.runFromStage(
+          params.projectDir,
+          params.stage,
+          params.options
+        );
+        return { success: true, runId, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] RunFromStage failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_RECOVER,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) {
+          return { success: false, error: "projectDir is required." };
+        }
+        const result = await pipelineOrchestrator.recoverInterruptedPipeline(params.projectDir);
+        const state2 = pipelineOrchestrator.getStatus(params.projectDir);
+        return { success: true, result, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] Recover failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
 }
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
@@ -7209,6 +12397,7 @@ electron.app.whenReady().then(() => {
   registerStockHandlers(electron.ipcMain);
   registerAudioHandlers(electron.ipcMain);
   registerCaptionHandlers(electron.ipcMain);
+  registerPipelineHandlers(electron.ipcMain);
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {
@@ -7225,4 +12414,17 @@ electron.app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     electron.app.quit();
   }
+});
+electron.app.on("before-quit", () => {
+  pipelineOrchestrator.handleAppQuit();
+});
+process.on("uncaughtException", (error) => {
+  logger.error("[App] Uncaught exception:", error);
+  try {
+    pipelineOrchestrator.handleAppQuit();
+  } catch {
+  }
+});
+process.on("unhandledRejection", (reason) => {
+  logger.error("[App] Unhandled rejection:", reason);
 });

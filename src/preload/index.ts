@@ -22,7 +22,8 @@ import type {
   RenderQaReport,
   AutoPipelineOptions,
   AutoPipelineState,
-  PipelineStage
+  PipelineStage,
+  PipelineRecoveryResult
 } from '../../shared/types'
 
 
@@ -339,6 +340,11 @@ const api = {
       options?: Partial<AutoPipelineOptions>
     ): Promise<{ success: boolean; runId?: string; state?: AutoPipelineState; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RUN_FROM_STAGE, { projectDir, stage, options }),
+
+    recover: (
+      projectDir: string
+    ): Promise<{ success: boolean; result?: PipelineRecoveryResult; state?: AutoPipelineState; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RECOVER, { projectDir }),
 
     onProgress: (callback: (state: AutoPipelineState) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: AutoPipelineState): void => {

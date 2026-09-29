@@ -12,11 +12,131 @@ import type {
   AutoPipelineOptions,
   InputFingerprint,
   PipelineStage,
-  PipelineStageState
+  PipelineStageState,
+  PipelineLease,
+  PipelineSnapshot
 } from './pipeline-types'
 
+/** ID duy nhất của instance ứng dụng hiện tại (thay đổi mỗi khi app khởi động lại) */
+export const APP_INSTANCE_ID = uuidv4()
+
+/** Chuẩn hóa đường dẫn thư mục dự án */
+export function normalizeProjectDir(projectDir: string): string {
+  if (!projectDir) return ''
+  const resolved = path.resolve(projectDir)
+  return path.normalize(resolved)
+}
+
 export function getPipelineStatePath(projectDir: string): string {
-  return path.join(projectDir, 'analysis', 'auto-pipeline-state.json')
+  return path.join(normalizeProjectDir(projectDir), 'analysis', 'auto-pipeline-state.json')
+}
+
+export function getPipelineStateBackupPath(projectDir: string): string {
+  return path.join(normalizeProjectDir(projectDir), 'analysis', 'auto-pipeline-state.backup.json')
+}
+
+/**
+ * Kiểm tra xem một process ID có còn đang chạy hay không.
+ */
+export function isProcessAlive(pid: number): boolean {
+  if (!pid || pid <= 0) return false
+  try {
+    return process.kill(pid, 0)
+  } catch (err: unknown) {
+    const code = (err as { code?: string }).code
+    return code === 'EPERM'
+  }
+}
+
+/**
+ * Tạo lease mới để đảm bảo tính độc quyền của tiến trình chạy pipeline.
+ */
+export function createLease(runId: string, currentStage: PipelineStage): PipelineLease {
+  const now = new Date().toISOString()
+  return {
+    runId,
+    appInstanceId: APP_INSTANCE_ID,
+    pid: process.pid,
+    acquiredAt: now,
+    heartbeatAt: now,
+    currentStage
+  }
+}
+
+/**
+ * Cập nhật heartbeat của lease.
+ */
+export function updateHeartbeat(state: AutoPipelineState): void {
+  const now = new Date().toISOString()
+  if (state.lease) {
+    state.lease.heartbeatAt = now
+    state.lease.currentStage = state.currentStage
+  } else {
+    state.lease = createLease(state.runId, state.currentStage)
+  }
+  state.updatedAt = now
+}
+
+/**
+ * Giải phóng lease khi pipeline kết thúc hoặc bị hủy.
+ */
+export function releaseLease(state: AutoPipelineState): void {
+  delete state.lease
+  state.updatedAt = new Date().toISOString()
+}
+
+/**
+ * Xác định xem lease có bị stale (tiến trình sở hữu đã chết hoặc timeout heartbeat) hay không.
+ */
+export function isLeaseStale(
+  lease?: PipelineLease | null,
+  heartbeatTimeoutMs = 15000
+): boolean {
+  if (!lease) return false
+
+  // Nếu thuộc về instance khác
+  if (lease.appInstanceId !== APP_INSTANCE_ID) {
+    // 1. Kiểm tra xem process PID cũ còn sống không
+    if (!isProcessAlive(lease.pid)) {
+      return true
+    }
+    // 2. Kiểm tra heartbeat timeout
+    const lastHeartbeat = new Date(lease.heartbeatAt).getTime()
+    if (isNaN(lastHeartbeat) || Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
+      return true
+    }
+    // 3. Instance khác đã chạy từ trước nhưng app hiện tại khởi động lại
+    return true
+  }
+
+  // Nếu cùng instance nhưng heartbeat đã quá lâu không cập nhật
+  const lastHeartbeat = new Date(lease.heartbeatAt).getTime()
+  if (!isNaN(lastHeartbeat) && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
+    return true
+  }
+
+  return false
+}
+
+/**
+ * Chuyển đổi AutoPipelineState thành PipelineSnapshot có version đơn điệu.
+ */
+export function toSnapshot(state: AutoPipelineState): PipelineSnapshot {
+  return {
+    version: state.version,
+    runId: state.runId,
+    projectDir: state.projectDir,
+    currentStage: state.currentStage,
+    overallStatus: state.overallStatus,
+    stages: state.stages,
+    updatedAt: state.updatedAt,
+    lease: state.lease,
+    warnings: state.warnings,
+    fatalErrors: state.fatalErrors,
+    renderOutputPath: state.renderOutputPath,
+    preflightReportPath: state.preflightReportPath,
+    postflightReportPath: state.postflightReportPath
+  }
 }
 
 /**
@@ -87,7 +207,7 @@ export function createDefaultStageStates(): Record<string, PipelineStageState> {
 }
 
 /**
- * Tạo một AutoPipelineState mới.
+ * Tạo một AutoPipelineState mới với version khởi đầu = 1.
  */
 export function createInitialPipelineState(
   options: AutoPipelineOptions,
@@ -95,16 +215,21 @@ export function createInitialPipelineState(
   runId?: string
 ): AutoPipelineState {
   const now = new Date().toISOString()
+  const rId = runId ?? uuidv4()
   return {
     schemaVersion: PIPELINE_SCHEMA_VERSION,
-    runId: runId ?? uuidv4(),
-    projectDir: options.projectDir,
+    version: 1,
+    runId: rId,
+    projectDir: normalizeProjectDir(options.projectDir),
     currentStage: 'idle',
     overallStatus: 'idle',
     startedAt: now,
     updatedAt: now,
     inputFingerprint: fingerprint,
-    options,
+    options: {
+      ...options,
+      projectDir: normalizeProjectDir(options.projectDir)
+    },
     stages: createDefaultStageStates(),
     warnings: [],
     fatalErrors: []
@@ -112,33 +237,97 @@ export function createInitialPipelineState(
 }
 
 /**
- * Đọc trạng thái pipeline từ file JSON an toàn.
+ * Đọc trạng thái pipeline từ file JSON an toàn, fallback sang backup nếu file chính lỗi.
  */
 export function loadPipelineState(projectDir: string): AutoPipelineState | null {
   const statePath = getPipelineStatePath(projectDir)
-  if (!fs.existsSync(statePath)) return null
-  try {
-    const raw = fs.readFileSync(statePath, 'utf-8')
-    const parsed = JSON.parse(raw) as AutoPipelineState
-    if (!parsed || typeof parsed !== 'object' || !parsed.stages) return null
-    return parsed
-  } catch (err) {
-    logger.warn(`[PipelineState] Failed to parse ${statePath}: ${String(err)}`)
-    return null
+  const backupPath = getPipelineStateBackupPath(projectDir)
+
+  // 1. Thử đọc file chính
+  if (fs.existsSync(statePath)) {
+    try {
+      const raw = fs.readFileSync(statePath, 'utf-8')
+      const parsed = JSON.parse(raw) as AutoPipelineState
+      if (parsed && typeof parsed === 'object' && parsed.stages) {
+        if (!parsed.version) parsed.version = 1
+        return parsed
+      }
+    } catch (err) {
+      logger.warn(`[PipelineState] Primary state corrupt, trying backup: ${String(err)}`)
+    }
   }
+
+  // 2. Thử đọc file backup
+  if (fs.existsSync(backupPath)) {
+    try {
+      const rawBackup = fs.readFileSync(backupPath, 'utf-8')
+      const parsedBackup = JSON.parse(rawBackup) as AutoPipelineState
+      if (parsedBackup && typeof parsedBackup === 'object' && parsedBackup.stages) {
+        logger.info(`[PipelineState] Successfully recovered pipeline state from backup`)
+        if (!parsedBackup.version) parsedBackup.version = 1
+        return parsedBackup
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return null
 }
 
 /**
- * Ghi state atomically: ghi vào file .tmp trước rồi rename để tránh corrupt khi crash/kill.
+ * Queue đồng bộ hóa các thao tác ghi state để tránh xung đột ghi đồng thời.
+ */
+class StateWriteQueue {
+  private queue = Promise.resolve()
+
+  public enqueue<T>(fn: () => T | Promise<T>): Promise<T> {
+    return new Promise((resolve, reject) => {
+      this.queue = this.queue.then(async () => {
+        try {
+          const res = await fn()
+          resolve(res)
+        } catch (err) {
+          reject(err)
+        }
+      })
+    })
+  }
+}
+
+const writeQueue = new StateWriteQueue()
+
+/**
+ * Ghi state atomically:
+ * 1. Tăng version đơn điệu
+ * 2. Lưu bản sao lưu backup hợp lệ
+ * 3. Ghi vào file .tmp
+ * 4. Rename sang file chính
  */
 export function savePipelineStateAtomic(
   projectDir: string,
   state: AutoPipelineState
 ): void {
-  const finalPath = getPipelineStatePath(projectDir)
+  const normDir = normalizeProjectDir(projectDir)
+  state.projectDir = normDir
+  state.version = (state.version || 0) + 1
+  state.updatedAt = new Date().toISOString()
+
+  const finalPath = getPipelineStatePath(normDir)
+  const backupPath = getPipelineStateBackupPath(normDir)
   const dir = path.dirname(finalPath)
+
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true })
+  }
+
+  // Nếu file chính hiện tại hợp lệ, tạo backup
+  if (fs.existsSync(finalPath)) {
+    try {
+      fs.copyFileSync(finalPath, backupPath)
+    } catch {
+      /* ignore backup copy error */
+    }
   }
 
   const tmpPath = path.join(
@@ -149,6 +338,22 @@ export function savePipelineStateAtomic(
   const content = JSON.stringify(state, null, 2)
   fs.writeFileSync(tmpPath, content, 'utf-8')
   fs.renameSync(tmpPath, finalPath)
+
+  try {
+    fs.copyFileSync(finalPath, backupPath)
+  } catch {
+    /* ignore backup copy error */
+  }
+}
+
+/**
+ * Async version của savePipelineStateAtomic sử dụng writeQueue serialize.
+ */
+export async function savePipelineStateQueued(
+  projectDir: string,
+  state: AutoPipelineState
+): Promise<void> {
+  return writeQueue.enqueue(() => savePipelineStateAtomic(projectDir, state))
 }
 
 /**

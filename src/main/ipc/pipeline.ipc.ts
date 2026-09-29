@@ -133,4 +133,24 @@ export function registerPipelineHandlers(ipcMain: IpcMain): void {
       }
     }
   )
+
+  // ── Recover Pipeline ───────────────────────────────────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_RECOVER,
+    async (_event, params: { projectDir: string }) => {
+      try {
+        if (!params?.projectDir) {
+          return { success: false, error: 'projectDir is required.' }
+        }
+        const result = await pipelineOrchestrator.recoverInterruptedPipeline(params.projectDir)
+        const state = pipelineOrchestrator.getStatus(params.projectDir)
+        return { success: true, result, state }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.error(`[PipelineIPC] Recover failed: ${msg}`)
+        return { success: false, error: msg }
+      }
+    }
+  )
 }
+

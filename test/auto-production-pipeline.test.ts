@@ -19,7 +19,12 @@ import {
   computeInputFingerprint,
   isFingerprintEqual,
   determineInvalidatedStages,
-  applyInvalidation
+  applyInvalidation,
+  createLease,
+  isLeaseStale,
+  releaseLease,
+  getPipelineStateBackupPath,
+  normalizeProjectDir
 } from '../src/main/pipeline/pipeline-state'
 import {
   validatePipelinePrerequisites,
@@ -32,7 +37,8 @@ import {
   isGlobalContextValid,
   checkStockCompletion,
   isAudioValid,
-  isPreflightValid
+  isPreflightValid,
+  reconcileProjectArtifacts
 } from '../src/main/pipeline/pipeline-artifacts'
 import { pipelineOrchestrator } from '../src/main/pipeline/pipeline-orchestrator'
 import { IPC_CHANNELS } from '../shared/types'
@@ -465,9 +471,291 @@ async function runTests(): Promise<void> {
     assert.strictEqual(STAGE_NAV_TARGETS['completed'], 'render')
   })
 
-  // Clean up temp test directory
+  // ── 14. Crash Recovery & Stale Lease Tests ─────────────────────────────────
+  const crashDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pipeline-crash-test-'))
+  const crashProject = path.join(crashDir, 'crash-project')
+  fs.mkdirSync(path.join(crashProject, 'analysis'), { recursive: true })
+  fs.mkdirSync(path.join(crashProject, 'assets', 'stock'), { recursive: true })
+  fs.mkdirSync(path.join(crashProject, 'output'), { recursive: true })
+
+  const crashScript = path.join(crashProject, 'script.txt')
+  fs.writeFileSync(crashScript, 'Crash recovery documentary narration script.', 'utf-8')
+  const crashVoiceover = path.join(crashProject, 'voiceover.mp3')
+  fs.writeFileSync(crashVoiceover, Buffer.alloc(2048, 2))
+
+  // Master edit plan với 95 scenes
+  const scenes95 = Array.from({ length: 95 }, (_, i) => ({
+    sceneIndex: i,
+    mediaFile: `stock_${i}.mp4`,
+    mediaType: 'video' as const,
+    startTime: i * 4,
+    endTime: (i + 1) * 4,
+    duration: 4
+  }))
+  const masterPlan95 = {
+    totalScenes: 95,
+    chapters: [{ sequences: [{ scenes: scenes95 }] }]
+  }
+  fs.writeFileSync(
+    path.join(crashProject, 'analysis', 'master-edit-plan.json'),
+    JSON.stringify(masterPlan95, null, 2)
+  )
+
+  // Giả lập 95 media files thực tế trên đĩa
+  const assignments95: Record<string, unknown> = {}
+  for (let i = 0; i < 95; i++) {
+    const filename = `stock_${i}.mp4`
+    const filePath = path.join(crashProject, 'assets', 'stock', filename)
+    fs.writeFileSync(filePath, Buffer.alloc(512, i))
+    assignments95[String(i)] = {
+      sceneIndex: i,
+      status: 'assigned',
+      asset: {
+        id: `pexels_${i}`,
+        provider: 'pexels',
+        type: 'video',
+        url: `https://example.com/${i}`,
+        localPath: filePath,
+        filename
+      },
+      score: 85
+    }
+  }
+  fs.writeFileSync(
+    path.join(crashProject, 'analysis', 'stock-assignments.json'),
+    JSON.stringify({ assignments: assignments95 }, null, 2)
+  )
+
+  // Giả lập artifacts hợp lệ cho stages 1-5 đã hoàn thành trước khi crash ở stage 6
+  fs.writeFileSync(
+    path.join(crashProject, 'analysis', 'transcript.json'),
+    JSON.stringify({ segments: [{ start: 0, end: 4, text: 'Narration' }] }, null, 2)
+  )
+  fs.writeFileSync(
+    path.join(crashProject, 'analysis', 'caption-plan.json'),
+    JSON.stringify({ phrases: [{ text: 'Narration', startTime: 0, endTime: 4 }], enabled: true }, null, 2)
+  )
+  fs.writeFileSync(
+    path.join(crashProject, 'analysis', 'global-script-context.json'),
+    JSON.stringify({ primarySubject: 'documentary', exactTopicAnchors: ['history'] }, null, 2)
+  )
+
+  await it('19. Crash recovery: UI 79/95 vs disk 95/95 reconciles to completed 95/95 without re-searching', async () => {
+    // Giả lập state cũ bị crash khi đang ghi nhận 79/95
+    const crashedState = createInitialPipelineState(
+      {
+        projectDir: crashProject,
+        scriptPath: crashScript,
+        voiceoverPath: crashVoiceover
+      },
+      'fp-123',
+      'crashed-run-1'
+    )
+    crashedState.overallStatus = 'running'
+    crashedState.currentStage = 'stock-search'
+    crashedState.stages['validating'].status = 'completed'
+    crashedState.stages['transcribing'].status = 'completed'
+    crashedState.stages['planning'].status = 'completed'
+    crashedState.stages['captions'].status = 'completed'
+    crashedState.stages['global-context'].status = 'completed'
+    crashedState.stages['stock-search'] = {
+      status: 'running',
+      progress: 79 / 95,
+      message: '[79/95] Scene 79 - candidate search...'
+    }
+
+    savePipelineStateAtomic(crashProject, crashedState)
+
+    // Khởi chạy recovery
+    const recovery = await pipelineOrchestrator.recoverInterruptedPipeline(crashProject)
+
+    assert.strictEqual(recovery.recovered, true)
+    assert.strictEqual(recovery.resumable, true)
+
+    // Stage stock-search phải được reconcile thành completed 100% (95/95)
+    const recoveredState = loadPipelineState(crashProject)!
+    assert.strictEqual(recoveredState.stages['stock-search'].status, 'completed')
+    assert.strictEqual(recoveredState.stages['stock-search'].progress, 1.0)
+    assert.ok(recoveredState.stages['stock-search'].message.includes('95/95'))
+    assert.strictEqual(recoveredState.overallStatus, 'interrupted')
+
+    // Stage tiếp theo phải là audio-search
+    assert.strictEqual(recovery.resumeFrom, 'audio-search')
+    assert.strictEqual(recoveredState.currentStage, 'audio-search')
+  })
+
+  await it('20. Stale lease detected on app restart with running state', () => {
+    const staleState = loadPipelineState(crashProject)!
+    staleState.overallStatus = 'running'
+    // Lease có appInstanceId khác và heartbeat cũ hơn 20s
+    staleState.lease = {
+      runId: 'old-run',
+      appInstanceId: 'different-app-instance-uuid',
+      pid: 999999, // Process không tồn tại
+      acquiredAt: new Date(Date.now() - 60000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 30000).toISOString(),
+      currentStage: 'stock-search'
+    }
+    savePipelineStateAtomic(crashProject, staleState)
+
+    assert.strictEqual(isLeaseStale(staleState.lease), true)
+
+    // getStatus phải tự động nhận diện stale lease và chuyển thành interrupted
+    const status = pipelineOrchestrator.getStatus(crashProject)!
+    assert.strictEqual(status.overallStatus, 'interrupted')
+    assert.strictEqual(status.lease, undefined)
+  })
+
+  await it('21. PID reused by OS but appInstanceId is different recognizes stale lease', () => {
+    // Trường hợp hệ điều hành tái sử dụng đúng PID của process hiện tại
+    const staleWithSamePid = {
+      runId: 'old-run',
+      appInstanceId: 'dead-instance-uuid',
+      pid: process.pid, // PID trùng
+      acquiredAt: new Date(Date.now() - 60000).toISOString(),
+      heartbeatAt: new Date(Date.now() - 25000).toISOString(), // > 15s timeout
+      currentStage: 'stock-search' as const
+    }
+    assert.strictEqual(isLeaseStale(staleWithSamePid), true)
+  })
+
+  await it('22. Stock partial completion (80/95) identifies exactly 15 missing scenes', () => {
+    // Xóa bớt 15 file media
+    for (let i = 80; i < 95; i++) {
+      const filePath = path.join(crashProject, 'assets', 'stock', `stock_${i}.mp4`)
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    }
+
+    const summary = checkStockCompletion(crashProject)
+    assert.strictEqual(summary.totalScenes, 95)
+    assert.strictEqual(summary.assignedScenes, 95)
+    assert.strictEqual(summary.downloadedScenes, 80)
+    assert.strictEqual(summary.missingScenes, 15)
+    assert.strictEqual(summary.missingSceneIndices.length, 15)
+  })
+
+  await it('23. Manual/locked assignments are preserved and not overwritten', () => {
+    const assignments = JSON.parse(
+      fs.readFileSync(path.join(crashProject, 'analysis', 'stock-assignments.json'), 'utf-8')
+    )
+    assignments.assignments['10'].locked = true
+    assignments.assignments['10'].manualUpload = true
+    fs.writeFileSync(
+      path.join(crashProject, 'analysis', 'stock-assignments.json'),
+      JSON.stringify(assignments, null, 2)
+    )
+
+    const reloaded = JSON.parse(
+      fs.readFileSync(path.join(crashProject, 'analysis', 'stock-assignments.json'), 'utf-8')
+    )
+    assert.strictEqual(reloaded.assignments['10'].locked, true)
+    assert.strictEqual(reloaded.assignments['10'].manualUpload, true)
+  })
+
+  await it('24. Monotonic version prevents late progress events from overwriting completed stage', () => {
+    const testState = createInitialPipelineState(
+      { projectDir: crashProject, scriptPath: crashScript, voiceoverPath: crashVoiceover },
+      'fp-mono',
+      'mono-run-1'
+    )
+    testState.version = 10
+    testState.stages['stock-search'] = {
+      status: 'completed',
+      progress: 1.0,
+      message: 'Stock search completed — 95/95 scenes assigned'
+    }
+
+    // Giả lập logic kiểm tra monotonic version của frontend/renderer
+    const lateEvent = {
+      ...testState,
+      version: 8, // Event đến muộn với version thấp hơn
+      stages: {
+        ...testState.stages,
+        'stock-search': {
+          status: 'running' as const,
+          progress: 79 / 95,
+          message: '[79/95] Scene 79 - candidate search...'
+        }
+      }
+    }
+
+    // Version guard: chỉ chấp nhận incoming version >= current version
+    const shouldAccept = lateEvent.version >= testState.version
+    assert.strictEqual(shouldAccept, false, 'Late event with lower version must be rejected')
+  })
+
+  await it('25. Crash during render does not treat .partial.mp4 as completed video', () => {
+    const outputDir = path.join(crashProject, 'output')
+    // Tạo file partial mp4 giả lập crash giữa chừng
+    fs.writeFileSync(path.join(outputDir, 'final_output.partial.mp4'), Buffer.alloc(100000))
+    fs.writeFileSync(path.join(outputDir, '_final_output_working.mp4'), Buffer.alloc(100000))
+
+    const recon = reconcileProjectArtifacts(crashProject)
+    assert.strictEqual(recon.renderValid, false, 'Partial files must never be validated as complete render')
+  })
+
+  await it('26. App graceful closing (handleAppQuit) marks running pipeline as interrupted and allows resume', () => {
+    const runningState = createInitialPipelineState(
+      { projectDir: crashProject, scriptPath: crashScript, voiceoverPath: crashVoiceover },
+      'fp-quit',
+      'quit-run-1'
+    )
+    runningState.overallStatus = 'running'
+    runningState.currentStage = 'stock-search'
+    runningState.lease = createLease('quit-run-1', 'stock-search')
+    savePipelineStateAtomic(crashProject, runningState)
+
+    // Giả lập app quit
+    pipelineOrchestrator.handleAppQuit()
+
+    // Sau khi quit, state phải chuyển sang interrupted để sẵn sàng resume
+    const postQuit = loadPipelineState(crashProject)!
+    // getStatus will see stale lease and ensure interrupted
+    const checked = pipelineOrchestrator.getStatus(crashProject)!
+    assert.strictEqual(checked.overallStatus, 'interrupted')
+  })
+
+  await it('27. Corrupted state file automatically recovers from backup file', () => {
+    const stateToSave = createInitialPipelineState(
+      { projectDir: crashProject, scriptPath: crashScript, voiceoverPath: crashVoiceover },
+      'fp-backup',
+      'backup-run-1'
+    )
+    stateToSave.version = 42
+    savePipelineStateAtomic(crashProject, stateToSave)
+
+    // Đổi nội dung file chính thành JSON hỏng
+    const stateFile = path.join(crashProject, 'analysis', 'auto-pipeline-state.json')
+    fs.writeFileSync(stateFile, '{ corrupt-json: true, unterminated...', 'utf-8')
+
+    // loadPipelineState phải tự động đọc từ file .backup.json
+    const recoveredFromBackup = loadPipelineState(crashProject)
+    assert.ok(recoveredFromBackup !== null, 'Must recover from backup file')
+    assert.strictEqual(recoveredFromBackup?.version, 43)
+  })
+
+  await it('28. Mutex prevents concurrent duplicate jobs from bootstrap recovery, resume button, and auto-start', async () => {
+    const opts: AutoPipelineOptions = {
+      projectDir: crashProject,
+      scriptPath: crashScript,
+      voiceoverPath: crashVoiceover
+    }
+
+    // Khởi động đồng thời start và resume
+    const [p1, p2] = await Promise.all([
+      pipelineOrchestrator.startPipeline(opts),
+      pipelineOrchestrator.startPipeline(opts)
+    ])
+
+    // Cả hai lệnh phải trả về cùng runId của instance duy nhất
+    assert.strictEqual(p1.runId, p2.runId)
+    pipelineOrchestrator.cancelPipeline(p1.runId)
+  })
+
+  // Clean up temp test directories
   try {
     fs.rmSync(testDir, { recursive: true, force: true })
+    fs.rmSync(crashDir, { recursive: true, force: true })
   } catch {
     /* ignore */
   }

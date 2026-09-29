@@ -11,6 +11,7 @@ import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
 import { registerPipelineHandlers } from './ipc/pipeline.ipc'
+import { pipelineOrchestrator } from './pipeline/pipeline-orchestrator'
 import { logger } from './logger'
 
 function createWindow(): BrowserWindow {
@@ -91,3 +92,21 @@ app.on('window-all-closed', () => {
     app.quit()
   }
 })
+
+app.on('before-quit', () => {
+  pipelineOrchestrator.handleAppQuit()
+})
+
+process.on('uncaughtException', (error) => {
+  logger.error('[App] Uncaught exception:', error)
+  try {
+    pipelineOrchestrator.handleAppQuit()
+  } catch {
+    /* ignore */
+  }
+})
+
+process.on('unhandledRejection', (reason) => {
+  logger.error('[App] Unhandled rejection:', reason)
+})
+

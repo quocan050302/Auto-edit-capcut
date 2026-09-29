@@ -64,7 +64,28 @@ const IPC_CHANNELS = {
   CAPTIONS_PREVIEW_RENDER: "captions:preview-render",
   CAPTIONS_PROGRESS: "captions:progress",
   // Remotion caption overlay render progress (separate from main FFmpeg render)
-  CAPTIONS_RENDER_PROGRESS: "captions:render-progress"
+  CAPTIONS_RENDER_PROGRESS: "captions:render-progress",
+  // Production Intelligence — Storyboard & Candidates
+  STOCK_CANDIDATES_GET: "stock:candidates-get",
+  STOCK_CANDIDATE_SELECT: "stock:candidate-select",
+  STOCK_CANDIDATE_APPROVE: "stock:candidate-approve",
+  STOCK_STORYBOARD_SUMMARY_GET: "stock:storyboard-summary-get",
+  // Production Intelligence — Settings
+  PRODUCTION_SETTINGS_GET: "production-settings:get",
+  PRODUCTION_SETTINGS_SET: "production-settings:set",
+  // Production Intelligence — Render QA
+  RENDER_PREFLIGHT_RUN: "render:preflight-run",
+  RENDER_QA_GET: "render:qa-get",
+  RENDER_QA_PROGRESS: "render:qa-progress",
+  // Auto Production Pipeline
+  PIPELINE_START: "pipeline:start",
+  PIPELINE_RESUME: "pipeline:resume",
+  PIPELINE_CANCEL: "pipeline:cancel",
+  PIPELINE_STATUS_GET: "pipeline:status-get",
+  PIPELINE_PROGRESS: "pipeline:progress",
+  PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
+  PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
+  PIPELINE_RECOVER: "pipeline:recover"
 };
 const api = {
   window: {
@@ -121,6 +142,13 @@ const api = {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.RENDER_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.RENDER_PROGRESS, handler);
+    },
+    runPreflight: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFLIGHT_RUN, params),
+    getQaReport: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_QA_GET, params),
+    onQaProgress: (callback) => {
+      const handler = (_event, data) => callback(data);
+      electron.ipcRenderer.on(IPC_CHANNELS.RENDER_QA_PROGRESS, handler);
+      return () => electron.ipcRenderer.off(IPC_CHANNELS.RENDER_QA_PROGRESS, handler);
     }
   },
   stock: {
@@ -133,6 +161,11 @@ const api = {
     analyzeContext: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_ANALYZE, params),
     getContext: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_GET, projectDir),
     saveContext: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CONTEXT_SAVE, params),
+    // Candidate Storyboard Review
+    getCandidates: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CANDIDATES_GET, params),
+    selectCandidate: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CANDIDATE_SELECT, params),
+    approveCandidate: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_CANDIDATE_APPROVE, params),
+    getStoryboardSummary: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.STOCK_STORYBOARD_SUMMARY_GET, projectDir),
     onProgress: (callback) => {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, handler);
@@ -181,6 +214,28 @@ const api = {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler);
       return () => electron.ipcRenderer.off(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, handler);
+    }
+  },
+  production: {
+    getSettings: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_GET, projectDir),
+    setSettings: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_SET, params)
+  },
+  pipeline: {
+    start: (options) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_START, options),
+    resume: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RESUME, { projectDir }),
+    cancel: (runId) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_CANCEL, { runId }),
+    getStatus: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_STATUS_GET, { projectDir }),
+    retryStage: (projectDir, stage) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RETRY_STAGE, { projectDir, stage }),
+    runFromStage: (projectDir, stage, options) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RUN_FROM_STAGE, { projectDir, stage, options }),
+    recover: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RECOVER, { projectDir }),
+    onProgress: (callback) => {
+      const handler = (_event, state) => {
+        callback(state);
+      };
+      electron.ipcRenderer.on(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
+      return () => {
+        electron.ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
+      };
     }
   }
 };

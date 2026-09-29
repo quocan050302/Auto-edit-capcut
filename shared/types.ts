@@ -790,7 +790,8 @@ export const IPC_CHANNELS = {
   PIPELINE_STATUS_GET: 'pipeline:status-get',
   PIPELINE_PROGRESS: 'pipeline:progress',
   PIPELINE_RETRY_STAGE: 'pipeline:retry-stage',
-  PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage'
+  PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
+  PIPELINE_RECOVER: 'pipeline:recover'
 } as const
 
 // ─── Master Edit Plan Retention Extension ─────────────────────────────────────
@@ -980,24 +981,66 @@ export interface AutoPipelineOptions {
   autoStartOnReady?: boolean
 }
 
-export interface AutoPipelineState {
-  schemaVersion: number
+export type PipelineOverallStatus =
+  | 'idle'
+  | 'running'
+  | 'interrupted'
+  | 'recovering'
+  | 'needs-attention'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface PipelineLease {
+  runId: string
+  appInstanceId: string
+  pid: number
+  acquiredAt: string
+  heartbeatAt: string
+  currentStage: PipelineStage
+}
+
+export interface PipelineSnapshot {
+  version: number
   runId: string
   projectDir: string
   currentStage: PipelineStage
-  overallStatus:
-    | 'idle'
-    | 'running'
-    | 'needs-attention'
-    | 'completed'
-    | 'failed'
-    | 'cancelled'
+  overallStatus: PipelineOverallStatus
+  stages: Record<string, PipelineStageState>
+  updatedAt: string
+  lease?: PipelineLease
+  warnings?: string[]
+  fatalErrors?: string[]
+  renderOutputPath?: string
+  preflightReportPath?: string
+  postflightReportPath?: string
+}
+
+export interface PipelineRecoveryResult {
+  recovered: boolean
+  previousRunId?: string
+  resumable: boolean
+  resumeFrom?: PipelineStage
+  completedStages: PipelineStage[]
+  invalidStages: PipelineStage[]
+  warnings: string[]
+  snapshot?: PipelineSnapshot
+}
+
+export interface AutoPipelineState {
+  schemaVersion: number
+  version: number // Monotonically increasing version counter for snapshots
+  runId: string
+  projectDir: string
+  currentStage: PipelineStage
+  overallStatus: PipelineOverallStatus
   startedAt?: string
   updatedAt: string
   completedAt?: string
   inputFingerprint: InputFingerprint
   options: AutoPipelineOptions
   stages: Record<string, PipelineStageState>
+  lease?: PipelineLease
   warnings: string[]
   fatalErrors: string[]
   renderOutputPath?: string

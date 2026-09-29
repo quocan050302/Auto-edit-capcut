@@ -7340,6 +7340,553 @@ function FeatureCard({
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.6 }, children: desc })
   ] });
 }
+function usePipeline(projectDir) {
+  const [pipelineState, setPipelineState] = reactExports.useState(null);
+  const [isLoading, setIsLoading] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState(null);
+  const isMountedRef = reactExports.useRef(true);
+  reactExports.useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+  const updateStateIfNewer = reactExports.useCallback((incoming) => {
+    if (!incoming) {
+      setPipelineState(null);
+      return;
+    }
+    setPipelineState((prev) => {
+      if (!prev) return incoming;
+      const prevVersion = prev.version ?? 0;
+      const incomingVersion = incoming.version ?? 0;
+      if (incomingVersion >= prevVersion) {
+        return incoming;
+      }
+      return prev;
+    });
+  }, []);
+  const refreshStatus = reactExports.useCallback(async () => {
+    if (!projectDir) {
+      setPipelineState(null);
+      return;
+    }
+    try {
+      const state = await window.api.pipeline.getStatus(projectDir);
+      if (isMountedRef.current && state) {
+        updateStateIfNewer(state);
+      }
+    } catch (err) {
+      if (isMountedRef.current) {
+        setError(err instanceof Error ? err.message : String(err));
+      }
+    }
+  }, [projectDir, updateStateIfNewer]);
+  reactExports.useEffect(() => {
+    if (!projectDir) {
+      setPipelineState(null);
+      return;
+    }
+    const unsubscribe = window.api.pipeline.onProgress((state) => {
+      if (isMountedRef.current && state.projectDir === projectDir) {
+        updateStateIfNewer(state);
+      }
+    });
+    refreshStatus();
+    return () => {
+      unsubscribe();
+    };
+  }, [projectDir, refreshStatus, updateStateIfNewer]);
+  const startPipeline = reactExports.useCallback(
+    async (options) => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const res = await window.api.pipeline.start(options);
+        if (!res.success) {
+          setError(res.error || "Failed to start pipeline");
+          return false;
+        }
+        if (res.state && isMountedRef.current) {
+          updateStateIfNewer(res.state);
+        }
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        return false;
+      } finally {
+        if (isMountedRef.current) setIsLoading(false);
+      }
+    },
+    [updateStateIfNewer]
+  );
+  const resumePipeline = reactExports.useCallback(async () => {
+    if (!projectDir) return false;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const res = await window.api.pipeline.resume(projectDir);
+      if (!res.success) {
+        setError(res.error || "Failed to resume pipeline");
+        return false;
+      }
+      if (res.state && isMountedRef.current) {
+        updateStateIfNewer(res.state);
+      }
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      return false;
+    } finally {
+      if (isMountedRef.current) setIsLoading(false);
+    }
+  }, [projectDir, updateStateIfNewer]);
+  const recoverPipeline = reactExports.useCallback(async () => {
+    if (!projectDir) return null;
+    setIsLoading(true);
+    setError(null);
+    try {
+      const res = await window.api.pipeline.recover(projectDir);
+      if (!res.success) {
+        setError(res.error || "Failed to recover pipeline");
+        return null;
+      }
+      if (res.state && isMountedRef.current) {
+        updateStateIfNewer(res.state);
+      }
+      return res.result ?? null;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      return null;
+    } finally {
+      if (isMountedRef.current) setIsLoading(false);
+    }
+  }, [projectDir, updateStateIfNewer]);
+  const cancelPipeline = reactExports.useCallback(async () => {
+    const target = pipelineState?.runId || projectDir;
+    if (!target) return false;
+    setIsLoading(true);
+    try {
+      const res = await window.api.pipeline.cancel(target);
+      if (res.success && isMountedRef.current) {
+        setPipelineState(
+          (prev) => prev ? { ...prev, overallStatus: "cancelled" } : null
+        );
+      }
+      return res.success;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+      return false;
+    } finally {
+      if (isMountedRef.current) setIsLoading(false);
+    }
+  }, [pipelineState?.runId, projectDir]);
+  const retryStage = reactExports.useCallback(
+    async (stage) => {
+      if (!projectDir) return false;
+      setIsLoading(true);
+      setError(null);
+      try {
+        const res = await window.api.pipeline.retryStage(projectDir, stage);
+        if (!res.success) {
+          setError(res.error || `Failed to retry stage: ${stage}`);
+          return false;
+        }
+        if (res.state && isMountedRef.current) {
+          updateStateIfNewer(res.state);
+        }
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        return false;
+      } finally {
+        if (isMountedRef.current) setIsLoading(false);
+      }
+    },
+    [projectDir, updateStateIfNewer]
+  );
+  const runFromStage = reactExports.useCallback(
+    async (stage, options) => {
+      if (!projectDir) return false;
+      setIsLoading(true);
+      setError(null);
+      try {
+        const res = await window.api.pipeline.runFromStage(projectDir, stage, options);
+        if (!res.success) {
+          setError(res.error || `Failed to run from stage: ${stage}`);
+          return false;
+        }
+        if (res.state && isMountedRef.current) {
+          updateStateIfNewer(res.state);
+        }
+        return true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
+        return false;
+      } finally {
+        if (isMountedRef.current) setIsLoading(false);
+      }
+    },
+    [projectDir, updateStateIfNewer]
+  );
+  const isRunning = pipelineState?.overallStatus === "running";
+  return {
+    pipelineState,
+    isRunning,
+    isLoading,
+    error,
+    startPipeline,
+    resumePipeline,
+    recoverPipeline,
+    cancelPipeline,
+    retryStage,
+    runFromStage,
+    refreshStatus
+  };
+}
+const ORDERED_STAGES = [
+  { key: "validating", title: "Validate Inputs", pageName: "input" },
+  { key: "transcribing", title: "Transcription", pageName: "transcribe" },
+  { key: "planning", title: "AI Planning", pageName: "planning" },
+  { key: "captions", title: "Dynamic Captions", pageName: "captions" },
+  { key: "global-context", title: "Global Visual Context", pageName: "stock" },
+  { key: "stock-search", title: "Stock Search & Ranking", pageName: "stock" },
+  { key: "audio-search", title: "Background Music & SFX", pageName: "audio" },
+  { key: "preflight", title: "Render Preflight QA", pageName: "render" },
+  { key: "rendering", title: "Rendering Video", pageName: "render" },
+  { key: "postflight", title: "Postflight QA", pageName: "render" }
+];
+function formatDuration$2(ms) {
+  if (!ms || ms <= 0) return "";
+  const secs = Math.round(ms / 1e3);
+  if (secs < 60) return `${secs}s`;
+  const mins = Math.floor(secs / 60);
+  const remSecs = secs % 60;
+  return `${mins}m ${remSecs}s`;
+}
+function PipelineTimeline({
+  pipelineState,
+  isRunning,
+  onCancel,
+  onResume,
+  onRetryStage,
+  onNavigateToStage
+}) {
+  const { stages, currentStage, overallStatus, warnings, fatalErrors } = pipelineState;
+  const isCompleted = overallStatus === "completed";
+  const isNeedsAttention = overallStatus === "needs-attention";
+  const isFailed = overallStatus === "failed";
+  const isInterrupted = overallStatus === "interrupted" || overallStatus === "recovering";
+  function getStatusIcon(status, isCurrent) {
+    if (status === "completed") return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--color-success, #22c55e)" }, children: "✓" });
+    if (status === "running" || isCurrent) {
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "span",
+        {
+          style: {
+            display: "inline-block",
+            width: 12,
+            height: 12,
+            border: "2px solid rgba(139,92,246,0.3)",
+            borderTopColor: "var(--brand-primary, #a855f7)",
+            borderRadius: "50%",
+            animation: "spin 1s linear infinite"
+          }
+        }
+      );
+    }
+    if (status === "warning" || status === "interrupted") return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#f59e0b" }, children: "⚠️" });
+    if (status === "failed") return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#ef4444" }, children: "✕" });
+    if (status === "cancelled") return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#6b7280" }, children: "⊘" });
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#4b5563" }, children: "○" });
+  }
+  function getStatusBadgeClass(status) {
+    if (status === "completed") return "badge-success";
+    if (status === "running") return "badge-progress";
+    if (status === "warning" || status === "interrupted") return "badge-warning";
+    if (status === "failed") return "badge-error";
+    if (status === "cancelled") return "badge-secondary";
+    return "badge-secondary";
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: "panel",
+      style: {
+        border: isNeedsAttention || isInterrupted ? "1px solid #f59e0b" : isFailed ? "1px solid #ef4444" : isCompleted ? "1px solid var(--color-success, #22c55e)" : "1px solid var(--border-brand, #3b82f6)"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "18px" }, children: "⚡" }),
+            "Auto Production Pipeline",
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                className: `panel-badge ${isCompleted ? "badge-success" : isNeedsAttention || isInterrupted ? "badge-warning" : isFailed ? "badge-error" : isRunning ? "badge-progress" : "badge-secondary"}`,
+                children: overallStatus.toUpperCase()
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", alignItems: "center" }, children: [
+            isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-secondary btn-sm",
+                onClick: onCancel,
+                style: { borderColor: "#ef4444", color: "#ef4444" },
+                title: "Cancel Pipeline",
+                children: "Cancel"
+              }
+            ),
+            (isNeedsAttention || isFailed || isInterrupted || !isRunning && !isCompleted && overallStatus !== "idle") && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-primary btn-sm", onClick: onResume, children: "Resume Pipeline" }),
+            isCompleted && pipelineState.renderOutputPath && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-primary btn-sm",
+                onClick: () => onNavigateToStage("rendering"),
+                children: "View Output Video"
+              }
+            )
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [
+          isInterrupted && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              style: {
+                padding: "10px 14px",
+                borderRadius: "var(--radius-sm, 6px)",
+                background: "rgba(59, 130, 246, 0.12)",
+                border: "1px solid rgba(59, 130, 246, 0.35)",
+                color: "#60a5fa",
+                fontSize: "13px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "12px"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Pipeline Interrupted:" }),
+                  " Process was interrupted or closed unexpectedly. Artifacts are preserved. Ready to resume from current stage."
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    className: "btn btn-primary btn-sm",
+                    style: { flexShrink: 0 },
+                    onClick: onResume,
+                    children: "Resume"
+                  }
+                )
+              ]
+            }
+          ),
+          fatalErrors && fatalErrors.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              style: {
+                padding: "10px 14px",
+                borderRadius: "var(--radius-sm, 6px)",
+                background: "rgba(239, 68, 68, 0.1)",
+                border: "1px solid rgba(239, 68, 68, 0.3)",
+                color: "#f87171",
+                fontSize: "13px"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Pipeline Stopped:" }),
+                " ",
+                fatalErrors[fatalErrors.length - 1]
+              ]
+            }
+          ),
+          isNeedsAttention && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              style: {
+                padding: "10px 14px",
+                borderRadius: "var(--radius-sm, 6px)",
+                background: "rgba(245, 158, 11, 0.1)",
+                border: "1px solid rgba(245, 158, 11, 0.3)",
+                color: "#fbbf24",
+                fontSize: "13px",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "12px"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Action Needed:" }),
+                  " One or more scenes require manual stock review or preflight fix before rendering."
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    className: "btn btn-secondary btn-sm",
+                    style: { flexShrink: 0 },
+                    onClick: () => onNavigateToStage(currentStage),
+                    children: "Open Step"
+                  }
+                )
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: ORDERED_STAGES.map((s, idx) => {
+            const stageData = stages[s.key];
+            const status = stageData?.status ?? "pending";
+            const isCurrent = currentStage === s.key && isRunning;
+            const progress = stageData?.progress ?? 0;
+            return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "8px 12px",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  background: isCurrent ? "rgba(168, 85, 247, 0.08)" : status === "completed" ? "rgba(34, 197, 94, 0.04)" : "rgba(255, 255, 255, 0.02)",
+                  border: isCurrent ? "1px solid rgba(168, 85, 247, 0.3)" : "1px solid rgba(255, 255, 255, 0.05)",
+                  gap: "12px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", minWidth: "220px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "div",
+                      {
+                        style: {
+                          width: 24,
+                          height: 24,
+                          borderRadius: "50%",
+                          background: "rgba(255,255,255,0.05)",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          flexShrink: 0
+                        },
+                        children: getStatusIcon(status, isCurrent)
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary, #fff)" }, children: [
+                        idx + 1,
+                        ". ",
+                        s.title
+                      ] }),
+                      stageData?.durationMs ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary, #9ca3af)" }, children: formatDuration$2(stageData.durationMs) }) : null
+                    ] })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: "150px" }, children: [
+                    stageData?.message && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "div",
+                      {
+                        style: {
+                          fontSize: "12px",
+                          color: stageData.error ? "#f87171" : "var(--text-secondary, #9ca3af)",
+                          whiteSpace: "nowrap",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis"
+                        },
+                        title: stageData.message,
+                        children: stageData.message
+                      }
+                    ),
+                    (status === "running" || progress > 0 && progress < 1) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "div",
+                      {
+                        style: {
+                          height: 4,
+                          width: "100%",
+                          background: "rgba(255,255,255,0.1)",
+                          borderRadius: 2,
+                          marginTop: 4,
+                          overflow: "hidden"
+                        },
+                        children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "div",
+                          {
+                            style: {
+                              height: "100%",
+                              width: `${Math.round(progress * 100)}%`,
+                              background: "var(--brand-primary, #a855f7)",
+                              transition: "width 0.2s ease"
+                            }
+                          }
+                        )
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexShrink: 0 }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: `panel-badge ${getStatusBadgeClass(status)}`, style: { fontSize: "11px" }, children: status }),
+                    (status === "failed" || status === "warning" && !isRunning) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        className: "btn btn-secondary btn-sm",
+                        onClick: () => onRetryStage(s.key),
+                        style: { padding: "2px 8px", fontSize: "11px" },
+                        children: "Retry"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        className: "btn btn-secondary btn-sm",
+                        onClick: () => onNavigateToStage(s.key),
+                        style: { padding: "2px 8px", fontSize: "11px" },
+                        title: `Open ${s.title}`,
+                        children: "Open"
+                      }
+                    )
+                  ] })
+                ]
+              },
+              s.key
+            );
+          }) }),
+          isCompleted && pipelineState.renderOutputPath && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              style: {
+                padding: "12px",
+                borderRadius: "var(--radius-sm, 6px)",
+                background: "rgba(34, 197, 94, 0.1)",
+                border: "1px solid rgba(34, 197, 94, 0.3)",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: "12px"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--color-success, #22c55e)" }, children: "Production Complete!" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary, #9ca3af)", wordBreak: "break-all" }, children: pipelineState.renderOutputPath })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    className: "btn btn-primary btn-sm",
+                    onClick: () => onNavigateToStage("rendering"),
+                    children: "Open Render Page"
+                  }
+                )
+              ]
+            }
+          )
+        ] })
+      ]
+    }
+  );
+}
 function FileRow({
   label,
   description,
@@ -7407,9 +7954,71 @@ function InputPage({
   project,
   onUpdateInputs,
   onScanMedia,
-  isScanning
+  isScanning,
+  onNavigate
 }) {
   const { inputs } = project;
+  const [workflowMode, setWorkflowMode] = reactExports.useState("manual");
+  const [whisperModel, setWhisperModel] = reactExports.useState("base");
+  const [requireBgMusic, setRequireBgMusic] = reactExports.useState(false);
+  const [autoStartOnReady, setAutoStartOnReady] = reactExports.useState(false);
+  const {
+    pipelineState,
+    isRunning,
+    startPipeline,
+    resumePipeline,
+    cancelPipeline,
+    retryStage
+  } = usePipeline(project.projectDir);
+  const lastAutoStartedFingerprintRef = reactExports.useRef(null);
+  const debounceTimerRef = reactExports.useRef(null);
+  const runningInputsSnapshotRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (isRunning && !runningInputsSnapshotRef.current) {
+      runningInputsSnapshotRef.current = {
+        script: inputs.scriptPath,
+        voiceover: inputs.voiceoverPath
+      };
+    } else if (!isRunning) {
+      runningInputsSnapshotRef.current = null;
+    }
+  }, [isRunning, inputs.scriptPath, inputs.voiceoverPath]);
+  const inputChangedWhileRunning = isRunning && runningInputsSnapshotRef.current !== null && (runningInputsSnapshotRef.current.script !== inputs.scriptPath || runningInputsSnapshotRef.current.voiceover !== inputs.voiceoverPath);
+  const isAutoReady = !!(inputs.scriptPath && inputs.voiceoverPath);
+  reactExports.useEffect(() => {
+    if (workflowMode !== "auto" || !autoStartOnReady || !isAutoReady || isRunning) {
+      return;
+    }
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}`;
+    if (lastAutoStartedFingerprintRef.current === currentFp) {
+      return;
+    }
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      if (lastAutoStartedFingerprintRef.current !== currentFp && !isRunning) {
+        lastAutoStartedFingerprintRef.current = currentFp;
+        handleStartAutoPipeline();
+      }
+    }, 800);
+    return () => {
+      if (debounceTimerRef.current) {
+        clearTimeout(debounceTimerRef.current);
+      }
+    };
+  }, [workflowMode, autoStartOnReady, isAutoReady, inputs.scriptPath, inputs.voiceoverPath, isRunning]);
+  async function handleStartAutoPipeline() {
+    if (!inputs.scriptPath || !inputs.voiceoverPath) return;
+    await startPipeline({
+      projectDir: project.projectDir,
+      scriptPath: inputs.scriptPath,
+      voiceoverPath: inputs.voiceoverPath,
+      whisperModel,
+      requireBackgroundMusic: requireBgMusic,
+      autoStartOnReady
+    });
+  }
   async function selectScript() {
     const path = await window.api.selectFile({
       title: "Select Script File",
@@ -7431,16 +8040,118 @@ function InputPage({
     const path = await window.api.selectFolder({ title });
     if (path) await onUpdateInputs({ [key]: path });
   }
-  const allRequiredSet = inputs.voiceoverPath !== null;
+  const allRequiredSetManual = inputs.voiceoverPath !== null;
   const scanCount = [inputs.imagesFolder, inputs.videosFolder].filter(Boolean).length;
+  function handleNavigateToStage(stage) {
+    const stageToPage = {
+      transcribing: "transcribe",
+      planning: "planning",
+      captions: "captions",
+      "global-context": "stock",
+      "stock-search": "stock",
+      "audio-search": "audio",
+      preflight: "render",
+      rendering: "render",
+      postflight: "render",
+      completed: "render"
+    };
+    const targetPage = stageToPage[stage] || "input";
+    if (onNavigate) {
+      onNavigate(targetPage);
+    }
+  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        className: "panel",
+        style: {
+          background: "rgba(255, 255, 255, 0.02)",
+          border: "1px solid rgba(255, 255, 255, 0.08)",
+          marginBottom: "16px"
+        },
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            className: "panel-body",
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              padding: "12px 16px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "14px", fontWeight: 600, color: "var(--text-primary)" }, children: "Workflow Mode" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: workflowMode === "manual" ? "Manual mode: Inspect and run each production step individually" : "Auto Production: Fully autonomous end-to-end documentary video generation" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    background: "rgba(255, 255, 255, 0.06)",
+                    borderRadius: "var(--radius-sm, 6px)",
+                    padding: "3px",
+                    gap: "4px"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: `btn btn-sm ${workflowMode === "manual" ? "btn-primary" : "btn-secondary"}`,
+                        onClick: () => setWorkflowMode("manual"),
+                        id: "btn-mode-manual",
+                        style: { padding: "6px 14px" },
+                        children: "Manual"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: `btn btn-sm ${workflowMode === "auto" ? "btn-primary" : "btn-secondary"}`,
+                        onClick: () => setWorkflowMode("auto"),
+                        id: "btn-mode-auto",
+                        style: { padding: "6px 14px" },
+                        children: "⚡ Auto Production"
+                      }
+                    )
+                  ]
+                }
+              )
+            ]
+          }
+        )
+      }
+    ),
+    inputChangedWhileRunning && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          padding: "12px 16px",
+          borderRadius: "var(--radius-sm, 6px)",
+          background: "rgba(245, 158, 11, 0.15)",
+          border: "1px solid rgba(245, 158, 11, 0.4)",
+          color: "#fbbf24",
+          fontSize: "13px",
+          marginBottom: "16px"
+        },
+        children: [
+          "⚠️ ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Input files changed while pipeline is running:" }),
+          " New files will not take effect until current pipeline is cancelled or restarted."
+        ]
+      }
+    ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z", clipRule: "evenodd" }) }) }),
           "Source Files"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-new", children: "Required" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-new", children: workflowMode === "auto" ? "Required for Auto Flow" : "Required" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "10px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -7471,21 +8182,23 @@ function InputPage({
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { d: "M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z" }) }) }),
-          "Media Library"
+          "Media Library ",
+          workflowMode === "auto" ? "(Optional)" : ""
         ] }),
         scanCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "panel-badge badge-success", children: [
           scanCount,
           " folder",
           scanCount > 1 ? "s" : "",
           " set"
-        ] })
+        ] }),
+        workflowMode === "auto" && scanCount === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-secondary", style: { fontSize: "11px" }, children: "Stock will auto-download" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "10px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           FileRow,
           {
             label: "Images",
-            description: "Folder containing images (.jpg, .png, .webp...)",
+            description: workflowMode === "auto" ? "Optional local images folder" : "Folder containing images (.jpg, .png, .webp...)",
             value: inputs.imagesFolder,
             icon: "🖼️",
             onSelect: () => selectFolder("imagesFolder", "Select Images Folder"),
@@ -7496,7 +8209,7 @@ function InputPage({
           FileRow,
           {
             label: "Videos",
-            description: "Folder containing video footage (.mp4, .mov, .avi...)",
+            description: workflowMode === "auto" ? "Optional local video footage folder" : "Folder containing video footage (.mp4, .mov, .avi...)",
             value: inputs.videosFolder,
             icon: "🎥",
             onSelect: () => selectFolder("videosFolder", "Select Videos Folder"),
@@ -7527,7 +8240,107 @@ function InputPage({
         )
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(
+    workflowMode === "auto" && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: "panel",
+        style: {
+          background: "var(--brand-gradient-subtle)",
+          border: "1px solid var(--border-brand)"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title", children: "⚡ Auto Production Engine" }),
+            isAutoReady && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-success", children: "Ready for Auto Production" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "14px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "4px" }, children: "Whisper Model" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "select",
+                  {
+                    value: whisperModel,
+                    onChange: (e) => setWhisperModel(e.target.value),
+                    className: "input-select",
+                    style: { width: "100%", padding: "6px 10px", background: "rgba(0,0,0,0.4)", color: "#fff", borderRadius: 4, border: "1px solid rgba(255,255,255,0.1)" },
+                    disabled: isRunning,
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "tiny", children: "Tiny (fastest)" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "base", children: "Base (recommended)" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "small", children: "Small (high accuracy)" }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "medium", children: "Medium (best accuracy)" })
+                    ]
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", justifyContent: "center", gap: "8px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { fontSize: "13px", display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "checkbox",
+                      checked: requireBgMusic,
+                      onChange: (e) => setRequireBgMusic(e.target.checked),
+                      disabled: isRunning
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Require Background Music (block if none found)" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { fontSize: "13px", display: "flex", alignItems: "center", gap: "8px", cursor: "pointer" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "checkbox",
+                      checked: autoStartOnReady,
+                      onChange: (e) => setAutoStartOnReady(e.target.checked),
+                      disabled: isRunning
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Start automatically when required inputs are ready" })
+                ] })
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  paddingTop: "10px",
+                  borderTop: "1px solid rgba(255,255,255,0.08)"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: !isAutoReady ? "Select both Script and Voiceover audio above to enable Auto Production" : isRunning ? "Pipeline is currently executing autonomously..." : "All prerequisites met. Click to run the entire pipeline from start to finish." }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "10px" }, children: isRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "btn btn-secondary",
+                      onClick: cancelPipeline,
+                      style: { borderColor: "#ef4444", color: "#ef4444" },
+                      id: "btn-cancel-auto-pipeline",
+                      children: "Cancel Run"
+                    }
+                  ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      className: "btn btn-primary",
+                      onClick: handleStartAutoPipeline,
+                      disabled: !isAutoReady || isRunning,
+                      id: "btn-start-auto-production",
+                      style: { padding: "8px 20px", fontWeight: 600 },
+                      children: "⚡ Start Auto Production"
+                    }
+                  ) })
+                ]
+              }
+            )
+          ] })
+        ]
+      }
+    ),
+    workflowMode === "manual" && /* @__PURE__ */ jsxRuntimeExports.jsx(
       "div",
       {
         className: "panel",
@@ -7547,14 +8360,14 @@ function InputPage({
             children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "4px" }, children: "Analyze Project" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: !allRequiredSet ? "Select a voice-over file to enable analysis" : "Scan media folders and extract metadata" })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: !allRequiredSetManual ? "Select a voice-over file to enable analysis" : "Scan media folders and extract metadata" })
               ] }),
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "button",
                 {
                   className: "btn btn-primary",
                   onClick: onScanMedia,
-                  disabled: !allRequiredSet || isScanning || !inputs.imagesFolder && !inputs.videosFolder,
+                  disabled: !allRequiredSetManual || isScanning || !inputs.imagesFolder && !inputs.videosFolder,
                   id: "btn-analyze-project",
                   children: isScanning ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
                     /* @__PURE__ */ jsxRuntimeExports.jsxs(
@@ -7583,6 +8396,17 @@ function InputPage({
             ]
           }
         ) })
+      }
+    ),
+    pipelineState && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      PipelineTimeline,
+      {
+        pipelineState,
+        isRunning,
+        onCancel: cancelPipeline,
+        onResume: resumePipeline,
+        onRetryStage: retryStage,
+        onNavigateToStage: handleNavigateToStage
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stats-grid", children: [
@@ -9034,6 +9858,15 @@ function PlanningPage({ project }) {
       if (p2) setPlan(p2);
     });
     window.api.config.get("geminiApiKey").then((k2) => setHasKey(!!k2 && k2.trim().length > 10));
+    window.api.config.get("preferredModel").then((m2) => {
+      if (m2) {
+        if (m2 === "gemini-2.5-flash" || m2 === "gemini-1.5-flash" || m2 === "gemini-1.5-flash-latest") {
+          setSelectedModel("gemini-3.8-flash");
+        } else {
+          setSelectedModel(m2);
+        }
+      }
+    });
   }, [project.projectDir]);
   async function handleGenerate() {
     setIsGenerating(true);
@@ -9238,16 +10071,15 @@ function PlanningPage({ project }) {
       /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Generate Edit Plan" }),
       " để AI phân tích transcript và tạo timeline.",
       /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", marginTop: "4px", display: "block" }, children: "Dùng Gemini 1.5 Flash — mất khoảng 30–60 giây" })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", marginTop: "4px", display: "block" }, children: "Dùng Gemini Flash - mất khoảng 30-60 giây" })
     ] }) }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `@keyframes spin { to { transform: rotate(360deg); } }` })
   ] });
 }
 const GEMINI_MODELS = [
-  { id: "gemini-3.8-flash", label: "gemini-3.8-flash  (latest — recommended)" },
-  { id: "gemini-3.6-flash", label: "gemini-3.6-flash" },
-  { id: "gemini-2.5-flash", label: "gemini-2.5-flash-preview" },
-  { id: "gemini-1.5-flash-latest", label: "gemini-1.5-flash-latest (legacy)" }
+  { id: "gemini-3.8-flash", label: "gemini-3.8-flash (latest - recommended)" },
+  { id: "gemini-3.5-flash", label: "gemini-3.5-flash" },
+  { id: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite" }
 ];
 function fmt$1(secs) {
   const m2 = Math.floor(secs / 60);
@@ -9261,6 +10093,10 @@ function fmtBytes(bytes) {
 }
 function RenderPage({ project }) {
   const [isRendering, setIsRendering] = reactExports.useState(false);
+  const [isPreflightRunning, setIsPreflightRunning] = reactExports.useState(false);
+  const [preflightReport, setPreflightReport] = reactExports.useState(null);
+  const [showIssuesList, setShowIssuesList] = reactExports.useState(false);
+  const [copied, setCopied] = reactExports.useState(false);
   const [progress, setProgress] = reactExports.useState(null);
   const [captionProgress, setCaptionProgress] = reactExports.useState(null);
   const [result, setResult] = reactExports.useState(null);
@@ -9308,6 +10144,11 @@ function RenderPage({ project }) {
           );
         }).length;
         setMediaReadyCount(ready);
+        try {
+          const initialPreflight = await window.api.render.runPreflight({ projectDir: project.projectDir });
+          setPreflightReport(initialPreflight);
+        } catch {
+        }
       }
     });
     window.api.audio.getPlan(project.projectDir).then((ap) => {
@@ -9327,16 +10168,52 @@ function RenderPage({ project }) {
   function stopTimer() {
     if (timerRef.current) clearInterval(timerRef.current);
   }
+  async function handleCheckPreflight() {
+    setIsPreflightRunning(true);
+    setError(null);
+    try {
+      const pf2 = await window.api.render.runPreflight({ projectDir: project.projectDir });
+      setPreflightReport(pf2);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsPreflightRunning(false);
+    }
+  }
   async function handleRender() {
     setIsRendering(true);
     setError(null);
     setResult(null);
     setCaptionProgress(null);
-    setProgress({ stage: "Starting...", progress: 0 });
+    setIsPreflightRunning(true);
+    setProgress({ stage: "Running Preflight QA check...", progress: 0.02 });
+    let pfReport = null;
+    try {
+      pfReport = await window.api.render.runPreflight({ projectDir: project.projectDir });
+      setPreflightReport(pfReport);
+    } catch (pfErr) {
+      console.warn("[RenderPage] Preflight check error:", pfErr);
+    } finally {
+      setIsPreflightRunning(false);
+    }
+    if (pfReport && pfReport.status === "failed") {
+      setIsRendering(false);
+      setProgress(null);
+      setShowIssuesList(true);
+      const fatalIssues = pfReport.issues.filter((i) => i.severity === "fatal");
+      setError(`Preflight QA failed with ${fatalIssues.length} fatal error(s). Render blocked until resolved.`);
+      return;
+    }
+    setProgress({ stage: "Starting render...", progress: 0.05 });
     startTimer();
     const unsub = window.api.render.onProgress((data) => setProgress(data));
     const unsubCaption = window.api.captions?.onRenderProgress?.(
       (data) => setCaptionProgress(data)
+    );
+    const unsubQa = window.api.render.onQaProgress?.(
+      (data) => {
+        setProgress({ stage: `QA: ${data.stage} (${data.message})`, progress: data.progress });
+      }
     );
     try {
       const res = resolution;
@@ -9368,6 +10245,7 @@ function RenderPage({ project }) {
       stopTimer();
       unsub();
       unsubCaption?.();
+      unsubQa?.();
     }
   }
   const pct2 = progress ? Math.round(progress.progress * 100) : 0;
@@ -9429,6 +10307,152 @@ function RenderPage({ project }) {
             fontWeight: 600,
             flexShrink: 0
           }, children: "↻ Re-render needed" })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          marginBottom: "20px",
+          padding: "16px",
+          background: "var(--bg-elevated)",
+          borderRadius: "var(--radius-md)",
+          border: `1px solid ${!preflightReport ? "var(--border-default)" : preflightReport.status === "failed" ? "rgba(239, 68, 68, 0.4)" : preflightReport.status === "passed_with_warnings" ? "rgba(245, 158, 11, 0.4)" : "rgba(16, 185, 129, 0.4)"}`
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "12px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "16px" }, children: "🛡️" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }, children: "Production Intelligence Preflight QA" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Automated validation of edit plan, media assets, audio tracks, and transitions before render" })
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: isPreflightRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+              fontSize: "11px",
+              padding: "4px 10px",
+              borderRadius: 999,
+              background: "rgba(99, 102, 241, 0.15)",
+              color: "#818cf8",
+              fontWeight: 600
+            }, children: "⏳ Running Preflight..." }) : preflightReport ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+              fontSize: "11px",
+              padding: "4px 10px",
+              borderRadius: 999,
+              fontWeight: 700,
+              background: preflightReport.status === "failed" ? "rgba(239, 68, 68, 0.15)" : preflightReport.status === "passed_with_warnings" ? "rgba(245, 158, 11, 0.15)" : "rgba(16, 185, 129, 0.15)",
+              color: preflightReport.status === "failed" ? "#f87171" : preflightReport.status === "passed_with_warnings" ? "#fbbf24" : "#34d399"
+            }, children: [
+              preflightReport.status === "failed" && "❌ Preflight: Failed",
+              preflightReport.status === "passed_with_warnings" && `⚠️ Preflight: Passed with warnings (${preflightReport.warningCount})`,
+              preflightReport.status === "passed" && "✓ Preflight: Passed"
+            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-secondary btn-sm",
+                onClick: handleCheckPreflight,
+                disabled: isRendering || isPreflightRunning,
+                style: { fontSize: "11px", padding: "4px 10px" },
+                children: "🔍 Check Preflight"
+              }
+            ) })
+          ] }),
+          preflightReport && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
+              gap: "8px",
+              marginBottom: preflightReport.issues.length > 0 ? "12px" : "0"
+            }, children: [
+              { label: "Scenes checked", value: preflightReport.totalScenes, ok: preflightReport.totalScenes > 0 },
+              { label: "Media resolved", value: `${preflightReport.resolvedScenes}/${preflightReport.totalScenes}`, ok: preflightReport.resolvedScenes === preflightReport.totalScenes },
+              { label: "Missing media", value: preflightReport.missingScenes, ok: preflightReport.missingScenes === 0, isWarn: preflightReport.missingScenes > 0 },
+              { label: "Duration expected", value: fmt$1(preflightReport.expectedDuration), ok: preflightReport.expectedDuration > 0 },
+              {
+                label: "Caption issues",
+                value: preflightReport.issues.filter((i) => i.category === "caption").length,
+                ok: preflightReport.issues.filter((i) => i.category === "caption").length === 0,
+                isWarn: preflightReport.issues.filter((i) => i.category === "caption").length > 0
+              },
+              {
+                label: "Audio issues",
+                value: preflightReport.issues.filter((i) => i.category === "audio").length,
+                ok: preflightReport.issues.filter((i) => i.category === "audio").length === 0,
+                isWarn: preflightReport.issues.filter((i) => i.category === "audio").length > 0
+              },
+              {
+                label: "Transition issues",
+                value: preflightReport.issues.filter((i) => i.category === "transition").length,
+                ok: preflightReport.issues.filter((i) => i.category === "transition").length === 0,
+                isWarn: preflightReport.issues.filter((i) => i.category === "transition").length > 0
+              }
+            ].map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+              padding: "8px 10px",
+              background: "var(--bg-base)",
+              borderRadius: "var(--radius-sm)",
+              border: "1px solid var(--border-subtle)",
+              textAlign: "center"
+            }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "2px" }, children: m2.label }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+                fontSize: "12px",
+                fontWeight: 700,
+                color: m2.ok ? "var(--color-success)" : m2.isWarn ? "#fbbf24" : "var(--color-error)"
+              }, children: m2.value })
+            ] }, m2.label)) }),
+            preflightReport.issues.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  onClick: () => setShowIssuesList((prev) => !prev),
+                  style: {
+                    background: "none",
+                    border: "none",
+                    color: "var(--brand-accent)",
+                    cursor: "pointer",
+                    fontSize: "11px",
+                    fontWeight: 600,
+                    padding: 0,
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "4px"
+                  },
+                  children: showIssuesList ? "▼ Hide QA issues" : `▶ Show ${preflightReport.issues.length} QA notice(s)`
+                }
+              ),
+              showIssuesList && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+                marginTop: "8px",
+                maxHeight: "160px",
+                overflowY: "auto",
+                display: "flex",
+                flexDirection: "column",
+                gap: "6px",
+                background: "var(--bg-base)",
+                padding: "8px",
+                borderRadius: "var(--radius-sm)"
+              }, children: preflightReport.issues.map((issue) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+                fontSize: "11px",
+                display: "flex",
+                gap: "8px",
+                alignItems: "flex-start",
+                color: issue.severity === "fatal" ? "#f87171" : issue.severity === "warning" ? "#fbbf24" : "var(--text-secondary)"
+              }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: issue.severity === "fatal" ? "❌" : issue.severity === "warning" ? "⚠️" : "ℹ️" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1 }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+                    textTransform: "uppercase",
+                    fontSize: "9px",
+                    fontWeight: 700,
+                    padding: "1px 4px",
+                    borderRadius: "3px",
+                    marginRight: "6px",
+                    background: issue.severity === "fatal" ? "rgba(239, 68, 68, 0.2)" : "rgba(245, 158, 11, 0.2)"
+                  }, children: issue.category }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: issue.message }),
+                  issue.suggestion && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }, children: [
+                    "💡 ",
+                    issue.suggestion
+                  ] })
+                ] })
+              ] }, issue.id)) })
+            ] })
+          ] })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "16px", alignItems: "flex-end", marginBottom: "20px", flexWrap: "wrap" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", style: { flex: 1, minWidth: "180px" }, children: [
@@ -9646,9 +10670,9 @@ function RenderPage({ project }) {
               id: "btn-start-render",
               className: `btn btn-primary btn-lg`,
               onClick: handleRender,
-              disabled: isRendering || !hasPlan,
+              disabled: isRendering || isPreflightRunning || !hasPlan,
               style: { minWidth: "200px" },
-              children: isRendering ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              children: isRendering || isPreflightRunning ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "svg",
                   {
@@ -9665,10 +10689,22 @@ function RenderPage({ project }) {
                     ]
                   }
                 ),
-                "Rendering... ",
-                pct2,
-                "%"
+                isPreflightRunning ? "Running Preflight..." : `Rendering... ${pct2}%`
               ] }) : result ? "🔄 Re-render" : "▶ Start Render"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              className: "btn btn-secondary",
+              onClick: handleCheckPreflight,
+              disabled: isRendering || isPreflightRunning || !hasPlan,
+              style: { display: "flex", alignItems: "center", gap: "6px" },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🛡️" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Re-check Preflight" })
+              ]
             }
           ),
           isRendering && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }, children: [
@@ -9747,9 +10783,22 @@ function RenderPage({ project }) {
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", style: { background: "rgba(52,211,153,0.2)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--color-success)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z", clipRule: "evenodd" }) }) }),
           "Render Complete!"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--color-success)", fontWeight: 700 }, children: [
-          "✓ ",
-          fmtBytes(result.fileSizeBytes)
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+          result.qaReport && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+            fontSize: "11px",
+            fontWeight: 700,
+            padding: "3px 8px",
+            borderRadius: "999px",
+            background: result.qaReport.status === "passed" ? "rgba(16, 185, 129, 0.15)" : result.qaReport.status === "passed_with_warnings" ? "rgba(245, 158, 11, 0.15)" : "rgba(239, 68, 68, 0.15)",
+            color: result.qaReport.status === "passed" ? "#34d399" : result.qaReport.status === "passed_with_warnings" ? "#fbbf24" : "#f87171"
+          }, children: [
+            "QA: ",
+            result.qaReport.status.replace(/_/g, " ").toUpperCase()
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--color-success)", fontWeight: 700 }, children: [
+            "✓ ",
+            fmtBytes(result.fileSizeBytes)
+          ] })
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
@@ -9762,6 +10811,26 @@ function RenderPage({ project }) {
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", style: { fontSize: "16px" }, children: value }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: label })
         ] }, label)) }),
+        result.qaReport && result.qaReport.issues.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          background: "var(--bg-elevated)",
+          padding: "12px 14px",
+          borderRadius: "var(--radius-md)",
+          marginBottom: "14px",
+          border: "1px solid var(--border-default)"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "8px" }, children: [
+            "🛡️ Postflight QA Audit (",
+            result.qaReport.issues.length,
+            " notice",
+            result.qaReport.issues.length > 1 ? "s" : "",
+            ")"
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: result.qaReport.issues.map((iss) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: iss.severity === "warning" ? "#fbbf24" : "var(--text-muted)" }, children: [
+            iss.severity === "warning" ? "⚠️" : "ℹ️",
+            " ",
+            iss.message
+          ] }, iss.id)) })
+        ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
           padding: "12px 16px",
           background: "var(--bg-base)",
@@ -9775,21 +10844,18 @@ function RenderPage({ project }) {
           "📁 ",
           result.outputPath
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
             className: "btn btn-secondary",
             onClick: () => {
               navigator.clipboard.writeText(result.outputPath);
-              alert(`Output saved to:
-${result.outputPath}
-
-(Path copied to clipboard)`);
+              setCopied(true);
+              setTimeout(() => setCopied(false), 3e3);
             },
-            style: { marginRight: "8px" },
-            children: "📋 Copy Output Path"
+            children: copied ? "✓ Path Copied to Clipboard!" : "📋 Copy Output Path"
           }
-        )
+        ) })
       ] })
     ] }),
     !isRendering && !result && !error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { background: "var(--bg-elevated)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "13px", color: "var(--text-muted)", lineHeight: 2 }, children: [
@@ -9831,17 +10897,23 @@ function providerBadge(provider) {
     pexels: { bg: "rgba(5, 193, 112, 0.15)", fg: "#05C170" },
     pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9" }
   };
-  const c = colors[provider] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0" };
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-    fontSize: "10px",
-    fontWeight: 700,
-    padding: "2px 8px",
-    borderRadius: "999px",
-    background: c.bg,
-    color: c.fg,
-    letterSpacing: "0.05em",
-    textTransform: "uppercase"
-  }, children: provider });
+  const c = colors[provider.toLowerCase()] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0" };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "span",
+    {
+      style: {
+        fontSize: "9px",
+        fontWeight: 700,
+        padding: "2px 6px",
+        borderRadius: "999px",
+        background: c.bg,
+        color: c.fg,
+        letterSpacing: "0.05em",
+        textTransform: "uppercase"
+      },
+      children: provider
+    }
+  );
 }
 function statusBadge(status) {
   const map = {
@@ -9854,155 +10926,331 @@ function statusBadge(status) {
   const s = map[status] ?? map.pending;
   return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", fontWeight: 600, color: s.color }, children: s.label });
 }
+function approvalBadge(status) {
+  if (status === "approved") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "span",
+      {
+        style: {
+          fontSize: "9px",
+          fontWeight: 700,
+          padding: "2px 7px",
+          borderRadius: "999px",
+          background: "rgba(34,197,94,0.18)",
+          color: "#22c55e",
+          border: "1px solid rgba(34,197,94,0.4)"
+        },
+        children: "★ APPROVED"
+      }
+    );
+  }
+  if (status === "needs_review") {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "span",
+      {
+        style: {
+          fontSize: "9px",
+          fontWeight: 700,
+          padding: "2px 7px",
+          borderRadius: "999px",
+          background: "rgba(245,158,11,0.18)",
+          color: "#f59e0b",
+          border: "1px solid rgba(245,158,11,0.4)"
+        },
+        children: "⚠ NEEDS REVIEW"
+      }
+    );
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "span",
+    {
+      style: {
+        fontSize: "9px",
+        fontWeight: 600,
+        padding: "2px 7px",
+        borderRadius: "999px",
+        background: "rgba(99,102,241,0.15)",
+        color: "var(--text-brand)",
+        border: "1px solid rgba(99,102,241,0.3)"
+      },
+      children: "AUTO SELECTED"
+    }
+  );
+}
 function matchLabelBadge(label) {
   if (!label) return null;
   const map = {
     STRONG_MATCH: { color: "#22c55e", bg: "rgba(34,197,94,0.12)" },
+    EXACT_SUBJECT: { color: "#22c55e", bg: "rgba(34,197,94,0.12)" },
     ACCEPTABLE: { color: "#60a5fa", bg: "rgba(96,165,250,0.12)" },
+    CONTEXTUAL_MATCH: { color: "#60a5fa", bg: "rgba(96,165,250,0.12)" },
     ILLUSTRATIVE: { color: "#f59e0b", bg: "rgba(245,158,11,0.12)" },
+    HISTORICAL: { color: "#c084fc", bg: "rgba(192,132,252,0.12)" },
     REJECTED: { color: "#f87171", bg: "rgba(248,113,113,0.12)" }
   };
   const c = map[label] ?? { color: "var(--text-muted)", bg: "transparent" };
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-    fontSize: "9px",
-    fontWeight: 700,
-    padding: "2px 6px",
-    borderRadius: "999px",
-    background: c.bg,
-    color: c.color,
-    letterSpacing: "0.05em"
-  }, children: label.replace("_", " ") });
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "span",
+    {
+      style: {
+        fontSize: "9px",
+        fontWeight: 700,
+        padding: "2px 6px",
+        borderRadius: "999px",
+        background: c.bg,
+        color: c.color,
+        letterSpacing: "0.04em"
+      },
+      children: label.replace(/_/g, " ")
+    }
+  );
 }
 function tierBadge(tier) {
   if (!tier) return null;
   const colors = { A: "#22c55e", B: "#60a5fa", C: "#f59e0b", D: "#f87171" };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
-    fontSize: "9px",
-    fontWeight: 700,
-    padding: "2px 6px",
-    borderRadius: "4px",
-    background: "rgba(255,255,255,0.06)",
-    color: colors[tier] ?? "#a0a0c0"
-  }, children: [
-    "Tier ",
-    tier
-  ] });
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "span",
+    {
+      style: {
+        fontSize: "9px",
+        fontWeight: 700,
+        padding: "2px 6px",
+        borderRadius: "4px",
+        background: "rgba(255,255,255,0.06)",
+        color: colors[tier] ?? "#a0a0c0"
+      },
+      children: [
+        "Tier ",
+        tier
+      ]
+    }
+  );
+}
+function PreviewModal({
+  candidate,
+  onClose
+}) {
+  const isVideo = candidate.result.mediaType === "video";
+  const src = candidate.result.previewUrl || candidate.result.downloadUrl;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        zIndex: 1e3,
+        background: "rgba(0,0,0,0.85)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "20px"
+      },
+      onClick: onClose,
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border-strong)",
+            borderRadius: "var(--radius-lg)",
+            overflow: "hidden",
+            maxWidth: "720px",
+            width: "100%",
+            boxShadow: "var(--shadow-lg)"
+          },
+          onClick: (e) => e.stopPropagation(),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  padding: "12px 16px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  borderBottom: "1px solid var(--border-subtle)"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }, children: "Candidate Preview" }),
+                    providerBadge(candidate.result.provider),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+                      candidate.result.width,
+                      "x",
+                      candidate.result.height,
+                      " · Score: ",
+                      candidate.score.totalScore,
+                      "/100"
+                    ] })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-sm btn-secondary", onClick: onClose, children: "✕ Close" })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  background: "#000",
+                  minHeight: "320px",
+                  maxHeight: "480px",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center"
+                },
+                children: isVideo && src ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "video",
+                  {
+                    src,
+                    controls: true,
+                    autoPlay: true,
+                    style: { maxWidth: "100%", maxHeight: "480px", objectFit: "contain" }
+                  }
+                ) : src ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "img",
+                  {
+                    src,
+                    alt: candidate.result.title,
+                    style: { maxWidth: "100%", maxHeight: "480px", objectFit: "contain" }
+                  }
+                ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "var(--text-muted)", fontSize: "12px" }, children: "Preview unavailable" })
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "12px 16px", background: "var(--bg-void)" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }, children: candidate.result.title || "Untitled Asset" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+                "Creator: ",
+                candidate.result.creator || "Unknown",
+                " · Duration: ",
+                candidate.result.durationSecs || 0,
+                "s"
+              ] }),
+              candidate.score.reasons.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "6px", fontSize: "11px", color: "#22c55e" }, children: [
+                "✓ ",
+                candidate.score.reasons.join(" · ")
+              ] })
+            ] })
+          ]
+        }
+      )
+    }
+  );
 }
 function ReplaceModal({
   assignment,
   onConfirm,
   onClose
 }) {
-  const [query, setQuery] = reactExports.useState(assignment.searchQueries[0] ?? "");
-  const suggestions = assignment.searchQueries;
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-    position: "fixed",
-    inset: 0,
-    zIndex: 999,
-    background: "rgba(0,0,0,0.7)",
-    display: "flex",
-    alignItems: "center",
-    justifyContent: "center"
-  }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-    background: "var(--bg-elevated)",
-    border: "1px solid var(--border-strong)",
-    borderRadius: "var(--radius-lg)",
-    padding: "28px",
-    width: "520px",
-    boxShadow: "var(--shadow-lg)"
-  }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "6px" }, children: [
-      "Replace Scene ",
-      assignment.sceneIndex
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginBottom: "20px", lineHeight: 1.5 }, children: [
-      assignment.narrationText.slice(0, 120),
-      assignment.narrationText.length > 120 ? "…" : ""
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "12px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "6px" }, children: "SEARCH QUERY" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "input",
+  const [query, setQuery] = reactExports.useState(assignment.searchQueries?.[0] ?? assignment.usedQuery ?? "");
+  const suggestions = assignment.searchQueries ?? [];
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        zIndex: 999,
+        background: "rgba(0,0,0,0.7)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center"
+      },
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
         {
-          value: query,
-          onChange: (e) => setQuery(e.target.value),
-          onKeyDown: (e) => {
-            if (e.key === "Enter") onConfirm(query);
-          },
-          placeholder: "Enter a short, visual search query…",
           style: {
-            width: "100%",
-            background: "var(--bg-base)",
-            border: "1px solid var(--border-default)",
-            borderRadius: "var(--radius-sm)",
-            color: "var(--text-primary)",
-            fontSize: "13px",
-            padding: "10px 12px",
-            outline: "none"
-          }
+            background: "var(--bg-elevated)",
+            border: "1px solid var(--border-strong)",
+            borderRadius: "var(--radius-lg)",
+            padding: "24px",
+            width: "520px",
+            boxShadow: "var(--shadow-lg)"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "14px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "6px" }, children: [
+              "Replace Media for Scene ",
+              assignment.sceneIndex
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginBottom: "16px", lineHeight: 1.5 }, children: [
+              assignment.narrationText?.slice(0, 120),
+              (assignment.narrationText?.length ?? 0) > 120 ? "…" : ""
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "14px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", display: "block", marginBottom: "6px" }, children: "Custom Search Query" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  className: "input",
+                  value: query,
+                  onChange: (e) => setQuery(e.target.value),
+                  placeholder: "e.g. vintage steam train mountains",
+                  style: { width: "100%", fontSize: "12px" },
+                  onKeyDown: (e) => {
+                    if (e.key === "Enter" && query.trim()) onConfirm(query.trim());
+                  }
+                }
+              )
+            ] }),
+            suggestions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "16px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "6px" }, children: "AI Suggested Queries:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: suggestions.map((s, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-sm btn-secondary",
+                  style: { fontSize: "10px", padding: "3px 8px" },
+                  onClick: () => setQuery(s),
+                  children: s
+                },
+                idx
+              )) })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "flex-end", gap: "8px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-secondary btn-sm", onClick: onClose, children: "Cancel" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  className: "btn btn-primary btn-sm",
+                  onClick: () => query.trim() && onConfirm(query.trim()),
+                  disabled: !query.trim(),
+                  children: "Search & Replace"
+                }
+              )
+            ] })
+          ]
         }
       )
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "6px" }, children: "SUGGESTED QUERIES (click to use)" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px" }, children: suggestions.map((q2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          onClick: () => setQuery(q2),
-          style: {
-            background: query === q2 ? "var(--brand-gradient-subtle)" : "var(--bg-overlay)",
-            border: `1px solid ${query === q2 ? "var(--border-brand)" : "var(--border-subtle)"}`,
-            color: query === q2 ? "var(--text-brand)" : "var(--text-secondary)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "11px",
-            padding: "4px 10px",
-            cursor: "pointer"
-          },
-          children: q2
-        },
-        q2
-      )) })
-    ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", justifyContent: "flex-end" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: "btn btn-secondary",
-          onClick: onClose,
-          style: { minWidth: "80px" },
-          children: "Cancel"
-        }
-      ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          className: "btn btn-primary",
-          onClick: () => onConfirm(query),
-          disabled: !query.trim(),
-          style: { minWidth: "120px" },
-          children: "🔍 Search & Replace"
-        }
-      )
-    ] })
-  ] }) });
+    }
+  );
 }
-function SceneCard({
+function StoryboardSceneCard({
   assignment,
   projectDir,
+  candidates,
   onReplace,
   onLock,
-  onUpload
+  onUpload,
+  onCandidateSelected,
+  onCandidateApproved
 }) {
   const [showReplace, setShowReplace] = reactExports.useState(false);
   const [replacing, setReplacing] = reactExports.useState(false);
   const [locking, setLocking] = reactExports.useState(false);
-  const [thumbError, setThumbError] = reactExports.useState(false);
+  const [actionError, setActionError] = reactExports.useState(null);
+  const [previewCandidate, setPreviewCandidate] = reactExports.useState(null);
+  const [showReasons, setShowReasons] = reactExports.useState(false);
+  const [narrationExpanded, setNarrationExpanded] = reactExports.useState(false);
   const asset = assignment.asset;
-  const isAssigned = assignment.status === "assigned" && asset;
+  const isAssigned = assignment.status === "assigned" && !!asset;
+  const sceneCandidates = candidates.length > 0 ? candidates : assignment.candidates ?? [];
   async function handleReplace(query) {
     setShowReplace(false);
     setReplacing(true);
-    await onReplace(assignment.sceneIndex, query);
+    setActionError(null);
+    const res = await onReplace(assignment.sceneIndex, query);
+    if (!res) {
+      setActionError("Replace failed to find or download media.");
+    }
     setReplacing(false);
   }
   async function handleLock() {
@@ -10010,240 +11258,543 @@ function SceneCard({
     await onLock(assignment.sceneIndex, !assignment.locked);
     setLocking(false);
   }
+  async function handleSelect(candidateId) {
+    setActionError(null);
+    try {
+      const res = await window.api.stock.selectCandidate({
+        projectDir,
+        sceneIndex: assignment.sceneIndex,
+        candidateId
+      });
+      if (!res.success) {
+        setActionError(res.error || "Failed to select candidate");
+      } else {
+        await onCandidateSelected(candidateId);
+      }
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+  async function handleApprove(candidateId) {
+    setActionError(null);
+    try {
+      const res = await window.api.stock.approveCandidate({
+        projectDir,
+        sceneIndex: assignment.sceneIndex,
+        candidateId
+      });
+      if (!res.success) {
+        setActionError(res.error || "Failed to approve candidate");
+      } else {
+        await onCandidateApproved(candidateId);
+      }
+    } catch (e) {
+      setActionError(e instanceof Error ? e.message : String(e));
+    }
+  }
+  const duration = assignment.endTime - assignment.startTime;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-      background: "var(--bg-elevated)",
-      border: `1px solid ${isAssigned ? "var(--border-default)" : assignment.status === "failed" ? "rgba(248,113,113,0.3)" : "var(--border-subtle)"}`,
-      borderRadius: "var(--radius-md)",
-      overflow: "hidden",
-      transition: "border-color 0.2s",
-      position: "relative"
-    }, children: [
-      assignment.locked && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-        position: "absolute",
-        top: 8,
-        right: 8,
-        zIndex: 2,
-        background: "rgba(251,191,36,0.2)",
-        border: "1px solid rgba(251,191,36,0.4)",
-        borderRadius: "999px",
-        fontSize: "9px",
-        padding: "2px 7px",
-        color: "var(--color-warning)",
-        fontWeight: 700
-      }, children: "🔒 LOCKED" }),
-      assignment.manualOverride && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-        position: "absolute",
-        top: 8,
-        right: assignment.locked ? 72 : 8,
-        zIndex: 2,
-        background: "rgba(96,165,250,0.2)",
-        border: "1px solid rgba(96,165,250,0.4)",
-        borderRadius: "999px",
-        fontSize: "9px",
-        padding: "2px 7px",
-        color: "var(--color-info)",
-        fontWeight: 700
-      }, children: "📤 OWN" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { height: "120px", background: "var(--bg-void)", overflow: "hidden", position: "relative" }, children: [
-        isAssigned && asset?.thumbnailUrl && !thumbError ? /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "img",
-          {
-            src: asset.thumbnailUrl,
-            alt: `Scene ${assignment.sceneIndex}`,
-            style: { width: "100%", height: "100%", objectFit: "cover" },
-            onError: () => setThumbError(true)
-          }
-        ) : isAssigned ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-          width: "100%",
-          height: "100%",
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          background: "var(--bg-elevated)",
+          border: `1px solid ${assignment.locked ? "rgba(251,191,36,0.35)" : assignment.approvalStatus === "approved" ? "rgba(34,197,94,0.35)" : isAssigned ? "var(--border-default)" : "rgba(248,113,113,0.3)"}`,
+          borderRadius: "var(--radius-md)",
+          padding: "16px",
           display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
           flexDirection: "column",
-          gap: "6px",
-          background: "linear-gradient(135deg, rgba(99,102,241,0.08) 0%, rgba(168,85,247,0.08) 100%)"
-        }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "26px" }, children: "🎬" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-brand)", fontWeight: 600, letterSpacing: "0.5px" }, children: [
-            asset?.provider?.toUpperCase() || "STOCK",
-            " VIDEO"
-          ] })
-        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-          width: "100%",
-          height: "100%",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-          flexDirection: "column",
-          gap: "6px"
-        }, children: assignment.status === "failed" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "24px" }, children: "⚠️" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", color: "var(--color-error)" }, children: "No asset found" })
-        ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "24px", opacity: 0.3 }, children: "🎬" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: "Pending" })
-        ] }) }),
-        isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-          position: "absolute",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          height: "3px",
-          background: "rgba(0,0,0,0.5)"
-        }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-          height: "100%",
-          width: `${Math.round(assignment.score * 100)}%`,
-          background: assignment.score > 0.6 ? "var(--color-success)" : assignment.score > 0.35 ? "var(--color-warning)" : "var(--color-error)",
-          transition: "width 0.5s ease"
-        } }) })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "12px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "6px" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }, children: [
-              "S",
-              String(assignment.sceneIndex).padStart(3, "0")
+          gap: "12px",
+          boxShadow: "var(--shadow-sm)",
+          position: "relative"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", fontSize: "11px", fontWeight: 700, color: "var(--text-brand)" }, children: [
+                "S",
+                String(assignment.sceneIndex).padStart(3, "0")
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }, children: [
+                "(",
+                assignment.sceneId,
+                ")"
+              ] }),
+              assignment.chapterTitle && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "10px",
+                    color: "var(--text-secondary)",
+                    background: "var(--bg-void)",
+                    padding: "2px 6px",
+                    borderRadius: "4px"
+                  },
+                  children: assignment.chapterTitle
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }, children: [
+                fmt(assignment.startTime),
+                "–",
+                fmt(assignment.endTime),
+                " (",
+                duration.toFixed(1),
+                "s)"
+              ] })
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-brand)" }, children: [
-              fmt(assignment.startTime),
-              "–",
-              fmt(assignment.endTime)
-            ] }),
-            statusBadge(assignment.status)
-          ] }),
-          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
-            providerBadge(asset.provider),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
-              Math.round(assignment.score * 100),
-              "%"
-            ] })
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-          fontSize: "11px",
-          color: "var(--text-secondary)",
-          lineHeight: 1.4,
-          marginBottom: "8px",
-          overflow: "hidden",
-          display: "-webkit-box",
-          WebkitLineClamp: 2,
-          WebkitBoxOrient: "vertical"
-        }, children: assignment.narrationText || "(no narration)" }),
-        isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-          fontSize: "10px",
-          color: "var(--text-muted)",
-          fontFamily: "var(--font-mono)",
-          marginBottom: "8px"
-        }, children: [
-          '🔍 "',
-          assignment.usedQuery,
-          '" · by ',
-          asset.creator
-        ] }),
-        (assignment.tierUsed || assignment.matchLabel) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 8 }, children: [
-          tierBadge(assignment.tierUsed),
-          matchLabelBadge(assignment.matchLabel),
-          assignment.chapterTitle && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", color: "var(--text-muted)", padding: "2px 6px", background: "var(--bg-overlay)", borderRadius: 4 }, children: assignment.chapterTitle.slice(0, 30) })
-        ] }),
-        assignment.scoreBreakdown && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-          fontSize: "9px",
-          color: "var(--text-muted)",
-          background: "var(--bg-void)",
-          borderRadius: 4,
-          padding: "6px 8px",
-          marginBottom: 8,
-          lineHeight: 1.6
-        }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "2px 12px" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-              "Local: ",
-              assignment.scoreBreakdown.localRelevance,
-              "/30"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-              "Global: ",
-              assignment.scoreBreakdown.globalSubjectRelevance,
-              "/25"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-              "Geo: ",
-              assignment.scoreBreakdown.geographyMatch,
-              "/15"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-              "Time: ",
-              assignment.scoreBreakdown.timePeriodMatch,
-              "/10"
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+              tierBadge(assignment.tierUsed),
+              matchLabelBadge(assignment.matchLabel),
+              matchLabelBadge(assignment.visualTruthLabel),
+              statusBadge(assignment.status),
+              approvalBadge(assignment.approvalStatus),
+              assignment.locked && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "9px",
+                    padding: "2px 6px",
+                    borderRadius: "999px",
+                    background: "rgba(251,191,36,0.15)",
+                    color: "var(--color-warning)",
+                    fontWeight: 700
+                  },
+                  children: "🔒 LOCKED"
+                }
+              ),
+              assignment.manualOverride && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "9px",
+                    padding: "2px 6px",
+                    borderRadius: "999px",
+                    background: "rgba(96,165,250,0.15)",
+                    color: "var(--color-info)",
+                    fontWeight: 700
+                  },
+                  children: "📤 USER MEDIA"
+                }
+              )
             ] })
           ] }),
-          assignment.scoreBreakdown.penaltyReasons?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#f87171", marginTop: 2 }, children: [
-            "⚠ ",
-            assignment.scoreBreakdown.penaltyReasons[0].slice(0, 50)
-          ] })
-        ] }),
-        assignment.status === "failed" && assignment.errorMessage && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--color-error)", marginBottom: "8px" }, children: assignment.errorMessage.slice(0, 80) }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "5px", flexWrap: "wrap" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "button",
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-void)", borderRadius: "var(--radius-sm)", padding: "10px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  fontSize: "11px",
+                  color: "var(--text-secondary)",
+                  lineHeight: 1.5,
+                  cursor: "pointer"
+                },
+                onClick: () => setNarrationExpanded(!narrationExpanded),
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "Narration:" }),
+                  " ",
+                  narrationExpanded || (assignment.narrationText?.length ?? 0) <= 140 ? assignment.narrationText || "(no narration)" : `${assignment.narrationText.slice(0, 140)}…`
+                ]
+              }
+            ),
+            assignment.visualIntent && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "4px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Visual Intent:" }),
+              " ",
+              assignment.visualIntent
+            ] }),
+            assignment.usedQuery && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "2px", fontFamily: "var(--font-mono)" }, children: [
+              '🔍 Search Query: "',
+              assignment.usedQuery,
+              '"'
+            ] })
+          ] }),
+          isAssigned && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
             {
-              className: "btn btn-secondary btn-sm",
-              onClick: () => setShowReplace(true),
-              disabled: replacing || assignment.locked,
-              style: { fontSize: "10px", padding: "4px 8px" },
-              title: assignment.locked ? "Unlock to replace" : "Search for different asset",
+              style: {
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                padding: "6px 10px",
+                background: "rgba(99,102,241,0.08)",
+                borderRadius: "var(--radius-sm)",
+                fontSize: "11px"
+              },
               children: [
-                replacing ? "⟳" : "🔄",
-                " Replace"
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, color: "var(--text-primary)" }, children: "Active Media:" }),
+                  providerBadge(asset.provider),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "var(--text-secondary)" }, children: [
+                    asset.mediaType.toUpperCase(),
+                    " ",
+                    asset.creator ? `· by ${asset.creator}` : ""
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontWeight: 700, color: assignment.score >= 70 ? "#22c55e" : "#f59e0b" }, children: [
+                  "Score: ",
+                  Math.round(assignment.score * (assignment.score <= 1 ? 100 : 1)),
+                  "/100"
+                ] }) })
               ]
             }
           ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-secondary)", marginBottom: "6px" }, children: [
+              "Candidate Storyboard ",
+              sceneCandidates.length > 0 ? `(${sceneCandidates.length} evaluated)` : ""
+            ] }),
+            sceneCandidates.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  padding: "12px",
+                  textAlign: "center",
+                  background: "var(--bg-void)",
+                  borderRadius: "var(--radius-sm)",
+                  fontSize: "11px",
+                  color: "var(--text-muted)"
+                },
+                children: "No candidate filmstrip available for this scene yet. Run Stock Search to generate ranked candidates."
+              }
+            ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))",
+                  gap: "10px"
+                },
+                children: sceneCandidates.slice(0, 3).map((candidate, idx) => {
+                  const isWinner = candidate.selected || idx === 0 && !candidate.rejected && !assignment.selectedCandidateId;
+                  const isCurrent = assignment.selectedCandidateId === candidate.candidateId || isWinner && !assignment.selectedCandidateId;
+                  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        background: "var(--bg-void)",
+                        border: `1px solid ${isCurrent ? "var(--color-brand)" : candidate.rejected ? "rgba(248,113,113,0.3)" : "var(--border-subtle)"}`,
+                        borderRadius: "var(--radius-sm)",
+                        overflow: "hidden",
+                        display: "flex",
+                        flexDirection: "column"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { height: "95px", background: "#090a0f", position: "relative", overflow: "hidden" }, children: [
+                          candidate.result.thumbnailUrl ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "img",
+                            {
+                              src: candidate.result.thumbnailUrl,
+                              alt: candidate.result.title,
+                              loading: "lazy",
+                              style: { width: "100%", height: "100%", objectFit: "cover" },
+                              onError: (e) => {
+                                e.target.style.display = "none";
+                              }
+                            }
+                          ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "div",
+                            {
+                              style: {
+                                width: "100%",
+                                height: "100%",
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                color: "var(--text-muted)",
+                                fontSize: "24px"
+                              },
+                              children: "🎬"
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "div",
+                            {
+                              style: {
+                                position: "absolute",
+                                top: 6,
+                                left: 6,
+                                background: idx === 0 ? "rgba(34,197,94,0.9)" : "rgba(0,0,0,0.75)",
+                                color: "#fff",
+                                fontSize: "9px",
+                                fontWeight: 700,
+                                padding: "1px 6px",
+                                borderRadius: "3px"
+                              },
+                              children: idx === 0 ? "1 · RECOMMENDED" : `Candidate ${idx + 1}`
+                            }
+                          ),
+                          isCurrent && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "div",
+                            {
+                              style: {
+                                position: "absolute",
+                                top: 6,
+                                right: 6,
+                                background: "var(--color-brand)",
+                                color: "#fff",
+                                fontSize: "9px",
+                                fontWeight: 700,
+                                padding: "1px 6px",
+                                borderRadius: "3px"
+                              },
+                              children: "✓ ACTIVE"
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                            "div",
+                            {
+                              style: {
+                                position: "absolute",
+                                bottom: 4,
+                                right: 6,
+                                background: "rgba(0,0,0,0.8)",
+                                color: candidate.score.totalScore >= 70 ? "#22c55e" : "#f59e0b",
+                                fontSize: "10px",
+                                fontWeight: 700,
+                                padding: "2px 5px",
+                                borderRadius: "3px"
+                              },
+                              children: [
+                                candidate.score.totalScore,
+                                "/100"
+                              ]
+                            }
+                          )
+                        ] }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "8px", flex: 1, display: "flex", flexDirection: "column", gap: "6px" }, children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "4px" }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "4px", alignItems: "center" }, children: [
+                              providerBadge(candidate.result.provider),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", color: "var(--text-muted)", textTransform: "uppercase" }, children: candidate.result.mediaType })
+                            ] }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "9px", color: "var(--text-muted)", fontFamily: "var(--font-mono)" }, children: [
+                              candidate.result.width,
+                              "x",
+                              candidate.result.height,
+                              candidate.result.durationSecs ? ` · ${candidate.result.durationSecs}s` : ""
+                            ] })
+                          ] }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "3px", fontSize: "8px", color: "var(--text-muted)" }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { background: "rgba(255,255,255,0.05)", padding: "1px 4px", borderRadius: "2px" }, children: [
+                              "Loc: ",
+                              candidate.score.localRelevance
+                            ] }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { background: "rgba(255,255,255,0.05)", padding: "1px 4px", borderRadius: "2px" }, children: [
+                              "Glob: ",
+                              candidate.score.globalContextFit
+                            ] }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { background: "rgba(255,255,255,0.05)", padding: "1px 4px", borderRadius: "2px" }, children: [
+                              "Mot: ",
+                              candidate.score.motionSuitability
+                            ] }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { background: "rgba(255,255,255,0.05)", padding: "1px 4px", borderRadius: "2px" }, children: [
+                              "Div: ",
+                              candidate.score.diversityScore
+                            ] }),
+                            candidate.score.reusePenalty < 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { background: "rgba(248,113,113,0.15)", color: "#f87171", padding: "1px 4px", borderRadius: "2px" }, children: [
+                              "Pen: ",
+                              candidate.score.reusePenalty
+                            ] })
+                          ] }),
+                          candidate.score.reasons[0] && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                            "div",
+                            {
+                              style: {
+                                fontSize: "9px",
+                                color: "#22c55e",
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                whiteSpace: "nowrap"
+                              },
+                              children: [
+                                "✓ ",
+                                candidate.score.reasons[0]
+                              ]
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "4px", marginTop: "auto", paddingTop: "4px" }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                type: "button",
+                                className: "btn btn-sm btn-secondary",
+                                style: { fontSize: "9px", padding: "3px 6px", flex: 1 },
+                                onClick: () => setPreviewCandidate(candidate),
+                                children: "👁 Preview"
+                              }
+                            ),
+                            !isCurrent && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                type: "button",
+                                className: "btn btn-sm btn-secondary",
+                                style: { fontSize: "9px", padding: "3px 6px", flex: 1, borderColor: "var(--color-brand)" },
+                                onClick: () => handleSelect(candidate.candidateId),
+                                children: "✓ Select"
+                              }
+                            ),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx(
+                              "button",
+                              {
+                                type: "button",
+                                className: "btn btn-sm",
+                                style: {
+                                  fontSize: "9px",
+                                  padding: "3px 6px",
+                                  flex: 1,
+                                  background: candidate.approved ? "rgba(34,197,94,0.2)" : "var(--bg-overlay)",
+                                  color: candidate.approved ? "#22c55e" : "var(--text-muted)"
+                                },
+                                onClick: () => handleApprove(candidate.candidateId),
+                                children: candidate.approved ? "★ Done" : "★ Approve"
+                              }
+                            )
+                          ] })
+                        ] })
+                      ]
+                    },
+                    candidate.candidateId || idx
+                  );
+                })
+              }
+            )
+          ] }),
+          showReasons && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
             {
-              className: "btn btn-sm",
-              onClick: handleLock,
-              disabled: locking,
               style: {
+                padding: "10px",
+                background: "var(--bg-void)",
+                borderRadius: "var(--radius-sm)",
                 fontSize: "10px",
-                padding: "4px 8px",
-                background: assignment.locked ? "rgba(251,191,36,0.1)" : "var(--bg-overlay)",
-                border: `1px solid ${assignment.locked ? "rgba(251,191,36,0.4)" : "var(--border-subtle)"}`,
-                color: assignment.locked ? "var(--color-warning)" : "var(--text-muted)",
-                cursor: "pointer",
-                borderRadius: "var(--radius-sm)"
+                lineHeight: 1.6
               },
-              title: assignment.locked ? "Unlock this scene" : "Lock this scene to prevent auto-replacement",
-              children: assignment.locked ? "🔓 Unlock" : "🔒 Lock"
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 700, color: "var(--text-primary)", marginBottom: "4px" }, children: "Scoring & Diversity Explanation:" }),
+                sceneCandidates[0]?.score?.reasons?.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#22c55e" }, children: [
+                  "✓ ",
+                  r2
+                ] }, i)),
+                sceneCandidates[0]?.score?.rejectionReasons?.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#f87171" }, children: [
+                  "⚠ ",
+                  r2
+                ] }, i))
+              ]
             }
           ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
+          actionError && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
             {
-              className: "btn btn-sm",
-              onClick: () => onUpload(assignment.sceneIndex),
               style: {
-                fontSize: "10px",
-                padding: "4px 8px",
-                background: "var(--bg-overlay)",
-                border: "1px solid var(--border-subtle)",
-                color: "var(--text-muted)",
-                cursor: "pointer",
-                borderRadius: "var(--radius-sm)"
+                padding: "8px 12px",
+                background: "rgba(248,113,113,0.12)",
+                border: "1px solid rgba(248,113,113,0.3)",
+                borderRadius: "var(--radius-sm)",
+                fontSize: "11px",
+                color: "var(--color-error)"
               },
-              title: "Upload your own media for this scene",
-              children: "📤 Upload"
+              children: [
+                "⚠ ",
+                actionError
+              ]
             }
-          )
-        ] })
-      ] })
-    ] }),
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", alignItems: "center", marginTop: "2px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-sm btn-secondary",
+                onClick: () => handleApprove(),
+                style: {
+                  fontSize: "10px",
+                  padding: "4px 10px",
+                  background: assignment.approvalStatus === "approved" ? "rgba(34,197,94,0.15)" : void 0,
+                  color: assignment.approvalStatus === "approved" ? "#22c55e" : void 0
+                },
+                children: assignment.approvalStatus === "approved" ? "★ Approved" : "★ Approve Scene"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                className: "btn btn-secondary btn-sm",
+                onClick: () => setShowReplace(true),
+                disabled: replacing || assignment.locked,
+                style: { fontSize: "10px", padding: "4px 10px" },
+                children: [
+                  replacing ? "⟳" : "🔄",
+                  " Replace"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-sm",
+                onClick: handleLock,
+                disabled: locking,
+                style: {
+                  fontSize: "10px",
+                  padding: "4px 10px",
+                  background: assignment.locked ? "rgba(251,191,36,0.1)" : "var(--bg-overlay)",
+                  border: `1px solid ${assignment.locked ? "rgba(251,191,36,0.4)" : "var(--border-subtle)"}`,
+                  color: assignment.locked ? "var(--color-warning)" : "var(--text-muted)",
+                  cursor: "pointer",
+                  borderRadius: "var(--radius-sm)"
+                },
+                children: assignment.locked ? "🔓 Unlock" : "🔒 Lock"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-sm",
+                onClick: () => onUpload(assignment.sceneIndex),
+                style: {
+                  fontSize: "10px",
+                  padding: "4px 10px",
+                  background: "var(--bg-overlay)",
+                  border: "1px solid var(--border-subtle)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  borderRadius: "var(--radius-sm)"
+                },
+                children: "📤 Upload Media"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-sm",
+                onClick: () => setShowReasons(!showReasons),
+                style: {
+                  fontSize: "10px",
+                  padding: "4px 10px",
+                  background: "transparent",
+                  border: "1px solid var(--border-subtle)",
+                  color: "var(--text-muted)",
+                  cursor: "pointer",
+                  borderRadius: "var(--radius-sm)"
+                },
+                children: showReasons ? "Hide Breakdown" : "ℹ View Reasons"
+              }
+            )
+          ] })
+        ]
+      }
+    ),
     showReplace && /* @__PURE__ */ jsxRuntimeExports.jsx(
       ReplaceModal,
       {
         assignment,
         onConfirm: handleReplace,
         onClose: () => setShowReplace(false)
+      }
+    ),
+    previewCandidate && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      PreviewModal,
+      {
+        candidate: previewCandidate,
+        onClose: () => setPreviewCandidate(null)
       }
     )
   ] });
@@ -10266,12 +11817,27 @@ function StockPage({
   const [ctxExpanded, setCtxExpanded] = reactExports.useState(false);
   const [analyzingCtx, setAnalyzingCtx] = reactExports.useState(false);
   const [ctxProgress, setCtxProgress] = reactExports.useState(null);
-  reactExports.useEffect(() => {
-    window.api.stock.getContext(project.projectDir).then((ctx) => {
+  const [filter, setFilter] = reactExports.useState("all");
+  const [candidatesStore, setCandidatesStore] = reactExports.useState({});
+  const [storyboardSummary, setStoryboardSummary] = reactExports.useState(null);
+  const loadData = async () => {
+    try {
+      const [ctx, cands, summary] = await Promise.all([
+        window.api.stock.getContext(project.projectDir),
+        window.api.stock.getCandidates({ projectDir: project.projectDir }),
+        window.api.stock.getStoryboardSummary(project.projectDir)
+      ]);
       if (ctx) setGlobalCtx(ctx);
-    }).catch(() => {
-    });
-  }, [project.projectDir]);
+      if (cands && typeof cands === "object") {
+        setCandidatesStore(cands);
+      }
+      if (summary) setStoryboardSummary(summary);
+    } catch {
+    }
+  };
+  reactExports.useEffect(() => {
+    void loadData();
+  }, [project.projectDir, review]);
   async function handleAnalyzeContext() {
     setAnalyzingCtx(true);
     setCtxProgress("Starting global context analysis...");
@@ -10303,9 +11869,33 @@ function StockPage({
       unsub();
     }
   }
-  const assigned = review?.assignedScenes ?? 0;
-  const total = review?.totalScenes ?? 0;
-  const coverage = total > 0 ? Math.round(assigned / total * 100) : 0;
+  const assignments = review?.assignments ?? [];
+  const filteredAssignments = reactExports.useMemo(() => {
+    switch (filter) {
+      case "needs_review":
+        return assignments.filter((a) => a.approvalStatus === "needs_review" || a.status === "failed" || a.score < 50);
+      case "low_score":
+        return assignments.filter((a) => a.score < 60);
+      case "missing":
+        return assignments.filter((a) => !a.asset || a.status === "failed");
+      case "locked":
+        return assignments.filter((a) => a.locked);
+      case "manual":
+        return assignments.filter((a) => a.manualOverride);
+      case "approved":
+        return assignments.filter((a) => a.approvalStatus === "approved");
+      case "all":
+      default:
+        return assignments;
+    }
+  }, [assignments, filter]);
+  const total = assignments.length;
+  const assigned = storyboardSummary?.assignedScenes ?? review?.assignedScenes ?? 0;
+  const approved = storyboardSummary?.approvedScenes ?? assignments.filter((a) => a.approvalStatus === "approved").length;
+  const needsReview = storyboardSummary?.needsReviewScenes ?? assignments.filter((a) => a.approvalStatus === "needs_review" || a.status === "failed" || a.score < 50).length;
+  const missing = storyboardSummary?.missingScenes ?? assignments.filter((a) => !a.asset || a.status === "failed").length;
+  const avgScore = storyboardSummary?.averageScore ?? (total > 0 ? Math.round(assignments.reduce((acc, a) => acc + (a.score > 1 ? a.score : a.score * 100), 0) / total) : 0);
+  const dedupAvoided = storyboardSummary?.duplicateAssetsAvoided ?? 0;
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", children: [
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { borderColor: globalCtx ? "rgba(99,102,241,0.35)" : "var(--border-subtle)" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", style: { cursor: "pointer" }, onClick: () => setCtxExpanded((e) => !e), children: [
@@ -10337,204 +11927,189 @@ function StockPage({
           /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: 12 }, children: ctxExpanded ? "▲" : "▼" })
         ] })
       ] }),
-      ctxProgress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-        padding: "8px 20px",
-        fontSize: "11px",
-        color: ctxProgress.startsWith("⚠") ? "#f59e0b" : "var(--text-secondary)",
-        background: "var(--bg-overlay)",
-        borderTop: "1px solid var(--border-subtle)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between"
-      }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: ctxProgress }),
-        !analyzingCtx && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            onClick: () => setCtxProgress(null),
-            style: { background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "13px", padding: "0 4px" },
-            title: "Dismiss",
-            children: "✕"
-          }
-        )
-      ] }),
-      ctxExpanded && globalCtx && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }, children: [
+      ctxProgress && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          style: {
+            padding: "8px 16px",
+            fontSize: "11px",
+            color: ctxProgress.startsWith("⚠") ? "var(--color-warning)" : "var(--text-brand)",
+            background: "var(--bg-void)",
+            borderBottom: "1px solid var(--border-subtle)"
+          },
+          children: ctxProgress
+        }
+      ),
+      ctxExpanded && globalCtx && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { fontSize: "11px", display: "flex", flexDirection: "column", gap: 10 }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "PRIMARY SUBJECT" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-primary)", marginBottom: 12 }, children: globalCtx.primarySubject }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "CENTRAL THESIS" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12, lineHeight: 1.5 }, children: globalCtx.centralThesis }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "LOCATION" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: 12 }, children: [globalCtx.geography?.primaryCountry, globalCtx.geography?.primaryRegion, ...globalCtx.geography?.secondaryLocations ?? []].filter(Boolean).join(", ") || "Not specified" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: 4 }, children: "TIME PERIOD" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: globalCtx.timeContext?.primaryPeriod || "Contemporary" })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "Subject:" }),
+          " ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-secondary)" }, children: globalCtx.primarySubject })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#22c55e", marginBottom: 4 }, children: "✓ EXACT TOPIC ANCHORS" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }, children: globalCtx.exactTopicAnchors.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(34,197,94,0.1)", color: "#22c55e", padding: "2px 8px", borderRadius: 999 }, children: a }, a)) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#60a5fa", marginBottom: 4 }, children: "~ CONTEXTUAL ANCHORS" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }, children: globalCtx.contextualAnchors.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(96,165,250,0.1)", color: "#60a5fa", padding: "2px 8px", borderRadius: 999 }, children: a }, a)) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#f87171", marginBottom: 4 }, children: "✗ FORBIDDEN SUBSTITUTIONS" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 12 }, children: globalCtx.forbiddenSubstitutions.map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(248,113,113,0.1)", color: "#f87171", padding: "2px 8px", borderRadius: 999 }, children: f2 }, f2)) }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#f59e0b", marginBottom: 4 }, children: "⊘ NEGATIVE KEYWORDS" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4 }, children: globalCtx.negativeKeywords.map((n2) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "rgba(245,158,11,0.1)", color: "#f59e0b", padding: "2px 8px", borderRadius: 999 }, children: n2 }, n2)) })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "Central Thesis:" }),
+          " ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-secondary)" }, children: globalCtx.centralThesis })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "Geography:" }),
+          " ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-secondary)" }, children: [globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(", ") })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "Time Period:" }),
+          " ",
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "var(--text-secondary)" }, children: [
+            globalCtx.timeContext.primaryPeriod,
+            globalCtx.timeContext.historicalPeriods.length > 0 ? ` (${globalCtx.timeContext.historicalPeriods.join(", ")})` : ""
+          ] })
+        ] }),
+        globalCtx.forbiddenSubstitutions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#f87171" }, children: "Forbidden Substitutions:" }),
+          " ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)" }, children: globalCtx.forbiddenSubstitutions.join(" · ") })
         ] })
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm3 2h6v4H7V5zm8 8v2h1v-2h-1zm-2-2H7v4h6v-4zm2 0h1V9h-1v2zm1-4V5h-1v2h1zM5 5v2H4V5h1zm-1 4h1v2H4V9zm1 4H4v2h1v-2z", clipRule: "evenodd" }) }) }),
-          "Stock Media Engine"
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "12px" }, children: [
-          review && total > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-              width: "80px",
-              height: "6px",
-              borderRadius: "999px",
-              background: "var(--bg-overlay)",
-              overflow: "hidden"
-            }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-              height: "100%",
-              width: `${coverage}%`,
-              background: coverage === 100 ? "var(--color-success)" : coverage > 60 ? "var(--color-warning)" : "var(--color-info)",
-              transition: "width 0.4s ease"
-            } }) }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: [
-              assigned,
-              "/",
-              total,
-              " scenes (",
-              coverage,
-              "%)"
-            ] })
+    total > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: "10px" }, children: [
+      { label: "Total Scenes", value: total, icon: "🎬", color: "var(--text-primary)" },
+      { label: "Assigned", value: assigned, icon: "✓", color: "var(--color-success)" },
+      { label: "Approved", value: approved, icon: "★", color: "#22c55e" },
+      { label: "Needs Review", value: needsReview, icon: "⚠", color: needsReview > 0 ? "#f59e0b" : "var(--text-muted)" },
+      { label: "Missing", value: missing, icon: "✗", color: missing > 0 ? "#f87171" : "var(--text-muted)" },
+      { label: "Avg Score", value: `${avgScore}%`, icon: "📊", color: "var(--text-brand)" },
+      { label: "Dedup Avoided", value: dedupAvoided, icon: "🛡️", color: "var(--color-info)" }
+    ].map((s) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          background: "var(--bg-elevated)",
+          border: "1px solid var(--border-subtle)",
+          borderRadius: "var(--radius-md)",
+          padding: "12px 14px",
+          textAlign: "center"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "16px", marginBottom: "2px" }, children: s.icon }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "18px", fontWeight: 800, color: s.color, fontFamily: "var(--font-mono)" }, children: s.value }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.04em" }, children: s.label })
+        ]
+      },
+      s.label
+    )) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: "panel",
+        style: {
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          flexWrap: "wrap",
+          gap: "12px",
+          padding: "12px 16px"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-muted)", marginRight: "4px" }, children: "FILTER:" }),
+            [
+              { id: "all", label: `All (${total})` },
+              { id: "needs_review", label: `Needs Review (${needsReview})` },
+              { id: "low_score", label: "Low Score (<60)" },
+              { id: "missing", label: `Missing (${missing})` },
+              { id: "locked", label: "Locked" },
+              { id: "manual", label: "Manual" },
+              { id: "approved", label: `Approved (${approved})` }
+            ].map((btn) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                className: "btn btn-sm",
+                style: {
+                  fontSize: "10px",
+                  padding: "4px 10px",
+                  borderRadius: "999px",
+                  background: filter === btn.id ? "var(--color-brand)" : "var(--bg-void)",
+                  color: filter === btn.id ? "#fff" : "var(--text-secondary)",
+                  border: `1px solid ${filter === btn.id ? "var(--color-brand)" : "var(--border-subtle)"}`
+                },
+                onClick: () => setFilter(btn.id),
+                children: btn.label
+              },
+              btn.id
+            ))
           ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
-              className: `btn ${isRunning ? "btn-secondary" : "btn-primary"}`,
+              className: "btn btn-primary",
+              style: { fontSize: "11px", padding: "6px 16px" },
               onClick: onRun,
               disabled: isRunning,
-              id: "btn-run-stock-search",
-              style: { minWidth: "160px" },
-              children: isRunning ? "⟳ Running…" : review ? "🔄 Re-run Search" : "🎬 Run Stock Search"
+              children: isRunning ? "⟳ Searching Stock..." : "⚡ Run Stock Search"
             }
-          )
+          ) })
+        ]
+      }
+    ),
+    isRunning && progress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { padding: "16px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "8px", fontSize: "11px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-primary)" }, children: progress.message }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "var(--text-brand)", fontFamily: "var(--font-mono)" }, children: [
+          Math.round(progress.progress * 100),
+          "%"
         ] })
       ] }),
-      isRunning && progress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "0 20px 16px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: progress.message }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--text-brand)" }, children: [
-            Math.round(progress.progress * 100),
-            "%"
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: "4px", background: "var(--bg-overlay)", borderRadius: "999px", overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-          height: "100%",
-          width: `${Math.round(progress.progress * 100)}%`,
-          background: "var(--brand-gradient)",
-          transition: "width 0.3s ease",
-          borderRadius: "999px"
-        } }) })
-      ] })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: "6px", background: "var(--bg-void)", borderRadius: "3px", overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          style: {
+            height: "100%",
+            width: `${Math.round(progress.progress * 100)}%`,
+            background: "var(--color-brand)",
+            transition: "width 0.3s ease"
+          }
+        }
+      ) })
     ] }),
     !review && !isRunning && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { textAlign: "center", padding: "48px 24px" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "48px", marginBottom: "16px" }, children: "🎬" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "8px" }, children: "Automatic Stock Media Engine" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.8, maxWidth: "480px", margin: "0 auto 24px" }, children: [
-        "After running AI Planning, click ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "8px" }, children: "Candidate Stock Engine & Storyboard Review" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.8, maxWidth: "520px", margin: "0 auto 24px" }, children: [
+        "Click ",
         /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Run Stock Search" }),
-        " to automatically find, rank, and download the best matching stock footage from Pexels and Pixabay for each scene in your edit plan."
+        " to evaluate Pexels and Pixabay candidates, rank them on 8 quality dimensions, avoid duplicate repetitive clips, and inspect them in the Storyboard Filmstrip."
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", justifyContent: "center", gap: "20px", flexWrap: "wrap" }, children: [
-        { icon: "🔍", label: "AI-generated queries", desc: "Short, visual search terms" },
-        { icon: "📊", label: "Multi-factor ranking", desc: "Relevance + quality + fit" },
-        { icon: "⬇️", label: "Auto download", desc: "Saved to project/assets/stock/" },
-        { icon: "🔒", label: "User review", desc: "Replace, lock, or upload own" }
-      ].map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-        background: "var(--bg-elevated)",
-        border: "1px solid var(--border-subtle)",
-        borderRadius: "var(--radius-md)",
-        padding: "16px 20px",
-        width: "160px",
-        textAlign: "center"
-      }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "24px", marginBottom: "8px" }, children: f2.icon }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "4px" }, children: f2.label }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: f2.desc })
-      ] }, f2.label)) }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "24px", fontSize: "11px", color: "var(--text-muted)" }, children: [
-        "Make sure Pexels and/or Pixabay API keys are configured in",
-        " ",
-        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-brand)" }, children: "Settings → API Providers" })
-      ] })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { className: "btn btn-primary", onClick: onRun, disabled: isRunning, children: "⚡ Run Stock Search" })
     ] }),
-    review && total > 0 && !isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }, children: [
-      { label: "Total Scenes", value: total, icon: "🎬" },
-      {
-        label: "Assigned",
-        value: assigned,
-        icon: "✅",
-        color: "var(--color-success)"
-      },
-      {
-        label: "Failed",
-        value: total - assigned,
-        icon: "⚠️",
-        color: total - assigned > 0 ? "var(--color-error)" : "var(--text-muted)"
-      },
-      { label: "Coverage", value: `${coverage}%`, icon: "📊" }
-    ].map((s) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", style: { textAlign: "center" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "20px", marginBottom: "4px" }, children: s.icon }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", style: { color: s.color }, children: s.value }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: s.label })
-    ] }, s.label)) }),
-    review && review.assignments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title", children: "Scene Assignments" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
-          review.assignments.length,
-          " scenes · click Replace to find alternatives"
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-        display: "grid",
-        gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))",
-        gap: "14px"
-      }, children: review.assignments.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx(
-        SceneCard,
+    assignments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: "14px" }, children: filteredAssignments.map((a) => {
+      const key = a.sceneId || `scene_${a.sceneIndex}`;
+      const cands = candidatesStore[key] || candidatesStore[String(a.sceneIndex)] || [];
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        StoryboardSceneCard,
         {
           assignment: a,
           projectDir: project.projectDir,
+          candidates: cands,
           onReplace,
           onLock,
-          onUpload
+          onUpload,
+          onCandidateSelected: async () => {
+            await loadData();
+            onLoad();
+          },
+          onCandidateApproved: async () => {
+            await loadData();
+            onLoad();
+          }
         },
-        a.sceneId
-      )) }) })
-    ] }),
-    review && review.assignments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { background: "var(--bg-elevated)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", lineHeight: 1.7 }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Provider chain:" }),
+        a.sceneId || a.sceneIndex
+      );
+    }) }),
+    assignments.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { background: "var(--bg-elevated)", padding: "12px 16px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", lineHeight: 1.7 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Workflow note:" }),
       " ",
-      "Pexels Video → Pixabay Video → Pexels Photo → Pixabay Photo → Manual Review",
-      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "Downloads:" }),
-      " ",
-      "Saved to ",
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("code", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-brand)" }, children: [
-        project.projectDir,
-        "/assets/stock/"
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-secondary)" }, children: "License:" }),
-      " ",
-      "Pexels and Pixabay assets are free for commercial use under their respective licenses."
-    ] }) }) }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
-        @keyframes spin { to { transform: rotate(360deg); } }
-      ` })
+      "Candidate review is optional. If you proceed directly to render, top-ranked candidates (Rank 1) are used automatically."
+    ] }) })
   ] });
 }
 function ProgressBar({ value }) {
@@ -12209,6 +13784,37 @@ function App() {
       loadCachedTranscript(project.projectDir);
     }
   }, [project?.projectDir]);
+  reactExports.useEffect(() => {
+    if (!project?.projectDir) return;
+    let lastNavigatedStage = "";
+    const unsubscribe = window.api.pipeline.onProgress((state) => {
+      if (state.projectDir !== project.projectDir || state.overallStatus !== "running") {
+        return;
+      }
+      const stage = state.currentStage;
+      if (stage && stage !== lastNavigatedStage) {
+        lastNavigatedStage = stage;
+        const stageToPage = {
+          transcribing: "transcribe",
+          planning: "planning",
+          captions: "captions",
+          "global-context": "stock",
+          "stock-search": "stock",
+          "audio-search": "audio",
+          preflight: "render",
+          rendering: "render",
+          completed: "render"
+        };
+        const target = stageToPage[stage];
+        if (target) {
+          setCurrentPage(target);
+        }
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [project?.projectDir]);
   function navigate(page) {
     if (page !== "home" && !project) return;
     setCurrentPage(page);
@@ -12268,7 +13874,8 @@ function App() {
             project,
             onUpdateInputs: updateInputs,
             onScanMedia: handleScanMedia,
-            isScanning
+            isScanning,
+            onNavigate: (p2) => navigate(p2)
           }
         ),
         currentPage === "transcribe" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
