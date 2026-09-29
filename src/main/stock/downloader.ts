@@ -100,7 +100,7 @@ export async function downloadAsset(
   const filename = `S${String(sceneIndex).padStart(3, '0')}_${candidate.provider}_${candidate.assetId}${ext}`
   const destPath = join(stockDir, filename)
 
-  logger.info(`[Downloader] Downloading ${candidate.assetId} → ${filename}`)
+  logger.info(`[Downloader] Downloading ${candidate.assetId} -> ${filename}`)
 
   let fileSizeBytes: number | undefined
   try {

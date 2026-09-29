@@ -16,6 +16,19 @@ import * as path from 'path'
 import { GoogleGenAI } from '@google/genai'
 import { logger } from '../logger'
 import { normalizeApiKey } from '../utils/api-key'
+import {
+  normalizePreferredTextModel,
+  classifyGeminiErrorKind,
+  DEPRECATED_TEXT_MODELS
+} from '../utils/gemini-fallback'
+import { getAvailableModelsForTask } from '../ai/model-router'
+import {
+  recordModelRateLimit,
+  recordModelUnavailable,
+  recordModelNotFound,
+  recordModelSuccess,
+  recordModelFailure
+} from '../ai/model-health'
 import type {
   CaptionPlan,
   CaptionPhrase,
@@ -148,7 +161,7 @@ function buildFallbackCaptionPlan(
   transcript: TranscriptResult,
   scenes: SceneRef[]
 ): CaptionPlan {
-  logger.warn('[CaptionPlanner] Dùng fallback thuật toán — caption sẽ cơ bản, nên rà lại thủ công')
+  logger.warn('[CaptionPlanner] Using algorithmic fallback -- basic captions generated, please review manually')
 
   const activeRanges: CaptionActiveRange[] = []
   const phrases: CaptionPhrase[] = []
@@ -319,29 +332,29 @@ export interface CaptionPlannerParams {
 export async function generateCaptionPlan(params: CaptionPlannerParams): Promise<CaptionPlan> {
   const { projectDir, apiKey, forceRegenerate = false } = params
   const progress = params.onProgress ?? (() => {})
-  const modelId = params.model ?? 'gemini-3.8-flash'
+  const modelId = params.model ?? 'gemini-3.5-flash'
 
   const captionPlanPath = path.join(projectDir, 'analysis', 'caption-plan.json')
 
   // Nếu đã có plan và không bắt buộc tạo lại → trả về cache
   if (!forceRegenerate && fs.existsSync(captionPlanPath)) {
-    logger.info('[CaptionPlanner] Dùng caption-plan.json đã cache')
+    logger.info('[CaptionPlanner] Using cached caption-plan.json')
     return JSON.parse(fs.readFileSync(captionPlanPath, 'utf-8')) as CaptionPlan
   }
 
   // Load transcript
-  progress('Đang tải transcript...', 0.05)
+  progress('Loading transcript...', 0.05)
   const transcriptPath = path.join(projectDir, 'analysis', 'transcript.json')
   if (!fs.existsSync(transcriptPath)) {
-    throw new Error('Chưa có transcript.json — chạy bước Transcription trước')
+    throw new Error('Missing transcript.json -- please run Transcription step first')
   }
   const transcript: TranscriptResult = JSON.parse(fs.readFileSync(transcriptPath, 'utf-8'))
 
   // Load master-edit-plan
-  progress('Đang tải edit plan...', 0.10)
+  progress('Loading edit plan...', 0.10)
   const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
   if (!fs.existsSync(planPath)) {
-    throw new Error('Chưa có master-edit-plan.json — chạy bước Planning trước')
+    throw new Error('Missing master-edit-plan.json -- please run Planning step first')
   }
   const editPlan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
 
@@ -368,9 +381,8 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
   logger.info(`[CaptionPlanner] ${scenes.length} scenes, ${transcript.segments.length} segments`)
   const allWords = transcript.segments.flatMap(seg => seg.words ?? [])
 
-  // Thử Gemini với fallback chain
-  const fallbackModels = [modelId, 'gemini-3.8-flash', 'gemini-3.6-flash', 'gemini-2.5-flash', 'gemini-1.5-flash-latest']
-    .filter((v, i, a) => a.indexOf(v) === i)
+  // Thử Gemini với model router
+  const fallbackModels = getAvailableModelsForTask('caption_planning', modelId)
 
   let plan: CaptionPlan | null = null
 
@@ -379,8 +391,8 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
     try {
       progress(
         attempt === 0
-          ? `Đang gửi lên Gemini (${currentModel})...`
-          : `Thử lại với ${currentModel}...`,
+          ? `Sending caption planning request to Gemini (${currentModel})...`
+          : `Retrying with ${currentModel}...`,
         0.20 + attempt * 0.10
       )
 
@@ -404,36 +416,48 @@ export async function generateCaptionPlan(params: CaptionPlannerParams): Promise
 
       // Validate tối thiểu
       if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
-        throw new Error('Response JSON thiếu phrases hoặc activeRanges')
+        throw new Error('Response JSON missing phrases or activeRanges')
       }
 
       // Sanitize: clamp timestamps, dedup IDs, sort, ensure hook range
-      progress('Đang validate kết quả Gemini...', 0.60 + attempt * 0.05)
+      progress('Validating Gemini caption plan...', 0.60 + attempt * 0.05)
       sanitizePlan(parsed, transcript.duration)
 
       plan = parsed
-      logger.info(`[CaptionPlanner] Gemini thành công với model ${currentModel}, ${plan.phrases.length} phrases`)
+      recordModelSuccess(currentModel)
+      logger.info(`[CaptionPlanner] Gemini succeeded with ${currentModel}, ${plan.phrases.length} phrases`)
       break
     } catch (err) {
-      logger.warn(`[CaptionPlanner] ${currentModel} thất bại: ${String(err)}`)
+      const { kind, message } = classifyGeminiErrorKind(err)
+      recordModelFailure(currentModel, kind)
+
+      if (kind === 'MODEL_NOT_FOUND') {
+        const nextModel = fallbackModels[attempt + 1]
+        logger.warn(`[CaptionPlanner] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? 'rule-based fallback'}.`)
+      } else if (kind === 'RATE_LIMIT' || kind === 'SERVICE_UNAVAILABLE') {
+        const nextModel = fallbackModels[attempt + 1]
+        logger.warn(`[CaptionPlanner] ${currentModel} failed (${kind}): ${message.slice(0, 100)}. Switching immediately to ${nextModel ?? 'fallback'}...`)
+      } else {
+        logger.warn(`[CaptionPlanner] ${currentModel} failed: ${message.slice(0, 100)}`)
+      }
     }
   }
 
   // Fallback thuật toán nếu tất cả model đều lỗi
   if (!plan) {
-    progress('Gemini không khả dụng — dùng fallback thuật toán...', 0.70)
+    progress('Gemini AI unavailable -- using algorithmic fallback...', 0.70)
     plan = buildFallbackCaptionPlan(transcript, scenes)
   }
 
   // Lưu file (atomic: write temp then rename để tránh corrupt)
-  progress('Đang lưu caption-plan.json...', 0.90)
+  progress('Saving caption-plan.json...', 0.90)
   fs.mkdirSync(path.join(projectDir, 'analysis'), { recursive: true })
   const tmpPath = captionPlanPath + '.tmp'
   fs.writeFileSync(tmpPath, JSON.stringify(plan, null, 2), 'utf-8')
   fs.renameSync(tmpPath, captionPlanPath)
 
-  logger.info(`[CaptionPlanner] Đã lưu ${plan.phrases.length} phrases vào caption-plan.json`)
-  progress('Hoàn thành!', 1.0)
+  logger.info(`[CaptionPlanner] Saved ${plan.phrases.length} phrases to caption-plan.json`)
+  progress('Complete!', 1.0)
 
   return plan
 }
@@ -459,7 +483,7 @@ function sanitizePlan(plan: CaptionPlan, sourceDuration: number): void {
     p.endTime = Math.max(p.startTime + 0.1, Math.min(p.endTime, dur))
     if (!p.id || seenIds.has(p.id)) {
       p.id = `cap_${String(++autoIdx).padStart(4, '0')}`
-      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed → ${p.id}`)
+      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed -> ${p.id}`)
     }
     seenIds.add(p.id)
   }
@@ -467,7 +491,7 @@ function sanitizePlan(plan: CaptionPlan, sourceDuration: number): void {
   // 2. Remove invalid ranges
   const validRanges = plan.activeRanges.filter(r => {
     const valid = r.endTime > r.startTime && r.startTime >= 0 && r.endTime <= dur + 1
-    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime}→${r.endTime}`)
+    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime} -> ${r.endTime}`)
     return valid
   })
   plan.activeRanges = validRanges
@@ -482,15 +506,15 @@ function sanitizePlan(plan: CaptionPlan, sourceDuration: number): void {
   plan.activeRanges.sort((a, b) => a.startTime - b.startTime)
   plan.phrases.sort((a, b) => a.startTime - b.startTime)
 
-  // 5. Ensure hook range covers 0→hookEnd
+  // 5. Ensure hook range covers 0 -> hookEnd
   const hookEnd = Math.min(HOOK_WINDOW_SECONDS, dur)
   const hookRange = plan.activeRanges.find(r => r.reason === 'hook')
   if (!hookRange) {
-    logger.warn('[CaptionPlanner] Gemini missing hook range — adding default 0→' + hookEnd)
+    logger.warn('[CaptionPlanner] Gemini missing hook range -- adding default 0 -> ' + hookEnd)
     plan.activeRanges.unshift({ startTime: 0, endTime: hookEnd, reason: 'hook' })
     plan.activeRanges.sort((a, b) => a.startTime - b.startTime)
   } else if (hookRange.endTime < hookEnd - 0.5) {
-    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s — extending to ${hookEnd}s`)
+    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s -- extending to ${hookEnd}s`)
     hookRange.endTime = hookEnd
   }
 }
@@ -516,5 +540,5 @@ export function saveCaptionPlan(projectDir: string, plan: CaptionPlan): void {
   const planPath = path.join(projectDir, 'analysis', 'caption-plan.json')
   fs.mkdirSync(path.dirname(planPath), { recursive: true })
   fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
-  logger.info(`[CaptionPlanner] Đã lưu thủ công caption-plan.json (${plan.phrases.length} phrases)`)
+  logger.info(`[CaptionPlanner] Saved caption-plan.json manually (${plan.phrases.length} phrases)`)
 }

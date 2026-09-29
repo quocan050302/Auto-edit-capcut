@@ -3,7 +3,10 @@ import { join } from 'path'
 import * as winston from 'winston'
 import * as fs from 'fs'
 
-const logsDir = join(app.getPath('userData'), 'logs')
+const logsDir = join(
+  app && typeof app.getPath === 'function' ? app.getPath('userData') : process.cwd(),
+  'logs'
+)
 if (!fs.existsSync(logsDir)) {
   fs.mkdirSync(logsDir, { recursive: true })
 }
@@ -13,7 +16,11 @@ const logFormat = winston.format.combine(
   winston.format.errors({ stack: true }),
   winston.format.printf(({ level, message, timestamp, ...meta }) => {
     const metaStr = Object.keys(meta).length ? ` ${JSON.stringify(meta)}` : ''
-    return `[${timestamp}] ${level.toUpperCase()}: ${message}${metaStr}`
+    const safeMsg = String(message)
+      .replace(/—/g, '-')
+      .replace(/→/g, '->')
+      .replace(/…/g, '...')
+    return `[${timestamp}] ${level.toUpperCase()}: ${safeMsg}${metaStr}`
   })
 )
 

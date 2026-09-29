@@ -112,7 +112,7 @@ export async function openverseSearchAudio(
     return []
   }
 
-  logger.info(`[Openverse] "${query}" → ${data.result_count ?? 0} results`)
+  logger.info(`[Openverse] "${query}" -> ${data.result_count ?? 0} results`)
 
   return (data.results ?? []).map((item): AudioSearchResult => ({
     assetId: item.id,

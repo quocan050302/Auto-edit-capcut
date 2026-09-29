@@ -1,6 +1,7 @@
 import { GoogleGenAI } from '@google/genai'
 import type { ApiKeyVerifyResult } from '../../../shared/types'
 import { logger } from '../logger'
+import { normalizePreferredTextModel } from './gemini-fallback'
 
 /**
  * Normalizes an API key:
@@ -203,9 +204,11 @@ export async function verifyGeminiApiKey(
       break
     }
 
-    if (model) {
+    const testModel = normalizePreferredTextModel(model)
+
+    if (testModel) {
       try {
-        await ai.models.get({ model })
+        await ai.models.get({ model: testModel })
       } catch (modelErr: unknown) {
         const classified = classifyGeminiError(modelErr)
         if (classified.status === 'MODEL_UNAVAILABLE') {
@@ -221,7 +224,7 @@ export async function verifyGeminiApiKey(
       valid: true,
       status: 'VERIFIED',
       message: 'API key hợp lệ và đã sẵn sàng sử dụng.',
-      modelTested: model ?? (firstModelName ? firstModelName.replace(/^models\//, '') : 'gemini-3.8-flash')
+      modelTested: testModel || (firstModelName ? firstModelName.replace(/^models\//, '') : 'gemini-3.8-flash')
     }
   } catch (err: unknown) {
     logger.warn(`[GeminiKeyVerification] Failed: ${err}`)

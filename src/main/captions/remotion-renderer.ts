@@ -16,7 +16,7 @@ import * as fs from 'fs'
 import { bundle } from '@remotion/bundler'
 import { renderMedia, selectComposition } from '@remotion/renderer'
 import { logger } from '../logger'
-import type { CaptionPlan } from '../../../shared/types'
+import type { CaptionPlan, VisualGrammarDecision } from '../../../shared/types'
 import type { ProofVisual } from '../retention/retention-types'
 
 // Cache bundle URL để tránh re-bundle mỗi lần render
@@ -28,11 +28,11 @@ let cachedBundleUrl: string | null = null
  */
 async function getBundle(onProgress?: (pct: number) => void): Promise<string> {
   if (cachedBundleUrl) {
-    logger.info('[RemotionRenderer] Dùng bundle cache')
+    logger.info('[RemotionRenderer] Using bundle cache')
     return cachedBundleUrl
   }
 
-  logger.info('[RemotionRenderer] Đang bundle Remotion composition...')
+  logger.info('[RemotionRenderer] Bundling Remotion composition...')
 
   const entryPoint = path.join(__dirname, '../../src/remotion/index.ts')
 
@@ -51,6 +51,7 @@ async function getBundle(onProgress?: (pct: number) => void): Promise<string> {
 export interface RemotionRenderOptions {
   captionPlan: CaptionPlan
   proofVisuals?: ProofVisual[]          // optional — absent = caption-only (backward compat)
+  visualGrammar?: VisualGrammarDecision[] // optional Visual Scene Grammar
   videoDurationInSeconds: number
   outputPath: string        // vd: assets/captions/overlay.webm
   fps?: number
@@ -69,6 +70,7 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
   const {
     captionPlan,
     proofVisuals,
+    visualGrammar,
     videoDurationInSeconds,
     outputPath,
     fps = 30,
@@ -87,14 +89,17 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
   const durationInFrames = Math.ceil(videoDurationInSeconds * fps)
 
   logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)`)
-  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}×${resolution.height}`)
-  logger.info(`[RemotionRenderer] Phrases: ${captionPlan.phrases.length}`)
+  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}x${resolution.height}`)
+  logger.info(`[RemotionRenderer] Phrases: ${captionPlan?.phrases?.length ?? 0}`)
   logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`)
+  logger.info(`[RemotionRenderer] VisualGrammar: ${visualGrammar?.length ?? 0}`)
 
   const inputProps = {
-    captionPlan,
+    captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
     proofVisuals: proofVisuals ?? [],
+    visualGrammar: visualGrammar ?? []
   }
+
 
   const composition = await selectComposition({
     serveUrl: bundleUrl,
@@ -122,7 +127,7 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
     },
   })
 
-  logger.info(`[RemotionRenderer] Overlay xong: ${outputPath}`)
+  logger.info(`[RemotionRenderer] Overlay complete: ${outputPath}`)
 }
 
 /**
@@ -130,5 +135,5 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
  */
 export function clearBundleCache(): void {
   cachedBundleUrl = null
-  logger.info('[RemotionRenderer] Bundle cache đã xoá')
+  logger.info('[RemotionRenderer] Bundle cache cleared')
 }

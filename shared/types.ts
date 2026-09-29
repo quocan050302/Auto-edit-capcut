@@ -386,6 +386,144 @@ export interface StockSceneAssignment {
   searchPlan?: StockSearchPlan
   rejectedCandidates?: Array<{ title: string; score: number; reason: string }>
   tierUsed?: 'A' | 'B' | 'C' | 'D'
+  // Production Intelligence extension fields
+  candidates?: StockCandidate[]
+  selectedCandidateId?: string
+  approvalStatus?: 'auto_selected' | 'approved' | 'needs_review'
+  reviewedAt?: string
+}
+
+// ─── Production Intelligence Types ──────────────────────────────────────────
+
+export interface ProductionIntelligenceSettings {
+  enabled: boolean
+  candidateRankingEnabled: boolean
+  storyboardReviewEnabled: boolean
+  visualSceneGrammarEnabled: boolean
+  renderQaEnabled: boolean
+  strictMissingMedia: boolean
+  candidatesPerScene: number
+  maxVisualGrammarDensity: number
+}
+
+export const DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS: ProductionIntelligenceSettings = {
+  enabled: true,
+  candidateRankingEnabled: true,
+  storyboardReviewEnabled: true,
+  visualSceneGrammarEnabled: true,
+  renderQaEnabled: true,
+  strictMissingMedia: false,
+  candidatesPerScene: 3,
+  maxVisualGrammarDensity: 0.25
+}
+
+export interface StockCandidateScore {
+  localRelevance: number        // 0..30
+  globalContextFit: number      // 0..20
+  chapterContextFit: number     // 0..10
+  technicalQuality: number      // 0..10
+  motionSuitability: number     // 0..10
+  aspectRatioFit: number        // 0..5
+  diversityScore: number        // 0..15
+  reusePenalty: number          // -30..0
+  totalScore: number            // 0..100
+  reasons: string[]
+  rejectionReasons: string[]
+}
+
+export interface StockCandidate {
+  candidateId: string
+  sceneId: string
+  sceneIndex: number
+  result: StockSearchResult
+  score: StockCandidateScore
+  rank: number
+  selected: boolean
+  approved: boolean
+  rejected: boolean
+}
+
+export interface StoryboardSummary {
+  totalScenes: number
+  assignedScenes: number
+  approvedScenes: number
+  needsReviewScenes: number
+  missingScenes: number
+  averageRelevanceScore: number
+  duplicateAssetsAvoided: number
+}
+
+// ─── Visual Scene Grammar Types ─────────────────────────────────────────────
+
+export type VisualGrammarType =
+  | 'stock_video'
+  | 'stock_image'
+  | 'photo_parallax'
+  | 'stat_card'
+  | 'quote_card'
+  | 'date_card'
+  | 'location_card'
+  | 'comparison_card'
+  | 'chapter_title'
+  | 'document_card'
+
+export interface VisualGrammarDecision {
+  sceneId: string
+  sceneIndex: number
+  type: VisualGrammarType
+  confidence: number
+  reason: string
+  primaryText?: string
+  secondaryText?: string
+  sourceNarration?: string
+  startOffset: number
+  duration: number
+  position?: string
+  enabled: boolean
+}
+
+export interface VisualGrammarPlan {
+  version: number
+  generatedAt: string
+  decisions: VisualGrammarDecision[]
+}
+
+// ─── Render QA Types ────────────────────────────────────────────────────────
+
+export type QaSeverity = 'info' | 'warning' | 'fatal'
+
+export interface RenderQaIssue {
+  id: string
+  stage: 'preflight' | 'postflight'
+  severity: QaSeverity
+  category:
+    | 'plan'
+    | 'media'
+    | 'audio'
+    | 'caption'
+    | 'overlay'
+    | 'transition'
+    | 'output'
+  sceneId?: string
+  sceneIndex?: number
+  message: string
+  suggestion?: string
+  details?: Record<string, unknown>
+}
+
+export interface RenderQaReport {
+  version: number
+  generatedAt: string
+  status: 'passed' | 'passed_with_warnings' | 'failed'
+  expectedDuration: number
+  actualDuration?: number
+  totalScenes: number
+  resolvedScenes: number
+  missingScenes: number
+  fatalCount: number
+  warningCount: number
+  infoCount: number
+  issues: RenderQaIssue[]
 }
 
 /** Parameters passed to the stock engine */
@@ -628,7 +766,22 @@ export const IPC_CHANNELS = {
   CAPTIONS_PREVIEW_RENDER: 'captions:preview-render',
   CAPTIONS_PROGRESS: 'captions:progress',
   // Remotion caption overlay render progress (separate from main FFmpeg render)
-  CAPTIONS_RENDER_PROGRESS: 'captions:render-progress'
+  CAPTIONS_RENDER_PROGRESS: 'captions:render-progress',
+
+  // Production Intelligence — Storyboard & Candidates
+  STOCK_CANDIDATES_GET: 'stock:candidates-get',
+  STOCK_CANDIDATE_SELECT: 'stock:candidate-select',
+  STOCK_CANDIDATE_APPROVE: 'stock:candidate-approve',
+  STOCK_STORYBOARD_SUMMARY_GET: 'stock:storyboard-summary-get',
+
+  // Production Intelligence — Settings
+  PRODUCTION_SETTINGS_GET: 'production-settings:get',
+  PRODUCTION_SETTINGS_SET: 'production-settings:set',
+
+  // Production Intelligence — Render QA
+  RENDER_PREFLIGHT_RUN: 'render:preflight-run',
+  RENDER_QA_GET: 'render:qa-get',
+  RENDER_QA_PROGRESS: 'render:qa-progress'
 } as const
 
 // ─── Master Edit Plan Retention Extension ─────────────────────────────────────

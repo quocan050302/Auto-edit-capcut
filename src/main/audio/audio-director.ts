@@ -304,7 +304,7 @@ export async function runAudioDirector(
       const best = pickBest(results)
       if (best) {
         musicResult = { ...best, searchQuery: q }
-        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → "${q}" (music category): ${best.title}`)
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (music category): ${best.title}`)
         break
       }
     }
@@ -316,7 +316,7 @@ export async function runAudioDirector(
         const best = pickBest(results)
         if (best) {
           musicResult = { ...best, searchQuery: q }
-          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → "${q}" (no category): ${best.title}`)
+          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (no category): ${best.title}`)
           break
         }
       }
@@ -328,7 +328,7 @@ export async function runAudioDirector(
       const best = pickBest(results)
       if (best) {
         musicResult = { ...best, searchQuery: 'ambient background music' }
-        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" → fallback generic: ${best.title}`)
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> fallback generic: ${best.title}`)
       }
     }
 
@@ -398,7 +398,7 @@ export async function runAudioDirector(
       const localPath = await downloadAudio(sec.musicCandidate!, audioDir)
       sec.approvedLocalPath = localPath
       sec.approvedFilename = basename(localPath)
-      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} → ${localPath}`)
+      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} -> ${localPath}`)
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err)
       logger.warn(`[AudioDirector] Download failed for ${sec.sectionLabel}: ${msg}`)

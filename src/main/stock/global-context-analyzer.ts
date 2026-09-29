@@ -4,6 +4,19 @@ import { join } from "path"
 import { createHash } from "crypto"
 import { logger } from "../logger"
 import { normalizeApiKey } from "../utils/api-key"
+import {
+  normalizePreferredTextModel,
+  classifyGeminiErrorKind,
+  DEPRECATED_TEXT_MODELS
+} from "../utils/gemini-fallback"
+import { getAvailableModelsForTask } from "../ai/model-router"
+import {
+  recordModelRateLimit,
+  recordModelUnavailable,
+  recordModelNotFound,
+  recordModelSuccess,
+  recordModelFailure
+} from "../ai/model-health"
 import type { GlobalScriptContext, TranscriptResult } from "../../../shared/types"
 
 export type ProgressCallback = (msg: string, pct: number) => void
@@ -72,7 +85,7 @@ export async function analyzeGlobalContext(params: {
 }): Promise<GlobalScriptContext> {
   const { projectDir, apiKey, forceRegenerate = false } = params
   const progress = params.onProgress ?? (() => {})
-  const modelId = params.model ?? "gemini-3.8-flash"
+  const modelId = params.model ?? "gemini-3.5-flash"
 
   const fullText = params.scriptText
     ?? params.transcript?.fullText
@@ -106,6 +119,7 @@ export async function analyzeGlobalContext(params: {
 
   let rawJson = ""
   let aiError: string | null = null
+  let successfulModel = ""
 
   const cleanKey = normalizeApiKey(apiKey)
   if (cleanKey.length > 0) {
@@ -113,42 +127,79 @@ export async function analyzeGlobalContext(params: {
     try {
       const ai = new GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } })
       const prompt = buildGeminiPrompt(fullText, projectId, language)
-      const fallbackModels = [modelId, "gemini-3.8-flash", "gemini-3.6-flash", "gemini-2.5-flash", "gemini-1.5-flash-latest"].filter((v, i, a) => a.indexOf(v) === i)
-      const maxRetries = 3
+      const rawModel = params.model
+      if (rawModel && DEPRECATED_TEXT_MODELS.has(rawModel)) {
+        logger.warn(`[GeminiModel] Saved model ${rawModel} is unavailable for this account.`)
+        logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(rawModel)}.`)
+      }
+      const fallbackModels = getAvailableModelsForTask("global_context", rawModel)
 
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        const currentModel = fallbackModels[Math.min(attempt - 1, fallbackModels.length - 1)]
-        try {
-          progress(attempt === 1
-            ? `Sending full script to Gemini (${currentModel}) for global analysis...`
-            : `Retry ${attempt}/${maxRetries} (${currentModel})...`, 0.05 + attempt * 0.15)
-          const response = await ai.models.generateContent({
-            model: currentModel,
-            contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-            config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
-          })
-          rawJson = response.text ?? ""
-          if (rawJson) break
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err)
-          aiError = msg
-          logger.warn(`[GlobalContext] Gemini attempt ${attempt} failed: ${msg}`)
+      for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+        const currentModel = fallbackModels[mIdx]
+        let retryCount = 0
+        const maxRetries = 1
 
-          // If authentication error or invalid key, stop retrying immediately
-          if (msg.includes("401") || msg.includes("UNAUTHENTICATED") || msg.includes("API_KEY") || msg.includes("ACCESS_TOKEN_TYPE_UNSUPPORTED")) {
-            break
-          }
-
-          const overloaded = msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE")
-          if (overloaded && attempt < maxRetries) {
-            const wait = Math.min(attempt * 2, 6)
-            for (let s = wait; s > 0; s--) {
-              progress(`Gemini overloaded, retrying in ${s}s...`, 0.20)
-              await new Promise((r) => setTimeout(r, 1000))
+        while (retryCount <= maxRetries) {
+          try {
+            progress(
+              retryCount === 0
+                ? `Sending full script to Gemini (${currentModel}) for global analysis...`
+                : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
+              0.05 + mIdx * 0.15 + retryCount * 0.05
+            )
+            const response = await ai.models.generateContent({
+              model: currentModel,
+              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+            })
+            rawJson = response.text ?? ""
+            if (rawJson) {
+              successfulModel = currentModel
+              recordModelSuccess(currentModel)
+              break
             }
-            continue
+          } catch (err: unknown) {
+            const { kind, message } = classifyGeminiErrorKind(err)
+            recordModelFailure(currentModel, kind)
+            aiError = message
+
+            if (kind === "MODEL_NOT_FOUND") {
+              const nextModel = fallbackModels[mIdx + 1]
+              logger.warn(`[GeminiModel] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`)
+              break
+            }
+
+            if (kind === "AUTH_ERROR") {
+              logger.error(`[GlobalContext] Gemini authentication error. Check API key.`)
+              mIdx = fallbackModels.length
+              break
+            }
+
+            if (kind === "BAD_REQUEST") {
+              logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`)
+              break
+            }
+
+            if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
+              const nextModel = fallbackModels[mIdx + 1]
+              logger.warn(`[GlobalContext] Gemini ${currentModel} encountered ${kind}. Circuit breaker tripped. Switching immediately to ${nextModel ?? "fallback"}...`)
+              break
+            }
+
+            retryCount++
+            if (retryCount <= maxRetries) {
+              const wait = Math.pow(2, retryCount)
+              progress(`Gemini overloaded, retrying in ${wait}s...`, 0.20)
+              await new Promise((r) => setTimeout(r, wait * 1000 + Math.floor(Math.random() * 500)))
+              continue
+            } else {
+              logger.warn(`[GlobalContext] Gemini ${currentModel} exhausted retries, switching model...`)
+              break
+            }
           }
         }
+
+        if (rawJson) break
       }
     } catch (outerErr: unknown) {
       aiError = outerErr instanceof Error ? outerErr.message : String(outerErr)
@@ -163,7 +214,7 @@ export async function analyzeGlobalContext(params: {
     try {
       const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim()
       ctx = JSON.parse(clean) as GlobalScriptContext
-      ctx.modelUsed = modelId
+      ctx.modelUsed = successfulModel || modelId
     } catch {
       logger.warn("[GlobalContext] JSON parse failed, using fallback context")
       ctx = buildFallbackContext(projectId, language, fullText)
@@ -171,7 +222,7 @@ export async function analyzeGlobalContext(params: {
     }
   } else {
     logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`)
-    progress("Gemini AI không phản hồi hoặc key lỗi. Tự động tạo phân tích bối cảnh từ kịch bản...", 0.70)
+    progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.70)
     ctx = buildFallbackContext(projectId, language, fullText)
     ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic"
   }
@@ -183,7 +234,7 @@ export async function analyzeGlobalContext(params: {
   fs.mkdirSync(join(projectDir, "analysis"), { recursive: true })
   fs.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8")
   logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed })
-  progress(`Global context ready — "${ctx.primarySubject}"`, 1.0)
+  progress(`Global context ready - "${ctx.primarySubject}"`, 1.0)
   return ctx
 }
 
@@ -254,7 +305,7 @@ function buildFallbackContext(projectId: string, language: string, text: string)
     documentaryAngle: "observational documentary",
     targetAudience: "general audience",
     geography: {
-      primaryCountry: "Not specified",
+      primaryCountry: "",
       secondaryLocations: []
     },
     timeContext: {

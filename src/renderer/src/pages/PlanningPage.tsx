@@ -352,6 +352,16 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
     })
     // Check key
     window.api.config.get('geminiApiKey').then((k) => setHasKey(!!k && k.trim().length > 10))
+    // Load preferred model and normalize
+    window.api.config.get('preferredModel').then((m) => {
+      if (m) {
+        if (m === 'gemini-2.5-flash' || m === 'gemini-1.5-flash' || m === 'gemini-1.5-flash-latest') {
+          setSelectedModel('gemini-3.8-flash')
+        } else {
+          setSelectedModel(m)
+        }
+      }
+    })
   }, [project.projectDir])
 
   async function handleGenerate(): Promise<void> {
@@ -582,7 +592,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
             Click <strong>Generate Edit Plan</strong> để AI phân tích transcript và tạo timeline.
             <br />
             <span style={{ fontSize: '11px', marginTop: '4px', display: 'block' }}>
-              Dùng Gemini 1.5 Flash — mất khoảng 30–60 giây
+              Dùng Gemini Flash - mất khoảng 30-60 giây
             </span>
           </div>
         </div>
@@ -594,8 +604,7 @@ export function PlanningPage({ project }: PlanningPageProps): React.ReactElement
 }
 
 const GEMINI_MODELS = [
-  { id: 'gemini-3.8-flash',               label: 'gemini-3.8-flash  (latest — recommended)' },
-  { id: 'gemini-3.6-flash',               label: 'gemini-3.6-flash' },
-  { id: 'gemini-2.5-flash', label: 'gemini-2.5-flash-preview' },
-  { id: 'gemini-1.5-flash-latest',        label: 'gemini-1.5-flash-latest (legacy)' },
+  { id: 'gemini-3.8-flash',      label: 'gemini-3.8-flash (latest - recommended)' },
+  { id: 'gemini-3.5-flash',      label: 'gemini-3.5-flash' },
+  { id: 'gemini-3.5-flash-lite', label: 'gemini-3.5-flash-lite' },
 ]

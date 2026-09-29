@@ -4,7 +4,7 @@ import * as path from 'path'
 import { spawn } from 'child_process'
 import { logger } from './logger'
 import { renderCaptionsOverlay } from './captions/remotion-renderer'
-import type { AudioPlan, CaptionPlan, RenderTransitionSettings } from '../../shared/types'
+import type { AudioPlan, CaptionPlan, RenderTransitionSettings, VisualGrammarDecision, RenderQaReport } from '../../shared/types'
 import {
   concatSceneClipsWithTransitions,
   validateTransitionSettings,
@@ -20,6 +20,15 @@ import { cropToZoomFilter } from './retention/visual-beat-engine'
 import { runRetentionQA } from './retention/retention-qa'
 import type { RetentionSettings, VisualBeat, ProofVisual } from './retention/retention-types'
 import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
+import { loadProductionSettings } from './production-intelligence/production-settings'
+import {
+  generateVisualGrammarPlan,
+  loadVisualGrammarPlan
+} from './production-intelligence/visual-grammar-engine'
+
+
+import { runRenderPreflight } from './qa/render-preflight'
+import { runRenderPostflight } from './qa/render-postflight'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -39,7 +48,10 @@ export interface RenderResult {
   outputPath: string
   durationSecs: number
   fileSizeBytes: number
+  preflightReport?: RenderQaReport
+  qaReport?: RenderQaReport
 }
+
 
 interface ScenePlan {
   sceneIndex: number
@@ -254,7 +266,7 @@ export interface ResolvedSceneMedia {
     | 'missing'
 }
 
-function resolveSceneMediaWithSource(
+export function resolveSceneMediaWithSource(
   scene: ScenePlan,
   mediaIndex: Array<{ filename: string; path: string }>,
   projectDir: string
@@ -585,8 +597,25 @@ export async function renderVideo(params: {
     const totalScenes = scenes.length
     progress(`Processing ${totalScenes} scenes...`, 0.06)
 
+    // ── 3a. Production Intelligence: Preflight QA ────────────────────────────
+    progress('Running preflight QA checks...', 0.07)
+    const preflightReport = await runRenderPreflight({
+      projectDir,
+      voiceoverPath,
+      captionPlan: params.captionPlan,
+      resolution,
+      fps
+    })
+
+    if (preflightReport.status === 'failed') {
+      const fatalIssues = preflightReport.issues.filter((i) => i.severity === 'fatal')
+      const msg = fatalIssues.map((i) => i.message).join('; ')
+      throw new Error(`Render Preflight QA failed: ${msg}`)
+    }
+
     // ── 3b. Media Preflight ──────────────────────────────────────────────────
     progress('Validating scene media...', 0.08)
+
     const preflightResults: ResolvedSceneMedia[] = []
     let resolvedMediaCount = 0
     let missingMediaCount = 0
@@ -1043,7 +1072,7 @@ export async function renderVideo(params: {
       )
 
       const filterComplex = filterParts.join(';')
-      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}…`)
+      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`)
 
       await ffmpegRun([
         ...ffArgs,
@@ -1068,32 +1097,69 @@ export async function renderVideo(params: {
       `[RENDER] Audio mixing output validated: path=${workingOutputPath} sizeBytes=${fs.statSync(workingOutputPath).size} duration=${audioProbe.duration.toFixed(3)}s`
     )
 
-    // ── 7b. Render Dynamic Kinetic Captions via Remotion (nếu được bật) ────────
-    if (params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0) {
-      // ── 7b-i. Build proof visuals list với absolute timing ───────────────────
-      let proofVisuals: ProofVisual[] = []
-
-      if (retentionSettings.proofVisualsEnabled) {
+    // ── 7b. Render Overlays (Captions, Proof Visuals, Visual Scene Grammar) ───
+    let proofVisuals: ProofVisual[] = []
+    if (retentionSettings.proofVisualsEnabled) {
+      try {
+        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan)
+        logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`)
+        // Save debug plan (non-blocking)
         try {
-          proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan)
-          logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`)
-          // Save debug plan (non-blocking)
-          try {
-            const pvPlanPath = path.join(projectDir, 'analysis', 'proof-visual-plan.json')
-            fs.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map(pv => ({
-              type: pv.type, text: pv.primaryText,
-              startTime: pv.absoluteStartTime, endTime: pv.absoluteEndTime,
-              position: pv.position
-            })), null, 2), 'utf-8')
-          } catch { /* non-blocking */ }
-        } catch (err) {
-          logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`)
-          proofVisuals = []
-        }
+          const pvPlanPath = path.join(projectDir, 'analysis', 'proof-visual-plan.json')
+          fs.writeFileSync(pvPlanPath, JSON.stringify(proofVisuals.map(pv => ({
+            type: pv.type, text: pv.primaryText,
+            startTime: pv.absoluteStartTime, endTime: pv.absoluteEndTime,
+            position: pv.position
+          })), null, 2), 'utf-8')
+        } catch { /* non-blocking */ }
+      } catch (err) {
+        logger.warn(`[RENDER] ProofVisual build failed (non-blocking): ${String(err)}`)
+        proofVisuals = []
       }
+    }
 
+    const prodSettings = loadProductionSettings(projectDir)
+    let visualGrammar: Array<VisualGrammarDecision & { absoluteStartTime?: number; absoluteEndTime?: number }> = []
+
+    if (prodSettings.enabled && prodSettings.visualSceneGrammarEnabled) {
+      try {
+        let vgPlan = loadVisualGrammarPlan(projectDir)
+        if (!vgPlan) {
+          vgPlan = generateVisualGrammarPlan({
+            projectDir,
+            editPlan: plan,
+            captionPlan: params.captionPlan,
+            proofVisuals,
+            settings: prodSettings
+          })
+        }
+
+        visualGrammar = (vgPlan.decisions ?? [])
+          .filter((d) => d.enabled)
+          .map((d) => {
+            const sc = scenes.find((s) => s.sceneIndex === d.sceneIndex)
+            const sceneStart = sc?.startTime ?? 0
+            const absStart = sceneStart + d.startOffset
+            return {
+              ...d,
+              absoluteStartTime: absStart,
+              absoluteEndTime: absStart + d.duration
+            }
+          })
+        logger.info(`[RENDER] VisualSceneGrammar: ${visualGrammar.length} decisions active for overlay`)
+      } catch (vgErr) {
+        logger.warn(`[RENDER] VisualGrammar processing failed (non-blocking): ${String(vgErr)}`)
+        visualGrammar = []
+      }
+    }
+
+    const hasCaptions = !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0)
+    const hasProofVisuals = proofVisuals.length > 0
+    const hasVisualGrammar = visualGrammar.length > 0
+
+    if (hasCaptions || hasProofVisuals || hasVisualGrammar) {
       // ── 7b-ii. Render lớp overlay bằng Remotion ─────────────────────────────
-      progress('Rendering caption overlay (Remotion)...', 0.91)
+      progress('Rendering video overlay (Remotion)...', 0.91)
       const captionsDir = path.join(projectDir, 'assets', 'captions')
       fs.mkdirSync(captionsDir, { recursive: true })
       const overlayPath = path.join(captionsDir, 'overlay.mp4')  // H264 green screen
@@ -1101,8 +1167,9 @@ export async function renderVideo(params: {
       const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0)
 
       await renderCaptionsOverlay({
-        captionPlan: params.captionPlan,
+        captionPlan: params.captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
         proofVisuals,
+        visualGrammar,
         videoDurationInSeconds: videoDurationSecs,
         outputPath: overlayPath,
         fps,
@@ -1111,16 +1178,17 @@ export async function renderVideo(params: {
           progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 0.002)
         },
         onRenderProgress: (pct) => {
-          progress(`Rendering captions... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01)
+          progress(`Rendering overlays... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01)
         },
       })
+
 
       // ── 7b-iii. Merge overlay lên video gốc bằng FFmpeg ─────────────────────
       progress('Compositing captions overlay...', 0.93)
       const captionedPath = path.join(outputDir, '_captioned_tmp.mp4')
       safeUnlink(captionedPath)
 
-      logger.info(`[RENDER] Overlay merge: ${overlayPath} → ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
+      logger.info(`[RENDER] Overlay merge: ${overlayPath} -> ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`)
 
       await ffmpegRun([
         '-y',
@@ -1160,7 +1228,28 @@ export async function renderVideo(params: {
       logger.info('[RENDER] Caption overlay composited')
     }
 
-    // ── 8. Final output validation & publishing ────────────────────────────────
+    // ── 8. Production Intelligence: Postflight QA ─────────────────────────────
+    let qaReport: RenderQaReport | undefined
+    if (prodSettings.enabled && prodSettings.renderQaEnabled) {
+      progress('Running postflight QA inspection...', 0.95)
+      qaReport = await runRenderPostflight({
+        projectDir,
+        workingOutputPath,
+        expectedDuration: scenes.reduce((a, s) => a + s.duration, 0),
+        totalScenes: scenes.length,
+        hasVoiceover: hasAudio,
+        targetResolution: resolution,
+        targetFps: fps
+      })
+
+      if (qaReport.status === 'failed') {
+        const fatalIssues = qaReport.issues.filter((i) => i.severity === 'fatal')
+        const msg = fatalIssues.map((i) => i.message).join('; ')
+        throw new Error(`Render Postflight QA failed: ${msg}`)
+      }
+    }
+
+    // ── 8b. Final output validation & publishing ────────────────────────────────
     progress('Finalizing output...', 0.96)
     if (!fs.existsSync(workingOutputPath) || fs.statSync(workingOutputPath).size === 0) {
       throw new Error('Final render working file is missing or empty.')
@@ -1199,7 +1288,14 @@ export async function renderVideo(params: {
       fileSizeMB: (stat.size / 1024 / 1024).toFixed(2)
     })
 
-    return { outputPath, durationSecs, fileSizeBytes: stat.size }
+    return {
+      outputPath,
+      durationSecs,
+      fileSizeBytes: stat.size,
+      preflightReport,
+      qaReport
+    }
+
 
   } catch (err) {
     if (workingOutputPath) safeUnlink(workingOutputPath)
@@ -1254,20 +1350,20 @@ function buildProofVisualList(
     const normText = pv.primaryText.replace(/[\s,.$%]/g, '').toUpperCase()
     const dedupKey = `${normText}_${Math.floor(absStart / 15)}`
     if (seenKeys.has(dedupKey)) {
-      logger.debug(`[ProofVisual] scene ${i} skipped — duplicate: ${pv.primaryText}`)
+      logger.debug(`[ProofVisual] scene ${i} skipped -- duplicate: ${pv.primaryText}`)
       continue
     }
 
     // Dedup vs DataNote captions
     if (isDuplicateOfDataNote(pv.primaryText, captionPlan, absStart, absEnd)) {
-      logger.info(`[ProofVisual] scene ${i} skipped — duplicate DataNote: ${pv.primaryText}`)
+      logger.info(`[ProofVisual] scene ${i} skipped -- duplicate DataNote: ${pv.primaryText}`)
       continue
     }
 
     // Check caption state at this timestamp
     const captionState = getCaptionStateAt(absStart, absEnd, captionPlan)
     if (captionState === 'strong') {
-      logger.info(`[ProofVisual] scene ${i} skipped — overlaps big_statement caption`)
+      logger.info(`[ProofVisual] scene ${i} skipped -- overlaps big_statement caption`)
       continue
     }
 
@@ -1283,7 +1379,7 @@ function buildProofVisualList(
       position: resolvedPosition,
     })
 
-    logger.info(`[ProofVisual] scene ${i} → ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`)
+    logger.info(`[ProofVisual] scene ${i} -> ${pv.type}: "${pv.primaryText}" @${absStart.toFixed(1)}s pos=${resolvedPosition}`)
   }
 
   return result
