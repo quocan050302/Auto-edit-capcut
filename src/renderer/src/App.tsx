@@ -67,6 +67,43 @@ export default function App(): React.ReactElement {
     }
   }, [project?.projectDir])
 
+  // Auto-navigation when pipeline stage changes
+  useEffect(() => {
+    if (!project?.projectDir) return
+
+    let lastNavigatedStage = ''
+
+    const unsubscribe = window.api.pipeline.onProgress((state) => {
+      if (state.projectDir !== project.projectDir || state.overallStatus !== 'running') {
+        return
+      }
+
+      const stage = state.currentStage
+      if (stage && stage !== lastNavigatedStage) {
+        lastNavigatedStage = stage
+        const stageToPage: Partial<Record<string, Page>> = {
+          transcribing: 'transcribe',
+          planning: 'planning',
+          captions: 'captions',
+          'global-context': 'stock',
+          'stock-search': 'stock',
+          'audio-search': 'audio',
+          preflight: 'render',
+          rendering: 'render',
+          completed: 'render'
+        }
+        const target = stageToPage[stage]
+        if (target) {
+          setCurrentPage(target)
+        }
+      }
+    })
+
+    return () => {
+      unsubscribe()
+    }
+  }, [project?.projectDir])
+
   function navigate(page: Page): void {
     if (page !== 'home' && !project) return
     setCurrentPage(page)
@@ -137,6 +174,7 @@ export default function App(): React.ReactElement {
               onUpdateInputs={updateInputs}
               onScanMedia={handleScanMedia}
               isScanning={isScanning}
+              onNavigate={(p) => navigate(p as Page)}
             />
           )}
 
