@@ -10,6 +10,7 @@ import { registerRenderHandlers } from './ipc/render.ipc'
 import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
+import { registerPipelineHandlers } from './ipc/pipeline.ipc'
 import { logger } from './logger'
 
 function createWindow(): BrowserWindow {
@@ -66,6 +67,7 @@ app.whenReady().then(() => {
   registerStockHandlers(ipcMain)
   registerAudioHandlers(ipcMain)
   registerCaptionHandlers(ipcMain)
+  registerPipelineHandlers(ipcMain)
 
   const mainWindow = createWindow()
 

@@ -19,7 +19,10 @@ import type {
   StockCandidate,
   StoryboardSummary,
   ProductionIntelligenceSettings,
-  RenderQaReport
+  RenderQaReport,
+  AutoPipelineOptions,
+  AutoPipelineState,
+  PipelineStage
 } from '../../shared/types'
 
 
@@ -312,6 +315,40 @@ const api = {
 
     setSettings: (params: { projectDir?: string; settings: Partial<ProductionIntelligenceSettings> }): Promise<ProductionIntelligenceSettings> =>
       ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_SET, params)
+  },
+
+  pipeline: {
+    start: (options: AutoPipelineOptions): Promise<{ success: boolean; runId?: string; state?: AutoPipelineState; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_START, options),
+
+    resume: (projectDir: string): Promise<{ success: boolean; runId?: string; state?: AutoPipelineState; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RESUME, { projectDir }),
+
+    cancel: (runId: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_CANCEL, { runId }),
+
+    getStatus: (projectDir: string): Promise<AutoPipelineState | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_STATUS_GET, { projectDir }),
+
+    retryStage: (projectDir: string, stage: PipelineStage): Promise<{ success: boolean; runId?: string; state?: AutoPipelineState; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RETRY_STAGE, { projectDir, stage }),
+
+    runFromStage: (
+      projectDir: string,
+      stage: PipelineStage,
+      options?: Partial<AutoPipelineOptions>
+    ): Promise<{ success: boolean; runId?: string; state?: AutoPipelineState; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RUN_FROM_STAGE, { projectDir, stage, options }),
+
+    onProgress: (callback: (state: AutoPipelineState) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, state: AutoPipelineState): void => {
+        callback(state)
+      }
+      ipcRenderer.on(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
+      return () => {
+        ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
+      }
+    }
   }
 }
 
