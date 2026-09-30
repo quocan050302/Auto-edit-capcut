@@ -1,17 +1,19 @@
-import React from 'react'
 import type {
   AutoPipelineState,
   PipelineStage,
   StageStatus
 } from '../../../../shared/types'
+import { getPageForPipelineStage } from '../navigation/pipelineStageNavigation'
 
-interface PipelineTimelineProps {
+export interface PipelineTimelineProps {
   pipelineState: AutoPipelineState
   isRunning: boolean
   onCancel: () => void
   onResume: () => void
   onRetryStage: (stage: PipelineStage) => void
-  onNavigateToStage: (stage: PipelineStage) => void
+  onNavigateToStage?: (stage: PipelineStage) => void
+  onInspectStage?: (stage: PipelineStage) => void
+  onOpenFullWorkspace?: (stage: PipelineStage) => void
 }
 
 interface StageMeta {
@@ -48,7 +50,9 @@ export function PipelineTimeline({
   onCancel,
   onResume,
   onRetryStage,
-  onNavigateToStage
+  onNavigateToStage,
+  onInspectStage,
+  onOpenFullWorkspace
 }: PipelineTimelineProps): React.ReactElement {
   const { stages, currentStage, overallStatus, warnings, fatalErrors } = pipelineState
 
@@ -56,6 +60,14 @@ export function PipelineTimeline({
   const isNeedsAttention = overallStatus === 'needs-attention'
   const isFailed = overallStatus === 'failed'
   const isInterrupted = overallStatus === 'interrupted' || overallStatus === 'recovering'
+
+  function handleOpen(stage: PipelineStage): void {
+    if (onOpenFullWorkspace) {
+      onOpenFullWorkspace(stage)
+    } else if (onNavigateToStage) {
+      onNavigateToStage(stage)
+    }
+  }
 
   function getStatusIcon(status?: StageStatus, isCurrent?: boolean) {
     if (status === 'completed') return <span style={{ color: 'var(--color-success, #22c55e)' }}>✓</span>
@@ -145,7 +157,7 @@ export function PipelineTimeline({
           {isCompleted && pipelineState.renderOutputPath && (
             <button
               className="btn btn-primary btn-sm"
-              onClick={() => onNavigateToStage('rendering')}
+              onClick={() => handleOpen('rendering')}
             >
               View Output Video
             </button>
@@ -220,7 +232,7 @@ export function PipelineTimeline({
             <button
               className="btn btn-secondary btn-sm"
               style={{ flexShrink: 0 }}
-              onClick={() => onNavigateToStage(currentStage as PipelineStage)}
+              onClick={() => handleOpen(currentStage as PipelineStage)}
             >
               Open Step
             </button>
@@ -231,8 +243,11 @@ export function PipelineTimeline({
         <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
           {ORDERED_STAGES.map((s, idx) => {
             const stageData = stages[s.key]
-            const status: StageStatus = stageData?.status ?? 'pending'
+            const rawStatus: StageStatus = stageData?.status ?? 'pending'
+            const status: StageStatus =
+              rawStatus === 'running' && isInterrupted ? 'interrupted' : rawStatus
             const isCurrent = currentStage === s.key && isRunning
+            const isStageRunningNow = status === 'running' && isRunning
             const progress = stageData?.progress ?? 0
 
             return (
@@ -334,6 +349,7 @@ export function PipelineTimeline({
 
                   {(status === 'failed' || (status === 'warning' && !isRunning)) && (
                     <button
+                      type="button"
                       className="btn btn-secondary btn-sm"
                       onClick={() => onRetryStage(s.key)}
                       style={{ padding: '2px 8px', fontSize: '11px' }}
@@ -342,14 +358,37 @@ export function PipelineTimeline({
                     </button>
                   )}
 
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={() => onNavigateToStage(s.key)}
-                    style={{ padding: '2px 8px', fontSize: '11px' }}
-                    title={`Open ${s.title}`}
-                  >
-                    Open
-                  </button>
+                  {onInspectStage && (
+                    <button
+                      type="button"
+                      className={`btn btn-secondary btn-sm ${isStageRunningNow ? 'is-live' : ''}`}
+                      onClick={() => onInspectStage(s.key)}
+                      style={{ padding: '2px 8px', fontSize: '11px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                      aria-label={isStageRunningNow ? `Inspect live progress for ${s.title}` : `Inspect ${s.title}`}
+                      title={isStageRunningNow ? `Inspect live progress for ${s.title}` : `Inspect ${s.title}`}
+                    >
+                      {isStageRunningNow ? (
+                        <>
+                          <span className="live-dot" />
+                          <span>Inspect Live</span>
+                        </>
+                      ) : (
+                        <span>Inspect</span>
+                      )}
+                    </button>
+                  )}
+
+                  {(onOpenFullWorkspace || onNavigateToStage) && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      onClick={() => handleOpen(s.key)}
+                      style={{ padding: '2px 8px', fontSize: '11px' }}
+                      title={`Open ${s.title} workspace`}
+                    >
+                      Open
+                    </button>
+                  )}
                 </div>
               </div>
             )
@@ -380,7 +419,7 @@ export function PipelineTimeline({
             </div>
             <button
               className="btn btn-primary btn-sm"
-              onClick={() => onNavigateToStage('rendering')}
+              onClick={() => handleOpen('rendering')}
             >
               Open Render Page
             </button>

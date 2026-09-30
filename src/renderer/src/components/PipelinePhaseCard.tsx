@@ -87,6 +87,7 @@ export function computePhaseState(
 
   const { stages, currentStage, overallStatus } = pipelineState
   const stageKeys = phase.stages.map((s) => s.key)
+  const isPipelineInterrupted = overallStatus === 'interrupted' || overallStatus === 'recovering'
 
   let totalDuration = 0
   let completedCount = 0
@@ -105,11 +106,15 @@ export function computePhaseState(
 
     const sStatus: StageStatus = sData?.status ?? 'pending'
     const sProgress = sData?.progress ?? 0
+    const isStageRunning = sStatus === 'running' && overallStatus === 'running'
+    const isStageInterruptedNow =
+      sStatus === 'interrupted' ||
+      (currentStage === sk && isPipelineInterrupted)
 
     if (sStatus === 'completed') {
       completedCount++
       progressAccumulator += 1
-    } else if (sStatus === 'running' || (currentStage === sk && overallStatus === 'running')) {
+    } else if (isStageRunning || (currentStage === sk && overallStatus === 'running')) {
       isCurrentPhase = true
       activeStageKey = sk
       progressAccumulator += sProgress
@@ -118,8 +123,9 @@ export function computePhaseState(
       activeStageKey = sk
     } else if (sStatus === 'warning') {
       phaseHasWarning = true
-    } else if (sStatus === 'interrupted') {
+    } else if (isStageInterruptedNow) {
       phaseHasInterrupted = true
+      activeStageKey = sk
     }
 
     if (currentStage === sk) {
@@ -127,7 +133,7 @@ export function computePhaseState(
       if (overallStatus === 'running') isCurrentPhase = true
       if (overallStatus === 'failed') phaseHasFailure = true
       if (overallStatus === 'needs-attention') phaseHasWarning = true
-      if (overallStatus === 'interrupted' || overallStatus === 'recovering') phaseHasInterrupted = true
+      if (isPipelineInterrupted) phaseHasInterrupted = true
     }
   }
 
@@ -136,14 +142,14 @@ export function computePhaseState(
   let status: UiPhaseStatus = 'pending'
   if (completedCount === stageKeys.length) {
     status = 'completed'
-  } else if (isCurrentPhase) {
+  } else if (phaseHasInterrupted || (isPipelineInterrupted && activeStageKey && stageKeys.includes(activeStageKey))) {
+    status = 'interrupted'
+  } else if (isCurrentPhase && overallStatus === 'running') {
     status = 'running'
   } else if (phaseHasFailure) {
     status = 'failed'
   } else if (phaseHasWarning) {
     status = 'warning'
-  } else if (phaseHasInterrupted) {
-    status = 'interrupted'
   } else if (completedCount > 0) {
     status = 'pending'
   }
@@ -177,7 +183,13 @@ export function computePhaseState(
   } else if (status === 'warning') {
     summary = activeData?.message || 'Review needed before proceeding'
   } else if (status === 'interrupted') {
-    summary = 'Paused — ready to resume'
+    if (activeData?.message) {
+      summary = activeData.message.includes('ready to resume')
+        ? activeData.message
+        : `${activeData.message} — ready to resume`
+    } else {
+      summary = 'Paused — ready to resume'
+    }
   } else {
     // Pending summaries
     switch (phase.id) {
@@ -223,6 +235,8 @@ export interface PipelinePhaseCardProps {
   isRunning: boolean
   isExpanded?: boolean
   onToggleExpand?: () => void
+  onInspectStage?: (stage: PipelineStage) => void
+  onOpenFullWorkspace?: (stage: PipelineStage) => void
   onNavigateToStage?: (stage: PipelineStage) => void
   onRetryStage?: (stage: PipelineStage) => void
 }
@@ -233,6 +247,8 @@ export function PipelinePhaseCard({
   isRunning,
   isExpanded: controlledExpanded,
   onToggleExpand,
+  onInspectStage,
+  onOpenFullWorkspace,
   onNavigateToStage,
   onRetryStage
 }: PipelinePhaseCardProps): React.ReactElement {
@@ -347,8 +363,17 @@ export function PipelinePhaseCard({
           <div className="pipeline-phase-card__stages-list">
             {phase.stages.map((stg) => {
               const stageData = pipelineState?.stages[stg.key]
-              const stgStatus = stageData?.status ?? 'pending'
+              const rawStatus = stageData?.status ?? 'pending'
+              const isPipelineInterrupted =
+                pipelineState?.overallStatus === 'interrupted' ||
+                pipelineState?.overallStatus === 'recovering'
+
+              // Nếu pipeline tổng thể đang interrupted, stage running được normalize thành interrupted
+              const stgStatus: StageStatus =
+                rawStatus === 'running' && isPipelineInterrupted ? 'interrupted' : rawStatus
+
               const isCurrent = activeStage === stg.key && isRunning
+              const isStageRunningNow = stgStatus === 'running' && isRunning
 
               return (
                 <div
@@ -391,17 +416,45 @@ export function PipelinePhaseCard({
                       </span>
                     )}
 
-                    {onNavigateToStage && (
+                    {(onInspectStage || onNavigateToStage) && (
+                      <button
+                        type="button"
+                        className={`btn btn-secondary btn-sm pipeline-substage-inspect-btn ${isStageRunningNow ? 'is-live' : ''}`}
+                        style={{ fontSize: '11px', padding: '2px 8px', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                        aria-label={isStageRunningNow ? `Inspect live progress for ${stg.title}` : `Inspect ${stg.title}`}
+                        title={isStageRunningNow ? `Inspect live progress for ${stg.title}` : `Inspect details of ${stg.title}`}
+                        onClick={(e) => {
+                          e.stopPropagation()
+                          if (onInspectStage) {
+                            onInspectStage(stg.key)
+                          } else if (onNavigateToStage) {
+                            onNavigateToStage(stg.key)
+                          }
+                        }}
+                      >
+                        {isStageRunningNow ? (
+                          <>
+                            <span className="live-dot" />
+                            <span>Inspect Live</span>
+                          </>
+                        ) : (
+                          <span>Inspect</span>
+                        )}
+                      </button>
+                    )}
+
+                    {onOpenFullWorkspace && (
                       <button
                         type="button"
                         className="btn btn-secondary btn-sm"
-                        style={{ fontSize: '11px', padding: '2px 8px' }}
+                        style={{ fontSize: '11px', padding: '2px 6px', color: 'var(--text-secondary)' }}
+                        title={`Open ${stg.title} workspace`}
                         onClick={(e) => {
                           e.stopPropagation()
-                          onNavigateToStage(stg.key)
+                          onOpenFullWorkspace(stg.key)
                         }}
                       >
-                        Inspect
+                        ↗
                       </button>
                     )}
 
