@@ -1,9 +1,11 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect } from 'react'
 import type { AutoPipelineState, PipelineStage, ProjectState } from '../../../../shared/types'
-import { UI_PHASES, PipelinePhaseCard, computePhaseState } from './PipelinePhaseCard'
+import { UI_PHASES, PipelinePhaseCard, computePhaseState, type UiPhaseId } from './PipelinePhaseCard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { StatusBanner } from './StatusBanner'
 import { PipelineTimeline } from './PipelineTimeline'
+import { LivePipelineInspector } from './LivePipelineInspector'
+import { getPageForPipelineStage } from '../navigation/pipelineStageNavigation'
 
 export interface ClientPipelineDashboardProps {
   project: ProjectState
@@ -21,6 +23,52 @@ function fmtStopwatch(secs: number): string {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
 }
 
+/**
+ * Tính toán elapsed time của pipeline chính xác theo accumulated duration các stage,
+ * không phụ thuộc vào component mount time để không bị reset về 00:00 khi khôi phục / mở lại app.
+ */
+export function computePipelineElapsedMs(pipelineState: AutoPipelineState | null): number {
+  if (!pipelineState) return 0
+
+  let accumulatedMs = 0
+  if (pipelineState.stages) {
+    for (const stage of Object.values(pipelineState.stages)) {
+      if (stage && typeof stage.durationMs === 'number' && stage.durationMs > 0) {
+        accumulatedMs += stage.durationMs
+      }
+    }
+  }
+
+  // Nếu pipeline không running (interrupted, completed, paused, failed, idle)
+  if (pipelineState.overallStatus !== 'running') {
+    if (pipelineState.startedAt && pipelineState.completedAt) {
+      const diff = new Date(pipelineState.completedAt).getTime() - new Date(pipelineState.startedAt).getTime()
+      if (diff > 0) return Math.max(diff, accumulatedMs)
+    }
+    return accumulatedMs
+  }
+
+  // Nếu pipeline đang running: tính thêm thời gian của stage hiện tại đang chạy
+  const currentStageKey = pipelineState.currentStage
+  const currentStage = currentStageKey && pipelineState.stages ? pipelineState.stages[currentStageKey] : null
+
+  if (currentStage?.startedAt && currentStage.status === 'running') {
+    const stageElapsed = Date.now() - new Date(currentStage.startedAt).getTime()
+    if (stageElapsed > 0) {
+      return accumulatedMs + stageElapsed
+    }
+  }
+
+  if (pipelineState.startedAt) {
+    const overallElapsed = Date.now() - new Date(pipelineState.startedAt).getTime()
+    if (overallElapsed > 0) {
+      return Math.max(overallElapsed, accumulatedMs)
+    }
+  }
+
+  return accumulatedMs
+}
+
 export function ClientPipelineDashboard({
   project,
   pipelineState,
@@ -32,40 +80,63 @@ export function ClientPipelineDashboard({
 }: ClientPipelineDashboardProps): React.ReactElement {
   const [showCancelDialog, setShowCancelDialog] = useState(false)
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false)
-  const [elapsedSecs, setElapsedSecs] = useState(0)
-  const startTimeRef = useRef<number | null>(null)
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Stopwatch timer while running
+  // Live Inspector states
+  const [inspectorOpen, setInspectorOpen] = useState(false)
+  const [selectedStage, setSelectedStage] = useState<PipelineStage | null>(
+    (pipelineState?.currentStage as PipelineStage) || 'validating'
+  )
+  const [followCurrentStage, setFollowCurrentStage] = useState(true)
+
+  // Timer 1s chỉ dùng để refresh UI khi pipeline đang running
+  const [, setTick] = useState(0)
   useEffect(() => {
-    if (isRunning) {
-      if (!startTimeRef.current) {
-        startTimeRef.current = Date.now() - elapsedSecs * 1000
-      }
-      timerRef.current = setInterval(() => {
-        if (startTimeRef.current) {
-          setElapsedSecs(Math.floor((Date.now() - startTimeRef.current) / 1000))
-        }
-      }, 1000)
-    } else {
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-      }
-      if (pipelineState?.overallStatus === 'completed' || pipelineState?.overallStatus === 'idle') {
-        // Keep elapsed for display
-      }
-    }
+    if (!isRunning) return
+    const timer = setInterval(() => {
+      setTick((t) => t + 1)
+    }, 1000)
+    return () => clearInterval(timer)
+  }, [isRunning])
 
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current)
-    }
-  }, [isRunning, pipelineState?.overallStatus])
+  const elapsedMs = computePipelineElapsedMs(pipelineState)
+  const elapsedSecs = Math.floor(elapsedMs / 1000)
 
   const overallStatus = pipelineState?.overallStatus ?? 'idle'
   const isCompleted = overallStatus === 'completed'
   const isNeedsAttention = overallStatus === 'needs-attention'
   const isFailed = overallStatus === 'failed'
   const isInterrupted = overallStatus === 'interrupted' || overallStatus === 'recovering'
+
+  // Tìm phase chứa stage
+  function findPhaseForStage(stageKey?: PipelineStage): UiPhaseId {
+    if (!stageKey) return 'prepare'
+    for (const ph of UI_PHASES) {
+      if (ph.stages.some((s) => s.key === stageKey)) {
+        return ph.id
+      }
+    }
+    return 'prepare'
+  }
+
+  // Phase accordion: current phase tự mở, completed/pending mặc định đóng, mỗi lúc chỉ mở 1 phase
+  const [expandedPhaseId, setExpandedPhaseId] = useState<UiPhaseId | null>(() =>
+    findPhaseForStage(pipelineState?.currentStage)
+  )
+
+  // Auto-expand current phase khi currentStage thay đổi nếu Follow live bật
+  useEffect(() => {
+    if (followCurrentStage && pipelineState?.currentStage) {
+      const activePhase = findPhaseForStage(pipelineState.currentStage)
+      setExpandedPhaseId(activePhase)
+    }
+  }, [pipelineState?.currentStage, followCurrentStage])
+
+  // Follow current stage khi pipeline chuyển stage
+  useEffect(() => {
+    if (inspectorOpen && followCurrentStage && pipelineState?.currentStage) {
+      setSelectedStage(pipelineState.currentStage)
+    }
+  }, [pipelineState?.currentStage, inspectorOpen, followCurrentStage])
 
   // Overall percentage calculation
   let overallPercentage = 0
@@ -91,18 +162,15 @@ export function ClientPipelineDashboard({
 
   // Active Phase identification
   let currentPhaseTitle = 'Phase 1 — Prepare'
-  let currentPhaseId = 'prepare'
   if (pipelineState) {
     for (const ph of UI_PHASES) {
       const pState = computePhaseState(ph, pipelineState)
-      if (pState.status === 'running' || pState.status === 'warning' || pState.status === 'failed') {
+      if (pState.status === 'running' || pState.status === 'warning' || pState.status === 'failed' || pState.status === 'interrupted') {
         currentPhaseTitle = ph.title
-        currentPhaseId = ph.id
         break
       }
       if (pState.status === 'completed') {
         currentPhaseTitle = ph.title
-        currentPhaseId = ph.id
       }
     }
   }
@@ -112,9 +180,51 @@ export function ClientPipelineDashboard({
     pipelineState?.stages[pipelineState.currentStage as PipelineStage]?.message ||
     (isRunning ? 'Processing video components...' : 'Ready to start')
 
+  const currentPhaseFriendly = currentPhaseTitle.replace(/^Phase \d+ — /, '')
+  const headerTitle = isRunning
+    ? 'Creating your video'
+    : isInterrupted
+    ? 'Production paused safely'
+    : isNeedsAttention
+    ? 'Video needs review'
+    : isFailed
+    ? 'Production stopped due to an error'
+    : 'Pipeline ready'
+
+  const headerSubtitle = isInterrupted
+    ? `Previous progress was recovered. Resume to continue from ${currentPhaseFriendly}.`
+    : isRunning
+    ? activeMessage
+    : isNeedsAttention
+    ? 'One or more scenes require manual review before rendering.'
+    : isFailed
+    ? (pipelineState?.fatalErrors?.[pipelineState.fatalErrors.length - 1] || 'An error occurred during production.')
+    : 'Ready to start production.'
+
   async function handleConfirmCancel(): Promise<void> {
     setShowCancelDialog(false)
     await onCancel()
+  }
+
+  function handleInspectStage(stage: PipelineStage): void {
+    setSelectedStage(stage)
+    if (pipelineState?.currentStage === stage) {
+      setFollowCurrentStage(true)
+    } else {
+      setFollowCurrentStage(false)
+    }
+    setInspectorOpen(true)
+  }
+
+  function handleOpenTechnicalDetails(): void {
+    setSelectedStage(pipelineState?.currentStage || 'validating')
+    setFollowCurrentStage(true)
+    setInspectorOpen(true)
+  }
+
+  function handleOpenFullWorkspace(stage: PipelineStage): void {
+    const targetPage = getPageForPipelineStage(stage)
+    onNavigate(targetPage)
   }
 
   // Success Screen
@@ -173,7 +283,6 @@ export function ClientPipelineDashboard({
               className="btn btn-secondary btn-lg"
               onClick={() => {
                 if (pipelineState?.renderOutputPath) {
-                  // Navigate to export page for folder/copy options
                   onNavigate('render')
                 }
               }}
@@ -198,10 +307,24 @@ export function ClientPipelineDashboard({
               onCancel={() => setShowCancelDialog(true)}
               onResume={onResume}
               onRetryStage={onRetryStage}
-              onNavigateToStage={(stg) => onNavigate(stg)}
+              onInspectStage={handleInspectStage}
+              onOpenFullWorkspace={handleOpenFullWorkspace}
             />
           </div>
         )}
+
+        {/* Live Inspector Drawer */}
+        <LivePipelineInspector
+          isOpen={inspectorOpen}
+          pipelineState={pipelineState}
+          selectedStage={selectedStage}
+          followCurrentStage={followCurrentStage}
+          onSelectStage={(stg) => setSelectedStage(stg)}
+          onFollowCurrentStageChange={(follow) => setFollowCurrentStage(follow)}
+          onClose={() => setInspectorOpen(false)}
+          onOpenFullWorkspace={handleOpenFullWorkspace}
+          onRetryStage={onRetryStage}
+        />
       </div>
     )
   }
@@ -213,12 +336,7 @@ export function ClientPipelineDashboard({
         <StatusBanner
           variant="recovery"
           title="Previous progress recovered"
-          message="Assets and completed stages have been restored cleanly from the previous session. You can continue seamlessly."
-          action={{
-            label: 'Resume Production',
-            onClick: onResume,
-            variant: 'primary'
-          }}
+          message={`Assets and completed stages have been safely restored from the previous session. Resume to continue from ${currentPhaseFriendly}.`}
         />
       )}
 
@@ -250,7 +368,7 @@ export function ClientPipelineDashboard({
             'An error occurred. Check activity logs or retry the current step.'
           }
           action={{
-            label: 'Resume Pipeline',
+            label: 'Resume Production',
             onClick: onResume,
             variant: 'primary'
           }}
@@ -263,22 +381,24 @@ export function ClientPipelineDashboard({
           <div className="production-status-pill">
             <span
               className={`status-dot ${
-                isRunning ? 'rendering' : isNeedsAttention ? 'warning' : isFailed ? 'error' : 'ready'
+                isRunning
+                  ? 'rendering'
+                  : isInterrupted
+                  ? 'paused'
+                  : isNeedsAttention
+                  ? 'warning'
+                  : isFailed
+                  ? 'error'
+                  : 'ready'
               }`}
             />
             <span className="production-status-text">
-              {isRunning
-                ? 'Creating your video'
-                : isNeedsAttention
-                ? 'Review Needed'
-                : isFailed
-                ? 'Production Paused'
-                : 'Pipeline Ready'}
+              {headerTitle}
             </span>
           </div>
 
           <div className="production-current-message">
-            {isRunning ? activeMessage : isNeedsAttention ? 'Review required' : 'Ready to resume'}
+            {headerSubtitle}
           </div>
 
           <div className="production-meta-row">
@@ -303,6 +423,53 @@ export function ClientPipelineDashboard({
         </div>
 
         <div className="production-header-actions">
+          {/* Primary Action Button: Resume Production if interrupted or not running */}
+          {isInterrupted && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onResume}
+            >
+              ▶ Resume Production
+            </button>
+          )}
+
+          {!isRunning && !isInterrupted && !isCompleted && overallStatus !== 'idle' && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={onResume}
+            >
+              ▶ Resume Production
+            </button>
+          )}
+
+          {/* Inspect Live when running */}
+          {isRunning && (
+            <button
+              type="button"
+              className="btn btn-primary live-header-btn"
+              onClick={() => handleInspectStage(pipelineState?.currentStage || 'validating')}
+              title="Inspect live progress of currently running stage"
+            >
+              <span className="live-dot" />
+              <span>Inspect Live</span>
+            </button>
+          )}
+
+          {/* Secondary Inspection Button when not running */}
+          {!isRunning && (
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={handleOpenTechnicalDetails}
+              title="Inspect stage details in Live Inspector"
+            >
+              Inspect Stages
+            </button>
+          )}
+
+          {/* Secondary Action: Cancel when running */}
           {isRunning && (
             <button
               type="button"
@@ -310,17 +477,7 @@ export function ClientPipelineDashboard({
               style={{ color: '#f87171', borderColor: 'rgba(248,113,113,0.3)' }}
               onClick={() => setShowCancelDialog(true)}
             >
-              Cancel Pipeline
-            </button>
-          )}
-
-          {!isRunning && !isCompleted && overallStatus !== 'idle' && (
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={onResume}
-            >
-              ▶ Resume Pipeline
+              Cancel
             </button>
           )}
 
@@ -330,7 +487,7 @@ export function ClientPipelineDashboard({
             onClick={() => setShowTechnicalDetails((prev) => !prev)}
             title="Toggle low-level 10-stage technical timeline"
           >
-            {showTechnicalDetails ? 'Hide Details' : 'View Technical Details'}
+            {showTechnicalDetails ? 'Hide Timeline' : 'View Timeline'}
           </button>
         </div>
       </div>
@@ -349,7 +506,12 @@ export function ClientPipelineDashboard({
               phase={phase}
               pipelineState={pipelineState}
               isRunning={isRunning}
-              onNavigateToStage={(stg) => onNavigate(stg)}
+              isExpanded={expandedPhaseId === phase.id}
+              onToggleExpand={() => {
+                setExpandedPhaseId((prev) => (prev === phase.id ? null : phase.id))
+              }}
+              onInspectStage={handleInspectStage}
+              onOpenFullWorkspace={handleOpenFullWorkspace}
               onRetryStage={onRetryStage}
             />
           ))}
@@ -368,7 +530,8 @@ export function ClientPipelineDashboard({
             onCancel={() => setShowCancelDialog(true)}
             onResume={onResume}
             onRetryStage={onRetryStage}
-            onNavigateToStage={(stg) => onNavigate(stg)}
+            onInspectStage={handleInspectStage}
+            onOpenFullWorkspace={handleOpenFullWorkspace}
           />
         </div>
       )}
@@ -383,6 +546,19 @@ export function ClientPipelineDashboard({
         isDestructive={true}
         onConfirm={handleConfirmCancel}
         onCancel={() => setShowCancelDialog(false)}
+      />
+
+      {/* Live Pipeline Inspector Drawer */}
+      <LivePipelineInspector
+        isOpen={inspectorOpen}
+        pipelineState={pipelineState}
+        selectedStage={selectedStage}
+        followCurrentStage={followCurrentStage}
+        onSelectStage={(stg) => setSelectedStage(stg)}
+        onFollowCurrentStageChange={(follow) => setFollowCurrentStage(follow)}
+        onClose={() => setInspectorOpen(false)}
+        onOpenFullWorkspace={handleOpenFullWorkspace}
+        onRetryStage={onRetryStage}
       />
     </div>
   )
