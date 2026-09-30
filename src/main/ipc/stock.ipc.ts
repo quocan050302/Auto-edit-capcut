@@ -21,7 +21,22 @@ import {
   loadProductionSettings,
   saveProductionSettings
 } from "../production-intelligence/production-settings"
-import type { ProductionIntelligenceSettings } from "../../../shared/types"
+import {
+  getClaimLedgerPath,
+  updateClaimStatus,
+  addEvidenceSource,
+  linkSourceToClaim,
+  unlinkSourceFromClaim,
+  exportClaimManifests
+} from "../production-intelligence/claim-evidence-ledger"
+import { loadVisualTruthStore } from "../production-intelligence/visual-truth-reranker"
+import { readJsonSafe, atomicWriteJson } from "../production-intelligence/json-store"
+import type {
+  ProductionIntelligenceSettings,
+  ClaimEvidenceLedger,
+  EvidenceSource,
+  ClaimVerificationStatus
+} from "../../../shared/types"
 
 export function registerStockHandlers(ipcMain: IpcMain): void {
 
@@ -363,6 +378,88 @@ export function registerStockHandlers(ipcMain: IpcMain): void {
     IPC_CHANNELS.PRODUCTION_SETTINGS_SET,
     (_event, params: { projectDir?: string; settings: Partial<ProductionIntelligenceSettings> }) => {
       return saveProductionSettings(params.projectDir, params.settings)
+    }
+  )
+
+  // ── Production Intelligence: Claim & Evidence Ledger ────────────────────────
+  ipcMain.handle(IPC_CHANNELS.CLAIM_GET_LEDGER, (_event, projectDir: string) => {
+    try {
+      const ledgerPath = getClaimLedgerPath(projectDir)
+      return readJsonSafe<ClaimEvidenceLedger>(ledgerPath, null as unknown as ClaimEvidenceLedger)
+    } catch (err) {
+      logger.error(`[ClaimIPC] Failed to load claim ledger: ${String(err)}`)
+      return null
+    }
+  })
+
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_UPDATE_STATUS,
+    (_event, params: { projectDir: string; claimId: string; status: ClaimVerificationStatus; warningText?: string }) => {
+      return updateClaimStatus(params.projectDir, params.claimId, params.status, params.warningText)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_ADD_SOURCE,
+    (_event, params: { projectDir: string; source: Omit<EvidenceSource, 'id'> }) => {
+      return addEvidenceSource(params.projectDir, params.source)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_REMOVE_SOURCE,
+    (_event, params: { projectDir: string; sourceId: string }) => {
+      try {
+        const ledgerPath = getClaimLedgerPath(params.projectDir)
+        const ledger = readJsonSafe<ClaimEvidenceLedger>(ledgerPath, null as unknown as ClaimEvidenceLedger)
+        if (!ledger) return { success: false, error: 'Ledger not found' }
+
+        ledger.sources = ledger.sources.filter((s) => s.id !== params.sourceId)
+        for (const claim of ledger.claims) {
+          claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== params.sourceId)
+          if (claim.evidenceSourceIds.length === 0 && claim.verificationStatus === 'VERIFIED') {
+            claim.verificationStatus = 'UNSOURCED'
+          }
+        }
+        atomicWriteJson(ledgerPath, ledger)
+        return { success: true }
+      } catch (err) {
+        return { success: false, error: String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_LINK_SOURCE,
+    (_event, params: { projectDir: string; claimId: string; sourceId: string; newStatus?: ClaimVerificationStatus }) => {
+      return linkSourceToClaim(params.projectDir, params.claimId, params.sourceId, params.newStatus)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_UNLINK_SOURCE,
+    (_event, params: { projectDir: string; claimId: string; sourceId: string }) => {
+      return unlinkSourceFromClaim(params.projectDir, params.claimId, params.sourceId)
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS,
+    (_event, params: { projectDir: string; exportDir?: string }) => {
+      return exportClaimManifests(params.projectDir, params.exportDir)
+    }
+  )
+
+  // ── Production Intelligence: Visual Truth Reranker ─────────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.VISUAL_TRUTH_GET_DATA,
+    (_event, projectDir: string) => {
+      try {
+        return loadVisualTruthStore(projectDir)
+      } catch (err) {
+        logger.error(`[VisualTruthIPC] Failed to load visual truth data: ${String(err)}`)
+        return null
+      }
     }
   )
 }
