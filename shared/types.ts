@@ -395,6 +395,171 @@ export interface StockSceneAssignment {
 
 // ─── Production Intelligence Types ──────────────────────────────────────────
 
+export type VisualTruthLabel =
+  | 'EXACT_SUBJECT'
+  | 'CONTEXTUAL_MATCH'
+  | 'ILLUSTRATIVE'
+  | 'HISTORICAL'
+  | 'GENERIC_STOCK'
+  | 'CONTRADICTORY'
+  | 'UNKNOWN'
+
+export interface VisualTruthVerification {
+  candidateId: string
+  sceneId: string
+  actualSubjects: string[]
+  actualActions: string[]
+  visibleObjects: string[]
+  visibleText?: string[]
+  possibleLocations: string[]
+  possibleTimePeriods: string[]
+  subjectMatch: number
+  actionMatch: number
+  objectMatch: number
+  geographyMatch: number
+  timePeriodMatch: number
+  narrationMatch: number
+  visualIntentMatch: number
+  documentaryEvidenceValue: number
+  sequenceContinuity: number
+  genericStockRisk: number
+  contradictionRisk: number
+  technicalQuality: number
+  truthLabel: VisualTruthLabel
+  positiveReasons: string[]
+  negativeReasons: string[]
+  contradictionReasons: string[]
+  confidence: number
+  approved: boolean
+  requiresReview: boolean
+  analyzedAt: string
+  analysisVersion: string
+  model?: string
+}
+
+export interface VisualTruthWeights {
+  metadataRelevance: number
+  visualVerification: number
+  globalContext: number
+  actionMatch: number
+  sequenceContinuity: number
+  technicalQuality: number
+  genericStockPenalty: number
+  contradictionPenalty: number
+  reusePenalty: number
+}
+
+export const DEFAULT_VISUAL_TRUTH_WEIGHTS: VisualTruthWeights = {
+  metadataRelevance: 0.25,
+  visualVerification: 0.30,
+  globalContext: 0.15,
+  actionMatch: 0.10,
+  sequenceContinuity: 0.10,
+  technicalQuality: 0.10,
+  genericStockPenalty: 25,
+  contradictionPenalty: 50,
+  reusePenalty: 15
+}
+
+// ─── Claim & Evidence Ledger Types ──────────────────────────────────────────
+
+export type ClaimType =
+  | 'STATISTIC'
+  | 'MONEY'
+  | 'DATE'
+  | 'HISTORICAL_EVENT'
+  | 'PERSON'
+  | 'COMPANY'
+  | 'LOCATION'
+  | 'POLICY'
+  | 'QUOTE'
+  | 'COMPARISON'
+  | 'CAUSAL'
+  | 'GENERAL_FACT'
+
+export type ClaimVerificationStatus =
+  | 'VERIFIED'
+  | 'PARTIALLY_VERIFIED'
+  | 'UNSOURCED'
+  | 'CONTRADICTED'
+  | 'NOT_REQUIRED'
+
+export type EvidenceType =
+  | 'SOURCE_URL'
+  | 'DOCUMENT'
+  | 'REPORT'
+  | 'SCREENSHOT'
+  | 'ARCHIVE_IMAGE'
+  | 'ARCHIVE_VIDEO'
+  | 'CHART'
+  | 'USER_MEDIA'
+  | 'STOCK_CONTEXT'
+
+export interface EvidenceSource {
+  id: string
+  type: EvidenceType
+  title?: string
+  publisher?: string
+  author?: string
+  url?: string
+  publishedAt?: string
+  accessedAt?: string
+  localPath?: string
+  assetId?: string
+  pageNumber?: number
+  timecodeStart?: number
+  timecodeEnd?: number
+  license?: string
+  attribution?: string
+  notes?: string
+  manuallyAdded: boolean
+}
+
+export interface DocumentaryClaim {
+  id: string
+  scriptText: string
+  normalizedClaim: string
+  type: ClaimType
+  chapterId?: string
+  sequenceId?: string
+  sceneIds: string[]
+  importance: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+  confidence: number
+  verificationStatus: ClaimVerificationStatus
+  evidenceSourceIds: string[]
+  proofVisualRecommended: boolean
+  proofVisualType?:
+    | 'STAT_CARD'
+    | 'DOCUMENT_CARD'
+    | 'QUOTE_CARD'
+    | 'COMPARISON_CARD'
+    | 'DATA_NOTE'
+    | 'ARCHIVE_VISUAL'
+  warnings: string[]
+  extractionVersion: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ClaimEvidenceLedger {
+  projectId: string
+  scriptHash: string
+  globalContextHash: string
+  claims: DocumentaryClaim[]
+  sources: EvidenceSource[]
+  summary: {
+    totalClaims: number
+    verified: number
+    partiallyVerified: number
+    unsourced: number
+    contradicted: number
+    criticalUnsourced: number
+    coveragePct?: number
+  }
+  generatedAt: string
+  version: string
+}
+
 export interface ProductionIntelligenceSettings {
   enabled: boolean
   candidateRankingEnabled: boolean
@@ -404,6 +569,28 @@ export interface ProductionIntelligenceSettings {
   strictMissingMedia: boolean
   candidatesPerScene: number
   maxVisualGrammarDensity: number
+
+  // Visual Truth Reranker & Claim Evidence additions
+  visualTruthEnabled: boolean
+  visualTruthShortlistSize: number
+  visualTruthFrameCount: number
+  visualTruthMinConfidence: number
+  visualTruthTimeoutMs: number
+  claimEvidenceEnabled: boolean
+  evidenceWarningsEnabled: boolean
+  blockCriticalContradictedClaims: boolean
+
+  // Compatibility container if passed as nested object
+  productionIntelligence?: {
+    visualTruthEnabled?: boolean
+    visualTruthShortlistSize?: number
+    visualTruthFrameCount?: number
+    visualTruthMinConfidence?: number
+    visualTruthTimeoutMs?: number
+    claimEvidenceEnabled?: boolean
+    evidenceWarningsEnabled?: boolean
+    blockCriticalContradictedClaims?: boolean
+  }
 }
 
 export const DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS: ProductionIntelligenceSettings = {
@@ -414,7 +601,17 @@ export const DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS: ProductionIntelligenceSet
   renderQaEnabled: true,
   strictMissingMedia: false,
   candidatesPerScene: 3,
-  maxVisualGrammarDensity: 0.25
+  maxVisualGrammarDensity: 0.25,
+
+  // New features defaults
+  visualTruthEnabled: true,
+  visualTruthShortlistSize: 6,
+  visualTruthFrameCount: 3,
+  visualTruthMinConfidence: 60,
+  visualTruthTimeoutMs: 15000,
+  claimEvidenceEnabled: true,
+  evidenceWarningsEnabled: true,
+  blockCriticalContradictedClaims: false
 }
 
 export interface StockCandidateScore {
@@ -441,6 +638,9 @@ export interface StockCandidate {
   selected: boolean
   approved: boolean
   rejected: boolean
+  // Production Intelligence Visual Truth extension
+  visualTruth?: VisualTruthVerification
+  finalScore?: number
 }
 
 export interface StoryboardSummary {
@@ -782,6 +982,19 @@ export const IPC_CHANNELS = {
   RENDER_PREFLIGHT_RUN: 'render:preflight-run',
   RENDER_QA_GET: 'render:qa-get',
   RENDER_QA_PROGRESS: 'render:qa-progress',
+
+  // Production Intelligence — Claim & Evidence Ledger
+  CLAIM_GET_LEDGER: 'claim:get-ledger',
+  CLAIM_UPDATE_STATUS: 'claim:update-status',
+  CLAIM_ADD_SOURCE: 'claim:add-source',
+  CLAIM_REMOVE_SOURCE: 'claim:remove-source',
+  CLAIM_LINK_SOURCE: 'claim:link-source',
+  CLAIM_UNLINK_SOURCE: 'claim:unlink-source',
+  CLAIM_EXPORT_MANIFESTS: 'claim:export-manifests',
+
+  // Production Intelligence — Visual Truth Reranker
+  VISUAL_TRUTH_GET_DATA: 'visual-truth:get-data',
+  VISUAL_TRUTH_REANALYZE: 'visual-truth:reanalyze',
 
   // Auto Production Pipeline
   PIPELINE_START: 'pipeline:start',
