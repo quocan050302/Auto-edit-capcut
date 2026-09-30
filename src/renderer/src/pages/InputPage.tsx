@@ -5,6 +5,7 @@ import { useUiPreferences } from '../hooks/useUiPreferences'
 import { PipelineTimeline } from '../components/PipelineTimeline'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { ConfirmDialog } from '../components/ConfirmDialog'
+import { getPageForPipelineStage } from '../navigation/pipelineStageNavigation'
 
 export interface InputPageProps {
   project: ProjectState
@@ -257,21 +258,8 @@ export function InputPage({
   const scanCount = [inputs.imagesFolder, inputs.videosFolder, inputs.musicFolder, inputs.sfxFolder].filter(Boolean).length
 
   function handleNavigateToStage(stage: PipelineStage): void {
-    const stageToPage: Partial<Record<PipelineStage, string>> = {
-      transcribing: 'transcribe',
-      planning: 'planning',
-      captions: 'captions',
-      'global-context': 'stock',
-      'stock-search': 'stock',
-      'audio-search': 'audio',
-      preflight: 'render',
-      rendering: 'render',
-      postflight: 'render',
-      completed: 'render'
-    }
-    const targetPage = stageToPage[stage] || 'input'
     if (onNavigate) {
-      onNavigate(targetPage)
+      onNavigate(getPageForPipelineStage(stage))
     }
   }
 
