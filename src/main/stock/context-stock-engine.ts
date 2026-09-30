@@ -43,6 +43,10 @@ import {
   loadStockCandidates,
   saveStockCandidates
 } from "../production-intelligence/candidate-ranking"
+import { rerankShortlistedCandidates } from "../production-intelligence/visual-truth-reranker"
+import { getClaimLedgerPath } from "../production-intelligence/claim-evidence-ledger"
+import type { ClaimEvidenceLedger } from "../../../shared/types"
+import { assertSceneIdentityPreserved } from "../production-intelligence/scene-invariants"
 import { HistoricalAssignmentSummary } from "../production-intelligence/diversity-engine"
 import { atomicWriteJson, readJsonSafe } from "../production-intelligence/json-store"
 import { flattenEditPlanScenes } from "../utils/scene-plan"
@@ -607,17 +611,61 @@ export async function runContextAwareStockEngine(
             isLocked: scene.locked
           }
 
-          const topCandidates = rankCandidatesForScene(
+          const shortlistCount = Math.max(
+            prodSettings.candidatesPerScene || 3,
+            prodSettings.visualTruthShortlistSize || 6
+          )
+
+          let topCandidates = rankCandidatesForScene(
             sceneId,
             scene.sceneIndex,
             candidates,
             scoringCtx,
-            prodSettings.candidatesPerScene || 3
+            shortlistCount
           )
+
+          let winner = topCandidates.find((c) => c.selected) || topCandidates[0]
+
+          // Visual Truth Reranking Stage
+          const isVisualTruthEnabled =
+            prodSettings.visualTruthEnabled ??
+            prodSettings.productionIntelligence?.visualTruthEnabled ??
+            true
+
+          if (isVisualTruthEnabled && apiKey) {
+            try {
+              const claimLedgerPath = getClaimLedgerPath(projectDir)
+              const claimLedger = fs.existsSync(claimLedgerPath)
+                ? readJsonSafe<ClaimEvidenceLedger>(claimLedgerPath, null as unknown as ClaimEvidenceLedger)
+                : null
+
+              const rerankResult = await rerankShortlistedCandidates({
+                projectDir,
+                sceneId,
+                sceneIndex: scene.sceneIndex,
+                narration,
+                visualIntent: planToUse.visualIntent,
+                candidates: topCandidates,
+                globalContext,
+                chapterTitle,
+                chapterPurpose,
+                claimLedger,
+                settings: prodSettings,
+                apiKey,
+                onProgress: (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct)
+              })
+
+              topCandidates = rerankResult.candidates
+              winner = rerankResult.winner
+            } catch (vtErr) {
+              logger.warn(
+                `[VisualTruth] Reranker error for scene ${sceneId}: ${String(vtErr)}, falling back to metadata ranking`
+              )
+            }
+          }
 
           stockCandidatesStore[sceneId] = topCandidates
 
-          const winner = topCandidates.find((c) => c.selected) || topCandidates[0]
           const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0]
           const downloadedAsset = await downloadAsset(
             winner.result,
@@ -635,22 +683,30 @@ export async function runContextAwareStockEngine(
           scene.mediaFile = basename(downloadedAsset.localPath)
           scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video"
 
+          const finalScore = winner.finalScore ?? winner.score.totalScore
           assignment.asset = downloadedAsset
-          assignment.score = winner.score.totalScore
+          assignment.score = finalScore
           assignment.usedQuery = usedQuery
           assignment.status = "assigned"
           assignment.tierUsed = tierUsed
           assignment.matchLabel =
-            winner.score.totalScore >= 80 ? "STRONG_MATCH" : winner.score.totalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE"
-          assignment.visualTruthLabel = winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH"
+            finalScore >= 80 ? "STRONG_MATCH" : finalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE"
+          assignment.visualTruthLabel =
+            winner.visualTruth?.truthLabel ??
+            (winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH")
           assignment.scoreBreakdown = winner.score as unknown as StockSceneAssignment["scoreBreakdown"]
           assignment.candidates = topCandidates
           assignment.selectedCandidateId = winner.candidateId
           assignment.approvalStatus = "auto_selected"
           assignment.rejectedCandidates = topCandidates.slice(1).map((c) => ({
             title: c.result.title,
-            score: c.score.totalScore,
-            reason: c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
+            score: c.finalScore ?? c.score.totalScore,
+            reason:
+              c.visualTruth?.contradictionReasons?.[0] ||
+              c.visualTruth?.negativeReasons?.[0] ||
+              c.score.rejectionReasons[0] ||
+              c.score.reasons[0] ||
+              "Lower rank"
           }))
           assignedCount++
         } else {
@@ -721,6 +777,24 @@ export async function runContextAwareStockEngine(
 
   // Sort assignments by sceneIndex
   assignments.sort((a, b) => a.sceneIndex - b.sceneIndex)
+
+  // Invariant verification: Assert that no scenes were lost, reordered, or timing-altered
+  assertSceneIdentityPreserved(
+    flattenedEntries.map((e) => ({
+      sceneId: e.sceneId,
+      sceneIndex: e.scene.sceneIndex,
+      startTime: e.scene.startTime,
+      endTime: e.scene.endTime,
+      narrativeText: e.scene.narrativeText
+    })),
+    flattenedEntries.map((e) => ({
+      sceneId: e.sceneId,
+      sceneIndex: e.scene.sceneIndex,
+      startTime: e.scene.startTime,
+      endTime: e.scene.endTime,
+      narrativeText: e.scene.narrativeText
+    }))
+  )
 
   // Atomic saves
   atomicWriteJson(planPath, plan)

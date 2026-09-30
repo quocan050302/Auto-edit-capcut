@@ -23,9 +23,11 @@ export function loadProductionSettings(projectDir?: string): ProductionIntellige
         projectSettingsPath,
         {}
       )
+      const nested = projectSettings.productionIntelligence || {}
       return {
         ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
-        ...projectSettings
+        ...projectSettings,
+        ...nested
       }
     }
   }
@@ -34,9 +36,11 @@ export function loadProductionSettings(projectDir?: string): ProductionIntellige
   try {
     const config = loadConfig() as { productionIntelligenceSettings?: Partial<ProductionIntelligenceSettings> }
     if (config.productionIntelligenceSettings) {
+      const nested = config.productionIntelligenceSettings.productionIntelligence || {}
       return {
         ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
-        ...config.productionIntelligenceSettings
+        ...config.productionIntelligenceSettings,
+        ...nested
       }
     }
   } catch (err) {
@@ -52,9 +56,11 @@ export function saveProductionSettings(
   projectDir?: string
 ): ProductionIntelligenceSettings {
   const current = loadProductionSettings(projectDir)
+  const nested = settings.productionIntelligence || {}
   const updated: ProductionIntelligenceSettings = {
     ...current,
-    ...settings
+    ...settings,
+    ...nested
   }
 
   // 1. If projectDir is supplied, save to project analysis folder
