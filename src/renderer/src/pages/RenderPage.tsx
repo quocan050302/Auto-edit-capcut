@@ -3,9 +3,9 @@ import type {
   ProjectState,
   VideoTransitionType,
   TransitionRenderMode,
-  RenderQaReport,
-  RenderQaIssue
+  RenderQaReport
 } from '../../../../shared/types'
+import { CollapsibleSection } from '../components/CollapsibleSection'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -46,7 +46,7 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [isRendering, setIsRendering] = useState(false)
   const [isPreflightRunning, setIsPreflightRunning] = useState(false)
   const [preflightReport, setPreflightReport] = useState<RenderQaReport | null>(null)
-  const [showIssuesList, setShowIssuesList] = useState(false)
+  const [showPreflightDetails, setShowPreflightDetails] = useState(false)
   const [copied, setCopied] = useState(false)
   const [progress, setProgress] = useState<RenderProgress | null>(null)
   const [captionProgress, setCaptionProgress] = useState<{ message: string; progress: number } | null>(null)
@@ -56,16 +56,16 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   const [sceneCount, setSceneCount] = useState(0)
   const [mediaReadyCount, setMediaReadyCount] = useState(0)
   const [elapsed, setElapsed] = useState(0)
-  const [audioReady, setAudioReady] = useState(0)  // count of downloaded music tracks
+  const [audioReady, setAudioReady] = useState(0)
   const startTimeRef = useRef<number | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  // Render settings
+  // Render settings (Preserved exact defaults & types)
   const [resolution, setResolution] = useState<'1920x1080' | '1280x720' | '3840x2160'>('1920x1080')
   const [fps, setFps] = useState<30 | 24 | 60>(30)
   const [outputName, setOutputName] = useState('final_output')
 
-  // Scene transition settings
+  // Scene transition settings (Preserved exact defaults & types)
   const [transitionEnabled, setTransitionEnabled] = useState(true)
   const [transitionMode, setTransitionMode] = useState<TransitionRenderMode>('smart')
   const [selectedTransition, setSelectedTransition] = useState<VideoTransitionType>('dissolve')
@@ -116,6 +116,10 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
         try {
           const initialPreflight = await window.api.render.runPreflight({ projectDir: project.projectDir })
           setPreflightReport(initialPreflight)
+          // If preflight has fatal issues, auto-expand details
+          if (initialPreflight && initialPreflight.status === 'failed') {
+            setShowPreflightDetails(true)
+          }
         } catch { /* ignore initial preflight error */ }
       }
     })
@@ -145,6 +149,9 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
     try {
       const pf = await window.api.render.runPreflight({ projectDir: project.projectDir })
       setPreflightReport(pf)
+      if (pf && pf.status === 'failed') {
+        setShowPreflightDetails(true)
+      }
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -171,12 +178,13 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
       setIsPreflightRunning(false)
     }
 
+    // Blocking condition: fatal preflight errors prevent rendering
     if (pfReport && pfReport.status === 'failed') {
       setIsRendering(false)
       setProgress(null)
-      setShowIssuesList(true)
+      setShowPreflightDetails(true)
       const fatalIssues = pfReport.issues.filter((i) => i.severity === 'fatal')
-      setError(`Preflight QA failed with ${fatalIssues.length} fatal error(s). Render blocked until resolved.`)
+      setError(`Cannot render yet: Preflight QA failed with ${fatalIssues.length} fatal error(s). Render blocked until resolved.`)
       return
     }
 
@@ -186,12 +194,10 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
 
     const unsub = window.api.render.onProgress((data) => setProgress(data))
 
-    // Subscribe to Remotion caption overlay progress
     const unsubCaption = window.api.captions?.onRenderProgress?.(
       (data: { message: string; progress: number }) => setCaptionProgress(data)
     )
 
-    // Subscribe to Postflight QA progress
     const unsubQa = window.api.render.onQaProgress?.(
       (data: { stage: string; progress: number; message: string }) => {
         setProgress({ stage: `QA: ${data.stage} (${data.message})`, progress: data.progress })
@@ -234,517 +240,405 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
   }
 
   const pct = progress ? Math.round(progress.progress * 100) : 0
+  const isPreflightFailed = preflightReport?.status === 'failed'
+  const isPreflightWarning = preflightReport?.status === 'passed_with_warnings'
+  const isPreflightPassed = preflightReport?.status === 'passed'
 
   return (
-    <div className="page-container">
-
-      {/* ── Status bar ─────────────────────────────── */}
-      <div className="panel">
-        <div className="panel-header">
+    <div className="page-container render-page-shell">
+      {/* ── LAYER 1: CLIENT SUMMARY & ABOVE-THE-FOLD PRIMARY ACTION ── */}
+      <div className="panel render-hero-card">
+        <div className="panel-header render-hero-header">
           <div className="panel-title">
-            <div className="panel-title-icon">
-              <svg width="12" height="12" viewBox="0 0 20 20" fill="var(--brand-primary)">
-                <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
-              </svg>
-            </div>
-            Render Video
+            <span className="panel-title-icon">🎬</span>
+            {result ? 'Render Complete' : isRendering ? 'Rendering Video' : isPreflightFailed ? 'Cannot render yet' : 'Ready to render'}
           </div>
-          {result && <span className="panel-badge badge-success">✓ Complete</span>}
-          {isRendering && <span className="panel-badge badge-warning" style={{ animation: 'pulse 1.5s infinite' }}>● Rendering</span>}
+          {result && <span className="panel-badge badge-success">✓ Output Ready</span>}
+          {isRendering && (
+            <span className="panel-badge badge-warning" style={{ animation: 'pulse 1.5s infinite' }}>
+              ● Rendering... {pct}%
+            </span>
+          )}
+          {!result && !isRendering && (
+            <span className={`panel-badge ${isPreflightFailed ? 'badge-error' : 'badge-success'}`}>
+              {isPreflightFailed ? 'Issues to resolve' : 'Preflight OK'}
+            </span>
+          )}
         </div>
+
         <div className="panel-body">
-          {/* Pre-flight checks */}
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '16px' }}>
-            {[
-              { label: 'Edit Plan', ok: hasPlan, value: hasPlan ? '✓ Ready' : '✗ Missing → AI Planning' },
-              {
-                label: 'Media Footage',
-                ok: mediaReadyCount > 0 && mediaReadyCount >= sceneCount,
-                value: sceneCount > 0
-                  ? (mediaReadyCount >= sceneCount ? `✓ ${mediaReadyCount}/${sceneCount} ready` : `⚠ ${mediaReadyCount}/${sceneCount} ready`)
-                  : '—'
-              },
-              { label: 'Voiceover', ok: !!voiceoverPath, value: voiceoverPath ? `✓ ${voiceoverPath.split(/[\/\\]/).pop()}` : '⚠ Not set (optional)' },
-              { label: 'Output Format', ok: true, value: `${resolution} · ${fps}fps` }
-            ].map(({ label, ok, value }) => (
-              <div key={label} style={{
-                padding: '10px 14px',
-                background: 'var(--bg-elevated)',
-                borderRadius: 'var(--radius-md)',
-                border: `1px solid ${ok ? 'var(--border-brand)' : 'var(--border-subtle)'}`
-              }}>
-                <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{label}</div>
-                <div style={{ fontSize: '12px', fontWeight: 700, color: ok ? 'var(--color-success)' : 'var(--color-error)' }}>{value}</div>
-              </div>
-            ))}
+          {/* Summary Cards Grid */}
+          <div className="render-summary-grid">
+            <div className="render-summary-card">
+              <span className="render-summary-card__label">Scenes</span>
+              <span className={`render-summary-card__value ${mediaReadyCount >= sceneCount && sceneCount > 0 ? 'text-success' : ''}`}>
+                {sceneCount > 0 ? `${mediaReadyCount}/${sceneCount} ready` : '—'}
+              </span>
+            </div>
+
+            <div className="render-summary-card">
+              <span className="render-summary-card__label">Voiceover</span>
+              <span className={`render-summary-card__value ${voiceoverPath ? 'text-success' : 'text-muted'}`}>
+                {voiceoverPath ? 'Ready' : 'Not set'}
+              </span>
+            </div>
+
+            <div className="render-summary-card">
+              <span className="render-summary-card__label">Captions</span>
+              <span className={`render-summary-card__value ${hasPlan ? 'text-success' : 'text-muted'}`}>
+                {hasPlan ? 'Ready' : 'Pending'}
+              </span>
+            </div>
+
+            <div className="render-summary-card">
+              <span className="render-summary-card__label">Soundtrack</span>
+              <span className={`render-summary-card__value ${audioReady > 0 ? 'text-brand' : 'text-muted'}`}>
+                {audioReady > 0 ? `${audioReady} tracks` : 'Voice only'}
+              </span>
+            </div>
+
+            <div className="render-summary-card">
+              <span className="render-summary-card__label">Quality Check</span>
+              <span className={`render-summary-card__value ${
+                isPreflightFailed
+                  ? 'text-error'
+                  : isPreflightWarning
+                  ? 'text-warning'
+                  : isPreflightPassed
+                  ? 'text-success'
+                  : 'text-muted'
+              }`}>
+                {isPreflightFailed
+                  ? `${preflightReport?.fatalCount} blocking`
+                  : isPreflightWarning
+                  ? `Passed (${preflightReport?.warningCount} notices)`
+                  : isPreflightPassed
+                  ? 'Passed'
+                  : 'Pending'}
+              </span>
+            </div>
+
+            <div className="render-summary-card">
+              <span className="render-summary-card__label">Output Format</span>
+              <span className="render-summary-card__value">
+                {resolution.split('x')[1]}p · {fps}fps
+              </span>
+            </div>
           </div>
 
-          {/* Audio music banner */}
-          {audioReady > 0 && (
-            <div style={{
-              display: 'flex', alignItems: 'center', gap: 12,
-              background: 'rgba(99,102,241,0.1)',
-              border: '1px solid rgba(99,102,241,0.35)',
-              borderRadius: 10, padding: '12px 16px',
-              marginBottom: 16
-            }}>
-              <span style={{ fontSize: 20 }}>🎵</span>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: '#a5b4fc', marginBottom: 2 }}>
-                  {audioReady} background music track{audioReady !== 1 ? 's' : ''} ready
-                </div>
-                <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
-                  {result
-                    ? 'Click Re-render to include background music in the output video.'
-                    : 'Background music will be mixed into the rendered video automatically.'}
-                </div>
-              </div>
-              {result && (
-                <span style={{
-                  fontSize: 11, padding: '4px 10px', borderRadius: 999,
-                  background: 'rgba(251,191,36,0.15)', color: '#fbbf24',
-                  fontWeight: 600, flexShrink: 0
-                }}>
-                  ↻ Re-render needed
+          {/* PRIMARY ACTION BAR - ABOVE THE FOLD */}
+          <div className="render-action-bar">
+            <div className="render-action-bar__left">
+              <button
+                id="btn-start-render"
+                type="button"
+                className="btn btn-primary btn-lg"
+                onClick={handleRender}
+                disabled={isRendering || isPreflightRunning || !hasPlan || isPreflightFailed}
+                style={{ minWidth: '220px', minHeight: '44px', fontWeight: 700 }}
+              >
+                {isRendering || isPreflightRunning ? (
+                  <>
+                    <svg
+                      width="16"
+                      height="16"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      style={{ animation: 'spin 1s linear infinite', marginRight: '8px' }}
+                    >
+                      <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
+                      <path d="M12 2a10 10 0 0110 10" strokeLinecap="round" />
+                    </svg>
+                    {isPreflightRunning ? 'Running Preflight...' : `Rendering... ${pct}%`}
+                  </>
+                ) : result ? (
+                  '🔄 Re-render Video'
+                ) : isPreflightFailed ? (
+                  'Cannot render yet'
+                ) : (
+                  '▶ Start Render'
+                )}
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleCheckPreflight}
+                disabled={isRendering || isPreflightRunning || !hasPlan}
+                style={{ minHeight: '44px' }}
+              >
+                <span>🛡️</span>
+                <span>Re-check Quality</span>
+              </button>
+            </div>
+
+            {isRendering && (
+              <div className="render-action-bar__right">
+                <span className="text-sm font-mono text-muted">
+                  ⏱ Elapsed: {fmt(elapsed)}
                 </span>
-              )}
+              </div>
+            )}
+          </div>
+
+          {/* Preflight QA Summary Bar with View Details toggle */}
+          {preflightReport && (
+            <div className={`preflight-summary-bar ${isPreflightFailed ? 'is-failed' : isPreflightWarning ? 'is-warning' : 'is-passed'}`}>
+              <div className="preflight-summary-bar__left">
+                <span className="preflight-summary-bar__icon">
+                  {isPreflightFailed ? '❌' : isPreflightWarning ? '⚠️' : '✓'}
+                </span>
+                <span className="preflight-summary-bar__text">
+                  {isPreflightFailed && `Quality check blocked: ${preflightReport.fatalCount} fatal error(s) must be resolved before rendering.`}
+                  {isPreflightWarning && `Quality check passed: ${preflightReport.warningCount} non-blocking recommendations.`}
+                  {isPreflightPassed && 'Quality check passed: All media, timing and audio tracks verified.'}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                onClick={() => setShowPreflightDetails((prev) => !prev)}
+              >
+                {showPreflightDetails ? 'Hide Details' : 'View Details'}
+              </button>
             </div>
           )}
 
-          {/* ── Production Intelligence: Preflight QA Panel ── */}
-          <div style={{
-            marginBottom: '20px',
-            padding: '16px',
-            background: 'var(--bg-elevated)',
-            borderRadius: 'var(--radius-md)',
-            border: `1px solid ${
-              !preflightReport
-                ? 'var(--border-default)'
-                : preflightReport.status === 'failed'
-                  ? 'rgba(239, 68, 68, 0.4)'
-                  : preflightReport.status === 'passed_with_warnings'
-                    ? 'rgba(245, 158, 11, 0.4)'
-                    : 'rgba(16, 185, 129, 0.4)'
-            }`
-          }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span style={{ fontSize: '16px' }}>🛡️</span>
-                <div>
-                  <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
-                    Production Intelligence Preflight QA
+          {/* Detailed Preflight Metrics & Issues (Toggled or Auto-opened on Fatal) */}
+          {showPreflightDetails && preflightReport && (
+            <div className="preflight-details-panel">
+              {/* 7 Preflight Metrics */}
+              <div className="preflight-metrics-grid">
+                {[
+                  { label: 'Scenes checked', value: preflightReport.totalScenes, ok: preflightReport.totalScenes > 0 },
+                  { label: 'Media resolved', value: `${preflightReport.resolvedScenes}/${preflightReport.totalScenes}`, ok: preflightReport.resolvedScenes === preflightReport.totalScenes },
+                  { label: 'Missing media', value: preflightReport.missingScenes, ok: preflightReport.missingScenes === 0, isWarn: preflightReport.missingScenes > 0 },
+                  { label: 'Duration expected', value: fmt(preflightReport.expectedDuration), ok: preflightReport.expectedDuration > 0 },
+                  {
+                    label: 'Caption notices',
+                    value: preflightReport.issues.filter((i) => i.category === 'caption').length,
+                    ok: preflightReport.issues.filter((i) => i.category === 'caption').length === 0,
+                    isWarn: preflightReport.issues.filter((i) => i.category === 'caption').length > 0
+                  },
+                  {
+                    label: 'Audio notices',
+                    value: preflightReport.issues.filter((i) => i.category === 'audio').length,
+                    ok: preflightReport.issues.filter((i) => i.category === 'audio').length === 0,
+                    isWarn: preflightReport.issues.filter((i) => i.category === 'audio').length > 0
+                  },
+                  {
+                    label: 'Transition notices',
+                    value: preflightReport.issues.filter((i) => i.category === 'transition').length,
+                    ok: preflightReport.issues.filter((i) => i.category === 'transition').length === 0,
+                    isWarn: preflightReport.issues.filter((i) => i.category === 'transition').length > 0
+                  }
+                ].map((m) => (
+                  <div key={m.label} className="preflight-metric-card">
+                    <div className="preflight-metric-label">{m.label}</div>
+                    <div className={`preflight-metric-value ${m.ok ? 'text-success' : m.isWarn ? 'text-warning' : 'text-error'}`}>
+                      {m.value}
+                    </div>
                   </div>
-                  <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
-                    Automated validation of edit plan, media assets, audio tracks, and transitions before render
-                  </div>
-                </div>
+                ))}
               </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                {isPreflightRunning ? (
-                  <span style={{
-                    fontSize: '11px', padding: '4px 10px', borderRadius: 999,
-                    background: 'rgba(99, 102, 241, 0.15)', color: '#818cf8', fontWeight: 600
-                  }}>
-                    ⏳ Running Preflight...
-                  </span>
-                ) : preflightReport ? (
-                  <span style={{
-                    fontSize: '11px', padding: '4px 10px', borderRadius: 999,
-                    fontWeight: 700,
-                    background:
-                      preflightReport.status === 'failed'
-                        ? 'rgba(239, 68, 68, 0.15)'
-                        : preflightReport.status === 'passed_with_warnings'
-                          ? 'rgba(245, 158, 11, 0.15)'
-                          : 'rgba(16, 185, 129, 0.15)',
-                    color:
-                      preflightReport.status === 'failed'
-                        ? '#f87171'
-                        : preflightReport.status === 'passed_with_warnings'
-                          ? '#fbbf24'
-                          : '#34d399'
-                  }}>
-                    {preflightReport.status === 'failed' && '❌ Preflight: Failed'}
-                    {preflightReport.status === 'passed_with_warnings' && `⚠️ Preflight: Passed with warnings (${preflightReport.warningCount})`}
-                    {preflightReport.status === 'passed' && '✓ Preflight: Passed'}
-                  </span>
-                ) : (
-                  <button
-                    className="btn btn-secondary btn-sm"
-                    onClick={handleCheckPreflight}
-                    disabled={isRendering || isPreflightRunning}
-                    style={{ fontSize: '11px', padding: '4px 10px' }}
-                  >
-                    🔍 Check Preflight
-                  </button>
-                )}
-              </div>
-            </div>
 
-            {preflightReport && (
-              <>
-                {/* 7 Preflight Metrics */}
-                <div style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))',
-                  gap: '8px',
-                  marginBottom: preflightReport.issues.length > 0 ? '12px' : '0'
-                }}>
-                  {[
-                    { label: 'Scenes checked', value: preflightReport.totalScenes, ok: preflightReport.totalScenes > 0 },
-                    { label: 'Media resolved', value: `${preflightReport.resolvedScenes}/${preflightReport.totalScenes}`, ok: preflightReport.resolvedScenes === preflightReport.totalScenes },
-                    { label: 'Missing media', value: preflightReport.missingScenes, ok: preflightReport.missingScenes === 0, isWarn: preflightReport.missingScenes > 0 },
-                    { label: 'Duration expected', value: fmt(preflightReport.expectedDuration), ok: preflightReport.expectedDuration > 0 },
-                    {
-                      label: 'Caption issues',
-                      value: preflightReport.issues.filter((i) => i.category === 'caption').length,
-                      ok: preflightReport.issues.filter((i) => i.category === 'caption').length === 0,
-                      isWarn: preflightReport.issues.filter((i) => i.category === 'caption').length > 0
-                    },
-                    {
-                      label: 'Audio issues',
-                      value: preflightReport.issues.filter((i) => i.category === 'audio').length,
-                      ok: preflightReport.issues.filter((i) => i.category === 'audio').length === 0,
-                      isWarn: preflightReport.issues.filter((i) => i.category === 'audio').length > 0
-                    },
-                    {
-                      label: 'Transition issues',
-                      value: preflightReport.issues.filter((i) => i.category === 'transition').length,
-                      ok: preflightReport.issues.filter((i) => i.category === 'transition').length === 0,
-                      isWarn: preflightReport.issues.filter((i) => i.category === 'transition').length > 0
-                    }
-                  ].map((m) => (
-                    <div key={m.label} style={{
-                      padding: '8px 10px',
-                      background: 'var(--bg-base)',
-                      borderRadius: 'var(--radius-sm)',
-                      border: '1px solid var(--border-subtle)',
-                      textAlign: 'center'
-                    }}>
-                      <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginBottom: '2px' }}>{m.label}</div>
-                      <div style={{
-                        fontSize: '12px',
-                        fontWeight: 700,
-                        color: m.ok ? 'var(--color-success)' : m.isWarn ? '#fbbf24' : 'var(--color-error)'
-                      }}>
-                        {m.value}
+              {/* Issue list */}
+              {preflightReport.issues.length > 0 && (
+                <div className="preflight-issues-list">
+                  {preflightReport.issues.map((issue) => (
+                    <div
+                      key={issue.id}
+                      className={`preflight-issue-item ${issue.severity === 'fatal' ? 'is-fatal' : issue.severity === 'warning' ? 'is-warning' : 'is-info'}`}
+                    >
+                      <span className="preflight-issue-icon">
+                        {issue.severity === 'fatal' ? '❌' : issue.severity === 'warning' ? '⚠️' : 'ℹ️'}
+                      </span>
+                      <div className="preflight-issue-content">
+                        <div className="preflight-issue-header">
+                          <span className="preflight-issue-badge">{issue.category}</span>
+                          <span className="preflight-issue-severity">
+                            {issue.severity === 'fatal' ? 'Blocking Error' : 'Recommendation'}
+                          </span>
+                        </div>
+                        <div className="preflight-issue-msg">{issue.message}</div>
+                        {issue.suggestion && (
+                          <div className="preflight-issue-suggestion">💡 {issue.suggestion}</div>
+                        )}
                       </div>
                     </div>
                   ))}
                 </div>
-
-                {preflightReport.issues.length > 0 && (
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => setShowIssuesList((prev) => !prev)}
-                      style={{
-                        background: 'none', border: 'none', color: 'var(--brand-accent)',
-                        cursor: 'pointer', fontSize: '11px', fontWeight: 600, padding: 0,
-                        display: 'flex', alignItems: 'center', gap: '4px'
-                      }}
-                    >
-                      {showIssuesList ? '▼ Hide QA issues' : `▶ Show ${preflightReport.issues.length} QA notice(s)`}
-                    </button>
-
-                    {showIssuesList && (
-                      <div style={{
-                        marginTop: '8px', maxHeight: '160px', overflowY: 'auto',
-                        display: 'flex', flexDirection: 'column', gap: '6px',
-                        background: 'var(--bg-base)', padding: '8px', borderRadius: 'var(--radius-sm)'
-                      }}>
-                        {preflightReport.issues.map((issue) => (
-                          <div key={issue.id} style={{
-                            fontSize: '11px',
-                            display: 'flex',
-                            gap: '8px',
-                            alignItems: 'flex-start',
-                            color: issue.severity === 'fatal' ? '#f87171' : issue.severity === 'warning' ? '#fbbf24' : 'var(--text-secondary)'
-                          }}>
-                            <span>{issue.severity === 'fatal' ? '❌' : issue.severity === 'warning' ? '⚠️' : 'ℹ️'}</span>
-                            <div style={{ flex: 1 }}>
-                              <span style={{
-                                textTransform: 'uppercase', fontSize: '9px', fontWeight: 700,
-                                padding: '1px 4px', borderRadius: '3px', marginRight: '6px',
-                                background: issue.severity === 'fatal' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(245, 158, 11, 0.2)'
-                              }}>
-                                {issue.category}
-                              </span>
-                              <span>{issue.message}</span>
-                              {issue.suggestion && (
-                                <div style={{ fontSize: '10px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                                  💡 {issue.suggestion}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-
-          {/* Settings row */}
-          <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', marginBottom: '20px', flexWrap: 'wrap' }}>
-            <div className="settings-field" style={{ flex: 1, minWidth: '180px' }}>
-              <label className="settings-label">Resolution</label>
-              <select
-                className="settings-select"
-                value={resolution}
-                onChange={(e) => setResolution(e.target.value as typeof resolution)}
-                disabled={isRendering}
-              >
-                <option value="1280x720">1280×720 HD</option>
-                <option value="1920x1080">1920×1080 Full HD</option>
-                <option value="3840x2160">3840×2160 4K</option>
-              </select>
-            </div>
-            <div className="settings-field" style={{ flex: 1, minWidth: '120px' }}>
-              <label className="settings-label">Frame Rate</label>
-              <select
-                className="settings-select"
-                value={fps}
-                onChange={(e) => setFps(Number(e.target.value) as typeof fps)}
-                disabled={isRendering}
-              >
-                <option value={24}>24 fps</option>
-                <option value={30}>30 fps</option>
-                <option value={60}>60 fps</option>
-              </select>
-            </div>
-            <div className="settings-field" style={{ flex: 2, minWidth: '200px' }}>
-              <label className="settings-label">Output filename</label>
-              <input
-                style={{
-                  background: 'var(--bg-base)', border: '1px solid var(--border-default)',
-                  borderRadius: 'var(--radius-sm)', color: 'var(--text-primary)',
-                  fontFamily: 'var(--font-mono)', fontSize: '12px',
-                  padding: '9px 12px', outline: 'none', width: '100%'
-                }}
-                value={outputName}
-                onChange={(e) => setOutputName(e.target.value)}
-                disabled={isRendering}
-                placeholder="final_output"
-              />
-            </div>
-          </div>
-
-          {/* Scene Transitions Section */}
-          <div style={{
-            marginBottom: '20px',
-            padding: '14px 16px',
-            background: 'var(--bg-elevated)',
-            borderRadius: 'var(--radius-md)',
-            border: '1px solid var(--border-default)'
-          }}>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'space-between',
-              marginBottom: transitionEnabled ? '14px' : '0'
-            }}>
-              <div>
-                <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span>🎬</span> Scene Transitions
-                </div>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>
-                  Cinematic FFmpeg transitions between scenes
-                </div>
-              </div>
-              <label style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: '8px',
-                cursor: isRendering ? 'not-allowed' : 'pointer',
-                fontSize: '12px',
-                fontWeight: 600,
-                color: transitionEnabled ? 'var(--brand-accent)' : 'var(--text-secondary)'
-              }}>
-                <input
-                  type="checkbox"
-                  checked={transitionEnabled}
-                  onChange={(e) => setTransitionEnabled(e.target.checked)}
-                  disabled={isRendering}
-                  style={{
-                    width: '16px',
-                    height: '16px',
-                    accentColor: 'var(--brand-primary)',
-                    cursor: isRendering ? 'not-allowed' : 'pointer'
-                  }}
-                />
-                <span>Enable scene transitions</span>
-              </label>
-            </div>
-
-            {transitionEnabled && (
-              <div style={{ display: 'flex', gap: '16px', alignItems: 'flex-end', flexWrap: 'wrap' }}>
-                <div className="settings-field" style={{ flex: 1, minWidth: '180px' }}>
-                  <label className="settings-label">Transition mode</label>
-                  <select
-                    className="settings-select"
-                    value={transitionMode}
-                    onChange={(e) => setTransitionMode(e.target.value as TransitionRenderMode)}
-                    disabled={isRendering}
-                  >
-                    <option value="smart">Smart / Follow edit plan</option>
-                    <option value="single">Single transition</option>
-                  </select>
-                </div>
-
-                {transitionMode === 'single' && (
-                  <div className="settings-field" style={{ flex: 1, minWidth: '160px' }}>
-                    <label className="settings-label">Transition type</label>
-                    <select
-                      className="settings-select"
-                      value={selectedTransition}
-                      onChange={(e) => setSelectedTransition(e.target.value as VideoTransitionType)}
-                      disabled={isRendering}
-                    >
-                      <option value="fade">Fade</option>
-                      <option value="dissolve">Dissolve</option>
-                      <option value="wipeleft">Wipe Left</option>
-                      <option value="wiperight">Wipe Right</option>
-                      <option value="slideleft">Slide Left</option>
-                      <option value="slideright">Slide Right</option>
-                      <option value="smoothleft">Smooth Left</option>
-                      <option value="smoothright">Smooth Right</option>
-                      <option value="circleopen">Circle Open</option>
-                      <option value="circleclose">Circle Close</option>
-                      <option value="pixelize">Pixelize</option>
-                      <option value="zoomin">Zoom In</option>
-                    </select>
-                  </div>
-                )}
-
-                <div className="settings-field" style={{ flex: 1, minWidth: '130px' }}>
-                  <label className="settings-label">Default duration</label>
-                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                    <input
-                      type="number"
-                      min={0.15}
-                      max={1.0}
-                      step={0.05}
-                      value={transitionDuration}
-                      onChange={(e) => setTransitionDuration(parseFloat(e.target.value) || 0.35)}
-                      disabled={isRendering}
-                      style={{
-                        background: 'var(--bg-base)',
-                        border: '1px solid var(--border-default)',
-                        borderRadius: 'var(--radius-sm)',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: '12px',
-                        padding: '9px 12px',
-                        outline: 'none',
-                        width: '100%'
-                      }}
-                    />
-                    <span style={{ position: 'absolute', right: '10px', fontSize: '11px', color: 'var(--text-muted)', pointerEvents: 'none' }}>s</span>
-                  </div>
-                </div>
-
-                <div className="settings-field" style={{ flex: 1, minWidth: '140px' }}>
-                  <label className="settings-label">Chapter transition duration</label>
-                  <div style={{ position: 'relative', display: 'flex', alignItems: 'center' }}>
-                    <input
-                      type="number"
-                      min={0.25}
-                      max={1.2}
-                      step={0.05}
-                      value={chapterDuration}
-                      onChange={(e) => setChapterDuration(parseFloat(e.target.value) || 0.65)}
-                      disabled={isRendering}
-                      style={{
-                        background: 'var(--bg-base)',
-                        border: '1px solid var(--border-default)',
-                        borderRadius: 'var(--radius-sm)',
-                        color: 'var(--text-primary)',
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: '12px',
-                        padding: '9px 12px',
-                        outline: 'none',
-                        width: '100%'
-                      }}
-                    />
-                    <span style={{ position: 'absolute', right: '10px', fontSize: '11px', color: 'var(--text-muted)', pointerEvents: 'none' }}>s</span>
-                  </div>
-                </div>
-              </div>
-            )}
-          </div>
-
-          {/* Action button */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
-            <button
-              id="btn-start-render"
-              className={`btn btn-primary btn-lg`}
-              onClick={handleRender}
-              disabled={isRendering || isPreflightRunning || !hasPlan}
-              style={{ minWidth: '200px' }}
-            >
-              {isRendering || isPreflightRunning ? (
-                <><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
-                  style={{ animation: 'spin 1s linear infinite', marginRight: '8px' }}>
-                  <circle cx="12" cy="12" r="10" strokeOpacity="0.25" />
-                  <path d="M12 2a10 10 0 0110 10" strokeLinecap="round" />
-                </svg>{isPreflightRunning ? 'Running Preflight...' : `Rendering... ${pct}%`}</>
-              ) : result ? (
-                '🔄 Re-render'
-              ) : (
-                '▶ Start Render'
               )}
-            </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={handleCheckPreflight}
-              disabled={isRendering || isPreflightRunning || !hasPlan}
-              style={{ display: 'flex', alignItems: 'center', gap: '6px' }}
-            >
-              <span>🛡️</span>
-              <span>Re-check Preflight</span>
-            </button>
-            {isRendering && (
-              <div style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
-                ⏱ {fmt(elapsed)}
-              </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* ── Progress ────────────────────────────────── */}
+      {/* ── LAYER 2: ADVANCED RENDER SETTINGS ACCORDION ── */}
+      <CollapsibleSection
+        title="Advanced render settings"
+        subtitle="Resolution, frame rate, output naming, and FFmpeg cinematic scene transitions."
+        summaryWhenClosed={`${resolution} · ${fps}fps · Transitions: ${transitionEnabled ? (transitionMode === 'smart' ? 'Smart / Auto' : selectedTransition) : 'Disabled'}`}
+        icon={<span>⚙️</span>}
+        defaultOpen={false}
+        className="advanced-settings-panel"
+      >
+        <div className="advanced-settings-grid">
+          <div className="settings-field">
+            <label className="settings-label">Output Resolution</label>
+            <select
+              className="settings-select"
+              value={resolution}
+              onChange={(e) => setResolution(e.target.value as typeof resolution)}
+              disabled={isRendering}
+            >
+              <option value="1280x720">1280×720 HD</option>
+              <option value="1920x1080">1920×1080 Full HD (Recommended)</option>
+              <option value="3840x2160">3840×2160 4K Ultra HD</option>
+            </select>
+          </div>
+
+          <div className="settings-field">
+            <label className="settings-label">Frame Rate (FPS)</label>
+            <select
+              className="settings-select"
+              value={fps}
+              onChange={(e) => setFps(Number(e.target.value) as typeof fps)}
+              disabled={isRendering}
+            >
+              <option value={24}>24 fps (Cinematic)</option>
+              <option value={30}>30 fps (Standard)</option>
+              <option value={60}>60 fps (Smooth)</option>
+            </select>
+          </div>
+
+          <div className="settings-field" style={{ gridColumn: 'span 2' }}>
+            <label className="settings-label">Output Filename</label>
+            <input
+              className="input-text font-mono"
+              value={outputName}
+              onChange={(e) => setOutputName(e.target.value)}
+              disabled={isRendering}
+              placeholder="final_output"
+            />
+          </div>
+        </div>
+
+        {/* Scene Transitions Sub-section */}
+        <div className="transition-settings-box">
+          <div className="transition-header-row">
+            <div>
+              <div className="text-sm font-semibold">Cinematic Scene Transitions</div>
+              <div className="text-xs text-muted">FFmpeg hardware-accelerated transitions between cut scenes</div>
+            </div>
+            <label className="checkbox-label">
+              <input
+                type="checkbox"
+                checked={transitionEnabled}
+                onChange={(e) => setTransitionEnabled(e.target.checked)}
+                disabled={isRendering}
+              />
+              <span>Enable transitions</span>
+            </label>
+          </div>
+
+          {transitionEnabled && (
+            <div className="transition-controls-grid">
+              <div className="settings-field">
+                <label className="settings-label">Transition Mode</label>
+                <select
+                  className="settings-select"
+                  value={transitionMode}
+                  onChange={(e) => setTransitionMode(e.target.value as TransitionRenderMode)}
+                  disabled={isRendering}
+                >
+                  <option value="smart">Smart / Follow Edit Plan</option>
+                  <option value="single">Single Transition</option>
+                </select>
+              </div>
+
+              {transitionMode === 'single' && (
+                <div className="settings-field">
+                  <label className="settings-label">Transition Type</label>
+                  <select
+                    className="settings-select"
+                    value={selectedTransition}
+                    onChange={(e) => setSelectedTransition(e.target.value as VideoTransitionType)}
+                    disabled={isRendering}
+                  >
+                    <option value="fade">Fade</option>
+                    <option value="dissolve">Dissolve</option>
+                    <option value="wipeleft">Wipe Left</option>
+                    <option value="wiperight">Wipe Right</option>
+                    <option value="slideleft">Slide Left</option>
+                    <option value="slideright">Slide Right</option>
+                    <option value="smoothleft">Smooth Left</option>
+                    <option value="smoothright">Smooth Right</option>
+                    <option value="circleopen">Circle Open</option>
+                    <option value="circleclose">Circle Close</option>
+                    <option value="pixelize">Pixelize</option>
+                    <option value="zoomin">Zoom In</option>
+                  </select>
+                </div>
+              )}
+
+              <div className="settings-field">
+                <label className="settings-label">Default Duration (s)</label>
+                <input
+                  type="number"
+                  min={0.15}
+                  max={1.0}
+                  step={0.05}
+                  value={transitionDuration}
+                  onChange={(e) => setTransitionDuration(parseFloat(e.target.value) || 0.35)}
+                  disabled={isRendering}
+                  className="input-text font-mono"
+                />
+              </div>
+
+              <div className="settings-field">
+                <label className="settings-label">Chapter Duration (s)</label>
+                <input
+                  type="number"
+                  min={0.25}
+                  max={1.2}
+                  step={0.05}
+                  value={chapterDuration}
+                  onChange={(e) => setChapterDuration(parseFloat(e.target.value) || 0.65)}
+                  disabled={isRendering}
+                  className="input-text font-mono"
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </CollapsibleSection>
+
+      {/* ── RENDERING PROGRESS OVERLAY / CARD ── */}
       {isRendering && progress && (
-        <div className="panel">
+        <div className="panel render-progress-card">
           <div className="panel-header">
             <div className="panel-title">Render Progress</div>
-            <span style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', color: 'var(--brand-primary)' }}>
-              {pct}%
-            </span>
+            <span className="font-mono text-brand font-bold">{pct}%</span>
           </div>
-          <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-            {/* FFmpeg main pipeline bar */}
-            <div className="progress-bar-wrap" style={{ height: '10px' }}>
+          <div className="panel-body">
+            <div className="progress-bar-wrap" style={{ height: '8px', marginBottom: '8px' }}>
               <div
                 className="progress-bar-fill"
-                style={{ width: `${Math.max(2, pct)}%`, transition: 'width 0.4s ease' }}
+                style={{ width: `${Math.max(2, pct)}%` }}
               />
             </div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-              {progress.stage}
-            </div>
-            {/* Remotion caption overlay sub-bar (shown only when active) */}
+            <div className="text-sm text-secondary">{progress.stage}</div>
+
+            {/* Remotion caption overlay progress */}
             {captionProgress && (
-              <div style={{ marginTop: 4 }}>
-                <div style={{
-                  display: 'flex', justifyContent: 'space-between',
-                  fontSize: '11px', color: 'var(--text-muted)', marginBottom: 4
-                }}>
-                  <span>🎬 Caption Overlay (Remotion)</span>
-                  <span style={{ fontFamily: 'var(--font-mono)', color: '#a5b4fc' }}>
+              <div className="mt-4">
+                <div className="flex justify-between text-xs text-muted mb-2">
+                  <span>🎬 Dynamic Captions Overlay</span>
+                  <span className="font-mono text-brand">
                     {Math.round(captionProgress.progress * 100)}%
                   </span>
                 </div>
@@ -753,122 +647,70 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
                     className="progress-bar-fill"
                     style={{
                       width: `${Math.max(1, Math.round(captionProgress.progress * 100))}%`,
-                      background: 'linear-gradient(90deg, #6366f1, #a5b4fc)',
-                      transition: 'width 0.4s ease'
+                      background: 'linear-gradient(90deg, #6366f1, #a5b4fc)'
                     }}
                   />
                 </div>
-                <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: 4 }}>
-                  {captionProgress.message}
-                </div>
-              </div>
-            )}
-            {progress.sceneIndex && progress.totalScenes && (
-              <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
-                {Array.from({ length: progress.totalScenes }, (_, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      width: '20px', height: '6px', borderRadius: '3px',
-                      background: i < (progress.sceneIndex ?? 0)
-                        ? 'var(--color-success)'
-                        : i === (progress.sceneIndex ?? 0) - 1
-                          ? 'var(--brand-primary)'
-                          : 'var(--bg-active)',
-                      transition: 'background 0.3s'
-                    }}
-                  />
-                ))}
+                <div className="text-xs text-muted mt-2">{captionProgress.message}</div>
               </div>
             )}
           </div>
         </div>
       )}
 
-      {/* ── Error ───────────────────────────────────── */}
+      {/* ── ERROR ALERT ── */}
       {error && (
-        <div className="panel" style={{ border: '1px solid rgba(248,113,113,0.3)' }}>
-          <div className="panel-body">
-            <div style={{ fontSize: '13px', color: '#fca5a5', fontWeight: 600, marginBottom: '8px' }}>
-              ❌ Render Failed
-            </div>
-            <div style={{ fontSize: '12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>
-              {error}
-            </div>
+        <div className="status-banner status-banner--error">
+          <div className="status-banner__icon"><span>✕</span></div>
+          <div className="status-banner__content">
+            <div className="status-banner__title">Render Interrupted</div>
+            <div className="status-banner__message font-mono text-xs">{error}</div>
           </div>
         </div>
       )}
 
-      {/* ── Result ──────────────────────────────────── */}
+      {/* ── COMPLETED RESULT CARD ── */}
       {result && (
-        <div className="panel" style={{ border: '1px solid rgba(52,211,153,0.3)' }}>
+        <div className="panel render-result-card">
           <div className="panel-header">
             <div className="panel-title">
-              <div className="panel-title-icon" style={{ background: 'rgba(52,211,153,0.2)' }}>
-                <svg width="12" height="12" viewBox="0 0 20 20" fill="var(--color-success)">
-                  <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
-                </svg>
-              </div>
+              <span className="panel-title-icon text-success">✓</span>
               Render Complete!
             </div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              {result.qaReport && (
-                <span style={{
-                  fontSize: '11px',
-                  fontWeight: 700,
-                  padding: '3px 8px',
-                  borderRadius: '999px',
-                  background:
-                    result.qaReport.status === 'passed'
-                      ? 'rgba(16, 185, 129, 0.15)'
-                      : result.qaReport.status === 'passed_with_warnings'
-                        ? 'rgba(245, 158, 11, 0.15)'
-                        : 'rgba(239, 68, 68, 0.15)',
-                  color:
-                    result.qaReport.status === 'passed'
-                      ? '#34d399'
-                      : result.qaReport.status === 'passed_with_warnings'
-                        ? '#fbbf24'
-                        : '#f87171'
-                }}>
-                  QA: {result.qaReport.status.replace(/_/g, ' ').toUpperCase()}
-                </span>
-              )}
-              <span style={{ fontSize: '11px', color: 'var(--color-success)', fontWeight: 700 }}>
-                ✓ {fmtBytes(result.fileSizeBytes)}
-              </span>
-            </div>
+            <span className="panel-badge badge-success">
+              {fmtBytes(result.fileSizeBytes)}
+            </span>
           </div>
+
           <div className="panel-body">
-            <div className="stats-grid" style={{ marginBottom: '16px' }}>
-              {[
-                { label: 'Duration', value: fmt(result.durationSecs) },
-                { label: 'File Size', value: fmtBytes(result.fileSizeBytes) },
-                { label: 'Render Time', value: fmt(elapsed) },
-                { label: 'Resolution', value: resolution }
-              ].map(({ label, value }) => (
-                <div key={label} className="stat-card">
-                  <div className="stat-value accent" style={{ fontSize: '16px' }}>{value}</div>
-                  <div className="stat-label">{label}</div>
-                </div>
-              ))}
+            <div className="stats-grid mb-4">
+              <div className="stat-card">
+                <div className="stat-value accent">{fmt(result.durationSecs)}</div>
+                <div className="stat-label">Duration</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value accent">{fmtBytes(result.fileSizeBytes)}</div>
+                <div className="stat-label">File Size</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value accent">{fmt(elapsed)}</div>
+                <div className="stat-label">Render Time</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value accent">{resolution}</div>
+                <div className="stat-label">Resolution</div>
+              </div>
             </div>
 
-            {/* Postflight QA Notes */}
+            {/* Postflight QA Audit notes */}
             {result.qaReport && result.qaReport.issues.length > 0 && (
-              <div style={{
-                background: 'var(--bg-elevated)',
-                padding: '12px 14px',
-                borderRadius: 'var(--radius-md)',
-                marginBottom: '14px',
-                border: '1px solid var(--border-default)'
-              }}>
-                <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '8px' }}>
+              <div className="postflight-audit-box mb-4">
+                <div className="text-xs font-semibold text-secondary mb-2">
                   🛡️ Postflight QA Audit ({result.qaReport.issues.length} notice{result.qaReport.issues.length > 1 ? 's' : ''})
                 </div>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <div className="flex flex-col gap-2">
                   {result.qaReport.issues.map((iss) => (
-                    <div key={iss.id} style={{ fontSize: '11px', color: iss.severity === 'warning' ? '#fbbf24' : 'var(--text-muted)' }}>
+                    <div key={iss.id} className="text-xs text-muted">
                       {iss.severity === 'warning' ? '⚠️' : 'ℹ️'} {iss.message}
                     </div>
                   ))}
@@ -876,24 +718,16 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
               </div>
             )}
 
-            <div style={{
-              padding: '12px 16px',
-              background: 'var(--bg-base)',
-              borderRadius: 'var(--radius-md)',
-              fontFamily: 'var(--font-mono)',
-              fontSize: '12px',
-              color: 'var(--color-success)',
-              marginBottom: '12px',
-              wordBreak: 'break-all'
-            }}>
+            <div className="output-path-pill mb-4 font-mono text-xs">
               📁 {result.outputPath}
             </div>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            <div className="flex gap-3">
               <button
+                type="button"
                 className="btn btn-secondary"
                 onClick={() => {
-                  navigator.clipboard.writeText(result!.outputPath)
+                  navigator.clipboard.writeText(result.outputPath)
                   setCopied(true)
                   setTimeout(() => setCopied(false), 3000)
                 }}
@@ -904,22 +738,6 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
           </div>
         </div>
       )}
-
-      {/* ── Info panel ──────────────────────────────── */}
-      {!isRendering && !result && !error && (
-        <div className="panel" style={{ background: 'var(--bg-elevated)' }}>
-          <div className="panel-body">
-            <div style={{ fontSize: '13px', color: 'var(--text-muted)', lineHeight: 2 }}>
-              <div>🎬 <strong style={{ color: 'var(--text-secondary)' }}>{sceneCount} scenes</strong> sẽ được ghép theo edit plan</div>
-              <div>🎵 Voiceover audio sẽ được mix vào toàn bộ video</div>
-              <div>⚡ FFmpeg xử lý từng scene → concat → mix audio</div>
-              <div>💾 Output lưu tại <code style={{ fontSize: '11px', color: 'var(--brand-primary)' }}>{project.projectDir}\output\</code></div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   )
 }

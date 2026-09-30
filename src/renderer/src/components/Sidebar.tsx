@@ -7,6 +7,7 @@ interface SidebarProps {
   project: ProjectState | null
   currentPage: Page
   onNavigate: (page: Page) => void
+  onToggleMode?: () => void
   hasTranscript?: boolean
   stockCoverage?: { assigned: number; total: number } | null
   audioCoverage?: { approved: number; total: number } | null
@@ -145,6 +146,7 @@ export function Sidebar({
   project,
   currentPage,
   onNavigate,
+  onToggleMode,
   hasTranscript,
   stockCoverage,
   audioCoverage
@@ -218,6 +220,20 @@ export function Sidebar({
             <div className="sidebar-project-name" style={{ color: 'var(--text-muted)' }}>
               No project open
             </div>
+          </div>
+        )}
+
+        {onToggleMode && (
+          <div className="sidebar-mode-switcher">
+            <button
+              type="button"
+              className="sidebar-mode-toggle-btn"
+              onClick={onToggleMode}
+              title="Switch to Simple Mode for streamlined workflow"
+            >
+              <span className="sidebar-mode-label">Advanced Mode</span>
+              <span className="sidebar-mode-switch-tag">Switch to Simple</span>
+            </button>
           </div>
         )}
       </div>
