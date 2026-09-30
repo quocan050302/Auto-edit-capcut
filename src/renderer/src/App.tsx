@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import { TitleBar } from './components/TitleBar'
 import { Sidebar } from './components/Sidebar'
+import { ClientSidebar } from './components/ClientSidebar'
 import { ProgressLog } from './components/ProgressLog'
 import { HomePage } from './pages/HomePage'
 import { InputPage } from './pages/InputPage'
+import { ProductionPage } from './pages/ProductionPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { AnalysisPage } from './pages/AnalysisPage'
 import { TranscriptionPage } from './pages/TranscriptionPage'
@@ -17,11 +19,25 @@ import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
 import { useStock } from './hooks/useStock'
 import { useAudioDirector } from './hooks/useAudioDirector'
+import { useUiPreferences } from './hooks/useUiPreferences'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'captions' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa'
+export type Page =
+  | 'home'
+  | 'input'
+  | 'production'
+  | 'transcribe'
+  | 'planning'
+  | 'captions'
+  | 'stock'
+  | 'audio'
+  | 'settings'
+  | 'analysis'
+  | 'render'
+  | 'qa'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
+  const { isSimpleMode, toggleInterfaceMode } = useUiPreferences()
 
   const {
     project,
@@ -67,6 +83,68 @@ export default function App(): React.ReactElement {
     }
   }, [project?.projectDir])
 
+  // Auto-navigation when pipeline stage changes
+  useEffect(() => {
+    if (!project?.projectDir) return
+
+    let lastNavigatedStage = ''
+    let hasNavigatedToProduction = false
+
+    const unsubscribe = window.api.pipeline.onProgress((state) => {
+      if (state.projectDir !== project.projectDir) {
+        return
+      }
+
+      // Reset auto-start guard if pipeline is not running
+      if (state.overallStatus !== 'running') {
+        hasNavigatedToProduction = false
+      }
+
+      const stage = state.currentStage
+
+      if (isSimpleMode) {
+        // Simple Mode: navigate ONCE to production when pipeline starts running
+        if (state.overallStatus === 'running' && !hasNavigatedToProduction) {
+          hasNavigatedToProduction = true
+          setCurrentPage('production')
+        }
+
+        // Only navigate to Export when render and postflight are completed!
+        if (state.overallStatus === 'completed' || stage === 'completed') {
+          setCurrentPage('render')
+        }
+      } else {
+        // Advanced Mode: preserve existing stage-by-stage auto-navigation
+        if (state.overallStatus !== 'running') {
+          return
+        }
+
+        if (stage && stage !== lastNavigatedStage) {
+          lastNavigatedStage = stage
+          const stageToPage: Partial<Record<string, Page>> = {
+            transcribing: 'transcribe',
+            planning: 'planning',
+            captions: 'captions',
+            'global-context': 'stock',
+            'stock-search': 'stock',
+            'audio-search': 'audio',
+            preflight: 'render',
+            rendering: 'render',
+            completed: 'render'
+          }
+          const target = stageToPage[stage]
+          if (target) {
+            setCurrentPage(target)
+          }
+        }
+      }
+    })
+
+    return () => {
+      unsubscribe()
+    }
+  }, [project?.projectDir, isSimpleMode])
+
   function navigate(page: Page): void {
     if (page !== 'home' && !project) return
     setCurrentPage(page)
@@ -106,28 +184,39 @@ export default function App(): React.ReactElement {
     : null
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${isSimpleMode ? 'client-shell' : ''}`}>
       <TitleBar projectName={project?.name ?? null} />
 
       <div className="app-body">
-        <Sidebar
-          project={project}
-          currentPage={currentPage}
-          onNavigate={navigate}
-          hasTranscript={transcript !== null}
-          stockCoverage={stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null}
-          audioCoverage={audioDirector.plan ? {
-            approved: audioDirector.plan.sections.filter((s) => s.approved).length,
-            total: audioDirector.plan.sections.length
-          } : null}
-        />
+        {isSimpleMode ? (
+          <ClientSidebar
+            project={project}
+            currentPage={currentPage}
+            onNavigate={(p) => navigate(p as Page)}
+            onToggleMode={toggleInterfaceMode}
+            stockCoverage={stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null}
+          />
+        ) : (
+          <Sidebar
+            project={project}
+            currentPage={currentPage}
+            onNavigate={navigate}
+            onToggleMode={toggleInterfaceMode}
+            hasTranscript={transcript !== null}
+            stockCoverage={stockReview ? { assigned: stockReview.assignedScenes, total: stockReview.totalScenes } : null}
+            audioCoverage={audioDirector.plan ? {
+              approved: audioDirector.plan.sections.filter((s) => s.approved).length,
+              total: audioDirector.plan.sections.length
+            } : null}
+          />
+        )}
 
         <div className="main-content">
           {currentPage === 'home' && (
             <HomePage
               onCreate={handleCreateProject}
               onOpen={handleOpenProject}
-              onNavigate={(p) => navigate(p)}
+              onNavigate={(p) => navigate(p as Page)}
             />
           )}
 
@@ -137,6 +226,14 @@ export default function App(): React.ReactElement {
               onUpdateInputs={updateInputs}
               onScanMedia={handleScanMedia}
               isScanning={isScanning}
+              onNavigate={(p) => navigate(p as Page)}
+            />
+          )}
+
+          {currentPage === 'production' && project && (
+            <ProductionPage
+              project={project}
+              onNavigate={(p) => navigate(p as Page)}
             />
           )}
 

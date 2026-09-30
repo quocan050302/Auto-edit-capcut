@@ -781,7 +781,17 @@ export const IPC_CHANNELS = {
   // Production Intelligence — Render QA
   RENDER_PREFLIGHT_RUN: 'render:preflight-run',
   RENDER_QA_GET: 'render:qa-get',
-  RENDER_QA_PROGRESS: 'render:qa-progress'
+  RENDER_QA_PROGRESS: 'render:qa-progress',
+
+  // Auto Production Pipeline
+  PIPELINE_START: 'pipeline:start',
+  PIPELINE_RESUME: 'pipeline:resume',
+  PIPELINE_CANCEL: 'pipeline:cancel',
+  PIPELINE_STATUS_GET: 'pipeline:status-get',
+  PIPELINE_PROGRESS: 'pipeline:progress',
+  PIPELINE_RETRY_STAGE: 'pipeline:retry-stage',
+  PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
+  PIPELINE_RECOVER: 'pipeline:recover'
 } as const
 
 // ─── Master Edit Plan Retention Extension ─────────────────────────────────────
@@ -895,4 +905,155 @@ export interface CaptionPlan {
   generationReason?: string                   // lý do fallback nếu có
   hookWindowSeconds?: number                  // hook window đã dùng khi generate
   sourceDuration?: number                     // transcript.duration — dùng cho timeline UI
+}
+
+// ─── Auto Production Pipeline Types ──────────────────────────────────────────
+
+export type PipelineStage =
+  | 'idle'
+  | 'validating'
+  | 'transcribing'
+  | 'planning'
+  | 'captions'
+  | 'global-context'
+  | 'stock-search'
+  | 'audio-search'
+  | 'preflight'
+  | 'rendering'
+  | 'postflight'
+  | 'completed'
+  | 'needs-attention'
+  | 'cancelled'
+  | 'failed'
+
+export type StageStatus =
+  | 'pending'
+  | 'running'
+  | 'completed'
+  | 'skipped'
+  | 'warning'
+  | 'failed'
+  | 'cancelled'
+
+export interface PipelineStageState {
+  status: StageStatus
+  progress: number // 0 to 1
+  message?: string
+  startedAt?: string
+  completedAt?: string
+  durationMs?: number
+  warning?: string
+  error?: string
+  artifactPath?: string
+  stats?: {
+    totalScenes?: number
+    processedScenes?: number
+    assignedScenes?: number
+    downloadedScenes?: number
+    missingScenes?: number
+    lowConfidenceScenes?: number
+    missingSceneIndices?: number[]
+    [key: string]: unknown
+  }
+}
+
+export interface InputFingerprint {
+  scriptPath: string
+  scriptHash?: string
+  voiceoverPath: string
+  voiceoverSize?: number
+  voiceoverMtimeMs?: number
+}
+
+export interface AutoPipelineOptions {
+  projectDir: string
+  scriptPath: string
+  voiceoverPath: string
+  whisperModel?: 'tiny' | 'base' | 'small' | 'medium'
+  geminiModel?: string
+  forceRegenerateCaptions?: boolean
+  preferredStockProvider?: 'pexels' | 'pixabay' | 'all'
+  requireBackgroundMusic?: boolean
+  outputName?: string
+  resolution?: { width: number; height: number }
+  fps?: 24 | 25 | 30 | 60
+  transitionSettings?: RenderTransitionSettings
+  autoStartOnReady?: boolean
+}
+
+export type PipelineOverallStatus =
+  | 'idle'
+  | 'running'
+  | 'interrupted'
+  | 'recovering'
+  | 'needs-attention'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface PipelineLease {
+  runId: string
+  appInstanceId: string
+  pid: number
+  acquiredAt: string
+  heartbeatAt: string
+  currentStage: PipelineStage
+}
+
+export interface PipelineSnapshot {
+  version: number
+  runId: string
+  projectDir: string
+  currentStage: PipelineStage
+  overallStatus: PipelineOverallStatus
+  stages: Record<string, PipelineStageState>
+  updatedAt: string
+  lease?: PipelineLease
+  warnings?: string[]
+  fatalErrors?: string[]
+  renderOutputPath?: string
+  preflightReportPath?: string
+  postflightReportPath?: string
+}
+
+export interface PipelineRecoveryResult {
+  recovered: boolean
+  previousRunId?: string
+  resumable: boolean
+  resumeFrom?: PipelineStage
+  completedStages: PipelineStage[]
+  invalidStages: PipelineStage[]
+  warnings: string[]
+  snapshot?: PipelineSnapshot
+}
+
+export interface AutoPipelineState {
+  schemaVersion: number
+  version: number // Monotonically increasing version counter for snapshots
+  runId: string
+  projectDir: string
+  currentStage: PipelineStage
+  overallStatus: PipelineOverallStatus
+  startedAt?: string
+  updatedAt: string
+  completedAt?: string
+  inputFingerprint: InputFingerprint
+  options: AutoPipelineOptions
+  stages: Record<string, PipelineStageState>
+  lease?: PipelineLease
+  warnings: string[]
+  fatalErrors: string[]
+  renderOutputPath?: string
+  preflightReportPath?: string
+  postflightReportPath?: string
+}
+
+export interface PipelineError {
+  code: string
+  stage: PipelineStage
+  message: string
+  recoverable: boolean
+  provider?: string
+  retryAfterMs?: number
+  originalError?: string
 }
