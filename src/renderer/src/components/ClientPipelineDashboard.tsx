@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import type { AutoPipelineState, PipelineStage, ProjectState } from '../../../../shared/types'
+import type { AutoPipelineState, PipelineStage, ProjectState, ClaimEvidenceLedger } from '../../../../shared/types'
 import { UI_PHASES, PipelinePhaseCard, computePhaseState, type UiPhaseId } from './PipelinePhaseCard'
 import { ConfirmDialog } from './ConfirmDialog'
 import { StatusBanner } from './StatusBanner'
@@ -87,6 +87,83 @@ export function ClientPipelineDashboard({
     (pipelineState?.currentStage as PipelineStage) || 'validating'
   )
   const [followCurrentStage, setFollowCurrentStage] = useState(true)
+
+  // Production Intelligence summaries (Client Mode)
+  const [claimLedger, setClaimLedger] = useState<ClaimEvidenceLedger | null>(null)
+  const [visualTruthSummary, setVisualTruthSummary] = useState<{
+    status: 'Strong' | 'Acceptable' | 'Needs review' | 'Pending'
+    hasData: boolean
+  }>({ status: 'Pending', hasData: false })
+
+  useEffect(() => {
+    let isMounted = true
+    async function loadClientIntelligence(): Promise<void> {
+      if (!project?.projectPath) return
+      try {
+        if (window.api?.claims?.getLedger) {
+          const ledger = await window.api.claims.getLedger(project.projectPath)
+          if (isMounted && ledger) {
+            setClaimLedger(ledger)
+          }
+        }
+      } catch {
+        // Safe fallback
+      }
+
+      try {
+        if (window.api?.visualTruth?.getData) {
+          const vtData = await window.api.visualTruth.getData(project.projectPath)
+          if (isMounted && vtData) {
+            const scenes = Object.values(vtData)
+            if (scenes.length === 0) {
+              setVisualTruthSummary({ status: 'Pending', hasData: false })
+            } else {
+              let hasNeedsReview = false
+              let strongCount = 0
+              let total = 0
+              for (const sc of scenes) {
+                const selectedVerification = sc.selectedCandidateId && sc.verifications?.[sc.selectedCandidateId]
+                const verification = selectedVerification || Object.values(sc.verifications || {})[0]
+                if (verification) {
+                  total++
+                  if (
+                    verification.requiresReview ||
+                    verification.truthLabel === 'CONTRADICTORY' ||
+                    verification.truthLabel === 'GENERIC_STOCK'
+                  ) {
+                    hasNeedsReview = true
+                  } else if (
+                    verification.truthLabel === 'EXACT_SUBJECT' ||
+                    (verification.truthLabel === 'CONTEXTUAL_MATCH' && (verification.subjectMatch ?? 0) >= 70)
+                  ) {
+                    strongCount++
+                  }
+                }
+              }
+              if (hasNeedsReview) {
+                setVisualTruthSummary({ status: 'Needs review', hasData: true })
+              } else if (total > 0 && strongCount / total >= 0.6) {
+                setVisualTruthSummary({ status: 'Strong', hasData: true })
+              } else if (total > 0) {
+                setVisualTruthSummary({ status: 'Acceptable', hasData: true })
+              } else {
+                setVisualTruthSummary({ status: 'Pending', hasData: false })
+              }
+            }
+          }
+        }
+      } catch {
+        // Safe fallback
+      }
+    }
+
+    loadClientIntelligence()
+    const interval = setInterval(loadClientIntelligence, 4000)
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [project?.projectPath, pipelineState?.currentStage, isRunning])
 
   // Timer 1s chỉ dùng để refresh UI khi pipeline đang running
   const [, setTick] = useState(0)
@@ -268,6 +345,37 @@ export function ClientPipelineDashboard({
                 ✓ Passed
               </span>
             </div>
+            {claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0 && (
+              <div className="metric-box">
+                <span className="metric-box__label">Evidence Coverage</span>
+                <span className="metric-box__value" style={{ color: '#60a5fa' }}>
+                  {Math.round(
+                    (((claimLedger.summary.verified ?? 0) + (claimLedger.summary.partiallyVerified ?? 0) * 0.5) /
+                      (claimLedger.summary.totalClaims || 1)) *
+                      100
+                  )}
+                  %
+                </span>
+              </div>
+            )}
+            {visualTruthSummary.hasData && (
+              <div className="metric-box">
+                <span className="metric-box__label">Visual Match</span>
+                <span
+                  className="metric-box__value"
+                  style={{
+                    color:
+                      visualTruthSummary.status === 'Strong'
+                        ? 'var(--color-success)'
+                        : visualTruthSummary.status === 'Acceptable'
+                        ? '#60a5fa'
+                        : '#fbbf24'
+                  }}
+                >
+                  {visualTruthSummary.status}
+                </span>
+              </div>
+            )}
           </div>
 
           <div className="success-actions-row">
@@ -491,6 +599,109 @@ export function ClientPipelineDashboard({
           </button>
         </div>
       </div>
+
+      {/* Production Intelligence: Visual Match & Evidence Coverage (Client Mode) */}
+      {(visualTruthSummary.hasData || (claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0)) && (
+        <div
+          className="client-intelligence-banner"
+          style={{
+            display: 'flex',
+            flexWrap: 'wrap',
+            gap: '16px',
+            marginTop: '16px',
+            padding: '14px 20px',
+            background: 'var(--bg-elevated)',
+            border: '1px solid var(--border-default)',
+            borderRadius: 'var(--radius-lg)',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            boxShadow: 'var(--shadow-sm)'
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '24px', flexWrap: 'wrap' }}>
+            {visualTruthSummary.hasData && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>Visual match:</span>
+                <span
+                  style={{
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    padding: '3px 10px',
+                    borderRadius: '999px',
+                    background:
+                      visualTruthSummary.status === 'Strong'
+                        ? 'rgba(34, 197, 94, 0.15)'
+                        : visualTruthSummary.status === 'Acceptable'
+                        ? 'rgba(59, 130, 246, 0.15)'
+                        : 'rgba(239, 68, 68, 0.15)',
+                    color:
+                      visualTruthSummary.status === 'Strong'
+                        ? '#4ade80'
+                        : visualTruthSummary.status === 'Acceptable'
+                        ? '#60a5fa'
+                        : '#f87171'
+                  }}
+                >
+                  {visualTruthSummary.status}
+                </span>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '3px 10px', fontSize: '11px', height: '26px' }}
+                  onClick={() => onNavigate('stock')}
+                >
+                  Review scene
+                </button>
+              </div>
+            )}
+
+            {claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0 && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <span style={{ fontSize: '13px', color: 'var(--text-secondary)' }}>
+                  Evidence coverage:{' '}
+                  <strong style={{ color: 'var(--text-primary)', fontWeight: 700 }}>
+                    {Math.round(
+                      (((claimLedger.summary.verified ?? 0) + (claimLedger.summary.partiallyVerified ?? 0) * 0.5) /
+                        (claimLedger.summary.totalClaims || 1)) *
+                        100
+                    )}
+                    %
+                  </strong>
+                </span>
+                {(() => {
+                  const needsReviewCount = (claimLedger.claims || []).filter(
+                    (c) =>
+                      (c.importance === 'HIGH' || c.importance === 'CRITICAL') &&
+                      c.verificationStatus !== 'VERIFIED'
+                  ).length
+                  return needsReviewCount > 0 ? (
+                    <span
+                      style={{
+                        fontSize: '11px',
+                        fontWeight: 600,
+                        padding: '3px 10px',
+                        borderRadius: '999px',
+                        background: 'rgba(245, 158, 11, 0.15)',
+                        color: '#fbbf24'
+                      }}
+                    >
+                      {needsReviewCount} important claim{needsReviewCount > 1 ? 's' : ''} need review
+                    </span>
+                  ) : null
+                })()}
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  style={{ padding: '3px 10px', fontSize: '11px', height: '26px' }}
+                  onClick={() => onNavigate('stock')}
+                >
+                  Review evidence
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* 5 UI Phase Cards */}
       <div className="production-phases-container">

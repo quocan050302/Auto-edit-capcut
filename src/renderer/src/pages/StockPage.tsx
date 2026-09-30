@@ -6,7 +6,11 @@ import type {
   StockReviewData,
   GlobalScriptContext,
   StockCandidate,
-  StoryboardSummary
+  StoryboardSummary,
+  ClaimEvidenceLedger,
+  DocumentaryClaim,
+  ClaimVerificationStatus,
+  VisualTruthLabel
 } from '../../../../shared/types'
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -125,11 +129,14 @@ function matchLabelBadge(label?: string): React.ReactElement | null {
   if (!label) return null
   const map: Record<string, { color: string; bg: string }> = {
     STRONG_MATCH: { color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
-    EXACT_SUBJECT: { color: '#22c55e', bg: 'rgba(34,197,94,0.12)' },
+    EXACT_SUBJECT: { color: '#22c55e', bg: 'rgba(34,197,94,0.15)' },
     ACCEPTABLE: { color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
-    CONTEXTUAL_MATCH: { color: '#60a5fa', bg: 'rgba(96,165,250,0.12)' },
-    ILLUSTRATIVE: { color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' },
-    HISTORICAL: { color: '#c084fc', bg: 'rgba(192,132,252,0.12)' },
+    CONTEXTUAL_MATCH: { color: '#60a5fa', bg: 'rgba(96,165,250,0.15)' },
+    ILLUSTRATIVE: { color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' },
+    HISTORICAL: { color: '#c084fc', bg: 'rgba(192,132,252,0.15)' },
+    GENERIC_STOCK: { color: '#f97316', bg: 'rgba(249,115,22,0.15)' },
+    CONTRADICTORY: { color: '#ef4444', bg: 'rgba(239,68,68,0.18)' },
+    UNKNOWN: { color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' },
     REJECTED: { color: '#f87171', bg: 'rgba(248,113,113,0.12)' }
   }
   const c = map[label] ?? { color: 'var(--text-muted)', bg: 'transparent' }
@@ -146,6 +153,33 @@ function matchLabelBadge(label?: string): React.ReactElement | null {
       }}
     >
       {label.replace(/_/g, ' ')}
+    </span>
+  )
+}
+
+function claimStatusBadge(status?: string): React.ReactElement | null {
+  if (!status) return null
+  const map: Record<string, { color: string; bg: string }> = {
+    VERIFIED: { color: '#22c55e', bg: 'rgba(34,197,94,0.15)' },
+    PARTIALLY_VERIFIED: { color: '#60a5fa', bg: 'rgba(96,165,250,0.15)' },
+    UNSOURCED: { color: '#f59e0b', bg: 'rgba(245,158,11,0.15)' },
+    CONTRADICTED: { color: '#ef4444', bg: 'rgba(239,68,68,0.15)' },
+    NOT_REQUIRED: { color: '#9ca3af', bg: 'rgba(156,163,175,0.15)' }
+  }
+  const c = map[status] ?? { color: 'var(--text-muted)', bg: 'transparent' }
+  return (
+    <span
+      style={{
+        fontSize: '9px',
+        fontWeight: 700,
+        padding: '2px 6px',
+        borderRadius: '999px',
+        background: c.bg,
+        color: c.color,
+        letterSpacing: '0.04em'
+      }}
+    >
+      {status.replace(/_/g, ' ')}
     </span>
   )
 }
@@ -378,20 +412,24 @@ function StoryboardSceneCard({
   assignment,
   projectDir,
   candidates,
+  claims,
   onReplace,
   onLock,
   onUpload,
   onCandidateSelected,
-  onCandidateApproved
+  onCandidateApproved,
+  onUpdateClaimStatus
 }: {
   assignment: StockSceneAssignment
   projectDir: string
   candidates: StockCandidate[]
+  claims?: DocumentaryClaim[]
   onReplace: (sceneIndex: number, query: string) => Promise<StockAsset | null>
   onLock: (sceneIndex: number, locked: boolean) => Promise<void>
   onUpload: (sceneIndex: number) => Promise<void>
   onCandidateSelected: (candidateId: string) => Promise<void>
   onCandidateApproved: (candidateId?: string) => Promise<void>
+  onUpdateClaimStatus?: (claimId: string, status: ClaimVerificationStatus) => Promise<void>
 }): React.ReactElement {
   const [showReplace, setShowReplace] = useState(false)
   const [replacing, setReplacing] = useState(false)
@@ -576,6 +614,45 @@ function StoryboardSceneCard({
             </div>
           )}
         </div>
+
+        {/* Documentary Claims in this scene */}
+        {claims && claims.length > 0 && (
+          <div style={{ background: 'rgba(99,102,241,0.06)', border: '1px solid rgba(99,102,241,0.2)', borderRadius: 'var(--radius-sm)', padding: '8px 10px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+              <span style={{ fontSize: '10px', fontWeight: 700, color: 'var(--color-brand)' }}>
+                ⚖ Documentary Claims ({claims.length})
+              </span>
+              <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>Evidence Required</span>
+            </div>
+            {claims.map((cl) => (
+              <div key={cl.id} style={{ display: 'flex', flexDirection: 'column', gap: '4px', marginBottom: '6px', fontSize: '10px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                  <span style={{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '3px', fontWeight: 600 }}>
+                    {cl.type}
+                  </span>
+                  <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>"{cl.normalizedClaim}"</span>
+                  {claimStatusBadge(cl.verificationStatus)}
+                  <select
+                    value={cl.verificationStatus}
+                    onChange={(e) => onUpdateClaimStatus?.(cl.id, e.target.value as ClaimVerificationStatus)}
+                    style={{ fontSize: '9px', background: 'var(--bg-void)', color: 'var(--text-secondary)', border: '1px solid var(--border-subtle)', borderRadius: '3px', padding: '1px 4px' }}
+                  >
+                    <option value="UNSOURCED">UNSOURCED</option>
+                    <option value="VERIFIED">VERIFIED</option>
+                    <option value="PARTIALLY_VERIFIED">PARTIALLY_VERIFIED</option>
+                    <option value="CONTRADICTED">CONTRADICTED</option>
+                    <option value="NOT_REQUIRED">NOT_REQUIRED</option>
+                  </select>
+                </div>
+                {cl.warnings.length > 0 && (
+                  <div style={{ color: 'var(--color-warning)', fontSize: '9px' }}>
+                    ℹ {cl.warnings[0]}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         {/* Selected Asset Header Overview */}
         {isAssigned && (
@@ -771,6 +848,30 @@ function StoryboardSceneCard({
                           </span>
                         )}
                       </div>
+
+                      {/* Visual Truth Verification Info */}
+                      {candidate.visualTruth && (
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '4px', margin: '2px 0' }}>
+                          <span style={{ fontSize: '9px', fontWeight: 600, color: 'var(--text-secondary)' }}>Visual Truth:</span>
+                          {matchLabelBadge(candidate.visualTruth.truthLabel)}
+                        </div>
+                      )}
+
+                      {candidate.finalScore !== undefined && (
+                        <div style={{ fontSize: '9px', color: 'var(--text-muted)', display: 'flex', justifyContent: 'space-between' }}>
+                          <span>Meta: {candidate.score.totalScore}</span>
+                          <span style={{ fontWeight: 600, color: candidate.finalScore >= 70 ? '#22c55e' : '#f59e0b' }}>
+                            Vision: {candidate.finalScore}
+                          </span>
+                        </div>
+                      )}
+
+                      {/* Contradiction Warning if present */}
+                      {candidate.visualTruth?.contradictionReasons?.[0] && (
+                        <div style={{ fontSize: '9px', color: '#ef4444', fontWeight: 600 }}>
+                          ⚠ {candidate.visualTruth.contradictionReasons[0]}
+                        </div>
+                      )}
 
                       {/* Candidate Reason Snippet */}
                       {candidate.score.reasons[0] && (
@@ -993,20 +1094,25 @@ export function StockPage({
   const [filter, setFilter] = useState<FilterType>('all')
   const [candidatesStore, setCandidatesStore] = useState<Record<string, StockCandidate[]>>({})
   const [storyboardSummary, setStoryboardSummary] = useState<StoryboardSummary | null>(null)
+  const [claimLedger, setClaimLedger] = useState<ClaimEvidenceLedger | null>(null)
+  const [ledgerExpanded, setLedgerExpanded] = useState(false)
+  const [exportingManifests, setExportingManifests] = useState(false)
 
-  // Load existing GlobalContext, candidates, and summary
+  // Load existing GlobalContext, candidates, summary, and claims
   const loadData = async (): Promise<void> => {
     try {
-      const [ctx, cands, summary] = await Promise.all([
+      const [ctx, cands, summary, ledger] = await Promise.all([
         window.api.stock.getContext(project.projectDir),
         window.api.stock.getCandidates({ projectDir: project.projectDir }),
-        window.api.stock.getStoryboardSummary(project.projectDir)
+        window.api.stock.getStoryboardSummary(project.projectDir),
+        window.api.claims.getLedger(project.projectDir)
       ])
       if (ctx) setGlobalCtx(ctx)
       if (cands && typeof cands === 'object') {
         setCandidatesStore(cands as Record<string, StockCandidate[]>)
       }
       if (summary) setStoryboardSummary(summary)
+      if (ledger) setClaimLedger(ledger)
     } catch {
       // Ignore background load errors
     }
@@ -1045,6 +1151,38 @@ export function StockPage({
     } finally {
       setAnalyzingCtx(false)
       unsub()
+    }
+  }
+
+  async function handleUpdateClaimStatus(claimId: string, status: ClaimVerificationStatus): Promise<void> {
+    try {
+      const res = await window.api.claims.updateStatus({
+        projectDir: project.projectDir,
+        claimId,
+        status
+      })
+      if (res.success) {
+        const updated = await window.api.claims.getLedger(project.projectDir)
+        if (updated) setClaimLedger(updated)
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  async function handleExportManifests(): Promise<void> {
+    try {
+      setExportingManifests(true)
+      const res = await window.api.claims.exportManifests({ projectDir: project.projectDir })
+      if (res.success) {
+        alert(`Exported Manifests successfully!\nCSV: ${res.csvPath}\nLicenses: ${res.licensesPath}`)
+      } else {
+        alert(`Export error: ${res.error}`)
+      }
+    } catch (err) {
+      alert(`Export error: ${String(err)}`)
+    } finally {
+      setExportingManifests(false)
     }
   }
 
@@ -1159,6 +1297,126 @@ export function StockPage({
                 <span style={{ color: 'var(--text-muted)' }}>{globalCtx.forbiddenSubstitutions.join(' · ')}</span>
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* ── Claim & Evidence Ledger Panel ────────────────────────────────────── */}
+      <div className="panel" style={{ borderColor: claimLedger ? 'rgba(99,102,241,0.35)' : 'var(--border-subtle)' }}>
+        <div className="panel-header" style={{ cursor: 'pointer' }} onClick={() => setLedgerExpanded((e) => !e)}>
+          <div className="panel-title">
+            <span style={{ marginRight: 8 }}>⚖️</span>
+            Claim & Evidence Ledger
+            {claimLedger && (
+              <span style={{ marginLeft: 8, fontSize: '10px', color: 'var(--text-muted)', fontWeight: 400 }}>
+                {claimLedger.claims.length} claims · {claimLedger.summary.coveragePct}% evidence coverage
+              </span>
+            )}
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {claimLedger ? (
+              <>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-xs"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    void handleExportManifests()
+                  }}
+                  disabled={exportingManifests}
+                >
+                  {exportingManifests ? 'Exporting...' : '📁 Export Sources (CSV/JSON)'}
+                </button>
+                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>{ledgerExpanded ? '▲' : '▼'}</span>
+              </>
+            ) : (
+              <span style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                Ledger generated after Global Visual Context analysis
+              </span>
+            )}
+          </div>
+        </div>
+
+        {ledgerExpanded && claimLedger && (
+          <div className="panel-body" style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            {/* Ledger metrics bar */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: '8px' }}>
+              <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)' }}>{claimLedger.summary.totalClaims}</div>
+                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>TOTAL CLAIMS</div>
+              </div>
+              <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: '#22c55e' }}>{claimLedger.summary.verified}</div>
+                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>VERIFIED</div>
+              </div>
+              <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: '#60a5fa' }}>{claimLedger.summary.partiallyVerified}</div>
+                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>PARTIAL</div>
+              </div>
+              <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: claimLedger.summary.unsourced > 0 ? '#f59e0b' : 'var(--text-muted)' }}>{claimLedger.summary.unsourced}</div>
+                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>UNSOURCED</div>
+              </div>
+              <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: claimLedger.summary.contradicted > 0 ? '#ef4444' : 'var(--text-muted)' }}>{claimLedger.summary.contradicted}</div>
+                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>CONTRADICTED</div>
+              </div>
+              <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: claimLedger.summary.coveragePct >= 70 ? '#22c55e' : '#f59e0b' }}>{claimLedger.summary.coveragePct}%</div>
+                <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>COVERAGE</div>
+              </div>
+            </div>
+
+            {/* List of claims */}
+            <div style={{ maxHeight: '240px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+              {claimLedger.claims.map((cl) => (
+                <div
+                  key={cl.id}
+                  style={{
+                    background: 'var(--bg-void)',
+                    padding: '8px 10px',
+                    borderRadius: '4px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '10px',
+                    fontSize: '11px'
+                  }}
+                >
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center', marginBottom: '2px', flexWrap: 'wrap' }}>
+                      <span style={{ background: 'rgba(255,255,255,0.08)', padding: '1px 5px', borderRadius: '3px', fontSize: '9px', fontWeight: 600 }}>{cl.type}</span>
+                      <span style={{ fontWeight: 600, color: 'var(--text-primary)' }}>"{cl.normalizedClaim}"</span>
+                      {claimStatusBadge(cl.verificationStatus)}
+                      <span style={{ fontSize: '9px', color: 'var(--text-muted)' }}>Scenes: {cl.sceneIds.join(', ')}</span>
+                    </div>
+                    {cl.warnings.length > 0 && (
+                      <div style={{ fontSize: '9px', color: 'var(--color-warning)' }}>
+                        ℹ {cl.warnings[0]}
+                      </div>
+                    )}
+                  </div>
+                  <select
+                    value={cl.verificationStatus}
+                    onChange={(e) => void handleUpdateClaimStatus(cl.id, e.target.value as ClaimVerificationStatus)}
+                    style={{
+                      fontSize: '10px',
+                      background: 'var(--bg-surface)',
+                      color: 'var(--text-secondary)',
+                      border: '1px solid var(--border-subtle)',
+                      borderRadius: '4px',
+                      padding: '3px 6px'
+                    }}
+                  >
+                    <option value="UNSOURCED">UNSOURCED</option>
+                    <option value="VERIFIED">VERIFIED</option>
+                    <option value="PARTIALLY_VERIFIED">PARTIAL</option>
+                    <option value="CONTRADICTED">CONTRADICTED</option>
+                    <option value="NOT_REQUIRED">NOT REQUIRED</option>
+                  </select>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -1314,6 +1572,10 @@ export function StockPage({
                   await loadData()
                   onLoad()
                 }}
+                claims={claimLedger?.claims.filter(
+                  (c) => c.sceneIds.includes(a.sceneId) || c.sceneIds.includes(`scene_${a.sceneIndex}`)
+                )}
+                onUpdateClaimStatus={handleUpdateClaimStatus}
               />
             )
           })}
