@@ -24,6 +24,7 @@
 - [7. Hệ Thống IPC (Inter-Process Communication)](#7-hệ-thống-ipc-inter-process-communication)
 - [8. Yêu Cầu Môi Trường & Hướng Dẫn Cài Đặt](#8-yêu-cầu-môi-trường--hướng-dẫn-cài-đặt)
 - [9. Khắc Phục Sự Cố (Troubleshooting)](#9-khắc-phục-sự-cố-troubleshooting)
+- [10. Production Intelligence: Visual Truth Reranker & Claim & Evidence Ledger](#10-production-intelligence-visual-truth-reranker--claim--evidence-ledger)
 
 ---
 
@@ -411,7 +412,83 @@ File cài đặt hoàn chỉnh cho hệ điều hành của bạn sẽ được 
 
 ---
 
+## 10. Production Intelligence: Visual Truth Reranker & Claim & Evidence Ledger
+
+Bổ sung 2 lớp trí tuệ sản xuất chuyên sâu dành cho video tài liệu phong cách US Documentary (lập luận chặt chẽ, bằng chứng rõ ràng, triệt tiêu cảm giác stock AI ghép vô hồn).
+
+### 10.1. Visual Truth Reranker là gì?
+- **Vấn đề giải quyết**: Metadata của stock video (title, tags) có thể trùng khớp từ khóa nhưng hình ảnh thực tế không đúng hành động (ví dụ: lời đọc nói về "so sánh giá trên nhãn kệ siêu thị", stock chỉ là người đẩy xe hàng chung chung).
+- **Kiến trúc 2 tầng (Two-Tier Architecture)**:
+  1. *Tầng 1 (Existing Metadata Ranking)*: Giữ nguyên thuật toán xếp hạng hiện hữu để tạo shortlist (mặc định 6 candidate tốt nhất).
+  2. *Tầng 2 (Visual Truth Verification)*: Trích xuất frame đại diện (20%, 50%, 80% duration) bằng FFmpeg mà không tải bản full-res nặng. Phân tích nội dung qua Gemini Vision API đối chiếu với Global Context, Visual Intent, và Forbidden Substitutions.
+  3. *Chấm điểm & Reranking*: Kết hợp trọng số chuẩn hóa 0–100, áp dụng hình phạt nặng với footage lạc quẻ (`GENERIC_STOCK`) hoặc trái ngược bối cảnh (`CONTRADICTORY`).
+
+### 10.2. Claim & Evidence Ledger là gì?
+- Phân tích toàn bộ kịch bản để nhận diện các phát biểu cần bằng chứng (`STATISTIC`, `MONEY`, `DATE`, `HISTORICAL_EVENT`, `PERSON`, `COMPANY`, `LOCATION`, `POLICY`, `QUOTE`, `COMPARISON`, `CAUSAL`, `GENERAL_FACT`).
+- **Nguyên tắc chống Hallucination**: AI tuyệt đối không tự bịa nguồn (URL, tác giả, tên báo cáo). Các claim chưa có nguồn luôn mang trạng thái `UNSOURCED` kèm cảnh báo bằng chứng cần bổ sung.
+- **Tích hợp Visual Grammar**: Liên kết với việc tạo các thẻ Stat Card, Document Card, Quote Card. Các claim `CONTRADICTED` bị chặn tạo thẻ minh chứng sự thật (`BLOCKED_BY_EVIDENCE`).
+
+### 10.3. Ý nghĩa các Truth Label & Verification Status
+- **Visual Truth Labels**:
+  - `EXACT_SUBJECT`: Đối tượng và hành động trong video khớp chính xác với yêu cầu scene.
+  - `CONTEXTUAL_MATCH`: Bối cảnh và không khí phù hợp hoàn toàn với ngữ cảnh của chương/scene.
+  - `ILLUSTRATIVE`: Footage mang tính minh họa ý niệm, phù hợp khi không đòi hỏi bằng chứng cụ thể.
+  - `HISTORICAL`: Footage hoặc tư liệu lưu trữ mang tính lịch sử.
+  - `GENERIC_STOCK`: Footage stock quá chung chung, vô thưởng vô phạt (bị phạt điểm).
+  - `CONTRADICTORY`: Vi phạm trực tiếp bối cảnh/thời đại/dân tộc/nội dung (bị phạt điểm rất nặng hoặc đánh dấu review).
+  - `UNKNOWN`: Độ tin cậy của Vision dưới ngưỡng tối thiểu, tự động fallback về metadata ranking.
+- **Claim Verification Status**:
+  - `VERIFIED`: Đã liên kết với nguồn tài liệu/URL hợp lệ.
+  - `PARTIALLY_VERIFIED`: Đã có nguồn tham khảo nhưng cần kiểm chứng thêm.
+  - `UNSOURCED`: Chưa có nguồn trích dẫn.
+  - `CONTRADICTED`: Phát biểu bị mâu thuẫn hoặc bác bỏ bởi tài liệu đối chiếu.
+  - `NOT_REQUIRED`: Câu trần thuật thông thường, không phải factual claim cần trích dẫn.
+
+### 10.4. Cách Thêm Nguồn (Source Management) Thủ Công
+- Trong giao diện **Stock & Storyboard** hoặc **Inspector**:
+  1. Mở tab **Claims & Evidence**.
+  2. Nhấn nút **Add Source** để nhập URL, tiêu đề báo cáo, nhà xuất bản, ngày xuất bản, giấy phép bản quyền.
+  3. Nhấn **Link Source** để liên kết nguồn với một hoặc nhiều Claim trong kịch bản. Trạng thái claim sẽ tự động chuyển sang `VERIFIED`.
+
+### 10.5. Cấu Hình & Bật/Tắt (Settings & Feature Flags)
+Trong `Settings -> Production Intelligence`:
+```json
+{
+  "productionIntelligence": {
+    "visualTruthEnabled": true,
+    "visualTruthShortlistSize": 6,
+    "visualTruthFrameCount": 3,
+    "visualTruthMinConfidence": 50,
+    "visualTruthTimeoutMs": 15000,
+    "claimEvidenceEnabled": true,
+    "evidenceWarningsEnabled": true,
+    "blockCriticalContradictedClaims": false
+  }
+}
+```
+- Khi tắt cờ (`false`), toàn bộ pipeline hoạt động ở chế độ gốc như trước khi nâng cấp.
+
+### 10.6. Cơ Chế Dự Phòng An Toàn (Fail-Safe Fallbacks)
+- Nếu Gemini Vision API bị lỗi, quá tải (429 Rate Limit), timeout, hoặc mất mạng:
+  - Hệ thống ghi log: `[VisualTruth] Vision unavailable — using metadata fallback`.
+  - Circuit Breaker tự ngắt các request tiếp theo để không gây nghẽn tiến trình tìm kiếm stock.
+  - Tự động fallback về kết quả Metadata Ranking gốc.
+  - **Không bao giờ làm dừng hoặc crash pipeline render video**.
+
+### 10.7. Vị Trí File Xuất (Export Manifests)
+Khi quá trình sản xuất hoàn tất, các tệp minh chứng sẽ được tự động xuất tại:
+- `<project-dir>/exports/claim-evidence-ledger.json`: Dữ liệu phân tích toàn diện các claim và bằng chứng.
+- `<project-dir>/exports/sources.csv`: Bảng tổng hợp nguồn trích dẫn đầy đủ (tiêu đề, URL, tác giả, scene ID, bản quyền).
+- `<project-dir>/exports/licenses.json`: Danh mục giấy phép bản quyền của toàn bộ tài nguyên trong video.
+
+### 10.8. Lưu Ý Cốt Lõi Về Sản Xuất
+> [!IMPORTANT]
+> **Stock footage không đồng nghĩa với Factual Evidence**. Một đoạn video stock người mẫu đếm tiền không thể chứng minh cho báo cáo tài chính của một tập đoàn. Claim Ledger giúp biên tập viên phân định rạch ròi giữa cảnh quay minh họa không khí (`STOCK_CONTEXT`) và tài liệu bằng chứng xác thực (`DOCUMENT`, `REPORT`, `DATA_NOTE`).
+
+---
+
 <p align="center">
   Phát triển với ❤️ bởi <b>Long-Form AI Video Factory Team</b><br>
   <i>Tự động hóa hoàn toàn quy trình sáng tạo nội dung video tài liệu chuyên nghiệp.</i>
 </p>
+
