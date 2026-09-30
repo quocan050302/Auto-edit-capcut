@@ -22,6 +22,12 @@ import {
   checkStockCompletion,
   isAudioValid
 } from './pipeline-artifacts'
+import { loadProductionSettings } from '../production-intelligence/production-settings'
+import {
+  extractDocumentaryClaims,
+  exportClaimManifests
+} from '../production-intelligence/claim-evidence-ledger'
+import { flattenEditPlanScenes } from '../utils/scene-plan'
 import type {
   AutoPipelineOptions,
   CaptionPlan,
@@ -292,50 +298,103 @@ export async function runGlobalContextStage(
     }
   }
 
+  let ctx: any = null
+  let isCached = false
+
   // Check cache
   if (isGlobalContextValid(options.projectDir)) {
     try {
-      const cached = JSON.parse(fs.readFileSync(contextPath, 'utf-8'))
-      onProgress('Using cached global script context', 1.0)
-      return {
-        success: true,
-        cached: true,
-        artifactPath: contextPath,
-        data: cached
-      }
+      ctx = JSON.parse(fs.readFileSync(contextPath, 'utf-8'))
+      isCached = true
+      onProgress('Using cached global script context', 0.5)
     } catch {
       /* ignore */
     }
   }
 
   const apiKey = resolveGeminiApiKey()
-  onProgress('Analyzing script for Global Visual Context...', 0.05)
-  checkAborted(signal)
 
-  const ctx = await analyzeGlobalContext({
-    projectDir: options.projectDir,
-    apiKey,
-    model: options.geminiModel,
-    scriptText,
-    transcript,
-    forceRegenerate: false,
-    onProgress: (msg, pct) => {
-      checkAborted(signal)
-      onProgress(msg, pct)
+  if (!ctx) {
+    onProgress('Analyzing script for Global Visual Context...', 0.05)
+    checkAborted(signal)
+
+    ctx = await analyzeGlobalContext({
+      projectDir: options.projectDir,
+      apiKey,
+      model: options.geminiModel,
+      scriptText,
+      transcript,
+      forceRegenerate: false,
+      onProgress: (msg, pct) => {
+        checkAborted(signal)
+        onProgress(msg, pct * 0.7)
+      }
+    })
+    checkAborted(signal)
+  }
+
+  // ── Claim & Evidence Analysis (runs right after Global Visual Context) ─────
+  const prodSettings = loadProductionSettings(options.projectDir)
+  const isClaimEnabled =
+    prodSettings.claimEvidenceEnabled ??
+    prodSettings.productionIntelligence?.claimEvidenceEnabled ??
+    true
+
+  let claimStats: { totalClaims: number; unsourced: number } | undefined
+
+  if (isClaimEnabled) {
+    const planPath = path.join(options.projectDir, 'analysis', 'master-edit-plan.json')
+    if (fs.existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
+        const flattened = flattenEditPlanScenes(plan)
+        const sceneInputs = flattened.map((e) => ({
+          sceneId: e.sceneId,
+          sceneIndex: e.scene.sceneIndex,
+          narration: e.scene.narrativeText ?? '',
+          visualIntent: e.scene.visualIntent,
+          chapterId: `CH${e.chapterIndex}`,
+          chapterTitle: e.chapterTitle
+        }))
+
+        if (sceneInputs.length > 0) {
+          onProgress('Analyzing script for Claim & Evidence Ledger...', 0.75)
+          checkAborted(signal)
+          const ledger = await extractDocumentaryClaims({
+            projectDir: options.projectDir,
+            scriptText,
+            globalContext: ctx,
+            scenes: sceneInputs,
+            apiKey,
+            model: options.geminiModel,
+            onProgress: (msg, prog) => {
+              checkAborted(signal)
+              onProgress(`[ClaimLedger] ${msg}`, 0.75 + prog * 0.23)
+            }
+          })
+          claimStats = {
+            totalClaims: ledger.claims.length,
+            unsourced: ledger.summary.unsourced
+          }
+        }
+      } catch (claimErr) {
+        logger.warn(`[ClaimLedger] Claim analysis warning: ${String(claimErr)}, continuing pipeline.`)
+      }
     }
-  })
+  }
 
-  checkAborted(signal)
-  onProgress('Global Visual Context completed', 1.0)
+  onProgress('Global Visual Context & Claim Analysis completed', 1.0)
 
   return {
     success: true,
-    cached: false,
+    cached: isCached,
     artifactPath: contextPath,
     data: ctx,
     stats: {
-      primarySubject: ctx.primarySubject,
-      anchorsCount: ctx.exactTopicAnchors?.length ?? 0
+      primarySubject: ctx?.primarySubject,
+      anchorsCount: ctx?.exactTopicAnchors?.length ?? 0,
+      claimsCount: claimStats?.totalClaims ?? 0,
+      unsourcedClaims: claimStats?.unsourced ?? 0
     }
   }
 }
@@ -758,9 +817,23 @@ export async function runPostflightStage(
     }
   }
 
+  // ── Manifest Export (sources.csv, licenses.json, claim-evidence-ledger.json)
+  let exportWarning: string | undefined
+  try {
+    const exportRes = exportClaimManifests(options.projectDir)
+    if (!exportRes.success) {
+      exportWarning = `Source manifest export warning: ${exportRes.error}`
+      logger.warn(`[EvidenceExport] ${exportWarning}`)
+    }
+  } catch (expErr) {
+    exportWarning = `Source manifest export error: ${String(expErr)}`
+    logger.warn(`[EvidenceExport] ${exportWarning}`)
+  }
+
   onProgress('Video production completed successfully!', 1.0)
   return {
     success: true,
+    warning: exportWarning,
     artifactPath: outputPath,
     data: {
       outputPath,

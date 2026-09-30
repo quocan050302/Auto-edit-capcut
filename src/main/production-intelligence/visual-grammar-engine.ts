@@ -5,12 +5,14 @@ import type {
   VisualGrammarDecision,
   VisualGrammarPlan,
   CaptionPlan,
-  ProductionIntelligenceSettings
+  ProductionIntelligenceSettings,
+  ClaimEvidenceLedger
 } from '../../../shared/types'
 import type { ProofVisual } from '../retention/retention-types'
 import { FlattenedSceneEntry, flattenEditPlanScenes } from '../utils/scene-plan'
 import { atomicWriteJson, readJsonSafe } from './json-store'
 import { loadProductionSettings } from './production-settings'
+import { getClaimLedgerPath } from './claim-evidence-ledger'
 import { logger } from '../logger'
 
 export interface GrammarDetectionResult {
@@ -405,6 +407,20 @@ export function generateVisualGrammarPlan(params: GenerateVisualGrammarParams): 
     mediaType?: string
   }>(editPlan as Record<string, unknown>)
 
+  const claimLedgerPath = getClaimLedgerPath(projectDir)
+  const claimLedger = fs.existsSync(claimLedgerPath)
+    ? readJsonSafe<ClaimEvidenceLedger>(claimLedgerPath, null as unknown as ClaimEvidenceLedger)
+    : null
+
+  const claimsByScene = new Map<string, any>()
+  if (claimLedger?.claims) {
+    for (const c of claimLedger.claims) {
+      for (const scId of c.sceneIds) {
+        claimsByScene.set(scId, c)
+      }
+    }
+  }
+
   const rawDecisions: VisualGrammarDecision[] = flattened.map((entry) => {
     const narration = entry.scene.narrativeText ?? ''
     const classification = classifyNarrationGrammar(narration, {
@@ -418,19 +434,40 @@ export function generateVisualGrammarPlan(params: GenerateVisualGrammarParams): 
     const graphicDuration = Math.min(Math.max(2.5, duration * 0.6), 4.5)
     const startOffset = Math.min(0.5, Math.max(0, duration - graphicDuration))
 
+    const linkedClaim = claimsByScene.get(entry.sceneId)
+    let enabled = prodSettings.enabled && prodSettings.visualSceneGrammarEnabled
+    let reason = classification.reason
+
+    if (linkedClaim) {
+      if (linkedClaim.verificationStatus === 'CONTRADICTED') {
+        enabled = false
+        reason = `BLOCKED_BY_EVIDENCE: Claim "${linkedClaim.normalizedClaim}" is contradicted.`
+      } else if (linkedClaim.verificationStatus === 'VERIFIED') {
+        reason += ` (Verified by documentation)`
+        if (linkedClaim.evidenceSourceIds?.length > 0 && !classification.secondaryText) {
+          const src = claimLedger?.sources?.find((s: any) => s.id === linkedClaim.evidenceSourceIds[0])
+          if (src?.publisher || src?.title) {
+            classification.secondaryText = `SOURCE: ${src.publisher || src.title}`
+          }
+        }
+      } else if (linkedClaim.verificationStatus === 'UNSOURCED') {
+        reason += ` (Caution: claim is unsourced)`
+      }
+    }
+
     return {
       sceneId: entry.sceneId,
       sceneIndex: entry.sceneIndex,
       type: classification.type,
       confidence: classification.confidence,
-      reason: classification.reason,
+      reason,
       primaryText: classification.primaryText,
       secondaryText: classification.secondaryText,
       sourceNarration: narration.slice(0, 100),
       startOffset,
       duration: graphicDuration,
       position: classification.position ?? 'bottom_right',
-      enabled: prodSettings.enabled && prodSettings.visualSceneGrammarEnabled
+      enabled
     }
   })
 
