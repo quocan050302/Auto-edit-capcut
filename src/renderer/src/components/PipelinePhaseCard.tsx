@@ -183,9 +183,13 @@ export function computePhaseState(
   } else if (status === 'warning') {
     summary = activeData?.message || 'Review needed before proceeding'
   } else if (status === 'interrupted') {
-    summary = activeData?.message
-      ? `${activeData.message} — ready to resume`
-      : 'Paused — ready to resume'
+    if (activeData?.message) {
+      summary = activeData.message.includes('ready to resume')
+        ? activeData.message
+        : `${activeData.message} — ready to resume`
+    } else {
+      summary = 'Paused — ready to resume'
+    }
   } else {
     // Pending summaries
     switch (phase.id) {
