@@ -316,7 +316,8 @@ async def analyze_thumbnail_intelligence_endpoint(req: ThumbnailIntelligenceRequ
     """
     try:
         from services.thumbnail_intelligence_service import ThumbnailIntelligenceService
-        svc = ThumbnailIntelligenceService(ai_engine=discovery_service.ai_engine)
+        from ai.engine import ai_engine
+        svc = ThumbnailIntelligenceService(ai_engine=ai_engine)
         result = await svc.run(
             channel_id=req.channel_id,
             channel_title=req.channel_title,
