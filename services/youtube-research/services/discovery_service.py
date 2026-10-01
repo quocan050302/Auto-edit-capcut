@@ -77,23 +77,37 @@ class DiscoveryService:
 
         async def update_progress(
             stage: str,
-            pct: int,
-            msg: str,
-            videos_c: int = 0,
-            channels_a: int = 0,
-            keywords_e: int = 0,
+            progress_percent: Optional[int] = None,
+            message: str = "",
+            videos_collected: int = 0,
+            channels_analyzed: int = 0,
+            keywords_expanded: int = 0,
             error: Optional[str] = None
         ):
+            latest = task_manager.latest_progress.get(run_id)
+            if stage in ("FAILED", "CANCELLED", "INTERRUPTED"):
+                if progress_percent is None or progress_percent == 100:
+                    progress_percent = latest.progress_percent if latest else 0
+                if videos_collected == 0 and latest:
+                    videos_collected = latest.videos_collected
+                if channels_analyzed == 0 and latest:
+                    channels_analyzed = latest.channels_analyzed
+                if keywords_expanded == 0 and latest:
+                    keywords_expanded = latest.keywords_expanded
+                    
+            if progress_percent is None:
+                progress_percent = 0
+
             elapsed = int(time.time() - start_time)
             try:
                 repo.update_run_stage(
                     run_id=run_id,
                     stage=stage,
-                    progress_percent=pct,
-                    message=msg,
-                    videos_collected=videos_c,
-                    channels_analyzed=channels_a,
-                    keywords_expanded=keywords_e,
+                    progress_percent=progress_percent,
+                    message=message,
+                    videos_collected=videos_collected,
+                    channels_analyzed=channels_analyzed,
+                    keywords_expanded=keywords_expanded,
                     error=error
                 )
             except Exception as db_err:
@@ -109,11 +123,11 @@ class DiscoveryService:
                         fresh_repo.update_run_stage(
                             run_id=run_id,
                             stage=stage,
-                            progress_percent=pct,
-                            message=msg,
-                            videos_collected=videos_c,
-                            channels_analyzed=channels_a,
-                            keywords_expanded=keywords_e,
+                            progress_percent=progress_percent,
+                            message=message,
+                            videos_collected=videos_collected,
+                            channels_analyzed=channels_analyzed,
+                            keywords_expanded=keywords_expanded,
                             error=error
                         )
                     finally:
@@ -124,11 +138,11 @@ class DiscoveryService:
             state = ProgressStateSchema(
                 run_id=run_id,
                 stage=stage,
-                progress_percent=pct,
-                message=msg,
-                videos_collected=videos_c,
-                channels_analyzed=channels_a,
-                keywords_expanded=keywords_e,
+                progress_percent=progress_percent,
+                message=message,
+                videos_collected=videos_collected,
+                channels_analyzed=channels_analyzed,
+                keywords_expanded=keywords_expanded,
                 elapsed_seconds=elapsed,
                 can_cancel=stage not in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"),
                 error=error
@@ -143,7 +157,7 @@ class DiscoveryService:
             await update_progress("QUEUED", 5, "Initializing research run...")
 
             if task_manager.is_cancelled(run_id):
-                await update_progress("CANCELLED", 100, "Research cancelled by user")
+                await update_progress("CANCELLED", None, "Research cancelled by user")
                 return
 
             # Stage 1: EXPANDING_KEYWORDS
@@ -181,11 +195,11 @@ class DiscoveryService:
             research_logger.info(f"[Discovery] stage.complete run_id={run_id} stage=EXPANDING_KEYWORDS count={keywords_count}")
 
             if task_manager.is_cancelled(run_id):
-                await update_progress("CANCELLED", 100, "Research cancelled by user")
+                await update_progress("CANCELLED", None, "Research cancelled by user")
                 return
 
             # Stage 2: SEARCHING & FETCHING_METADATA (Pass 1 - Broad Collection)
-            await update_progress("SEARCHING", 30, f"Searching YouTube across {keywords_count} queries...", keywords_e=keywords_count)
+            await update_progress("SEARCHING", 30, f"Searching YouTube across {keywords_count} queries...", keywords_expanded=keywords_count)
             all_raw_videos = []
             seen_video_ids = set()
             keyword_to_videos: Dict[str, List[Any]] = {}
@@ -194,7 +208,7 @@ class DiscoveryService:
             search_batch = expanded_keywords[:8]
             for idx, kw in enumerate(search_batch):
                 if task_manager.is_cancelled(run_id):
-                    await update_progress("CANCELLED", 100, "Research cancelled by user")
+                    await update_progress("CANCELLED", None, "Research cancelled by user")
                     return
 
                 res_videos = await self.provider_mgr.search_videos(
@@ -212,13 +226,13 @@ class DiscoveryService:
                         all_raw_videos.append(v)
 
                 pct = 30 + int((idx + 1) / len(search_batch) * 20)
-                await update_progress("FETCHING_METADATA", pct, f"Collected {len(all_raw_videos)} videos...", videos_c=len(all_raw_videos), keywords_e=keywords_count)
+                await update_progress("FETCHING_METADATA", pct, f"Collected {len(all_raw_videos)} videos...", videos_collected=len(all_raw_videos), keywords_expanded=keywords_count)
 
             # Stage 3: BASIC_SCORING
-            await update_progress("BASIC_SCORING", 55, "Computing preliminary velocity & age metrics...", videos_c=len(all_raw_videos), keywords_e=keywords_count)
+            await update_progress("BASIC_SCORING", 55, "Computing preliminary velocity & age metrics...", videos_collected=len(all_raw_videos), keywords_expanded=keywords_count)
             
             # Stage 4: ENRICHING_CANDIDATES & LOADING_CHANNEL_BASELINES (Pass 2)
-            await update_progress("ENRICHING_CANDIDATES", 65, "Selecting top candidates for channel enrichment...", videos_c=len(all_raw_videos), keywords_e=keywords_count)
+            await update_progress("ENRICHING_CANDIDATES", 65, "Selecting top candidates for channel enrichment...", videos_collected=len(all_raw_videos), keywords_expanded=keywords_count)
             
             # Deduplicate channels to avoid redundant network hits!
             unique_channel_ids = list(dict.fromkeys([v.channel_id for v in all_raw_videos if v.channel_id]))
@@ -228,7 +242,7 @@ class DiscoveryService:
             channels_to_enrich = unique_channel_ids[:15]
             for c_idx, cid in enumerate(channels_to_enrich):
                 if task_manager.is_cancelled(run_id):
-                    await update_progress("CANCELLED", 100, "Research cancelled by user")
+                    await update_progress("CANCELLED", None, "Research cancelled by user")
                     return
 
                 # Check if channel already in repo with fresh baseline
@@ -269,10 +283,10 @@ class DiscoveryService:
                     }
 
                 pct = 65 + int((c_idx + 1) / max(len(channels_to_enrich), 1) * 12)
-                await update_progress("LOADING_CHANNEL_BASELINES", pct, f"Analyzed baseline for {c_idx + 1} channels...", videos_c=len(all_raw_videos), channels_a=c_idx + 1, keywords_e=keywords_count)
+                await update_progress("LOADING_CHANNEL_BASELINES", pct, f"Analyzed baseline for {c_idx + 1} channels...", videos_collected=len(all_raw_videos), channels_analyzed=c_idx + 1, keywords_expanded=keywords_count)
 
             # Stage 5: CALCULATING_ADVANCED_METRICS
-            await update_progress("CALCULATING_ADVANCED_METRICS", 80, "Calculating opportunity scores, breakouts, and market signals...", videos_c=len(all_raw_videos), channels_a=len(channel_baselines), keywords_e=keywords_count)
+            await update_progress("CALCULATING_ADVANCED_METRICS", 80, "Calculating opportunity scores, breakouts, and market signals...", videos_collected=len(all_raw_videos), channels_analyzed=len(channel_baselines), keywords_expanded=keywords_count)
 
             breakout_items: List[BreakoutVideoSchema] = []
             enriched_video_dicts = []
@@ -452,11 +466,11 @@ class DiscoveryService:
             keyword_records.sort(key=lambda x: x.opportunity_score, reverse=True)
 
             # Stage 6: CLUSTERING
-            await update_progress("CLUSTERING", 88, "Clustering topic themes...", videos_c=len(all_raw_videos), channels_a=len(channel_baselines), keywords_e=keywords_count)
+            await update_progress("CLUSTERING", 88, "Clustering topic themes...", videos_collected=len(all_raw_videos), channels_analyzed=len(channel_baselines), keywords_expanded=keywords_count)
             topic_clusters = clustering_service.cluster_videos(enriched_video_dicts)
 
             # Stage 7: AI_ANALYSIS
-            await update_progress("AI_ANALYSIS", 93, "Generating market summary and content angles...", videos_c=len(all_raw_videos), channels_a=len(channel_baselines), keywords_e=keywords_count)
+            await update_progress("AI_ANALYSIS", 93, "Generating market summary and content angles...", videos_collected=len(all_raw_videos), channels_analyzed=len(channel_baselines), keywords_expanded=keywords_count)
             top_kw_str = keyword_records[0].keyword if keyword_records else topic
             ai_report = await ai_engine.generate_insights(
                 topic=topic,
@@ -467,7 +481,7 @@ class DiscoveryService:
             )
 
             # Stage 8: PERSISTING
-            await update_progress("PERSISTING", 97, "Saving research results to database...", videos_c=len(all_raw_videos), channels_a=len(channel_baselines), keywords_e=keywords_count)
+            await update_progress("PERSISTING", 97, "Saving research results to database...", videos_collected=len(all_raw_videos), channels_analyzed=len(channel_baselines), keywords_expanded=keywords_count)
 
             # Build Top Opportunity
             top_opp = None
@@ -536,15 +550,15 @@ class DiscoveryService:
                 run_rec.raw_results_json = json.dumps(full_result.model_dump())
                 db.commit()
 
-            await update_progress("COMPLETED", 100, f"Completed analysis for '{topic}'! Found {len(keyword_records)} rising opportunities.", videos_c=len(all_raw_videos), channels_a=len(channel_baselines), keywords_e=keywords_count)
+            await update_progress("COMPLETED", 100, f"Completed analysis for '{topic}'! Found {len(keyword_records)} rising opportunities.", videos_collected=len(all_raw_videos), channels_analyzed=len(channel_baselines), keywords_expanded=keywords_count)
             research_logger.info(f"[Discovery] Successfully completed run {run_id}")
 
         except asyncio.CancelledError:
             research_logger.info(f"[Discovery] Run {run_id} cancelled.")
-            await asyncio.shield(update_progress("CANCELLED", 100, "Research run was cancelled."))
+            await asyncio.shield(update_progress("CANCELLED", None, "Research run was cancelled."))
         except Exception as e:
             research_logger.error(f"[Discovery] Error in run {run_id}: {e}", exc_info=True)
-            await asyncio.shield(update_progress("FAILED", 100, f"Research error: {str(e)}", error=str(e)))
+            await asyncio.shield(update_progress("FAILED", None, f"Research error: {str(e)}", error=str(e)))
         finally:
             try:
                 db.close()

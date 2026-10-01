@@ -117,5 +117,31 @@ def test_provider_diagnostic_health_endpoint():
     res = client.get("/api/research/providers/health")
     assert res.status_code == 200
     data = res.json()
-    assert data["status"] == "online"
     assert "providers" in data
+    assert data["status"] == "online"
+
+@pytest.mark.anyio
+async def test_discovery_keyword_progress_callback_uses_canonical_arguments():
+    """Verify DiscoveryService correctly passes canonical arguments, no 'keywords_expanded' unexpected keyword exception."""
+    from services.discovery_service import DiscoveryService
+    from providers.fallback import ProviderFallbackManager
+    from workers.task_manager import task_manager
+
+    mock_mgr = MagicMock(spec=ProviderFallbackManager)
+    
+    async def mock_search_videos(*args, **kwargs):
+        raise ValueError("Intentional stop at SEARCHING")
+    
+    mock_mgr.search_videos = AsyncMock(side_effect=mock_search_videos)
+    service = DiscoveryService(mock_mgr)
+    run_id = "test_canonical_args"
+    
+    await service.execute_discovery_run(run_id=run_id, topic="test topic", limit=1)
+
+    latest = task_manager.latest_progress.get(run_id)
+    assert latest is not None
+    assert latest.stage == "FAILED"
+    assert "Intentional stop" in latest.message
+    assert latest.progress_percent == 30
+    assert latest.keywords_expanded > 0
+    assert latest.videos_collected == 0

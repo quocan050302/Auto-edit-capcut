@@ -13733,12 +13733,14 @@ class ResearchSidecarManager {
   healthCheckInterval = null;
   pidFilePath;
   lastSuccessfulHealthCheck = null;
+  buildId;
+  expectedStopReason = "none";
   isAppQuitting = false;
-  manualStopRequested = false;
   restartAttempts = 0;
   restartTimer = null;
   isRestarting = false;
   constructor() {
+    this.buildId = `dev_${Date.now()}_${Math.random().toString(36).substring(7)}`;
     this.pidFilePath = path.join(
       electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
       "youtube-research-sidecar.pid"
@@ -13785,22 +13787,24 @@ class ResearchSidecarManager {
               const data = JSON.parse(body);
               if (data.service === "YouTube Foreign Market Researcher" && data.status === "online") {
                 this.lastSuccessfulHealthCheck = (/* @__PURE__ */ new Date()).toISOString();
-                resolve(true);
+                const isPackaged = electron.app && electron.app.isPackaged;
+                const buildIdMatch = isPackaged ? true : data.build_id === this.buildId;
+                resolve({ isAlive: true, buildIdMatch, pid: data.parent_pid });
               } else {
-                resolve(false);
+                resolve({ isAlive: false, buildIdMatch: false });
               }
             } catch {
-              resolve(false);
+              resolve({ isAlive: false, buildIdMatch: false });
             }
           });
         } else {
-          resolve(false);
+          resolve({ isAlive: false, buildIdMatch: false });
         }
       });
-      req.on("error", () => resolve(false));
+      req.on("error", () => resolve({ isAlive: false, buildIdMatch: false }));
       req.on("timeout", () => {
         req.destroy();
-        resolve(false);
+        resolve({ isAlive: false, buildIdMatch: false });
       });
     });
   }
@@ -13812,15 +13816,31 @@ class ResearchSidecarManager {
     if (this.status === "running" && this.process) {
       return this.getStatus();
     }
-    const isAlive = await this.pingHealth();
-    if (isAlive) {
-      logger.info(`[ResearchSidecar] Sidecar already responding on http://${this.host}:${this.port}/health`);
-      logger.info(`[ResearchSidecar] spawn.success pid=${this.process?.pid ?? "existing"} (reusing alive process)`);
-      this.status = "running";
-      this.lastError = void 0;
-      this.restartAttempts = 0;
-      this.startMonitoring();
-      return this.getStatus();
+    const health = await this.pingHealth();
+    if (health.isAlive) {
+      if (health.buildIdMatch) {
+        logger.info(`[ResearchSidecar] Sidecar already responding on http://${this.host}:${this.port}/health`);
+        logger.info(`[ResearchSidecar] spawn.success pid=${this.process?.pid ?? "existing"} (reusing alive process)`);
+        this.status = "running";
+        this.lastError = void 0;
+        this.restartAttempts = 0;
+        this.startMonitoring();
+        return this.getStatus();
+      } else {
+        logger.info(`[ResearchSidecar] Found stale dev sidecar (build ID mismatch). Stopping it...`);
+        this.cleanupStaleProcess();
+        try {
+          if (process.platform === "win32") {
+            const out = child_process.execSync("netstat -ano | findstr :8765").toString();
+            const match = out.match(/\s+(\d+)\s*$/m);
+            if (match && match[1]) {
+              child_process.execSync(`taskkill /pid ${match[1]} /T /F`, { stdio: "ignore" });
+            }
+          }
+        } catch {
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
     }
     this.cleanupStaleProcess();
     const uvPath = getUvPath();
@@ -13850,17 +13870,20 @@ class ResearchSidecarManager {
         env: {
           ...process.env,
           PYTHONPATH: serviceDir,
-          UV_LINK_MODE: "copy"
+          UV_LINK_MODE: "copy",
+          RESEARCH_SIDECAR_BUILD_ID: this.buildId,
+          RESEARCH_SIDECAR_PARENT_PID: process.pid.toString()
         },
         windowsHide: true
       });
       if (this.process.pid) {
-        logger.info(`[ResearchSidecar] spawn.success pid=${this.process.pid}`);
+        logger.info(`[ResearchSidecar] spawn.success pid=${this.process.pid} build_id=${this.buildId}`);
         const metadata = {
           pid: this.process.pid,
           port: this.port,
           startedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          service: "YouTube Foreign Market Researcher"
+          service: "YouTube Foreign Market Researcher",
+          buildId: this.buildId
         };
         fs__namespace.writeFileSync(this.pidFilePath, JSON.stringify(metadata, null, 2), "utf-8");
       }
@@ -13878,10 +13901,11 @@ class ResearchSidecarManager {
         this.lastError = err.message;
       });
       this.process.on("exit", (code, signal) => {
-        const expected = this.manualStopRequested || this.isAppQuitting;
-        logger.info(`[ResearchSidecar] process.exit code=${code} signal=${signal} expected=${expected}`);
+        const isExpected = this.expectedStopReason === "manual" || this.expectedStopReason === "restart" || this.expectedStopReason === "app_quit" || this.isAppQuitting;
+        logger.info(`[ResearchSidecar] process.exit code=${code} signal=${signal} expected=${isExpected} reason=${this.expectedStopReason}`);
         this.process = null;
-        if (!expected) {
+        if (!isExpected) {
+          this.expectedStopReason = "unexpected";
           this.handleUnexpectedExit();
         } else {
           this.status = "stopped";
@@ -13890,8 +13914,8 @@ class ResearchSidecarManager {
       let attempts = 0;
       while (attempts < 24) {
         await new Promise((r) => setTimeout(r, 500));
-        const healthy = await this.pingHealth();
-        if (healthy) {
+        const { isAlive, buildIdMatch } = await this.pingHealth();
+        if (isAlive && buildIdMatch) {
           this.status = "running";
           this.lastError = void 0;
           this.restartAttempts = 0;
@@ -13914,7 +13938,7 @@ class ResearchSidecarManager {
     }
   }
   handleUnexpectedExit() {
-    if (this.isAppQuitting || this.manualStopRequested) {
+    if (this.isAppQuitting || this.expectedStopReason === "manual") {
       this.status = "stopped";
       return;
     }
@@ -13926,7 +13950,7 @@ class ResearchSidecarManager {
       this.clearRestartTimer();
       this.restartTimer = setTimeout(async () => {
         this.restartTimer = null;
-        if (this.isAppQuitting || this.manualStopRequested) return;
+        if (this.isAppQuitting || this.expectedStopReason === "manual") return;
         try {
           this.isRestarting = true;
           const status = await this.start();
@@ -13950,10 +13974,13 @@ class ResearchSidecarManager {
   async stop(isManual = false) {
     this.clearRestartTimer();
     if (this.isAppQuitting) {
+      this.expectedStopReason = "app_quit";
       logger.info("[ResearchSidecar] stop.app_quit");
+    } else if (isManual) {
+      this.expectedStopReason = "manual";
+      logger.info("[ResearchSidecar] stop.manual");
     } else {
-      this.manualStopRequested = isManual;
-      logger.info(isManual ? "[ResearchSidecar] stop.manual" : "[ResearchSidecar] stop.internal");
+      logger.info("[ResearchSidecar] stop.internal (expectedReason=" + this.expectedStopReason + ")");
     }
     this.status = "stopped";
     if (this.healthCheckInterval) {
@@ -13975,21 +14002,35 @@ class ResearchSidecarManager {
     this.cleanupStaleProcess();
   }
   async restart() {
-    this.clearRestartTimer();
-    this.restartAttempts = 0;
-    this.manualStopRequested = false;
-    await this.stop(false);
-    await new Promise((r) => setTimeout(r, 1e3));
-    return await this.start();
+    if (this.isRestarting) {
+      logger.warn("[ResearchSidecar] Restart already in progress.");
+      return this.getStatus();
+    }
+    try {
+      this.isRestarting = true;
+      this.clearRestartTimer();
+      this.restartAttempts = 0;
+      this.expectedStopReason = "restart";
+      await this.stop(false);
+      let waitTime = 0;
+      while (this.process !== null && waitTime < 5e3) {
+        await new Promise((r) => setTimeout(r, 200));
+        waitTime += 200;
+      }
+      this.expectedStopReason = "none";
+      return await this.start();
+    } finally {
+      this.isRestarting = false;
+    }
   }
   startMonitoring() {
     if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
     this.healthCheckInterval = setInterval(async () => {
-      const ok = await this.pingHealth();
-      if (!ok && this.status === "running") {
+      const health = await this.pingHealth();
+      if (!health.isAlive && this.status === "running") {
         logger.warn("[ResearchSidecar] Periodic ping failed. Marking degraded.");
         this.status = "degraded";
-      } else if (ok && this.status === "degraded") {
+      } else if (health.isAlive && this.status === "degraded") {
         this.status = "running";
       }
     }, 15e3);

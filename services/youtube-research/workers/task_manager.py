@@ -42,13 +42,27 @@ class TaskManager:
         if latest and latest.stage in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"):
             return
 
+        pct = 100 if stage == "COMPLETED" else (latest.progress_percent if latest else 0)
+        videos_c = latest.videos_collected if latest else 0
+        channels_a = latest.channels_analyzed if latest else 0
+        keywords_e = latest.keywords_expanded if latest else 0
+
         try:
             from db.engine import SessionLocal
             from repositories.research_repo import ResearchRepository
             db = SessionLocal()
             try:
                 repo = ResearchRepository(db)
-                repo.update_run_stage(run_id=run_id, stage=stage, progress_percent=100, message=message, error=error)
+                repo.update_run_stage(
+                    run_id=run_id, 
+                    stage=stage, 
+                    progress_percent=pct, 
+                    message=message, 
+                    videos_collected=videos_c,
+                    channels_analyzed=channels_a,
+                    keywords_expanded=keywords_e,
+                    error=error
+                )
             finally:
                 db.close()
         except Exception as e:
@@ -58,11 +72,11 @@ class TaskManager:
         state = ProgressStateSchema(
             run_id=run_id,
             stage=stage,
-            progress_percent=100,
+            progress_percent=pct,
             message=message,
-            videos_collected=latest.videos_collected if latest else 0,
-            channels_analyzed=latest.channels_analyzed if latest else 0,
-            keywords_expanded=latest.keywords_expanded if latest else 0,
+            videos_collected=videos_c,
+            channels_analyzed=channels_a,
+            keywords_expanded=keywords_e,
             elapsed_seconds=elapsed,
             can_cancel=False,
             error=error

@@ -50,6 +50,16 @@ export function ResearchProgressPanel({
   const lastProgressAtRef = useRef<number>(Date.now())
   const [isStalled, setIsStalled] = useState(false)
 
+  const [activeStage, setActiveStage] = useState<ResearchStage>(() => {
+    return isTerminal ? 'STARTING' : currentStage
+  })
+
+  useEffect(() => {
+    if (progressState?.stage && !isResearchStageTerminal(progressState.stage)) {
+      setActiveStage(progressState.stage)
+    }
+  }, [progressState?.stage])
+
   // Keep local baseline aligned with incoming events (never decreasing)
   useEffect(() => {
     if (progressState?.elapsed_seconds !== undefined && progressState.elapsed_seconds > lastEventElapsedRef.current) {
@@ -93,10 +103,11 @@ export function ResearchProgressPanel({
       COMPLETED: 9
     }
 
-    const currentIdx = stageOrder[currentStage] ?? 0
+    const currentIdx = stageOrder[activeStage] ?? 0
     const stepIdx = stageOrder[stepStage] ?? 0
 
-    if (currentIdx > stepIdx || currentStage === 'COMPLETED') return 'done'
+    if (currentStage === 'COMPLETED') return 'done'
+    if (currentIdx > stepIdx) return 'done'
     if (currentIdx === stepIdx) return 'current'
     return 'pending'
   }

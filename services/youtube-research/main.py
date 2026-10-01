@@ -2,6 +2,7 @@ import asyncio
 import json
 import time
 import uuid
+import os
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List
 
@@ -95,7 +96,9 @@ async def health_check():
         "service": "YouTube Foreign Market Researcher",
         "version": "1.0.0",
         "providers": prov_health,
-        "database": "sqlite_connected"
+        "database": "sqlite_connected",
+        "build_id": os.environ.get("RESEARCH_SIDECAR_BUILD_ID", "unknown"),
+        "parent_pid": os.environ.get("RESEARCH_SIDECAR_PARENT_PID", "unknown")
     }
 
 @app.get("/api/research/providers/health")
