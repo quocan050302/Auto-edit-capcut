@@ -1,0 +1,439 @@
+import React, { useState } from 'react'
+import type {
+  MarketCode,
+  ContentType,
+  TimeRange,
+  ResearchRunResult,
+  ResearchProgressState
+} from '../types/research.types'
+import { SUPPORTED_MARKETS } from '../types/research.types'
+import { ResearchProgressPanel } from './ResearchProgressPanel'
+import { OverviewSection } from './OverviewSection'
+
+interface Props {
+  onStartDiscover: (params: {
+    topic: string
+    market: MarketCode
+    content_type: ContentType
+    time_range: TimeRange
+    limit: number
+    filters: Record<string, unknown>
+  }) => Promise<void>
+  onExpandKeywords: (topic: string, market: MarketCode) => Promise<string[]>
+  activeProgress: ResearchProgressState | null
+  activeResult: ResearchRunResult | null
+  onCancelResearch: () => void
+  isCancelling: boolean
+  onSelectKeyword: (kw: string) => void
+  onCreateProject: (kw: string, angle?: string) => void
+  onNavigateTab: (tab: string) => void
+}
+
+export function DiscoverTab({
+  onStartDiscover,
+  onExpandKeywords,
+  activeProgress,
+  activeResult,
+  onCancelResearch,
+  isCancelling,
+  onSelectKeyword,
+  onCreateProject,
+  onNavigateTab
+}: Props): React.ReactElement {
+  const [topic, setTopic] = useState('grocery prices')
+  const [market, setMarket] = useState<MarketCode>('US')
+  const [contentType, setContentType] = useState<ContentType>('LONG')
+  const [timeRange, setTimeRange] = useState<TimeRange>('30d')
+  const [resultLimit, setResultLimit] = useState<number>(50)
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false)
+
+  // Advanced Filters State
+  const [minViews, setMinViews] = useState<string>('')
+  const [maxSubs, setMaxSubs] = useState<string>('')
+  const [minVpd, setMinVpd] = useState<string>('')
+  const [minOutlier, setMinOutlier] = useState<string>('')
+  const [minOpportunity, setMinOpportunity] = useState<string>('')
+  const [maxCompetition, setMaxCompetition] = useState<string>('')
+
+  // Keyword expansion suggestions
+  const [expandedSuggestions, setExpandedSuggestions] = useState<string[]>([])
+  const [isExpanding, setIsExpanding] = useState(false)
+
+  const isRunning = activeProgress !== null && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(activeProgress.stage)
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!topic.trim() || isRunning) return
+
+    const filters: Record<string, unknown> = {}
+    if (minViews) filters.min_views = parseInt(minViews, 10)
+    if (maxSubs) filters.max_subscribers = parseInt(maxSubs, 10)
+    if (minVpd) filters.min_views_per_day = parseFloat(minVpd)
+    if (minOutlier) filters.min_outlier_ratio = parseFloat(minOutlier)
+    if (minOpportunity) filters.min_opportunity = parseFloat(minOpportunity)
+    if (maxCompetition) filters.max_competition = parseFloat(maxCompetition)
+
+    onStartDiscover({
+      topic: topic.trim(),
+      market,
+      content_type: contentType,
+      time_range: timeRange,
+      limit: resultLimit,
+      filters
+    })
+  }
+
+  const handleExpandOnly = async () => {
+    if (!topic.trim() || isExpanding) return
+    setIsExpanding(true)
+    try {
+      const kwList = await onExpandKeywords(topic.trim(), market)
+      setExpandedSuggestions(kwList)
+    } finally {
+      setIsExpanding(false)
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
+      {/* ── Search Form Card ── */}
+      <div style={{
+        background: 'var(--bg-elevated, #13141c)',
+        border: '1px solid var(--border-subtle, rgba(255, 255, 255, 0.08))',
+        borderRadius: 'var(--radius-lg, 12px)',
+        padding: '24px',
+        boxShadow: '0 4px 15px rgba(0, 0, 0, 0.2)'
+      }}>
+        <form onSubmit={handleSubmit}>
+          <div style={{ marginBottom: '20px' }}>
+            <label style={{
+              display: 'block',
+              fontSize: '13px',
+              fontWeight: 600,
+              color: 'var(--text-primary)',
+              marginBottom: '8px'
+            }}>
+              What topic do you want to research?
+            </label>
+            <div style={{ display: 'flex', gap: '10px' }}>
+              <input
+                type="text"
+                value={topic}
+                onChange={(e) => setTopic(e.target.value)}
+                placeholder="e.g. grocery prices, personal finance, housing market, ai tools"
+                disabled={isRunning}
+                style={{
+                  flex: 1,
+                  background: 'var(--bg-base, #0a0a0f)',
+                  border: '1px solid var(--border-subtle)',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  padding: '12px 16px',
+                  color: 'var(--text-primary)',
+                  fontSize: '14px',
+                  outline: 'none'
+                }}
+              />
+              <button
+                type="submit"
+                className="btn btn-primary"
+                disabled={!topic.trim() || isRunning}
+                style={{
+                  padding: '0 24px',
+                  fontSize: '13px',
+                  fontWeight: 700,
+                  letterSpacing: '0.3px',
+                  background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+                  border: 'none',
+                  minWidth: '150px'
+                }}
+              >
+                {isRunning ? 'Analyzing...' : 'Analyze Market'}
+              </button>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={handleExpandOnly}
+                disabled={!topic.trim() || isRunning || isExpanding}
+                style={{ fontSize: '12px', padding: '0 16px' }}
+              >
+                {isExpanding ? 'Finding...' : 'Find Related Keywords'}
+              </button>
+            </div>
+          </div>
+
+          {/* Quick Selectors Row */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: 'repeat(4, 1fr)',
+            gap: '16px',
+            marginBottom: '16px'
+          }}>
+            {/* Market */}
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                Target Market
+              </label>
+              <select
+                value={market}
+                onChange={(e) => setMarket(e.target.value as MarketCode)}
+                disabled={isRunning}
+                style={{
+                  width: '100%',
+                  background: 'var(--bg-base)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                  borderRadius: '6px',
+                  padding: '8px 10px',
+                  fontSize: '12px'
+                }}
+              >
+                {SUPPORTED_MARKETS.map((m) => (
+                  <option key={m.code} value={m.code}>
+                    {m.flag} {m.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* Content Format */}
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                Content Format
+              </label>
+              <select
+                value={contentType}
+                onChange={(e) => setContentType(e.target.value as ContentType)}
+                disabled={isRunning}
+                style={{
+                  width: '100%',
+                  background: 'var(--bg-base)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                  borderRadius: '6px',
+                  padding: '8px 10px',
+                  fontSize: '12px'
+                }}
+              >
+                <option value="LONG">Long-form Video</option>
+                <option value="SHORT">YouTube Shorts</option>
+                <option value="BOTH">Both Formats</option>
+              </select>
+            </div>
+
+            {/* Time Range */}
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                Time Range
+              </label>
+              <select
+                value={timeRange}
+                onChange={(e) => setTimeRange(e.target.value as TimeRange)}
+                disabled={isRunning}
+                style={{
+                  width: '100%',
+                  background: 'var(--bg-base)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                  borderRadius: '6px',
+                  padding: '8px 10px',
+                  fontSize: '12px'
+                }}
+              >
+                <option value="24h">Last 24 Hours</option>
+                <option value="7d">Last 7 Days</option>
+                <option value="30d">Last 30 Days (Recommended)</option>
+                <option value="90d">Last 90 Days</option>
+                <option value="1y">Past Year</option>
+                <option value="all">All Time</option>
+              </select>
+            </div>
+
+            {/* Result Limit */}
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                Depth / Samples
+              </label>
+              <select
+                value={resultLimit}
+                onChange={(e) => setResultLimit(parseInt(e.target.value, 10))}
+                disabled={isRunning}
+                style={{
+                  width: '100%',
+                  background: 'var(--bg-base)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                  borderRadius: '6px',
+                  padding: '8px 10px',
+                  fontSize: '12px'
+                }}
+              >
+                <option value={50}>50 Videos (Fast)</option>
+                <option value={100}>100 Videos (Balanced)</option>
+                <option value={200}>200 Videos (Deep Research)</option>
+              </select>
+            </div>
+          </div>
+
+          {/* Collapsible Advanced Filters */}
+          <div style={{ marginTop: '12px' }}>
+            <button
+              type="button"
+              onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--text-brand, #818cf8)',
+                fontSize: '12px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '4px 0'
+              }}
+            >
+              <span>{showAdvancedFilters ? '▲ Hide Advanced Filters' : '▼ Show Advanced Filters (Views, Subs, Outlier, Competition)'}</span>
+            </button>
+
+            {showAdvancedFilters && (
+              <div style={{
+                marginTop: '12px',
+                padding: '16px',
+                background: 'var(--bg-base)',
+                borderRadius: '8px',
+                border: '1px solid var(--border-subtle)',
+                display: 'grid',
+                gridTemplateColumns: 'repeat(3, 1fr)',
+                gap: '14px'
+              }}>
+                <div>
+                  <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Minimum Views
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 10000"
+                    value={minViews}
+                    onChange={(e) => setMinViews(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', color: '#fff', fontSize: '11px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Maximum Channel Subscribers
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 100000 (Small channels)"
+                    value={maxSubs}
+                    onChange={(e) => setMaxSubs(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', color: '#fff', fontSize: '11px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Minimum Views / Day
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 500"
+                    value={minVpd}
+                    onChange={(e) => setMinVpd(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', color: '#fff', fontSize: '11px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Minimum Outlier Ratio (e.g. 3.0x)
+                  </label>
+                  <input
+                    type="number"
+                    step="0.5"
+                    placeholder="e.g. 3.0"
+                    value={minOutlier}
+                    onChange={(e) => setMinOutlier(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', color: '#fff', fontSize: '11px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Minimum Opportunity Score
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 70"
+                    value={minOpportunity}
+                    onChange={(e) => setMinOpportunity(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', color: '#fff', fontSize: '11px' }}
+                  />
+                </div>
+                <div>
+                  <label style={{ display: 'block', fontSize: '10px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                    Maximum Competition (0 - 100)
+                  </label>
+                  <input
+                    type="number"
+                    placeholder="e.g. 50"
+                    value={maxCompetition}
+                    onChange={(e) => setMaxCompetition(e.target.value)}
+                    style={{ width: '100%', background: 'var(--bg-elevated)', border: '1px solid var(--border-subtle)', borderRadius: '4px', padding: '6px 8px', color: '#fff', fontSize: '11px' }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Quick Suggestions Chips if user clicked Find Related Keywords */}
+          {expandedSuggestions.length > 0 && (
+            <div style={{ marginTop: '16px', paddingTop: '16px', borderTop: '1px solid var(--border-subtle)' }}>
+              <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+                Discovered keyword expansions (click to research):
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                {expandedSuggestions.map((kw) => (
+                  <button
+                    key={kw}
+                    type="button"
+                    onClick={() => {
+                      setTopic(kw)
+                      onSelectKeyword(kw)
+                    }}
+                    style={{
+                      background: 'rgba(99, 102, 241, 0.1)',
+                      border: '1px solid rgba(99, 102, 241, 0.3)',
+                      color: '#a5b4fc',
+                      fontSize: '11px',
+                      padding: '4px 10px',
+                      borderRadius: '999px',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    + {kw}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+        </form>
+      </div>
+
+      {/* ── Active Progress Panel ── */}
+      {isRunning && (
+        <ResearchProgressPanel
+          topic={topic}
+          progressState={activeProgress}
+          onCancel={onCancelResearch}
+          isCancelling={isCancelling}
+        />
+      )}
+
+      {/* ── Active Result Overview ── */}
+      {!isRunning && activeResult && (
+        <OverviewSection
+          result={activeResult}
+          onSelectKeyword={onSelectKeyword}
+          onCreateProjectFromKeyword={onCreateProject}
+        />
+      )}
+    </div>
+  )
+}
