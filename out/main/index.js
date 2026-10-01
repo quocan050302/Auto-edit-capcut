@@ -6,7 +6,7 @@ const fs = require("fs");
 const uuid = require("uuid");
 const winston = require("winston");
 const crypto = require("crypto");
-const ffprobeStatic$1 = require("ffprobe-static");
+const ffprobeStatic$2 = require("ffprobe-static");
 const os = require("os");
 const child_process = require("child_process");
 const genai = require("@google/genai");
@@ -38,6 +38,17 @@ const crypto__namespace = /* @__PURE__ */ _interopNamespaceDefault(crypto);
 const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
+const DEFAULT_VISUAL_TRUTH_WEIGHTS = {
+  metadataRelevance: 0.25,
+  visualVerification: 0.3,
+  globalContext: 0.15,
+  actionMatch: 0.1,
+  sequenceContinuity: 0.1,
+  technicalQuality: 0.1,
+  genericStockPenalty: 25,
+  contradictionPenalty: 50,
+  reusePenalty: 15
+};
 const DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS = {
   enabled: true,
   candidateRankingEnabled: true,
@@ -46,7 +57,16 @@ const DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS = {
   renderQaEnabled: true,
   strictMissingMedia: false,
   candidatesPerScene: 3,
-  maxVisualGrammarDensity: 0.25
+  maxVisualGrammarDensity: 0.25,
+  // New features defaults
+  visualTruthEnabled: true,
+  visualTruthShortlistSize: 6,
+  visualTruthFrameCount: 3,
+  visualTruthMinConfidence: 60,
+  visualTruthTimeoutMs: 15e3,
+  claimEvidenceEnabled: true,
+  evidenceWarningsEnabled: true,
+  blockCriticalContradictedClaims: false
 };
 const IPC_CHANNELS = {
   // File dialogs
@@ -133,6 +153,17 @@ const IPC_CHANNELS = {
   RENDER_PREFLIGHT_RUN: "render:preflight-run",
   RENDER_QA_GET: "render:qa-get",
   RENDER_QA_PROGRESS: "render:qa-progress",
+  // Production Intelligence — Claim & Evidence Ledger
+  CLAIM_GET_LEDGER: "claim:get-ledger",
+  CLAIM_UPDATE_STATUS: "claim:update-status",
+  CLAIM_ADD_SOURCE: "claim:add-source",
+  CLAIM_REMOVE_SOURCE: "claim:remove-source",
+  CLAIM_LINK_SOURCE: "claim:link-source",
+  CLAIM_UNLINK_SOURCE: "claim:unlink-source",
+  CLAIM_EXPORT_MANIFESTS: "claim:export-manifests",
+  // Production Intelligence — Visual Truth Reranker
+  VISUAL_TRUTH_GET_DATA: "visual-truth:get-data",
+  VISUAL_TRUTH_REANALYZE: "visual-truth:reanalyze",
   // Auto Production Pipeline
   PIPELINE_START: "pipeline:start",
   PIPELINE_RESUME: "pipeline:resume",
@@ -141,7 +172,13 @@ const IPC_CHANNELS = {
   PIPELINE_PROGRESS: "pipeline:progress",
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
-  PIPELINE_RECOVER: "pipeline:recover"
+  PIPELINE_RECOVER: "pipeline:recover",
+  // YouTube Foreign Market Researcher (Isolated Module)
+  RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
+  RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
+  RESEARCH_GET_SETTINGS: "research:get-settings",
+  RESEARCH_SAVE_SETTINGS: "research:save-settings",
+  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -425,7 +462,7 @@ function registerProjectHandlers(ipcMain) {
   });
   ipcMain.handle(IPC_CHANNELS.GET_APP_VERSION, () => electron.app.getVersion());
 }
-const FFPROBE_PATH = ffprobeStatic$1.path;
+const FFPROBE_PATH = ffprobeStatic$2.path;
 const IMAGE_EXTS = /* @__PURE__ */ new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]);
 const VIDEO_EXTS = /* @__PURE__ */ new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"]);
 const AUDIO_EXTS = /* @__PURE__ */ new Set([".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac", ".opus"]);
@@ -1047,7 +1084,9 @@ const MODEL_ROUTES = {
   global_context: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   caption_planning: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   stock_query: ["gemini-3.5-flash-lite", "gemini-3.5-flash"],
-  retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+  retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  visual_truth: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 };
 function getModelRoute(taskType, preferredModel) {
   const defaultRoute = [...MODEL_ROUTES[taskType]];
@@ -3940,18 +3979,22 @@ function loadProductionSettings(projectDir) {
         projectSettingsPath,
         {}
       );
+      const nested = projectSettings.productionIntelligence || {};
       return {
         ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
-        ...projectSettings
+        ...projectSettings,
+        ...nested
       };
     }
   }
   try {
     const config = loadConfig();
     if (config.productionIntelligenceSettings) {
+      const nested = config.productionIntelligenceSettings.productionIntelligence || {};
       return {
         ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
-        ...config.productionIntelligenceSettings
+        ...config.productionIntelligenceSettings,
+        ...nested
       };
     }
   } catch (err) {
@@ -3961,9 +4004,11 @@ function loadProductionSettings(projectDir) {
 }
 function saveProductionSettings(settings, projectDir) {
   const current = loadProductionSettings(projectDir);
+  const nested = settings.productionIntelligence || {};
   const updated = {
     ...current,
-    ...settings
+    ...settings,
+    ...nested
   };
   if (projectDir) {
     const projectSettingsPath = getProjectSettingsPath(projectDir);
@@ -4025,6 +4070,530 @@ function flattenEditPlanScenes(plan) {
     }
   }
   return result;
+}
+const CLAIM_EXTRACTION_VERSION = "1.0.0";
+function getClaimLedgerPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "claim-evidence-ledger.json");
+}
+function computeScriptHash(text) {
+  return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
+}
+function computeGlobalContextHash(ctx) {
+  if (!ctx) return "no-ctx";
+  const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
+  return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
+}
+function extractClaimsRuleBased(scenes, scriptHash2, ctxHash) {
+  const claims = [];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const statRegex = /\b\d+(\.\d+)?\s*(%|percent|percentage)\b/i;
+  const moneyRegex = /(\$\s*\d+[\d,.]*|\b\d+[\d,.]*\s*(dollars|cents|USD|billion|million|trillion))\b/i;
+  const dateRegex = /\b(18\d\d|19\d\d|20\d\d)\b/;
+  for (const sc of scenes) {
+    const text = sc.narration.trim();
+    if (!text) continue;
+    const sentences = text.split(/(?<=[.?!])\s+/).filter((s) => s.length > 10);
+    for (const sent of sentences) {
+      let type = null;
+      let importance = "MEDIUM";
+      let proofVisualType = void 0;
+      if (moneyRegex.test(sent)) {
+        type = "MONEY";
+        importance = "HIGH";
+        proofVisualType = "STAT_CARD";
+      } else if (statRegex.test(sent)) {
+        type = "STATISTIC";
+        importance = "HIGH";
+        proofVisualType = "STAT_CARD";
+      } else if (dateRegex.test(sent)) {
+        type = "DATE";
+        importance = "MEDIUM";
+        proofVisualType = "DOCUMENT_CARD";
+      }
+      if (type) {
+        const id = `claim_${crypto__namespace.createHash("md5").update(sent).digest("hex").slice(0, 10)}`;
+        const existing = claims.find((c) => c.normalizedClaim.toLowerCase() === sent.toLowerCase());
+        if (existing) {
+          if (!existing.sceneIds.includes(sc.sceneId)) {
+            existing.sceneIds.push(sc.sceneId);
+          }
+        } else {
+          claims.push({
+            id,
+            scriptText: sent,
+            normalizedClaim: sent,
+            type,
+            chapterId: sc.chapterId,
+            sequenceId: sc.sequenceId,
+            sceneIds: [sc.sceneId],
+            importance,
+            confidence: 75,
+            verificationStatus: "UNSOURCED",
+            evidenceSourceIds: [],
+            proofVisualRecommended: true,
+            proofVisualType,
+            warnings: [
+              `Extracted via rule-based parser. Requires authoritative citation.`
+            ],
+            extractionVersion: CLAIM_EXTRACTION_VERSION,
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+      }
+    }
+  }
+  const ledger = {
+    projectId: "default",
+    scriptHash: scriptHash2,
+    globalContextHash: ctxHash,
+    claims,
+    sources: [],
+    summary: computeLedgerSummary(claims),
+    generatedAt: now,
+    version: CLAIM_EXTRACTION_VERSION
+  };
+  return ledger;
+}
+function computeLedgerSummary(claims) {
+  let verified = 0;
+  let partiallyVerified = 0;
+  let unsourced = 0;
+  let contradicted = 0;
+  let criticalUnsourced = 0;
+  for (const c of claims) {
+    if (c.verificationStatus === "VERIFIED") verified++;
+    else if (c.verificationStatus === "PARTIALLY_VERIFIED") partiallyVerified++;
+    else if (c.verificationStatus === "UNSOURCED") {
+      unsourced++;
+      if (c.importance === "CRITICAL" || c.importance === "HIGH") criticalUnsourced++;
+    } else if (c.verificationStatus === "CONTRADICTED") contradicted++;
+  }
+  const totalClaims = claims.length;
+  const covered = verified + partiallyVerified;
+  const coveragePct = totalClaims > 0 ? Math.round(covered / totalClaims * 100) : 100;
+  return {
+    totalClaims,
+    verified,
+    partiallyVerified,
+    unsourced,
+    contradicted,
+    criticalUnsourced,
+    coveragePct
+  };
+}
+function sanitizeAiClaims(rawClaims, scenes) {
+  const validSceneIds = new Set(scenes.map((s) => s.sceneId));
+  const sceneMap = new Map(scenes.map((s) => [s.sceneId, s]));
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const claims = [];
+  if (!Array.isArray(rawClaims)) return claims;
+  for (let idx = 0; idx < rawClaims.length; idx++) {
+    const raw = rawClaims[idx];
+    if (typeof raw !== "object" || raw === null) continue;
+    const r = raw;
+    const scriptText = String(r.scriptText || r.claimText || "").trim();
+    if (!scriptText) continue;
+    const normalizedClaim = String(r.normalizedClaim || scriptText).trim();
+    const validTypes = [
+      "STATISTIC",
+      "MONEY",
+      "DATE",
+      "HISTORICAL_EVENT",
+      "PERSON",
+      "COMPANY",
+      "LOCATION",
+      "POLICY",
+      "QUOTE",
+      "COMPARISON",
+      "CAUSAL",
+      "GENERAL_FACT"
+    ];
+    const rawType = String(r.type || "GENERAL_FACT").toUpperCase();
+    const type = validTypes.includes(rawType) ? rawType : "GENERAL_FACT";
+    const rawImp = String(r.importance || "MEDIUM").toUpperCase();
+    const importance = rawImp === "CRITICAL" || rawImp === "HIGH" || rawImp === "LOW" ? rawImp : "MEDIUM";
+    let sceneIds = [];
+    if (Array.isArray(r.sceneIds)) {
+      sceneIds = r.sceneIds.map(String).filter((id2) => validSceneIds.has(id2));
+    }
+    if (sceneIds.length === 0) {
+      const match = scenes.find((s) => s.narration.toLowerCase().includes(scriptText.toLowerCase()));
+      if (match) sceneIds = [match.sceneId];
+    }
+    if (sceneIds.length === 0 && scenes.length > 0) {
+      sceneIds = [scenes[0].sceneId];
+    }
+    const firstScene = sceneMap.get(sceneIds[0]);
+    const rawStatus = String(r.verificationStatus || "").toUpperCase();
+    const verificationStatus = rawStatus === "PARTIALLY_VERIFIED" || rawStatus === "VERIFIED" ? "UNSOURCED" : rawStatus === "CONTRADICTED" ? "CONTRADICTED" : "UNSOURCED";
+    const warnings = Array.isArray(r.warnings) ? r.warnings.map(String) : [];
+    if (verificationStatus === "UNSOURCED" && warnings.length === 0) {
+      warnings.push(`Factual claim requires documentation or authoritative source citation.`);
+    }
+    const id = String(r.id || `claim_${idx + 1}_${crypto__namespace.createHash("md5").update(scriptText).digest("hex").slice(0, 8)}`);
+    let proofVisualType = void 0;
+    if (r.proofVisualType) {
+      const pvt = String(r.proofVisualType).toUpperCase();
+      if (["STAT_CARD", "DOCUMENT_CARD", "QUOTE_CARD", "COMPARISON_CARD", "DATA_NOTE", "ARCHIVE_VISUAL"].includes(pvt)) {
+        proofVisualType = pvt;
+      }
+    }
+    claims.push({
+      id,
+      scriptText,
+      normalizedClaim,
+      type,
+      chapterId: firstScene?.chapterId,
+      sequenceId: firstScene?.sequenceId,
+      sceneIds,
+      importance,
+      confidence: Math.min(100, Math.max(0, Number(r.confidence) || 80)),
+      verificationStatus,
+      evidenceSourceIds: [],
+      proofVisualRecommended: Boolean(r.proofVisualRecommended ?? (type === "STATISTIC" || type === "MONEY")),
+      proofVisualType,
+      warnings,
+      extractionVersion: CLAIM_EXTRACTION_VERSION,
+      createdAt: now,
+      updatedAt: now
+    });
+  }
+  return claims;
+}
+async function extractDocumentaryClaims(params) {
+  const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
+  const scriptHash2 = computeScriptHash(fullText);
+  const ctxHash = computeGlobalContextHash(globalContext);
+  if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
+    try {
+      const existing = readJsonSafe(ledgerPath, null);
+      if (existing && existing.claims && existing.scriptHash === scriptHash2 && existing.globalContextHash === ctxHash) {
+        logger.info(`[ClaimLedger] Using cached Claim & Evidence Ledger (${existing.claims.length} claims)`);
+        onProgress?.(`Loaded cached Claim Ledger (${existing.claims.length} claims)`, 1);
+        return existing;
+      }
+    } catch {
+    }
+  }
+  onProgress?.(`Analyzing script for factual claims and evidence requirements...`, 0.1);
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) {
+    logger.warn(`[ClaimLedger] No Gemini API key provided. Using rule-based claim extraction.`);
+    onProgress?.(`Gemini key unavailable — using rule-based claim extraction`, 0.5);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash2, ctxHash);
+    atomicWriteJson(ledgerPath, fallbackLedger);
+    return fallbackLedger;
+  }
+  const models = getAvailableModelsForTask("claim_analysis", params.model);
+  const sceneBriefs = scenes.slice(0, 150).map((s) => ({
+    sceneId: s.sceneId,
+    sceneIndex: s.sceneIndex,
+    chapter: s.chapterTitle ?? s.chapterId ?? "",
+    narration: s.narration
+  }));
+  const prompt = `You are a Senior Documentary Fact-Checker and Archive Producer for a high-end investigative documentary.
+Analyze the following documentary script and its scene breakdown to identify ALL statements that require documentary proof or citation.
+
+CRITICAL RULES:
+1. Do NOT treat general narrative actions (e.g. "She looked out the window", "The rain fell gently") as factual claims.
+2. Focus on:
+   - STATISTIC (percentages, market share, headcounts)
+   - MONEY (dollar amounts, profits, costs, fines, valuations)
+   - DATE (specific years, historical milestones, policy launch dates)
+   - HISTORICAL_EVENT (battles, legal rulings, treaties, disasters)
+   - PERSON (specific public figures, allegations, quotes, titles)
+   - COMPANY (corporate actions, monopolies, revenue, investigations)
+   - LOCATION (geopolitical claims, boundaries, treaty zones)
+   - POLICY (laws, regulations, legal mandates, institutional rules)
+   - QUOTE (direct or indirect quotes attributed to real individuals)
+   - COMPARISON ("largest in history", "twice as expensive", "faster than X")
+   - CAUSAL ("X directly caused Y", "the collapse occurred because of Z")
+3. ANTI-HALLUCINATION:
+   - DO NOT fabricate citations, URLs, author names, or publisher names.
+   - Leave verificationStatus as "UNSOURCED".
+   - Include specific guidance in 'warnings' about what type of primary source is needed (e.g., "Requires SEC 10-K filing or BLS statistical report").
+4. Map each claim to its corresponding sceneIds from the provided scene list.
+
+Global Context:
+- Primary Subject: ${globalContext?.primarySubject ?? "Documentary subject"}
+- Central Thesis: ${globalContext?.centralThesis ?? "Documentary thesis"}
+
+Scenes:
+${JSON.stringify(sceneBriefs, null, 2)}
+
+Respond with STRICT JSON matching this schema:
+{
+  "claims": [
+    {
+      "id": "claim_1",
+      "scriptText": "exact sentence or clause from script",
+      "normalizedClaim": "concise factual assertion",
+      "type": "STATISTIC" | "MONEY" | "DATE" | "HISTORICAL_EVENT" | "PERSON" | "COMPANY" | "LOCATION" | "POLICY" | "QUOTE" | "COMPARISON" | "CAUSAL" | "GENERAL_FACT",
+      "importance": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+      "confidence": 85,
+      "sceneIds": ["scene_001"],
+      "proofVisualRecommended": true,
+      "proofVisualType": "STAT_CARD" | "DOCUMENT_CARD" | "QUOTE_CARD" | "COMPARISON_CARD" | "DATA_NOTE" | "ARCHIVE_VISUAL",
+      "warnings": ["Requires specific primary documentation."]
+    }
+  ]
+}`;
+  let rawJson = "";
+  let successfulModel = "";
+  for (const currentModel of models) {
+    try {
+      onProgress?.(`Extracting claims with ${currentModel}...`, 0.3);
+      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+      const res = await ai.models.generateContent({
+        model: currentModel,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          maxOutputTokens: 8192
+        }
+      });
+      rawJson = res.text ?? "";
+      if (rawJson) {
+        successfulModel = currentModel;
+        recordModelSuccess(currentModel);
+        break;
+      }
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      logger.warn(`[ClaimLedger] Model ${currentModel} failed (${kind}): ${message}`);
+    }
+  }
+  let claims = [];
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      const list = Array.isArray(parsed) ? parsed : parsed.claims || [];
+      claims = sanitizeAiClaims(list, scenes);
+      logger.info(`[ClaimLedger] Extracted ${claims.length} claims using ${successfulModel}`);
+    } catch (err) {
+      logger.error(`[ClaimLedger] Failed to parse AI claim response: ${String(err)}`);
+    }
+  }
+  if (claims.length === 0) {
+    logger.warn(`[ClaimLedger] AI returned no claims, executing rule-based fallback`);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash2, ctxHash);
+    atomicWriteJson(ledgerPath, fallbackLedger);
+    return fallbackLedger;
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const ledger = {
+    projectId: path__namespace.basename(projectDir),
+    scriptHash: scriptHash2,
+    globalContextHash: ctxHash,
+    claims,
+    sources: [],
+    summary: computeLedgerSummary(claims),
+    generatedAt: now,
+    version: CLAIM_EXTRACTION_VERSION
+  };
+  atomicWriteJson(ledgerPath, ledger);
+  onProgress?.(`Claim Ledger ready (${claims.length} claims, ${ledger.summary.unsourced} unsourced)`, 1);
+  return ledger;
+}
+function addEvidenceSource(projectDir, source) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const id = source.id || `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const newSource = {
+    ...source,
+    id,
+    manuallyAdded: true
+  };
+  ledger.sources.push(newSource);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, source: newSource };
+}
+function linkSourceToClaim(projectDir, claimId, sourceId, newStatus) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const claim = ledger.claims.find((c) => c.id === claimId);
+  if (!claim) {
+    return { success: false, error: `Claim ${claimId} not found.` };
+  }
+  const source = ledger.sources.find((s) => s.id === sourceId);
+  if (!source) {
+    return { success: false, error: `Source ${sourceId} not found.` };
+  }
+  if (!claim.evidenceSourceIds.includes(sourceId)) {
+    claim.evidenceSourceIds.push(sourceId);
+  }
+  if (newStatus) {
+    claim.verificationStatus = newStatus;
+  } else if (claim.verificationStatus === "UNSOURCED") {
+    claim.verificationStatus = "VERIFIED";
+  }
+  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ledger.summary = computeLedgerSummary(ledger.claims);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, claim };
+}
+function unlinkSourceFromClaim(projectDir, claimId, sourceId) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const claim = ledger.claims.find((c) => c.id === claimId);
+  if (!claim) {
+    return { success: false, error: `Claim ${claimId} not found.` };
+  }
+  claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== sourceId);
+  if (claim.evidenceSourceIds.length === 0 && (claim.verificationStatus === "VERIFIED" || claim.verificationStatus === "PARTIALLY_VERIFIED")) {
+    claim.verificationStatus = "UNSOURCED";
+  }
+  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ledger.summary = computeLedgerSummary(ledger.claims);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, claim };
+}
+function updateClaimStatus(projectDir, claimId, status, warningText) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const claim = ledger.claims.find((c) => c.id === claimId);
+  if (!claim) {
+    return { success: false, error: `Claim ${claimId} not found.` };
+  }
+  claim.verificationStatus = status;
+  if (warningText) {
+    if (!claim.warnings.includes(warningText)) {
+      claim.warnings.push(warningText);
+    }
+  }
+  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ledger.summary = computeLedgerSummary(ledger.claims);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, claim };
+}
+function escapeCsvField(val) {
+  if (val === void 0 || val === null) return '""';
+  const str = String(val).replace(/"/g, '""');
+  return `"${str}"`;
+}
+function exportClaimManifests(projectDir, exportDir) {
+  try {
+    const ledgerPath = getClaimLedgerPath(projectDir);
+    const ledger = readJsonSafe(ledgerPath, null);
+    if (!ledger) {
+      return { success: false, error: "Claim ledger not found for export." };
+    }
+    const outDir = exportDir || path__namespace.join(projectDir, "exports");
+    fs__namespace.mkdirSync(outDir, { recursive: true });
+    const jsonPath = path__namespace.join(outDir, "claim-evidence-ledger.json");
+    atomicWriteJson(jsonPath, ledger);
+    const csvPath = path__namespace.join(outDir, "sources.csv");
+    const sourceMap = new Map(ledger.sources.map((s) => [s.id, s]));
+    const headers = [
+      "claim_id",
+      "scene_ids",
+      "claim_text",
+      "claim_type",
+      "importance",
+      "verification_status",
+      "source_title",
+      "publisher",
+      "source_url",
+      "published_at",
+      "accessed_at",
+      "license",
+      "attribution",
+      "asset_id",
+      "local_path",
+      "timecode",
+      "notes"
+    ];
+    const rows = [headers.join(",")];
+    for (const claim of ledger.claims) {
+      const linkedSources = claim.evidenceSourceIds.map((id) => sourceMap.get(id)).filter(Boolean);
+      if (linkedSources.length === 0) {
+        rows.push(
+          [
+            escapeCsvField(claim.id),
+            escapeCsvField(claim.sceneIds.join(";")),
+            escapeCsvField(claim.scriptText || claim.normalizedClaim),
+            escapeCsvField(claim.type),
+            escapeCsvField(claim.importance),
+            escapeCsvField(claim.verificationStatus),
+            escapeCsvField("UNSOURCED"),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(claim.warnings.join("; "))
+          ].join(",")
+        );
+      } else {
+        for (const src of linkedSources) {
+          const timecode = src.timecodeStart !== void 0 && src.timecodeEnd !== void 0 ? `${src.timecodeStart}-${src.timecodeEnd}` : "";
+          rows.push(
+            [
+              escapeCsvField(claim.id),
+              escapeCsvField(claim.sceneIds.join(";")),
+              escapeCsvField(claim.scriptText || claim.normalizedClaim),
+              escapeCsvField(claim.type),
+              escapeCsvField(claim.importance),
+              escapeCsvField(claim.verificationStatus),
+              escapeCsvField(src.title),
+              escapeCsvField(src.publisher),
+              escapeCsvField(src.url),
+              escapeCsvField(src.publishedAt),
+              escapeCsvField(src.accessedAt),
+              escapeCsvField(src.license),
+              escapeCsvField(src.attribution),
+              escapeCsvField(src.assetId),
+              escapeCsvField(src.localPath),
+              escapeCsvField(timecode),
+              escapeCsvField(src.notes)
+            ].join(",")
+          );
+        }
+      }
+    }
+    fs__namespace.writeFileSync(csvPath, rows.join("\n"), "utf-8");
+    const licensesPath = path__namespace.join(outDir, "licenses.json");
+    const licenses = ledger.sources.map((s) => ({
+      sourceId: s.id,
+      title: s.title ?? "Untitled Source",
+      publisher: s.publisher ?? "Unknown",
+      license: s.license ?? "All Rights Reserved / Fair Use Claim",
+      attribution: s.attribution ?? s.publisher ?? s.title ?? "",
+      url: s.url
+    }));
+    atomicWriteJson(licensesPath, {
+      project: path__namespace.basename(projectDir),
+      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      licenses
+    });
+    logger.info(`[EvidenceExport] Exported ${ledger.claims.length} claims and ${ledger.sources.length} sources to ${outDir}`);
+    return { success: true, csvPath, jsonPath, licensesPath };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[EvidenceExport] Failed exporting manifests: ${msg}`);
+    return { success: false, error: msg };
+  }
 }
 const YEAR_REGEX = /\b(1[6-9]\d{2}|20\d{2})('?s)?\b/;
 const CENTURY_REGEX = /\b(\d{1,2}(?:st|nd|rd|th))\s+century\b/i;
@@ -4290,6 +4859,16 @@ function generateVisualGrammarPlan(params) {
   const { projectDir, editPlan, captionPlan, proofVisuals } = params;
   const prodSettings = params.settings ?? loadProductionSettings(projectDir);
   const flattened = flattenEditPlanScenes(editPlan);
+  const claimLedgerPath = getClaimLedgerPath(projectDir);
+  const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe(claimLedgerPath, null) : null;
+  const claimsByScene = /* @__PURE__ */ new Map();
+  if (claimLedger?.claims) {
+    for (const c of claimLedger.claims) {
+      for (const scId of c.sceneIds) {
+        claimsByScene.set(scId, c);
+      }
+    }
+  }
   const rawDecisions = flattened.map((entry) => {
     const narration = entry.scene.narrativeText ?? "";
     const classification = classifyNarrationGrammar(narration, {
@@ -4301,19 +4880,38 @@ function generateVisualGrammarPlan(params) {
     const duration = entry.scene.duration ?? (entry.scene.endTime ?? 0) - (entry.scene.startTime ?? 0);
     const graphicDuration = Math.min(Math.max(2.5, duration * 0.6), 4.5);
     const startOffset = Math.min(0.5, Math.max(0, duration - graphicDuration));
+    const linkedClaim = claimsByScene.get(entry.sceneId);
+    let enabled = prodSettings.enabled && prodSettings.visualSceneGrammarEnabled;
+    let reason = classification.reason;
+    if (linkedClaim) {
+      if (linkedClaim.verificationStatus === "CONTRADICTED") {
+        enabled = false;
+        reason = `BLOCKED_BY_EVIDENCE: Claim "${linkedClaim.normalizedClaim}" is contradicted.`;
+      } else if (linkedClaim.verificationStatus === "VERIFIED") {
+        reason += ` (Verified by documentation)`;
+        if (linkedClaim.evidenceSourceIds?.length > 0 && !classification.secondaryText) {
+          const src = claimLedger?.sources?.find((s) => s.id === linkedClaim.evidenceSourceIds[0]);
+          if (src?.publisher || src?.title) {
+            classification.secondaryText = `SOURCE: ${src.publisher || src.title}`;
+          }
+        }
+      } else if (linkedClaim.verificationStatus === "UNSOURCED") {
+        reason += ` (Caution: claim is unsourced)`;
+      }
+    }
     return {
       sceneId: entry.sceneId,
       sceneIndex: entry.sceneIndex,
       type: classification.type,
       confidence: classification.confidence,
-      reason: classification.reason,
+      reason,
       primaryText: classification.primaryText,
       secondaryText: classification.secondaryText,
       sourceNarration: narration.slice(0, 100),
       startOffset,
       duration: graphicDuration,
       position: classification.position ?? "bottom_right",
-      enabled: prodSettings.enabled && prodSettings.visualSceneGrammarEnabled
+      enabled
     };
   });
   const sceneInfos = flattened.map((f) => ({
@@ -4353,8 +4951,8 @@ function loadVisualGrammarPlan(projectDir) {
   if (!fs__namespace.existsSync(planPath)) return null;
   return readJsonSafe(planPath, null);
 }
-const ffmpegStatic = require("ffmpeg-static");
-const ffprobeStatic = require("ffprobe-static");
+const ffmpegStatic$1 = require("ffmpeg-static");
+const ffprobeStatic$1 = require("ffprobe-static");
 const probeCache = /* @__PURE__ */ new Map();
 async function probeMediaDetailed(filePath) {
   if (!filePath || !fs__namespace.existsSync(filePath)) return null;
@@ -4364,13 +4962,13 @@ async function probeMediaDetailed(filePath) {
     if (cached && cached.mtimeMs === stat.mtimeMs) {
       return cached.probe;
     }
-    if (!ffprobeStatic?.path || !fs__namespace.existsSync(ffprobeStatic.path)) {
+    if (!ffprobeStatic$1?.path || !fs__namespace.existsSync(ffprobeStatic$1.path)) {
       logger.warn("[QA-Probe] ffprobe binary not found");
       return null;
     }
     return new Promise((resolve) => {
       const proc = child_process.spawn(
-        ffprobeStatic.path,
+        ffprobeStatic$1.path,
         [
           "-v",
           "error",
@@ -4437,12 +5035,12 @@ async function analyzeVideoQuality(filePath, totalDuration) {
     freezeSegments: [],
     silenceSegments: []
   };
-  if (!ffmpegStatic || !fs__namespace.existsSync(filePath)) {
+  if (!ffmpegStatic$1 || !fs__namespace.existsSync(filePath)) {
     return result;
   }
   return new Promise((resolve) => {
     const proc = child_process.spawn(
-      ffmpegStatic,
+      ffmpegStatic$1,
       [
         "-v",
         "info",
@@ -4496,7 +5094,7 @@ async function analyzeVideoQuality(filePath, totalDuration) {
   });
 }
 async function generateContactSheet(videoPath, outputPath, durationSecs) {
-  if (!ffmpegStatic || !fs__namespace.existsSync(videoPath) || durationSecs <= 0) {
+  if (!ffmpegStatic$1 || !fs__namespace.existsSync(videoPath) || durationSecs <= 0) {
     return false;
   }
   try {
@@ -4515,7 +5113,7 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
       const framePath = `${tmpDir}/frame_${i}.jpg`;
       await new Promise((resolve) => {
         const p = child_process.spawn(
-          ffmpegStatic,
+          ffmpegStatic$1,
           [
             "-y",
             "-ss",
@@ -4545,7 +5143,7 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
     const concatInputArgs = extractedFiles.flatMap((f) => ["-i", f]);
     await new Promise((resolve, reject) => {
       const p = child_process.spawn(
-        ffmpegStatic,
+        ffmpegStatic$1,
         [
           "-y",
           ...concatInputArgs,
@@ -8203,6 +8801,605 @@ function scoreContextCandidate(candidate, ctx) {
 function rankContextCandidates(candidates, ctx) {
   return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
 }
+const ffmpegStatic = require("ffmpeg-static");
+const ffprobeStatic = require("ffprobe-static");
+const VISUAL_TRUTH_ANALYSIS_VERSION = "1.0.0";
+function getVisualTruthStorePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "visual-truth.json");
+}
+function loadVisualTruthStore(projectDir) {
+  const filePath = getVisualTruthStorePath(projectDir);
+  return readJsonSafe(filePath, {
+    version: VISUAL_TRUTH_ANALYSIS_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    verifications: {}
+  });
+}
+function saveVisualTruthStore(projectDir, store) {
+  const filePath = getVisualTruthStorePath(projectDir);
+  store.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  atomicWriteJson(filePath, store);
+}
+function generateVerificationCacheKey(candidateId, sceneVisualIntent, globalContextHash) {
+  const intentHash = crypto__namespace.createHash("md5").update(sceneVisualIntent.trim()).digest("hex").slice(0, 10);
+  return `${candidateId}_${intentHash}_${globalContextHash}_${VISUAL_TRUTH_ANALYSIS_VERSION}`;
+}
+class VisionCircuitBreaker {
+  failureCount = 0;
+  lastFailureTime = 0;
+  threshold = 3;
+  cooldownMs = 6e4;
+  // 1 minute cooldown
+  isOpen() {
+    if (this.failureCount >= this.threshold) {
+      if (Date.now() - this.lastFailureTime > this.cooldownMs) {
+        return false;
+      }
+      return true;
+    }
+    return false;
+  }
+  recordFailure() {
+    this.failureCount++;
+    this.lastFailureTime = Date.now();
+  }
+  recordSuccess() {
+    this.failureCount = 0;
+  }
+}
+const visionCircuitBreaker = new VisionCircuitBreaker();
+async function downloadPreviewTemp(url2, destPath, timeoutMs = 8e3) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url2, { signal: controller.signal });
+    clearTimeout(timer);
+    if (!res.ok) return false;
+    const buffer = Buffer.from(await res.arrayBuffer());
+    fs__namespace.writeFileSync(destPath, buffer);
+    return true;
+  } catch (err) {
+    clearTimeout(timer);
+    return false;
+  }
+}
+async function probeDuration(filePath) {
+  if (!ffprobeStatic?.path || !fs__namespace.existsSync(filePath)) return 0;
+  return new Promise((resolve) => {
+    const proc = child_process.spawn(
+      ffprobeStatic.path,
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        filePath
+      ],
+      { windowsHide: true }
+    );
+    let stdout = "";
+    proc.stdout.on("data", (d) => {
+      stdout += d.toString();
+    });
+    proc.on("close", (code) => {
+      if (code === 0) {
+        const dur = parseFloat(stdout.trim());
+        resolve(dur > 0 ? dur : 0);
+      } else {
+        resolve(0);
+      }
+    });
+    proc.on("error", () => resolve(0));
+  });
+}
+async function extractCandidateFrames(candidate, maxFrames = 3) {
+  const tempDir = fs__namespace.mkdtempSync(path__namespace.join(os__namespace.tmpdir(), "vtruth_"));
+  const cleanup = () => {
+    try {
+      if (fs__namespace.existsSync(tempDir)) {
+        fs__namespace.rmSync(tempDir, { recursive: true, force: true });
+      }
+    } catch {
+    }
+  };
+  try {
+    const isImage = candidate.mediaType === "photo";
+    const mediaUrl = candidate.previewUrl || candidate.thumbnailUrl || candidate.downloadUrl;
+    if (!mediaUrl) {
+      cleanup();
+      return null;
+    }
+    const localTemp = path__namespace.join(tempDir, isImage ? "preview.jpg" : "preview.mp4");
+    const ok = await downloadPreviewTemp(mediaUrl, localTemp);
+    if (!ok || !fs__namespace.existsSync(localTemp) || fs__namespace.statSync(localTemp).size === 0) {
+      cleanup();
+      return null;
+    }
+    if (isImage) {
+      const b64 = fs__namespace.readFileSync(localTemp).toString("base64");
+      return { tempDir, frameBase64List: [b64], cleanup };
+    }
+    let duration = candidate.durationSecs || 0;
+    if (duration <= 0) {
+      duration = await probeDuration(localTemp);
+    }
+    if (duration <= 0) duration = 5;
+    const timestamps = [];
+    if (maxFrames === 1) {
+      timestamps.push(duration * 0.5);
+    } else if (maxFrames === 2) {
+      timestamps.push(Math.max(0.3, duration * 0.3), Math.max(0.6, duration * 0.7));
+    } else {
+      timestamps.push(
+        Math.max(0.3, duration * 0.2),
+        Math.max(0.6, duration * 0.5),
+        Math.min(duration - 0.3, duration * 0.8)
+      );
+    }
+    const frameBase64List = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = timestamps[i];
+      const framePath = path__namespace.join(tempDir, `frame_${i}.jpg`);
+      await new Promise((resolve) => {
+        if (!ffmpegStatic) {
+          resolve();
+          return;
+        }
+        const p = child_process.spawn(
+          ffmpegStatic,
+          [
+            "-y",
+            "-ss",
+            String(ts),
+            "-i",
+            localTemp,
+            "-vframes",
+            "1",
+            "-vf",
+            "scale=640:-1",
+            "-q:v",
+            "4",
+            framePath
+          ],
+          { windowsHide: true }
+        );
+        p.on("close", () => resolve());
+        p.on("error", () => resolve());
+      });
+      if (fs__namespace.existsSync(framePath) && fs__namespace.statSync(framePath).size > 100) {
+        frameBase64List.push(fs__namespace.readFileSync(framePath).toString("base64"));
+      }
+    }
+    if (frameBase64List.length === 0) {
+      cleanup();
+      return null;
+    }
+    return { tempDir, frameBase64List, cleanup };
+  } catch (err) {
+    cleanup();
+    return null;
+  }
+}
+function clampScore(val, min = 0, max = 100) {
+  const num = Number(val);
+  if (isNaN(num)) return min;
+  return Math.min(max, Math.max(min, Math.round(num)));
+}
+function computeCombinedVisualTruthScore(metadataScore, verification, weights = DEFAULT_VISUAL_TRUTH_WEIGHTS) {
+  const meta = clampScore(metadataScore, 0, 100);
+  const visualVerificationScore = clampScore(
+    verification.subjectMatch * 0.3 + verification.actionMatch * 0.3 + verification.visualIntentMatch * 0.2 + verification.narrationMatch * 0.2
+  );
+  const weightedSum = meta * weights.metadataRelevance + visualVerificationScore * weights.visualVerification + clampScore(verification.geographyMatch) * weights.globalContext + clampScore(verification.actionMatch) * weights.actionMatch + clampScore(verification.sequenceContinuity) * weights.sequenceContinuity + clampScore(verification.technicalQuality) * weights.technicalQuality;
+  let penalty = 0;
+  if (verification.genericStockRisk > 60) {
+    penalty += verification.genericStockRisk / 100 * weights.genericStockPenalty;
+  }
+  if (verification.contradictionRisk > 40) {
+    penalty += verification.contradictionRisk / 100 * weights.contradictionPenalty;
+  }
+  const evidenceBonus = verification.documentaryEvidenceValue / 100 * 10;
+  const rawFinal = weightedSum - penalty + evidenceBonus;
+  const finalScore = clampScore(rawFinal, 0, 100);
+  return {
+    finalScore,
+    breakdown: {
+      metadata: Math.round(meta * weights.metadataRelevance),
+      visual: Math.round(visualVerificationScore * weights.visualVerification),
+      penalty: Math.round(penalty),
+      evidenceBonus: Math.round(evidenceBonus)
+    }
+  };
+}
+function sanitizeVisualTruthVerification(p, candidateId, sceneId, minConfidence = 50, successfulModel) {
+  const confidence = clampScore(p?.confidence, 0, 100);
+  let truthLabel = p?.truthLabel || "UNKNOWN";
+  const validLabels = [
+    "EXACT_SUBJECT",
+    "CONTEXTUAL_MATCH",
+    "ILLUSTRATIVE",
+    "HISTORICAL",
+    "GENERIC_STOCK",
+    "CONTRADICTORY",
+    "UNKNOWN"
+  ];
+  if (!validLabels.includes(truthLabel)) {
+    truthLabel = "UNKNOWN";
+  }
+  if (confidence < minConfidence && truthLabel !== "CONTRADICTORY") {
+    truthLabel = "UNKNOWN";
+  }
+  const contradictionRisk = clampScore(p?.contradictionRisk);
+  return {
+    candidateId,
+    sceneId,
+    actualSubjects: Array.isArray(p?.actualSubjects) ? p.actualSubjects.map(String) : [],
+    actualActions: Array.isArray(p?.actualActions) ? p.actualActions.map(String) : [],
+    visibleObjects: Array.isArray(p?.visibleObjects) ? p.visibleObjects.map(String) : [],
+    visibleText: Array.isArray(p?.visibleText) ? p.visibleText.map(String) : [],
+    possibleLocations: Array.isArray(p?.possibleLocations) ? p.possibleLocations.map(String) : [],
+    possibleTimePeriods: Array.isArray(p?.possibleTimePeriods) ? p.possibleTimePeriods.map(String) : [],
+    subjectMatch: clampScore(p?.subjectMatch),
+    actionMatch: clampScore(p?.actionMatch),
+    objectMatch: clampScore(p?.objectMatch),
+    geographyMatch: clampScore(p?.geographyMatch),
+    timePeriodMatch: clampScore(p?.timePeriodMatch),
+    narrationMatch: clampScore(p?.narrationMatch),
+    visualIntentMatch: clampScore(p?.visualIntentMatch),
+    documentaryEvidenceValue: clampScore(p?.documentaryEvidenceValue),
+    sequenceContinuity: clampScore(p?.sequenceContinuity),
+    genericStockRisk: clampScore(p?.genericStockRisk),
+    contradictionRisk,
+    technicalQuality: clampScore(p?.technicalQuality),
+    truthLabel,
+    positiveReasons: Array.isArray(p?.positiveReasons) ? p.positiveReasons.map(String) : [],
+    negativeReasons: Array.isArray(p?.negativeReasons) ? p.negativeReasons.map(String) : [],
+    contradictionReasons: Array.isArray(p?.contradictionReasons) ? p.contradictionReasons.map(String) : [],
+    confidence,
+    approved: Boolean(p?.approved && truthLabel !== "CONTRADICTORY"),
+    requiresReview: Boolean(
+      p?.requiresReview || truthLabel === "CONTRADICTORY" || truthLabel === "UNKNOWN" || confidence < minConfidence || contradictionRisk > 50
+    ),
+    analyzedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    analysisVersion: VISUAL_TRUTH_ANALYSIS_VERSION,
+    model: successfulModel
+  };
+}
+async function analyzeCandidateVisualTruth(params) {
+  const {
+    candidate,
+    sceneId,
+    narration,
+    visualIntent,
+    globalContext,
+    chapterTitle,
+    chapterPurpose,
+    hasClaim,
+    claimWarning,
+    apiKey,
+    timeoutMs = 15e3,
+    minConfidence = 60,
+    framesCount = 3
+  } = params;
+  if (visionCircuitBreaker.isOpen()) {
+    logger.warn(`[VisualTruth] Vision circuit breaker open, skipping AI vision analysis`);
+    return null;
+  }
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) return null;
+  const extracted = await extractCandidateFrames(candidate, framesCount);
+  if (!extracted || extracted.frameBase64List.length === 0) {
+    return null;
+  }
+  const models = getAvailableModelsForTask("visual_truth", params.model);
+  const forbiddenSubs = globalContext?.forbiddenSubstitutions?.join("; ") || "None";
+  const primarySubject = globalContext?.primarySubject || "General documentary subject";
+  const timePeriod = globalContext?.timeContext?.primaryPeriod || "Modern / Unspecified";
+  const prompt = `You are a Lead Visual Truth Inspector and Archival Researcher for a high-end US documentary.
+Inspect the provided image frame(s) extracted from a stock candidate video or photo.
+Determine if the footage genuinely depicts what the narration, visual intent, and documentary context describe.
+
+Scene Context:
+- Scene Narration: "${narration}"
+- Visual Intent: "${visualIntent}"
+- Chapter Context: "${chapterTitle || ""} — ${chapterPurpose || ""}"
+- Global Subject: "${primarySubject}"
+- Required Time Period: "${timePeriod}"
+- STRICTLY FORBIDDEN SUBSTITUTIONS / FALSE TROUGHT: "${forbiddenSubs}"
+- Factual Claim in Scene: ${hasClaim ? `YES (${claimWarning || "Requires documentary proof"})` : "No"}
+
+Stock Candidate Metadata:
+- Title: "${candidate.title}"
+- Tags: "${(candidate.tags || []).join(", ")}"
+- Provider: "${candidate.provider}"
+
+Carefully inspect the frames for:
+1. Actual subjects and actions happening in the frames.
+2. Contradictions:
+   - Wrong religious/ethnic group (e.g., Amish/Mennonite shown instead of Hutterite, or Caucasian shown when Asian community required)
+   - Wrong historical era (e.g. smartphones/cars in historical scene)
+   - Distracting watermarks, foreign language signs, prominent unrelated logos
+   - Cartoon / 3D render when realistic live-action required
+   - Generic staged shopping carts when price comparison / shelf unit price was specified
+3. Documentary Evidence Value: Does this show actual real-life documentary evidence (e.g. receipt, price label, map, document, real archive) or purely staged/decorative footage?
+
+Respond with STRICT JSON matching this schema:
+{
+  "actualSubjects": ["woman in grocery aisle"],
+  "actualActions": ["examining price tag on shelf"],
+  "visibleObjects": ["shelf labels", "groceries"],
+  "visibleText": ["optional visible text"],
+  "possibleLocations": ["supermarket"],
+  "possibleTimePeriods": ["contemporary"],
+  "subjectMatch": 85,
+  "actionMatch": 80,
+  "objectMatch": 75,
+  "geographyMatch": 80,
+  "timePeriodMatch": 90,
+  "narrationMatch": 85,
+  "visualIntentMatch": 90,
+  "documentaryEvidenceValue": 70,
+  "sequenceContinuity": 80,
+  "genericStockRisk": 20,
+  "contradictionRisk": 5,
+  "technicalQuality": 85,
+  "truthLabel": "EXACT_SUBJECT" | "CONTEXTUAL_MATCH" | "ILLUSTRATIVE" | "HISTORICAL" | "GENERIC_STOCK" | "CONTRADICTORY" | "UNKNOWN",
+  "positiveReasons": ["Directly shows shelf price tags as requested in narration"],
+  "negativeReasons": [],
+  "contradictionReasons": [],
+  "confidence": 85,
+  "approved": true,
+  "requiresReview": false
+}`;
+  let rawJson = "";
+  let successfulModel = "";
+  for (const currentModel of models) {
+    try {
+      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+      const parts = [
+        { text: prompt }
+      ];
+      for (const b64 of extracted.frameBase64List) {
+        parts.push({
+          inlineData: {
+            mimeType: "image/jpeg",
+            data: b64
+          }
+        });
+      }
+      const callPromise = ai.models.generateContent({
+        model: currentModel,
+        contents: [{ role: "user", parts }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          maxOutputTokens: 2048
+        }
+      });
+      const timeoutPromise = new Promise(
+        (_, reject) => setTimeout(() => reject(new Error(`Visual truth timeout after ${timeoutMs}ms`)), timeoutMs)
+      );
+      const response = await Promise.race([callPromise, timeoutPromise]);
+      rawJson = response.text ?? "";
+      if (rawJson) {
+        successfulModel = currentModel;
+        visionCircuitBreaker.recordSuccess();
+        recordModelSuccess(currentModel);
+        break;
+      }
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      visionCircuitBreaker.recordFailure();
+      logger.warn(`[VisualTruth] Model ${currentModel} failed (${kind}): ${message}`);
+    }
+  }
+  extracted.cleanup();
+  if (!rawJson) {
+    return null;
+  }
+  try {
+    const p = JSON.parse(rawJson);
+    return sanitizeVisualTruthVerification(p, candidate.assetId, sceneId, minConfidence, successfulModel);
+  } catch (err) {
+    logger.warn(`[VisualTruth] Failed to parse vision JSON: ${String(err)}`);
+    return null;
+  }
+}
+async function rerankShortlistedCandidates(params) {
+  const {
+    projectDir,
+    sceneId,
+    sceneIndex,
+    narration,
+    visualIntent,
+    candidates,
+    globalContext,
+    chapterTitle,
+    chapterPurpose,
+    claimLedger,
+    settings,
+    apiKey,
+    onProgress,
+    onEvent
+  } = params;
+  if (candidates.length === 0) {
+    throw new Error("No candidates provided for reranking.");
+  }
+  const enabled = settings.enabled && (settings.visualTruthEnabled ?? settings.productionIntelligence?.visualTruthEnabled ?? true);
+  if (!enabled || !apiKey || !normalizeApiKey(apiKey)) {
+    logger.info(`[VisualTruth] Visual Truth Reranker disabled or key missing — using metadata ranking`);
+    onEvent?.("visual-truth:fallback", { sceneId, reason: "Feature disabled or API key missing" });
+    const winner2 = candidates.find((c) => c.selected) || candidates[0];
+    return { candidates, winner: winner2, usedFallback: true };
+  }
+  const shortlistSize = settings.visualTruthShortlistSize ?? settings.productionIntelligence?.visualTruthShortlistSize ?? 6;
+  const framesCount = settings.visualTruthFrameCount ?? settings.productionIntelligence?.visualTruthFrameCount ?? 3;
+  const timeoutMs = settings.visualTruthTimeoutMs ?? settings.productionIntelligence?.visualTruthTimeoutMs ?? 15e3;
+  const minConfidence = settings.visualTruthMinConfidence ?? settings.productionIntelligence?.visualTruthMinConfidence ?? 60;
+  const shortlist = candidates.slice(0, Math.min(candidates.length, shortlistSize));
+  logger.info(`[VisualTruth] Scene ${sceneId}: analyzing ${shortlist.length} shortlisted candidates`);
+  onEvent?.("visual-truth:started", { sceneId, totalCandidates: shortlist.length });
+  const store = loadVisualTruthStore(projectDir);
+  const ctxHash = globalContext?.exactTopicAnchors?.join(",") || "no-ctx";
+  const sceneClaims = (claimLedger?.claims || []).filter((c) => c.sceneIds.includes(sceneId));
+  const hasClaim = sceneClaims.length > 0;
+  const claimWarning = hasClaim ? `Claim: "${sceneClaims[0].normalizedClaim}" (${sceneClaims[0].type})` : void 0;
+  let visionFailures = 0;
+  for (let idx = 0; idx < shortlist.length; idx++) {
+    const candidate = shortlist[idx];
+    onProgress?.(`Visual verification Scene ${sceneIndex} Candidates ${idx + 1}/${shortlist.length}`, idx + 1, shortlist.length);
+    const cacheKey = generateVerificationCacheKey(candidate.candidateId, visualIntent, ctxHash);
+    let verification = store.verifications[cacheKey] || null;
+    if (!verification) {
+      try {
+        verification = await analyzeCandidateVisualTruth({
+          candidate: candidate.result,
+          sceneId,
+          narration,
+          visualIntent,
+          globalContext,
+          chapterTitle,
+          chapterPurpose,
+          hasClaim,
+          claimWarning,
+          apiKey,
+          timeoutMs,
+          minConfidence,
+          framesCount
+        });
+        if (verification) {
+          store.verifications[cacheKey] = verification;
+          saveVisualTruthStore(projectDir, store);
+        } else {
+          visionFailures++;
+        }
+      } catch (err) {
+        visionFailures++;
+        logger.warn(`[VisualTruth] Verification error for candidate ${candidate.candidateId}: ${String(err)}`);
+      }
+    }
+    if (verification) {
+      candidate.visualTruth = verification;
+      const { finalScore } = computeCombinedVisualTruthScore(candidate.score.totalScore, verification);
+      candidate.finalScore = finalScore;
+      logger.info(
+        `[VisualTruth] Candidate ${candidate.candidateId}: ${verification.truthLabel}, score ${finalScore}`
+      );
+      onEvent?.("visual-truth:candidate-analyzed", {
+        sceneId,
+        candidateId: candidate.candidateId,
+        truthLabel: verification.truthLabel,
+        finalScore,
+        positiveReasons: verification.positiveReasons,
+        negativeReasons: verification.negativeReasons
+      });
+    } else {
+      candidate.finalScore = candidate.score.totalScore;
+    }
+  }
+  const usedFallback = visionFailures >= shortlist.length;
+  if (usedFallback) {
+    logger.warn(`[VisualTruth] Vision unavailable — using metadata fallback`);
+    onEvent?.("visual-truth:fallback", { sceneId, reason: "All vision calls failed or timed out" });
+  }
+  shortlist.sort((a, b) => {
+    const aIsContradictory = a.visualTruth?.truthLabel === "CONTRADICTORY";
+    const bIsContradictory = b.visualTruth?.truthLabel === "CONTRADICTORY";
+    if (aIsContradictory !== bIsContradictory) {
+      return aIsContradictory ? 1 : -1;
+    }
+    return (b.finalScore ?? b.score.totalScore) - (a.finalScore ?? a.score.totalScore);
+  });
+  const remaining = candidates.slice(shortlist.length);
+  const rerankedList = [...shortlist, ...remaining];
+  rerankedList.forEach((c, idx) => {
+    c.rank = idx + 1;
+    c.selected = idx === 0;
+  });
+  const winner = rerankedList[0];
+  logger.info(`[VisualTruth] Scene ${sceneId} — selected ${winner.candidateId}, score ${winner.finalScore ?? winner.score.totalScore}`);
+  onEvent?.("visual-truth:scene-completed", {
+    sceneId,
+    selectedCandidateId: winner.candidateId,
+    truthLabel: winner.visualTruth?.truthLabel || "UNKNOWN",
+    finalScore: winner.finalScore ?? winner.score.totalScore
+  });
+  return { candidates: rerankedList, winner, usedFallback };
+}
+function hashNarration(text) {
+  if (!text) return "";
+  return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
+}
+function checkSceneIdentityPreserved(beforeScenes, afterScenes) {
+  const errors = [];
+  const warnings = [];
+  if (!Array.isArray(beforeScenes) || !Array.isArray(afterScenes)) {
+    errors.push("Both beforeScenes and afterScenes must be valid arrays.");
+    return { valid: false, errors, warnings };
+  }
+  if (beforeScenes.length !== afterScenes.length) {
+    errors.push(
+      `Scene count mismatch: expected ${beforeScenes.length} scenes, got ${afterScenes.length} scenes (scene loss or duplication detected).`
+    );
+    return { valid: false, errors, warnings };
+  }
+  for (let i = 0; i < beforeScenes.length; i++) {
+    const before = beforeScenes[i];
+    const after = afterScenes[i];
+    if (before.sceneIndex !== after.sceneIndex) {
+      errors.push(
+        `Scene order corrupted at index ${i}: expected sceneIndex ${before.sceneIndex}, got ${after.sceneIndex}.`
+      );
+    }
+    if (before.sceneId && after.sceneId && before.sceneId !== after.sceneId) {
+      errors.push(
+        `Scene ID mutated at index ${i}: before="${before.sceneId}", after="${after.sceneId}".`
+      );
+    }
+    const beforeNarration = before.narrativeText ?? before.narrationText ?? "";
+    const afterNarration = after.narrativeText ?? after.narrationText ?? "";
+    if (hashNarration(beforeNarration) !== hashNarration(afterNarration)) {
+      errors.push(
+        `Narration text altered at scene ${before.sceneId ?? before.sceneIndex}: expected "${beforeNarration.slice(0, 40)}...", got "${afterNarration.slice(0, 40)}...".`
+      );
+    }
+    const startDiff = Math.abs(before.startTime - after.startTime);
+    const endDiff = Math.abs(before.endTime - after.endTime);
+    if (startDiff > 1e-3 || endDiff > 1e-3) {
+      errors.push(
+        `Timing shifted at scene ${before.sceneId ?? before.sceneIndex}: expected [${before.startTime.toFixed(2)}-${before.endTime.toFixed(2)}], got [${after.startTime.toFixed(2)}-${after.endTime.toFixed(2)}].`
+      );
+    }
+    if (before.chapterId && after.chapterId && before.chapterId !== after.chapterId) {
+      warnings.push(
+        `Chapter ID mismatch at scene ${before.sceneId ?? before.sceneIndex}: before="${before.chapterId}", after="${after.chapterId}".`
+      );
+    }
+  }
+  return {
+    valid: errors.length === 0,
+    errors,
+    warnings
+  };
+}
+function assertSceneIdentityPreserved(beforeScenes, afterScenes, throwOnError = false) {
+  const result = checkSceneIdentityPreserved(beforeScenes, afterScenes);
+  if (!result.valid) {
+    const errorSummary = `[SceneInvariantViolated] ${result.errors.join(" | ")}`;
+    logger.error(errorSummary);
+    if (throwOnError || process.env.NODE_ENV === "test") {
+      throw new Error(errorSummary);
+    }
+    return false;
+  }
+  if (result.warnings.length > 0) {
+    logger.warn(`[SceneInvariantWarning] ${result.warnings.join(" | ")}`);
+  }
+  return true;
+}
 function toOrientation(ar) {
   if (ar === "9:16") return "portrait";
   if (ar === "1:1") return "square";
@@ -8633,15 +9830,47 @@ async function runContextAwareStockEngine(params, onProgress = () => {
             assignmentHistory,
             isLocked: scene.locked
           };
-          const topCandidates = rankCandidatesForScene(
+          const shortlistCount = Math.max(
+            prodSettings.candidatesPerScene || 3,
+            prodSettings.visualTruthShortlistSize || 6
+          );
+          let topCandidates = rankCandidatesForScene(
             sceneId,
             scene.sceneIndex,
             candidates,
             scoringCtx,
-            prodSettings.candidatesPerScene || 3
+            shortlistCount
           );
+          let winner = topCandidates.find((c) => c.selected) || topCandidates[0];
+          const isVisualTruthEnabled = prodSettings.visualTruthEnabled ?? prodSettings.productionIntelligence?.visualTruthEnabled ?? true;
+          if (isVisualTruthEnabled && apiKey) {
+            try {
+              const claimLedgerPath = getClaimLedgerPath(projectDir);
+              const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe(claimLedgerPath, null) : null;
+              const rerankResult = await rerankShortlistedCandidates({
+                projectDir,
+                sceneId,
+                sceneIndex: scene.sceneIndex,
+                narration,
+                visualIntent: planToUse.visualIntent,
+                candidates: topCandidates,
+                globalContext,
+                chapterTitle,
+                chapterPurpose,
+                claimLedger,
+                settings: prodSettings,
+                apiKey,
+                onProgress: (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct)
+              });
+              topCandidates = rerankResult.candidates;
+              winner = rerankResult.winner;
+            } catch (vtErr) {
+              logger.warn(
+                `[VisualTruth] Reranker error for scene ${sceneId}: ${String(vtErr)}, falling back to metadata ranking`
+              );
+            }
+          }
           stockCandidatesStore[sceneId] = topCandidates;
-          const winner = topCandidates.find((c) => c.selected) || topCandidates[0];
           const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
           const downloadedAsset = await downloadAsset(
             winner.result,
@@ -8656,21 +9885,22 @@ async function runContextAwareStockEngine(params, onProgress = () => {
           scene.localPath = downloadedAsset.localPath;
           scene.mediaFile = path.basename(downloadedAsset.localPath);
           scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          const finalScore = winner.finalScore ?? winner.score.totalScore;
           assignment.asset = downloadedAsset;
-          assignment.score = winner.score.totalScore;
+          assignment.score = finalScore;
           assignment.usedQuery = usedQuery;
           assignment.status = "assigned";
           assignment.tierUsed = tierUsed;
-          assignment.matchLabel = winner.score.totalScore >= 80 ? "STRONG_MATCH" : winner.score.totalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE";
-          assignment.visualTruthLabel = winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH";
+          assignment.matchLabel = finalScore >= 80 ? "STRONG_MATCH" : finalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE";
+          assignment.visualTruthLabel = winner.visualTruth?.truthLabel ?? (winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH");
           assignment.scoreBreakdown = winner.score;
           assignment.candidates = topCandidates;
           assignment.selectedCandidateId = winner.candidateId;
           assignment.approvalStatus = "auto_selected";
           assignment.rejectedCandidates = topCandidates.slice(1).map((c) => ({
             title: c.result.title,
-            score: c.score.totalScore,
-            reason: c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
+            score: c.finalScore ?? c.score.totalScore,
+            reason: c.visualTruth?.contradictionReasons?.[0] || c.visualTruth?.negativeReasons?.[0] || c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
           }));
           assignedCount++;
         } else {
@@ -8732,6 +9962,22 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     saveAssetsManifest(stockDir, manifest);
   }
   assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  assertSceneIdentityPreserved(
+    flattenedEntries.map((e) => ({
+      sceneId: e.sceneId,
+      sceneIndex: e.scene.sceneIndex,
+      startTime: e.scene.startTime,
+      endTime: e.scene.endTime,
+      narrativeText: e.scene.narrativeText
+    })),
+    flattenedEntries.map((e) => ({
+      sceneId: e.sceneId,
+      sceneIndex: e.scene.sceneIndex,
+      startTime: e.scene.startTime,
+      endTime: e.scene.endTime,
+      narrativeText: e.scene.narrativeText
+    }))
+  );
   atomicWriteJson(planPath, plan);
   atomicWriteJson(reviewPath, assignments);
   if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
@@ -9193,6 +10439,77 @@ function registerStockHandlers(ipcMain) {
     IPC_CHANNELS.PRODUCTION_SETTINGS_SET,
     (_event, params) => {
       return saveProductionSettings(params.projectDir, params.settings);
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.CLAIM_GET_LEDGER, (_event, projectDir) => {
+    try {
+      const ledgerPath = getClaimLedgerPath(projectDir);
+      return readJsonSafe(ledgerPath, null);
+    } catch (err) {
+      logger.error(`[ClaimIPC] Failed to load claim ledger: ${String(err)}`);
+      return null;
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_UPDATE_STATUS,
+    (_event, params) => {
+      return updateClaimStatus(params.projectDir, params.claimId, params.status, params.warningText);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_ADD_SOURCE,
+    (_event, params) => {
+      return addEvidenceSource(params.projectDir, params.source);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_REMOVE_SOURCE,
+    (_event, params) => {
+      try {
+        const ledgerPath = getClaimLedgerPath(params.projectDir);
+        const ledger = readJsonSafe(ledgerPath, null);
+        if (!ledger) return { success: false, error: "Ledger not found" };
+        ledger.sources = ledger.sources.filter((s) => s.id !== params.sourceId);
+        for (const claim of ledger.claims) {
+          claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== params.sourceId);
+          if (claim.evidenceSourceIds.length === 0 && claim.verificationStatus === "VERIFIED") {
+            claim.verificationStatus = "UNSOURCED";
+          }
+        }
+        atomicWriteJson(ledgerPath, ledger);
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_LINK_SOURCE,
+    (_event, params) => {
+      return linkSourceToClaim(params.projectDir, params.claimId, params.sourceId, params.newStatus);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_UNLINK_SOURCE,
+    (_event, params) => {
+      return unlinkSourceFromClaim(params.projectDir, params.claimId, params.sourceId);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS,
+    (_event, params) => {
+      return exportClaimManifests(params.projectDir, params.exportDir);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.VISUAL_TRUTH_GET_DATA,
+    (_event, projectDir) => {
+      try {
+        return loadVisualTruthStore(projectDir);
+      } catch (err) {
+        logger.error(`[VisualTruthIPC] Failed to load visual truth data: ${String(err)}`);
+        return null;
+      }
     }
   );
 }
@@ -11144,44 +12461,87 @@ async function runGlobalContextStage(options, onProgress, signal) {
     } catch {
     }
   }
+  let ctx = null;
+  let isCached = false;
   if (isGlobalContextValid(options.projectDir)) {
     try {
-      const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
-      onProgress("Using cached global script context", 1);
-      return {
-        success: true,
-        cached: true,
-        artifactPath: contextPath,
-        data: cached
-      };
+      ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+      isCached = true;
+      onProgress("Using cached global script context", 0.5);
     } catch {
     }
   }
   const apiKey = resolveGeminiApiKey();
-  onProgress("Analyzing script for Global Visual Context...", 0.05);
-  checkAborted(signal);
-  const ctx = await analyzeGlobalContext({
-    projectDir: options.projectDir,
-    apiKey,
-    model: options.geminiModel,
-    scriptText,
-    transcript,
-    forceRegenerate: false,
-    onProgress: (msg, pct) => {
-      checkAborted(signal);
-      onProgress(msg, pct);
+  if (!ctx) {
+    onProgress("Analyzing script for Global Visual Context...", 0.05);
+    checkAborted(signal);
+    ctx = await analyzeGlobalContext({
+      projectDir: options.projectDir,
+      apiKey,
+      model: options.geminiModel,
+      scriptText,
+      transcript,
+      forceRegenerate: false,
+      onProgress: (msg, pct) => {
+        checkAborted(signal);
+        onProgress(msg, pct * 0.7);
+      }
+    });
+    checkAborted(signal);
+  }
+  const prodSettings = loadProductionSettings(options.projectDir);
+  const isClaimEnabled = prodSettings.claimEvidenceEnabled ?? prodSettings.productionIntelligence?.claimEvidenceEnabled ?? true;
+  let claimStats;
+  if (isClaimEnabled) {
+    const planPath = path__namespace.join(options.projectDir, "analysis", "master-edit-plan.json");
+    if (fs__namespace.existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+        const flattened = flattenEditPlanScenes(plan);
+        const sceneInputs = flattened.map((e) => ({
+          sceneId: e.sceneId,
+          sceneIndex: e.scene.sceneIndex,
+          narration: e.scene.narrativeText ?? "",
+          visualIntent: e.scene.visualIntent,
+          chapterId: `CH${e.chapterIndex}`,
+          chapterTitle: e.chapterTitle
+        }));
+        if (sceneInputs.length > 0) {
+          onProgress("Analyzing script for Claim & Evidence Ledger...", 0.75);
+          checkAborted(signal);
+          const ledger = await extractDocumentaryClaims({
+            projectDir: options.projectDir,
+            scriptText,
+            globalContext: ctx,
+            scenes: sceneInputs,
+            apiKey,
+            model: options.geminiModel,
+            onProgress: (msg, prog) => {
+              checkAborted(signal);
+              onProgress(`[ClaimLedger] ${msg}`, 0.75 + prog * 0.23);
+            }
+          });
+          claimStats = {
+            totalClaims: ledger.claims.length,
+            unsourced: ledger.summary.unsourced
+          };
+        }
+      } catch (claimErr) {
+        logger.warn(`[ClaimLedger] Claim analysis warning: ${String(claimErr)}, continuing pipeline.`);
+      }
     }
-  });
-  checkAborted(signal);
-  onProgress("Global Visual Context completed", 1);
+  }
+  onProgress("Global Visual Context & Claim Analysis completed", 1);
   return {
     success: true,
-    cached: false,
+    cached: isCached,
     artifactPath: contextPath,
     data: ctx,
     stats: {
-      primarySubject: ctx.primarySubject,
-      anchorsCount: ctx.exactTopicAnchors?.length ?? 0
+      primarySubject: ctx?.primarySubject,
+      anchorsCount: ctx?.exactTopicAnchors?.length ?? 0,
+      claimsCount: claimStats?.totalClaims ?? 0,
+      unsourcedClaims: claimStats?.unsourced ?? 0
     }
   };
 }
@@ -11509,9 +12869,21 @@ async function runPostflightStage(options, renderResult, onProgress, signal) {
     } catch {
     }
   }
+  let exportWarning;
+  try {
+    const exportRes = exportClaimManifests(options.projectDir);
+    if (!exportRes.success) {
+      exportWarning = `Source manifest export warning: ${exportRes.error}`;
+      logger.warn(`[EvidenceExport] ${exportWarning}`);
+    }
+  } catch (expErr) {
+    exportWarning = `Source manifest export error: ${String(expErr)}`;
+    logger.warn(`[EvidenceExport] ${exportWarning}`);
+  }
   onProgress("Video production completed successfully!", 1);
   return {
     success: true,
+    warning: exportWarning,
     artifactPath: outputPath,
     data: {
       outputPath,
@@ -12351,6 +13723,315 @@ function registerPipelineHandlers(ipcMain) {
     }
   );
 }
+class ResearchSidecarManager {
+  static instance;
+  process = null;
+  port = 8765;
+  host = "127.0.0.1";
+  status = "stopped";
+  lastError;
+  healthCheckInterval = null;
+  pidFilePath;
+  constructor() {
+    this.pidFilePath = path.join(
+      electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
+      "youtube-research-sidecar.pid"
+    );
+  }
+  static getInstance() {
+    if (!ResearchSidecarManager.instance) {
+      ResearchSidecarManager.instance = new ResearchSidecarManager();
+    }
+    return ResearchSidecarManager.instance;
+  }
+  getStatus() {
+    return {
+      online: this.status === "running",
+      port: this.port,
+      pid: this.process?.pid,
+      url: `http://${this.host}:${this.port}`,
+      version: "1.0.0",
+      status: this.status,
+      error: this.lastError,
+      lastHealthCheck: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  async pingHealth() {
+    return new Promise((resolve) => {
+      const req = http__namespace.get(`http://${this.host}:${this.port}/health`, { timeout: 2e3 }, (res) => {
+        if (res.statusCode === 200) {
+          resolve(true);
+        } else {
+          resolve(false);
+        }
+      });
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(false);
+      });
+    });
+  }
+  async start() {
+    if (this.status === "running" && this.process) {
+      return this.getStatus();
+    }
+    const isAlive = await this.pingHealth();
+    if (isAlive) {
+      logger.info(`[ResearchSidecar] Sidecar already responding on http://${this.host}:${this.port}/health`);
+      this.status = "running";
+      this.startMonitoring();
+      return this.getStatus();
+    }
+    this.cleanupStaleProcess();
+    const uvPath = getUvPath();
+    const serviceDir = electron.app && !electron.app.isPackaged ? path.join(process.cwd(), "services", "youtube-research") : path.join(process.resourcesPath, "services", "youtube-research");
+    if (!fs__namespace.existsSync(serviceDir)) {
+      this.status = "error";
+      this.lastError = `YouTube Research service directory not found at: ${serviceDir}`;
+      logger.warn(`[ResearchSidecar] ${this.lastError}`);
+      return this.getStatus();
+    }
+    this.status = "starting";
+    logger.info(`[ResearchSidecar] Spawning YouTube Research sidecar via uv...`, { uvPath, serviceDir });
+    try {
+      const args = [
+        "run",
+        "uvicorn",
+        "main:app",
+        "--host",
+        this.host,
+        "--port",
+        String(this.port),
+        "--log-level",
+        "info"
+      ];
+      this.process = child_process.spawn(uvPath, args, {
+        cwd: serviceDir,
+        env: {
+          ...process.env,
+          PYTHONPATH: serviceDir,
+          UV_LINK_MODE: "copy"
+        },
+        windowsHide: true
+      });
+      if (this.process.pid) {
+        fs__namespace.writeFileSync(this.pidFilePath, String(this.process.pid), "utf-8");
+      }
+      this.process.stdout?.on("data", (data) => {
+        const line = data.toString().trim();
+        if (line) logger.debug(`[ResearchSidecar:stdout] ${line}`);
+      });
+      this.process.stderr?.on("data", (data) => {
+        const line = data.toString().trim();
+        if (line) logger.info(`[ResearchSidecar:stderr] ${line}`);
+      });
+      this.process.on("error", (err) => {
+        logger.warn(`[ResearchSidecar] Child process error: ${err.message}`);
+        this.status = "error";
+        this.lastError = err.message;
+      });
+      this.process.on("exit", (code, signal) => {
+        logger.info(`[ResearchSidecar] Exited with code ${code}, signal ${signal}`);
+        this.process = null;
+        if (this.status !== "stopped") {
+          this.status = "error";
+          this.lastError = `Process exited with code ${code}`;
+        }
+      });
+      let attempts = 0;
+      while (attempts < 24) {
+        await new Promise((r) => setTimeout(r, 500));
+        const healthy = await this.pingHealth();
+        if (healthy) {
+          this.status = "running";
+          this.lastError = void 0;
+          logger.info(`[ResearchSidecar] Successfully connected on http://${this.host}:${this.port}`);
+          this.startMonitoring();
+          return this.getStatus();
+        }
+        attempts++;
+      }
+      this.status = "degraded";
+      this.lastError = "Sidecar started but health check timed out after 12s";
+      logger.warn(`[ResearchSidecar] ${this.lastError}`);
+      return this.getStatus();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.status = "error";
+      this.lastError = msg;
+      logger.warn(`[ResearchSidecar] Failed to spawn sidecar: ${msg}`);
+      return this.getStatus();
+    }
+  }
+  async stop() {
+    this.status = "stopped";
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+    if (this.process && this.process.pid) {
+      logger.info(`[ResearchSidecar] Stopping sidecar PID ${this.process.pid}`);
+      try {
+        if (process.platform === "win32") {
+          child_process.execSync(`taskkill /pid ${this.process.pid} /T /F`, { stdio: "ignore" });
+        } else {
+          this.process.kill("SIGTERM");
+        }
+      } catch {
+      }
+      this.process = null;
+    }
+    this.cleanupStaleProcess();
+  }
+  async restart() {
+    await this.stop();
+    await new Promise((r) => setTimeout(r, 1e3));
+    return await this.start();
+  }
+  startMonitoring() {
+    if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+    this.healthCheckInterval = setInterval(async () => {
+      const ok = await this.pingHealth();
+      if (!ok && this.status === "running") {
+        logger.warn("[ResearchSidecar] Periodic ping failed. Marking degraded.");
+        this.status = "degraded";
+      } else if (ok && this.status === "degraded") {
+        this.status = "running";
+      }
+    }, 15e3);
+  }
+  cleanupStaleProcess() {
+    try {
+      if (fs__namespace.existsSync(this.pidFilePath)) {
+        const oldPid = parseInt(fs__namespace.readFileSync(this.pidFilePath, "utf-8").trim(), 10);
+        if (oldPid && !isNaN(oldPid)) {
+          if (process.platform === "win32") {
+            try {
+              child_process.execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: "ignore" });
+            } catch {
+            }
+          }
+        }
+        fs__namespace.unlinkSync(this.pidFilePath);
+      }
+    } catch {
+    }
+  }
+}
+const researchSidecar = ResearchSidecarManager.getInstance();
+function registerResearchHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS, async () => {
+    return researchSidecar.getStatus();
+  });
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_SIDECAR_RESTART, async () => {
+    logger.info("[IPC:Research] User requested sidecar restart");
+    return await researchSidecar.restart();
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF,
+    async (_event, payload) => {
+      try {
+        logger.info("[IPC:Research] Creating Video Project from research handoff", {
+          name: payload.projectName,
+          keyword: payload.keyword,
+          angle: payload.angle
+        });
+        const projectsDir = process.platform === "win32" ? "D:\\Video_factory_hutteries" : path.join(process.env.HOME || "", "Video_factory_hutteries");
+        const safeProjectName = payload.projectName.replace(/[^a-zA-Z0-9_\-\s]/g, "").trim() || "Research_Video_Project";
+        const projectDir = path.join(projectsDir, safeProjectName);
+        if (!fs__namespace.existsSync(projectDir)) {
+          fs__namespace.mkdirSync(projectDir, { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "source"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/images"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/videos"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/music"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/sfx"), { recursive: true });
+        }
+        const briefPath = path.join(projectDir, "source", "research_brief.txt");
+        const briefContent = [
+          `RESEARCH-BACKED VIDEO BRIEF: ${payload.projectName}`,
+          `Target Market: ${payload.market}`,
+          `Primary Keyword: ${payload.keyword}`,
+          `Angle / Hook: ${payload.angle || "Not specified"}`,
+          `Opportunity Score: ${payload.researchData.opportunityScore ?? "N/A"}/100`,
+          `Market Fit Signal: ${payload.researchData.marketFitScore ?? "N/A"}/100`,
+          `Confidence: ${payload.researchData.confidence ?? "N/A"}`,
+          "",
+          "WINNING TITLE PATTERNS:",
+          ...(payload.researchData.topTitles || []).map((t) => `- ${t}`),
+          "",
+          "IDENTIFIED CONTENT GAPS:",
+          ...(payload.researchData.contentGaps || []).map((g) => `- ${g}`),
+          "",
+          "RELATED KEYWORDS:",
+          ...(payload.researchData.relatedKeywords || []).map((k) => `- ${k}`),
+          "",
+          "AI / STRATEGIC IDEAS:",
+          ...(payload.researchData.aiContentIdeas || []).map((i) => `- ${i}`),
+          "",
+          "TOP BREAKOUT REFERENCE VIDEOS (PUBLIC YOUTUBE INSPIRATION ONLY - NOT MEDIA ASSETS):",
+          ...(payload.researchData.breakoutVideos || []).map(
+            (b) => `- "${b.title}" by ${b.channel || "Unknown"} (${(b.views || 0).toLocaleString()} views)`
+          )
+        ].join("\n");
+        fs__namespace.writeFileSync(briefPath, briefContent, "utf-8");
+        const scriptPath = path.join(projectDir, "source", "script.txt");
+        if (!fs__namespace.existsSync(scriptPath)) {
+          const draftScript = [
+            `# ${payload.projectName}`,
+            `## Target Topic: ${payload.keyword}`,
+            `## Hook Angle: ${payload.angle || "Investigative Documentary"}`,
+            "",
+            "[SCENE 1: COLD OPEN]",
+            `Why does everyone seem to be talking about ${payload.keyword}?`,
+            "The data tells a story that mainstream media is missing completely.",
+            "",
+            "[SCENE 2: THE REALITY]",
+            "Here is what is really happening behind closed doors.",
+            "",
+            "[SCENE 3: EVIDENCE & NUMBERS]",
+            "Let us look at the actual statistics and historical comparisons.",
+            "",
+            "[SCENE 4: CONCLUSION]",
+            "What happens next, and what can you do about it?"
+          ].join("\n");
+          fs__namespace.writeFileSync(scriptPath, draftScript, "utf-8");
+        }
+        const statePath = path.join(projectDir, "project.json");
+        const projectState = {
+          name: safeProjectName,
+          projectDir,
+          status: "NEW",
+          settings: {
+            videoType: "documentary",
+            aspectRatio: "16:9",
+            resolution: { width: 1920, height: 1080 },
+            fps: 30,
+            pacing: "balanced"
+          },
+          inputs: {
+            scriptPath,
+            voiceoverPath: null,
+            imagesFolder: path.join(projectDir, "media/images"),
+            videosFolder: path.join(projectDir, "media/videos"),
+            musicFolder: path.join(projectDir, "media/music"),
+            sfxFolder: path.join(projectDir, "media/sfx")
+          },
+          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        fs__namespace.writeFileSync(statePath, JSON.stringify(projectState, null, 2), "utf-8");
+        logger.info(`[IPC:Research] Successfully created project draft at ${projectDir}`);
+        return { success: true, projectDir };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[IPC:Research] Failed creating project from research: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -12398,6 +14079,10 @@ electron.app.whenReady().then(() => {
   registerAudioHandlers(electron.ipcMain);
   registerCaptionHandlers(electron.ipcMain);
   registerPipelineHandlers(electron.ipcMain);
+  registerResearchHandlers(electron.ipcMain);
+  researchSidecar.start().catch((err) => {
+    logger.warn("[ResearchSidecar] Non-blocking startup error:", err);
+  });
   const mainWindow = createWindow();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {
@@ -12417,11 +14102,15 @@ electron.app.on("window-all-closed", () => {
 });
 electron.app.on("before-quit", () => {
   pipelineOrchestrator.handleAppQuit();
+  researchSidecar.stop().catch(() => {
+  });
 });
 process.on("uncaughtException", (error) => {
   logger.error("[App] Uncaught exception:", error);
   try {
     pipelineOrchestrator.handleAppQuit();
+    researchSidecar.stop().catch(() => {
+    });
   } catch {
   }
 });

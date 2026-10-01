@@ -77,6 +77,16 @@ const IPC_CHANNELS = {
   RENDER_PREFLIGHT_RUN: "render:preflight-run",
   RENDER_QA_GET: "render:qa-get",
   RENDER_QA_PROGRESS: "render:qa-progress",
+  // Production Intelligence — Claim & Evidence Ledger
+  CLAIM_GET_LEDGER: "claim:get-ledger",
+  CLAIM_UPDATE_STATUS: "claim:update-status",
+  CLAIM_ADD_SOURCE: "claim:add-source",
+  CLAIM_REMOVE_SOURCE: "claim:remove-source",
+  CLAIM_LINK_SOURCE: "claim:link-source",
+  CLAIM_UNLINK_SOURCE: "claim:unlink-source",
+  CLAIM_EXPORT_MANIFESTS: "claim:export-manifests",
+  // Production Intelligence — Visual Truth Reranker
+  VISUAL_TRUTH_GET_DATA: "visual-truth:get-data",
   // Auto Production Pipeline
   PIPELINE_START: "pipeline:start",
   PIPELINE_RESUME: "pipeline:resume",
@@ -85,7 +95,11 @@ const IPC_CHANNELS = {
   PIPELINE_PROGRESS: "pipeline:progress",
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
-  PIPELINE_RECOVER: "pipeline:recover"
+  PIPELINE_RECOVER: "pipeline:recover",
+  // YouTube Foreign Market Researcher (Isolated Module)
+  RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
+  RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
+  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff"
 };
 const api = {
   window: {
@@ -220,6 +234,18 @@ const api = {
     getSettings: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_GET, projectDir),
     setSettings: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_SET, params)
   },
+  claims: {
+    getLedger: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_GET_LEDGER, projectDir),
+    updateStatus: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_UPDATE_STATUS, params),
+    addSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_ADD_SOURCE, params),
+    removeSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_REMOVE_SOURCE, params),
+    linkSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_LINK_SOURCE, params),
+    unlinkSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_UNLINK_SOURCE, params),
+    exportManifests: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS, params)
+  },
+  visualTruth: {
+    getData: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.VISUAL_TRUTH_GET_DATA, projectDir)
+  },
   pipeline: {
     start: (options) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_START, options),
     resume: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RESUME, { projectDir }),
@@ -237,6 +263,11 @@ const api = {
         electron.ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
       };
     }
+  },
+  research: {
+    getStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS),
+    restartSidecar: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_RESTART),
+    createProjectHandoff: (payload) => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF, payload)
   }
 };
 electron.contextBridge.exposeInMainWorld("api", api);
