@@ -54,6 +54,25 @@ class BreakoutVideoSchema(BaseModel):
     thumbnail_url: str
     is_small_channel_breakout: bool
 
+# V2: Candidate video with subscriber status label
+class CandidateVideoSchema(BaseModel):
+    video_id: str
+    url: str
+    title: str
+    channel_id: str
+    channel_title: str
+    published_at: str
+    age_days: float
+    views: int
+    views_per_day: float
+    channel_subscribers: Optional[int] = None
+    outlier_ratio: Optional[float] = None
+    subscriber_status: str = "VERIFIED_MATCH"  # VERIFIED_MATCH | UNVERIFIED_MATCH
+    subscriber_label: str = ""
+    filter_distance: float = 0.0
+    source_provider: str = ""
+    thumbnail_url: str = ""
+
 class KeywordRecordSchema(BaseModel):
     keyword: str
     opportunity_score: float
@@ -156,13 +175,57 @@ class DataSourceSchema(BaseModel):
     note: Optional[str] = None
 
 class FilterSummarySchema(BaseModel):
-    applied_filters: Dict[str, float | int] = {}
+    applied_filters: Dict[str, Any] = {}
     raw_videos_collected: int = 0
     videos_after_metadata_filters: int = 0
     videos_after_all_filters: int = 0
     keywords_before_filters: int = 0
     keywords_after_filters: int = 0
     excluded_by_reason: Dict[str, int] = {}
+    # V2 detailed funnel
+    funnel: Optional[Dict[str, int]] = None
+
+# V2: Filter funnel for UI display
+class FilterFunnelSchema(BaseModel):
+    raw_collected: int = 0
+    unique_after_dedupe: int = 0
+    above_min_views: int = 0
+    above_min_vpd: int = 0
+    above_min_outlier: int = 0
+    subscriber_known: int = 0
+    subscriber_unknown: int = 0
+    below_max_subscribers: int = 0
+    exact_matches: int = 0
+    unverified_matches: int = 0
+    near_matches: int = 0
+    excluded_by_reason: Dict[str, int] = {}
+
+# V2: Near match suggestion
+class NearMatchSuggestionSchema(BaseModel):
+    field: str
+    current_value: Any
+    suggested_value: Any
+    would_add_candidates: int
+    description: str
+
+# V2: Search diagnostics
+class SearchDiagnosticsSchema(BaseModel):
+    queries_generated: int = 0
+    queries_searched: int = 0
+    pages_fetched: int = 0
+    raw_results: int = 0
+    unique_videos: int = 0
+    duplicate_rate: float = 0.0
+    channels_discovered: int = 0
+    channels_enriched: int = 0
+    subscriber_known_pct: float = 0.0
+    baseline_coverage_pct: float = 0.0
+    official_api_calls: int = 0
+    fallback_calls: int = 0
+    cache_hits: int = 0
+    search_stop_reason: str = ""
+    search_budget_used: int = 0
+    search_budget_total: int = 0
 
 class ResearchRunResultSchema(BaseModel):
     run_id: str
@@ -185,6 +248,13 @@ class ResearchRunResultSchema(BaseModel):
     ai_insights: Optional[AiReportSchema] = None
     data_sources: List[DataSourceSchema]
     filter_summary: Optional[FilterSummarySchema] = None
+    # V2 optional — old runs without these still deserialize fine
+    exact_matches: Optional[List[CandidateVideoSchema]] = None
+    unverified_matches: Optional[List[CandidateVideoSchema]] = None
+    near_matches: Optional[List[CandidateVideoSchema]] = None
+    near_match_suggestions: Optional[List[NearMatchSuggestionSchema]] = None
+    filter_funnel: Optional[FilterFunnelSchema] = None
+    search_diagnostics: Optional[SearchDiagnosticsSchema] = None
 
 class ProgressStateSchema(BaseModel):
     run_id: str

@@ -1,9 +1,34 @@
 import urllib.parse
-from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone, timedelta
+from typing import List, Dict, Any, Optional, Tuple
 import httpx
 from providers.protocol import RawVideoData, RawChannelData
 from utils.parsers import parse_duration, calculate_age_days
 from core.logger import research_logger
+
+
+def _published_after_from_range(time_range: str) -> Optional[str]:
+    """Convert time_range string to RFC3339 publishedAfter for YouTube API."""
+    now = datetime.now(timezone.utc)
+    mapping = {
+        "7d": 7,
+        "30d": 30,
+        "90d": 90,
+        "365d": 365,
+    }
+    days = mapping.get(time_range)
+    if days is None:
+        return None
+    dt = now - timedelta(days=days)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _classify_content_type(duration_seconds: int) -> str:
+    """Classify content type by actual duration. SHORT ≤ 60s, LONG > 60s."""
+    if duration_seconds <= 0:
+        return "LONG"
+    return "SHORT" if duration_seconds <= 60 else "LONG"
+
 
 class OfficialYouTubeProvider:
     name: str = "OFFICIAL"
@@ -27,13 +52,19 @@ class OfficialYouTubeProvider:
         language: str = "en",
         content_type: str = "LONG",
         time_range: str = "30d",
-        limit: int = 50
-    ) -> List[RawVideoData]:
+        limit: int = 50,
+        page_token: Optional[str] = None,
+    ) -> Tuple[List[RawVideoData], Optional[str]]:
+        """
+        Search videos via YouTube Data API.
+        Returns (videos, next_page_token). next_page_token is None when no more pages.
+        """
         if not self.api_key:
-            return []
+            return [], None
 
+        published_after = _published_after_from_range(time_range)
         search_url = "https://www.googleapis.com/youtube/v3/search"
-        params = {
+        params: Dict[str, Any] = {
             "key": self.api_key,
             "part": "snippet",
             "q": query,
@@ -41,14 +72,26 @@ class OfficialYouTubeProvider:
             "regionCode": market,
             "relevanceLanguage": language,
             "maxResults": min(limit, 50),
+            "order": "relevance",
         }
 
+        if published_after:
+            params["publishedAfter"] = published_after
+
+        if page_token:
+            params["pageToken"] = page_token
+
+        # For content_type filtering at search level:
+        # LONG → medium or long (we get both and post-filter by duration)
+        # SHORT → short (YouTube Shorts bucket, we post-filter ≤60s)
         if content_type == "LONG":
-            params["videoDuration"] = "medium" # or long
+            # Don't restrict videoDuration here — we post-filter after fetching contentDetails
+            pass
         elif content_type == "SHORT":
             params["videoDuration"] = "short"
 
-        video_ids = []
+        video_ids: List[str] = []
+        next_page_token: Optional[str] = None
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 res = await client.get(search_url, params=params)
@@ -63,13 +106,14 @@ class OfficialYouTubeProvider:
                         self.health_status = "INVALID_KEY"
                         self.last_error = err_msg
                     research_logger.warning(f"[OfficialAPI] Search error: {self.last_error}")
-                    return []
+                    return [], None
                 elif res.status_code != 200:
                     self.health_status = "DEGRADED"
                     self.last_error = f"HTTP {res.status_code}"
-                    return []
+                    return [], None
 
                 data = res.json()
+                next_page_token = data.get("nextPageToken")
                 items = data.get("items", [])
                 for it in items:
                     v_id = it.get("id", {}).get("videoId")
@@ -80,14 +124,39 @@ class OfficialYouTubeProvider:
             research_logger.warning(f"[OfficialAPI] Request error: {e}")
             self.last_error = str(e)
             self.health_status = "DEGRADED"
-            return []
+            return [], None
 
         if not video_ids:
-            return []
+            return [], next_page_token
 
-        return await self.get_videos(video_ids)
+        videos = await self.get_videos(video_ids, target_content_type=content_type)
+        return videos, next_page_token
 
-    async def get_videos(self, video_ids: List[str]) -> List[RawVideoData]:
+    async def search_videos_simple(
+        self,
+        query: str,
+        market: str = "US",
+        language: str = "en",
+        content_type: str = "LONG",
+        time_range: str = "30d",
+        limit: int = 50,
+    ) -> List[RawVideoData]:
+        """Backward-compat wrapper that drops the next_page_token return value."""
+        videos, _ = await self.search_videos(
+            query=query,
+            market=market,
+            language=language,
+            content_type=content_type,
+            time_range=time_range,
+            limit=limit,
+        )
+        return videos
+
+    async def get_videos(
+        self,
+        video_ids: List[str],
+        target_content_type: Optional[str] = None,
+    ) -> List[RawVideoData]:
         if not self.api_key or not video_ids:
             return []
 
@@ -112,7 +181,19 @@ class OfficialYouTubeProvider:
                     stats = item.get("statistics", {})
 
                     duration = parse_duration(details.get("duration", ""))
-                    is_short = duration > 0 and duration <= 60
+                    # Classify by actual duration, not search-level hint
+                    actual_content_type = _classify_content_type(duration)
+
+                    # If caller wants a specific type, skip videos that don't match.
+                    # This ensures SHORT only gets ≤60s and LONG only gets >60s.
+                    if target_content_type and actual_content_type != target_content_type:
+                        continue
+
+                    # Skip live/upcoming broadcasts
+                    live_status = details.get("contentRating", {})
+                    broadcast = snippet.get("liveBroadcastContent", "none")
+                    if broadcast in ("live", "upcoming"):
+                        continue
 
                     thumbs = snippet.get("thumbnails", {})
                     thumb_url = (
@@ -140,7 +221,7 @@ class OfficialYouTubeProvider:
                             likes=likes,
                             comments=comments,
                             thumbnail_url=thumb_url,
-                            content_type="SHORT" if is_short else "LONG",
+                            content_type=actual_content_type,
                             provider=self.name,
                             raw_data=item
                         )
@@ -155,26 +236,36 @@ class OfficialYouTubeProvider:
         self,
         channel_id: str,
         content_type: str = "LONG",
-        max_videos: int = 25
+        max_videos: int = 25,
     ) -> RawChannelData:
+        """
+        Correct channel baseline flow:
+        1. channels.list → snippet,statistics,contentDetails
+        2. contentDetails.relatedPlaylists.uploads → uploads playlist ID
+        3. playlistItems.list → up to max_videos video IDs
+        4. videos.list batch → contentDetails + statistics
+        5. Filter by content_type, exclude livestreams, compute baseline
+        """
         if not self.api_key:
             return RawChannelData(channel_id=channel_id, title="Unknown", provider=self.name)
 
-        url = "https://www.googleapis.com/youtube/v3/channels"
-        params = {
-            "key": self.api_key,
-            "part": "snippet,statistics",
-            "id": channel_id,
-        }
-
         channel_title = "Unknown Channel"
-        sub_count = None
-        country = None
-        video_count = None
+        sub_count: Optional[int] = None
+        country: Optional[str] = None
+        video_count: Optional[int] = None
+        uploads_playlist_id: Optional[str] = None
 
+        # Step 1: Fetch channel metadata + contentDetails
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                res = await client.get(url, params=params)
+                res = await client.get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={
+                        "key": self.api_key,
+                        "part": "snippet,statistics,contentDetails",
+                        "id": channel_id,
+                    },
+                )
                 if res.status_code == 200:
                     data = res.json()
                     items = data.get("items", [])
@@ -182,19 +273,71 @@ class OfficialYouTubeProvider:
                         c = items[0]
                         snip = c.get("snippet", {})
                         stats = c.get("statistics", {})
+                        content_details = c.get("contentDetails", {})
                         channel_title = snip.get("title", channel_title)
                         country = snip.get("country")
-                        sub_count = int(stats.get("subscriberCount", 0)) if "subscriberCount" in stats else None
-                        video_count = int(stats.get("videoCount", 0)) if "videoCount" in stats else None
+                        if "subscriberCount" in stats:
+                            sub_count = int(stats["subscriberCount"])
+                        video_count = int(stats.get("videoCount", 0)) or None
+                        uploads_playlist_id = (
+                            content_details.get("relatedPlaylists", {}).get("uploads")
+                        )
         except Exception as e:
             research_logger.warning(f"[OfficialAPI] Channel lookup error {channel_id}: {e}")
 
-        # Fetch recent uploads via search
-        recent_videos = await self.search_videos(
-            query=f"channel:{channel_id}",
-            content_type=content_type,
-            limit=max_videos
-        )
+        if not uploads_playlist_id:
+            research_logger.warning(f"[OfficialAPI] No uploads playlist for {channel_id}, using fallback search")
+            # Fallback to search if playlist unavailable
+            recent_videos = await self.search_videos_simple(
+                query=f"site:youtube.com channel:{channel_id}",
+                content_type=content_type,
+                limit=max_videos,
+            )
+            return RawChannelData(
+                channel_id=channel_id,
+                title=channel_title,
+                country=country,
+                subscriber_count=sub_count,
+                video_count=video_count or len(recent_videos),
+                recent_videos=recent_videos,
+                provider=self.name,
+            )
+
+        # Step 2: Fetch recent video IDs from uploads playlist
+        video_ids: List[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                res = await client.get(
+                    "https://www.googleapis.com/youtube/v3/playlistItems",
+                    params={
+                        "key": self.api_key,
+                        "part": "contentDetails",
+                        "playlistId": uploads_playlist_id,
+                        "maxResults": min(max_videos, 50),
+                    },
+                )
+                if res.status_code == 200:
+                    data = res.json()
+                    for item in data.get("items", []):
+                        vid_id = item.get("contentDetails", {}).get("videoId")
+                        if vid_id:
+                            video_ids.append(vid_id)
+        except Exception as e:
+            research_logger.warning(f"[OfficialAPI] playlistItems error for {channel_id}: {e}")
+
+        if not video_ids:
+            return RawChannelData(
+                channel_id=channel_id,
+                title=channel_title,
+                country=country,
+                subscriber_count=sub_count,
+                video_count=video_count or 0,
+                recent_videos=[],
+                provider=self.name,
+            )
+
+        # Step 3: Batch fetch video details, filter by content_type
+        recent_videos = await self.get_videos(video_ids, target_content_type=content_type)
 
         return RawChannelData(
             channel_id=channel_id,
@@ -203,11 +346,10 @@ class OfficialYouTubeProvider:
             subscriber_count=sub_count,
             video_count=video_count or len(recent_videos),
             recent_videos=recent_videos,
-            provider=self.name
+            provider=self.name,
         )
 
     async def get_autocomplete(self, query: str, market: str = "US", language: str = "en") -> List[str]:
-        # Official API does not have dedicated autocomplete endpoint without quota cost, so use public suggest
         q_enc = urllib.parse.quote(query)
         url = f"https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={q_enc}&gl={market}&hl={language}"
         try:
@@ -226,5 +368,5 @@ class OfficialYouTubeProvider:
             "provider": self.name,
             "status": self.health_status,
             "quota_exceeded": self.quota_exceeded,
-            "last_error": self.last_error
+            "last_error": self.last_error,
         }
