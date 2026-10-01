@@ -514,21 +514,50 @@ async def update_settings_endpoint(req: SettingsUpdateSchema):
 async def test_api_key_endpoint(payload: Dict[str, str]):
     key = payload.get("api_key", "").strip()
     if not key:
-        return {"valid": False, "error": "API key cannot be empty"}
+        return {"valid": False, "status": "not_configured", "error": "API key cannot be empty"}
     try:
-        url = f"https://www.googleapis.com/youtube/v3/search?key={key}&part=snippet&maxResults=1&q=test"
-        async with httpx.AsyncClient(timeout=6.0) as client:
-            resp = await client.get(url)
+        # Use videos.list (1 unit cost) instead of search (100 units)
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {"key": key, "part": "snippet", "chart": "mostPopular", "maxResults": 1}
+        async with httpx.AsyncClient(timeout=8.0) as client:
+            resp = await client.get(url, params=params)
             if resp.status_code == 200:
-                return {"valid": True}
+                return {"valid": True, "status": "connected"}
+            elif resp.status_code == 400:
+                return {"valid": False, "status": "invalid_request", "error": "Invalid API request format"}
             elif resp.status_code == 403:
-                data = resp.json()
-                msg = data.get("error", {}).get("message", "Quota exceeded or invalid key")
-                return {"valid": False, "error": msg}
+                try:
+                    data = resp.json()
+                    err_code = data.get("error", {}).get("errors", [{}])[0].get("reason", "")
+                    err_msg = data.get("error", {}).get("message", "")
+                    err_lower = (err_code + " " + err_msg).lower()
+                    if "accessnotconfigured" in err_lower or "api not enabled" in err_lower:
+                        return {"valid": False, "status": "api_not_enabled",
+                                "error": "YouTube Data API v3 is not enabled. Enable it at console.cloud.google.com → APIs & Services."}
+                    elif "quotaexceeded" in err_lower or "dailylimitexceeded" in err_lower or "usagelimitexceeded" in err_lower:
+                        return {"valid": False, "status": "quota_exhausted",
+                                "error": "YouTube API quota exhausted for today. Resets at midnight Pacific Time."}
+                    elif "keyinvalid" in err_lower or "key not valid" in err_lower:
+                        return {"valid": False, "status": "invalid_key",
+                                "error": "YouTube API key is invalid. Check the key value and try again."}
+                    else:
+                        return {"valid": False, "status": "forbidden",
+                                "error": f"Access denied: {err_msg or err_code}"}
+                except Exception:
+                    return {"valid": False, "status": "invalid_key", "error": "Access forbidden (403)"}
+            elif resp.status_code == 429:
+                return {"valid": False, "status": "rate_limited",
+                        "error": "Too many requests. Wait a moment and try again."}
+            elif resp.status_code >= 500:
+                return {"valid": False, "status": "server_error",
+                        "error": f"YouTube API server error ({resp.status_code}). Google may have a temporary outage."}
             else:
-                return {"valid": False, "error": f"HTTP {resp.status_code}"}
+                return {"valid": False, "status": "unknown_error", "error": f"HTTP {resp.status_code}"}
+    except httpx.TimeoutException:
+        return {"valid": False, "status": "network_error",
+                "error": "Connection timed out. Check your network or DNS settings."}
     except Exception as e:
-        return {"valid": False, "error": str(e)}
+        return {"valid": False, "status": "network_error", "error": str(e)}
 
 @app.post("/api/research/test-ollama")
 async def test_ollama_endpoint(payload: Dict[str, str]):

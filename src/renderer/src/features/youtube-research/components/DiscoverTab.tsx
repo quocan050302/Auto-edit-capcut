@@ -6,9 +6,10 @@ import type {
   ResearchRunResult,
   ResearchProgressState,
   ApiConnectionStatus,
-  ResearchFilters
+  ResearchFilters,
+  SearchBudget
 } from '../types/research.types'
-import { SUPPORTED_MARKETS, isResearchRunActive } from '../types/research.types'
+import { SUPPORTED_MARKETS, isResearchRunActive, RESEARCH_PRESETS } from '../types/research.types'
 import { ResearchProgressPanel } from './ResearchProgressPanel'
 import { OverviewSection } from './OverviewSection'
 
@@ -76,6 +77,10 @@ export function DiscoverTab({
   const [timeRange, setTimeRange] = useState<TimeRange>('30d')
   const [resultLimit, setResultLimit] = useState<number>(50)
   const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false)
+
+  // V2 fields
+  const [searchBudget, setSearchBudget] = useState<SearchBudget>(6)
+  const [includeUnverified, setIncludeUnverified] = useState<boolean>(true)
 
   // Advanced Filters State
   const [minViews, setMinViews] = useState<string>('')
@@ -169,7 +174,12 @@ export function DiscoverTab({
       content_type: contentType,
       time_range: timeRange,
       limit: resultLimit,
-      filters: filtersToUse
+      filters: {
+        ...filtersToUse,
+        // V2 fields forwarded as filter extensions (backend reads these)
+        search_query_budget: searchBudget,
+        include_unverified_channels: includeUnverified,
+      } as ResearchFilters & { search_query_budget?: number; include_unverified_channels?: boolean }
     })
   }
 
@@ -431,6 +441,49 @@ export function DiscoverTab({
             )}
           </div>
 
+          {/* V2 Presets Row */}
+          <div style={{ marginBottom: '16px' }}>
+            <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '8px' }}>
+              Quick Preset
+            </label>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {RESEARCH_PRESETS.map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  disabled={isBusy}
+                  onClick={() => {
+                    if (preset.minViews !== undefined) setMinViews(String(preset.minViews))
+                    if (preset.maxSubscribers !== undefined) setMaxSubs(String(preset.maxSubscribers))
+                    setTimeRange(preset.timeRange)
+                    setContentType(preset.contentType)
+                    setResultLimit(preset.resultLimit)
+                    setSearchBudget(preset.searchBudget)
+                    setIncludeUnverified(preset.includeUnverified)
+                    if (preset.minViews || preset.maxSubscribers) setShowAdvancedFilters(true)
+                  }}
+                  style={{
+                    fontSize: '11px',
+                    padding: '5px 14px',
+                    borderRadius: '6px',
+                    border: '1px solid var(--border-subtle)',
+                    background: 'var(--bg-base)',
+                    color: 'var(--text-muted)',
+                    cursor: isBusy ? 'not-allowed' : 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    transition: 'all 0.15s ease',
+                  }}
+                  title={preset.description}
+                >
+                  <span>{preset.icon}</span>
+                  <span>{preset.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Quick Selectors Row */}
           <div style={{
             display: 'grid',
@@ -540,29 +593,69 @@ export function DiscoverTab({
                 <option value={50}>50 Videos (Fast)</option>
                 <option value={100}>100 Videos (Balanced)</option>
                 <option value={200}>200 Videos (Deep Research)</option>
+                <option value={300}>300 Videos (Max)</option>
+              </select>
+            </div>
+
+            {/* Search Budget (V2) */}
+            <div>
+              <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '6px' }}>
+                Search Budget
+              </label>
+              <select
+                value={searchBudget}
+                onChange={(e) => setSearchBudget(parseInt(e.target.value, 10) as 3 | 6 | 8 | 10)}
+                disabled={isBusy}
+                style={{
+                  width: '100%',
+                  background: 'var(--bg-base)',
+                  border: '1px solid var(--border-subtle)',
+                  color: 'var(--text-primary)',
+                  borderRadius: '6px',
+                  padding: '8px 10px',
+                  fontSize: '12px'
+                }}
+                title="Number of search queries sent to YouTube API per run"
+              >
+                <option value={3}>3 queries (Quick)</option>
+                <option value={6}>6 queries (Recommended)</option>
+                <option value={8}>8 queries (Thorough)</option>
+                <option value={10}>10 queries (Maximum)</option>
               </select>
             </div>
           </div>
 
           {/* Collapsible Advanced Filters */}
           <div style={{ marginTop: '12px' }}>
-            <button
-              type="button"
-              onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
-              style={{
-                background: 'none',
-                border: 'none',
-                color: 'var(--text-brand, #818cf8)',
-                fontSize: '12px',
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '4px 0'
-              }}
-            >
-              <span>{showAdvancedFilters ? '▲ Hide Advanced Filters' : '▼ Show Advanced Filters (Views, Subs, Outlier, Competition)'}</span>
-            </button>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <button
+                type="button"
+                onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--text-brand, #818cf8)',
+                  fontSize: '12px',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '4px 0'
+                }}
+              >
+                <span>{showAdvancedFilters ? '▲ Hide Advanced Filters' : '▼ Show Advanced Filters (Views, Subs, Outlier, Competition)'}</span>
+              </button>
+              {/* Include Unverified toggle always visible */}
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={includeUnverified}
+                  onChange={(e) => setIncludeUnverified(e.target.checked)}
+                  disabled={isBusy}
+                />
+                <span title="Show channels where subscriber count is hidden/unknown">Include unverified channels 👁</span>
+              </label>
+            </div>
 
             {showAdvancedFilters && (
               <div style={{

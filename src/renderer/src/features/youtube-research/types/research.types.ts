@@ -19,12 +19,34 @@ export const SUPPORTED_MARKETS: MarketInfo[] = [
 ]
 
 export type ContentType = 'LONG' | 'SHORT' | 'BOTH'
-export type TimeRange = '24h' | '7d' | '30d' | '90d' | '1y' | 'all' | 'custom'
+export type TimeRange = '24h' | '7d' | '30d' | '90d' | '1y' | '365d' | 'all' | 'custom'
 export type ProviderSource = 'OFFICIAL' | 'SCRAPER' | 'MIXED'
 export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 export type CompetitionLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 export type TrendState = 'Emerging' | 'Rising' | 'Stable' | 'Cooling'
 export type ApiConnectionStatus = 'checking' | 'reachable' | 'blocked' | 'offline'
+
+// V2: YouTube API key connection status
+export type ApiKeyStatus =
+  | 'not_configured'
+  | 'testing'
+  | 'connected'
+  | 'invalid_key'
+  | 'api_not_enabled'
+  | 'quota_exhausted'
+  | 'network_error'
+  | 'server_error'
+  | 'rate_limited'
+  | 'unknown_error'
+
+// V2: Subscriber verification states
+export type SubscriberStatus = 'VERIFIED_MATCH' | 'UNVERIFIED_MATCH' | 'REJECTED'
+
+// V2: Search budget options
+export type SearchBudget = 3 | 6 | 8 | 10
+
+// V2: Research presets
+export type ResearchPreset = 'small_niche' | 'balanced' | 'deep'
 
 export type ResearchStage =
   | 'STARTING'
@@ -151,6 +173,71 @@ export interface BreakoutVideoItem {
   is_small_channel_breakout: boolean
 }
 
+// V2: Candidate video with subscriber status
+export interface CandidateVideoItem {
+  video_id: string
+  url: string
+  title: string
+  channel_id: string
+  channel_title: string
+  published_at: string
+  age_days: number
+  views: number
+  views_per_day: number
+  channel_subscribers?: number | null
+  outlier_ratio?: number | null
+  subscriber_status: SubscriberStatus
+  subscriber_label: string   // "Subscriber hidden / unverified" or ""
+  filter_distance: number    // 0.0 = perfect, higher = farther from passing
+  source_provider: string
+  thumbnail_url: string
+}
+
+// V2: Near-match suggestion
+export interface NearMatchSuggestion {
+  field: string
+  current_value: number | string
+  suggested_value: number | string
+  would_add_candidates: number
+  description: string
+}
+
+// V2: Search diagnostics
+export interface SearchDiagnostics {
+  queries_generated: number
+  queries_searched: number
+  pages_fetched: number
+  raw_results: number
+  unique_videos: number
+  duplicate_rate: number
+  channels_discovered: number
+  channels_enriched: number
+  subscriber_known_pct: number
+  baseline_coverage_pct: number
+  official_api_calls: number
+  fallback_calls: number
+  cache_hits: number
+  search_stop_reason: string
+  search_budget_used: number
+  search_budget_total: number
+}
+
+// V2: Filter funnel for UI display
+export interface FilterFunnel {
+  raw_collected: number
+  unique_after_dedupe: number
+  above_min_views: number
+  above_min_vpd: number
+  above_min_outlier: number
+  subscriber_known: number
+  subscriber_unknown: number
+  below_max_subscribers: number
+  exact_matches: number
+  unverified_matches: number
+  near_matches: number
+  excluded_by_reason: Record<string, number>
+}
+
 export interface KeywordMetricRecord {
   keyword: string
   opportunity_score: number
@@ -258,6 +345,8 @@ export interface ResearchFilterSummary {
   keywords_before_filters: number
   keywords_after_filters: number
   excluded_by_reason: Record<string, number>
+  // V2
+  funnel?: Record<string, number>
 }
 
 export interface ResearchRunResult {
@@ -296,6 +385,13 @@ export interface ResearchRunResult {
   ai_insights?: AiInsightsReport | null
   data_sources: Array<{ metric: string; source: string; note?: string }>
   filter_summary?: ResearchFilterSummary
+  // V2 optional fields — old runs without these will be undefined
+  exact_matches?: CandidateVideoItem[]
+  unverified_matches?: CandidateVideoItem[]
+  near_matches?: CandidateVideoItem[]
+  near_match_suggestions?: NearMatchSuggestion[]
+  filter_funnel?: FilterFunnel
+  search_diagnostics?: SearchDiagnostics
 }
 
 export interface SavedResearchProject {
@@ -348,4 +444,84 @@ export interface ResearchSettings {
   snapshot_policy_hours: number
   scoring_weights: ResearchScoringWeights
   debug_mode: boolean
+}
+
+// V2: Research presets definition
+export interface ResearchPresetDef {
+  id: ResearchPreset
+  label: string
+  description: string
+  icon: string
+  minViews?: number
+  maxSubscribers?: number
+  timeRange: TimeRange
+  contentType: ContentType
+  resultLimit: number
+  searchBudget: SearchBudget
+  includeUnverified: boolean
+}
+
+export const RESEARCH_PRESETS: ResearchPresetDef[] = [
+  {
+    id: 'small_niche',
+    label: 'Small Niche',
+    description: 'Focus on small channels with breakout potential',
+    icon: '🔬',
+    minViews: 10000,
+    maxSubscribers: 100000,
+    timeRange: '90d',
+    contentType: 'LONG',
+    resultLimit: 50,
+    searchBudget: 6,
+    includeUnverified: true
+  },
+  {
+    id: 'balanced',
+    label: 'Balanced',
+    description: 'Mix of popular and emerging niches',
+    icon: '⚖️',
+    minViews: 5000,
+    timeRange: '30d',
+    contentType: 'LONG',
+    resultLimit: 100,
+    searchBudget: 8,
+    includeUnverified: true
+  },
+  {
+    id: 'deep',
+    label: 'Deep Research',
+    description: 'Exhaustive analysis with max API budget',
+    icon: '🔭',
+    minViews: 1000,
+    timeRange: '90d',
+    contentType: 'LONG',
+    resultLimit: 300,
+    searchBudget: 10,
+    includeUnverified: true
+  }
+]
+
+// Unified research input (single source of truth)
+export interface NicheResearchInput {
+  seedTopic: string
+  regionCode: MarketCode
+  relevanceLanguage: string
+  timeRange: TimeRange
+  contentType: ContentType
+  minimumViews?: number
+  maximumSubscribers?: number
+  minimumViewsPerDay?: number
+  minimumOutlierRatio?: number
+  resultLimit: number
+  searchQueryBudget: SearchBudget
+  includeUnverifiedChannels: boolean
+  semanticClustering: boolean
+  transcriptAnalysis: boolean
+}
+
+// V2: API key test response
+export interface ApiKeyTestResult {
+  valid: boolean
+  status: ApiKeyStatus
+  error?: string
 }

@@ -1,5 +1,6 @@
 import React from 'react'
 import type { ResearchRunResult, BreakoutVideoItem } from '../types/research.types'
+import { CandidateEvidencePanel } from './CandidateEvidencePanel'
 
 interface Props {
   result: ResearchRunResult
@@ -408,6 +409,17 @@ export function OverviewSection({
           * This is an estimated public-data signal, not private audience geography.
         </div>
       </div>
+
+      {/* V2: Candidate Evidence Panel (only shown when V2 data exists) */}
+      {(result.exact_matches || result.unverified_matches || result.near_matches) && (
+        <CandidateEvidencePanel
+          exactMatches={result.exact_matches || []}
+          unverifiedMatches={result.unverified_matches || []}
+          nearMatches={result.near_matches || []}
+          filterFunnel={result.filter_funnel}
+          nearMatchSuggestions={result.near_match_suggestions || []}
+        />
+      )}
     </div>
   )
 }

@@ -7,7 +7,8 @@ import type {
   MarketCode,
   ContentType,
   TimeRange,
-  ResearchFilters
+  ResearchFilters,
+  ApiKeyTestResult
 } from '../types/research.types'
 import { isResearchStageTerminal } from '../types/research.types'
 
@@ -283,12 +284,12 @@ export class ResearchApi {
     })
   }
 
-  async testYouTubeApiKey(apiKey: string): Promise<{ valid: boolean; quota_remaining?: number; error?: string }> {
-    return this.request('/api/research/test-api-key', {
+  async testYouTubeApiKey(apiKey: string): Promise<ApiKeyTestResult> {
+    return this.request<ApiKeyTestResult>('/api/research/test-api-key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ api_key: apiKey }),
-      timeoutMs: 10000
+      timeoutMs: 12000
     })
   }
 

@@ -52,7 +52,8 @@ export function ResearchSettingsModal({ onClose, onSettingsUpdated }: Props): Re
 
   // Test statuses
   const [testingKey, setTestingKey] = useState(false)
-  const [keyTestStatus, setKeyTestStatus] = useState<string | null>(null)
+  const [keyTestStatus, setKeyTestStatus] = useState<{ type: 'success' | 'error' | 'warning'; message: string } | null>(null)
+  const [showApiKey, setShowApiKey] = useState(false)
   const [testingAi, setTestingAi] = useState(false)
   const [aiTestStatus, setAiTestStatus] = useState<string | null>(null)
 
@@ -85,18 +86,33 @@ export function ResearchSettingsModal({ onClose, onSettingsUpdated }: Props): Re
   }, [])
 
   const handleTestKey = async () => {
-    if (!apiKeyInput.trim()) return
+    const key = apiKeyInput.trim()
+    if (!key) {
+      setKeyTestStatus({ type: 'error', message: '✗ Please enter an API key first' })
+      return
+    }
     setTestingKey(true)
     setKeyTestStatus(null)
     try {
-      const res = await researchApi.testYouTubeApiKey(apiKeyInput.trim())
+      const res = await researchApi.testYouTubeApiKey(key)
       if (res.valid) {
-        setKeyTestStatus('✓ YouTube API Key is valid and active')
+        setKeyTestStatus({ type: 'success', message: '✓ Connected — YouTube Data API v3 is active' })
       } else {
-        setKeyTestStatus(`✗ Invalid key: ${res.error || 'Connection failed'}`)
+        const statusLabels: Record<string, string> = {
+          invalid_key: '✗ Invalid API key — check the key value and try again',
+          api_not_enabled: '✗ API not enabled — enable YouTube Data API v3 at console.cloud.google.com',
+          quota_exhausted: '⚠ Quota exhausted — key is valid but daily limit reached. Resets at midnight PT.',
+          network_error: '✗ Network error — check your internet connection',
+          server_error: '✗ Google server error — try again in a moment',
+          rate_limited: '⚠ Rate limited — wait a moment and try again',
+          not_configured: '✗ Key is empty',
+        }
+        const isWarning = res.status === 'quota_exhausted' || res.status === 'rate_limited'
+        const label = statusLabels[res.status || ''] || `✗ ${res.error || 'Connection failed'}`
+        setKeyTestStatus({ type: isWarning ? 'warning' : 'error', message: label })
       }
     } catch (err: unknown) {
-      setKeyTestStatus(`✗ Test error: ${err instanceof Error ? err.message : String(err)}`)
+      setKeyTestStatus({ type: 'error', message: `✗ Test error: ${err instanceof Error ? err.message : String(err)}` })
     } finally {
       setTestingKey(false)
     }
@@ -241,37 +257,81 @@ export function ResearchSettingsModal({ onClose, onSettingsUpdated }: Props): Re
                 </label>
 
                 {useOfficialApi && (
-                  <div style={{ paddingLeft: '22px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     <div style={{ display: 'flex', gap: '8px' }}>
-                      <input
-                        type="password"
-                        placeholder={hasApiKey ? 'API Key Configured (enter new to update)' : 'Paste YouTube Data API Key...'}
-                        value={apiKeyInput}
-                        onChange={(e) => setApiKeyInput(e.target.value)}
-                        style={{
-                          flex: 1,
-                          background: 'var(--bg-elevated)',
-                          border: '1px solid var(--border-subtle)',
-                          borderRadius: '4px',
-                          padding: '6px 10px',
-                          color: '#fff',
-                          fontSize: '12px',
-                          fontFamily: 'var(--font-mono)'
-                        }}
-                      />
+                      <div style={{ position: 'relative', flex: 1 }}>
+                        <input
+                          type={showApiKey ? 'text' : 'password'}
+                          placeholder={hasApiKey ? '(configured — enter new key to update)' : 'Paste YouTube Data API Key...'}
+                          value={apiKeyInput}
+                          onChange={(e) => {
+                            setApiKeyInput(e.target.value)
+                            setKeyTestStatus(null)
+                          }}
+                          style={{
+                            width: '100%',
+                            background: 'var(--bg-elevated)',
+                            border: '1px solid var(--border-subtle)',
+                            borderRadius: '4px',
+                            padding: '6px 36px 6px 10px',
+                            color: '#fff',
+                            fontSize: '12px',
+                            fontFamily: 'var(--font-mono)',
+                            boxSizing: 'border-box'
+                          }}
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setShowApiKey(!showApiKey)}
+                          style={{
+                            position: 'absolute',
+                            right: '8px',
+                            top: '50%',
+                            transform: 'translateY(-50%)',
+                            background: 'none',
+                            border: 'none',
+                            color: 'var(--text-muted)',
+                            cursor: 'pointer',
+                            fontSize: '11px',
+                            padding: '2px'
+                          }}
+                          title={showApiKey ? 'Hide key' : 'Show key'}
+                        >
+                          {showApiKey ? '👁️' : '🙈'}
+                        </button>
+                      </div>
                       <button
                         className="btn btn-secondary"
                         onClick={handleTestKey}
-                        disabled={!apiKeyInput.trim() || testingKey}
-                        style={{ fontSize: '11px', padding: '0 12px' }}
+                        disabled={testingKey}
+                        style={{ fontSize: '11px', padding: '0 12px', whiteSpace: 'nowrap' }}
                       >
-                        {testingKey ? 'Testing...' : 'Test Key'}
+                        {testingKey ? '⏳ Testing...' : 'Test Connection'}
                       </button>
                     </div>
 
+                    {hasApiKey && !apiKeyInput && (
+                      <div style={{ fontSize: '10px', color: 'var(--text-muted)' }}>
+                        ✓ API key is stored (value hidden for security)
+                      </div>
+                    )}
+
                     {keyTestStatus && (
-                      <div style={{ fontSize: '11px', color: keyTestStatus.startsWith('✓') ? '#34d399' : '#f87171' }}>
-                        {keyTestStatus}
+                      <div style={{
+                        fontSize: '11px',
+                        color: keyTestStatus.type === 'success' ? '#34d399'
+                          : keyTestStatus.type === 'warning' ? '#fbbf24'
+                          : '#f87171',
+                        padding: '6px 8px',
+                        background: keyTestStatus.type === 'success' ? 'rgba(52,211,153,0.08)'
+                          : keyTestStatus.type === 'warning' ? 'rgba(251,191,36,0.08)'
+                          : 'rgba(248,113,113,0.08)',
+                        borderRadius: '4px',
+                        border: `1px solid ${keyTestStatus.type === 'success' ? 'rgba(52,211,153,0.2)'
+                          : keyTestStatus.type === 'warning' ? 'rgba(251,191,36,0.2)'
+                          : 'rgba(248,113,113,0.2)'}`
+                      }}>
+                        {keyTestStatus.message}
                       </div>
                     )}
                   </div>
