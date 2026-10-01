@@ -7,7 +7,9 @@
  */
 
 import { logger } from "../logger"
-import type { GeminiErrorKind } from "../utils/gemini-fallback"
+import { classifyGeminiErrorKind, type GeminiErrorKind } from "../utils/gemini-fallback"
+
+export { classifyGeminiErrorKind, type GeminiErrorKind }
 
 export type ModelHealthStatus = "available" | "rate_limited" | "unavailable"
 

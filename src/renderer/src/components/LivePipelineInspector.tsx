@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import type { AutoPipelineState, PipelineStage, StageStatus } from '../../../../shared/types'
+import type { AutoPipelineState, PipelineStage, StageStatus, ClaimEvidenceLedger } from '../../../../shared/types'
 import { STAGE_DESCRIPTIONS } from '../navigation/pipelineStageNavigation'
 
 export interface LivePipelineInspectorProps {
@@ -60,8 +60,20 @@ export function LivePipelineInspector({
 }: LivePipelineInspectorProps): React.ReactElement | null {
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [claimLedger, setClaimLedger] = useState<ClaimEvidenceLedger | null>(null)
+  const [visualTruthData, setVisualTruthData] = useState<any>(null)
   const drawerRef = useRef<HTMLDivElement>(null)
   const previousActiveElementRef = useRef<HTMLElement | null>(null)
+
+  useEffect(() => {
+    if (!isOpen || !pipelineState?.projectDir) return
+    window.api.claims?.getLedger(pipelineState.projectDir).then((l) => {
+      if (l) setClaimLedger(l)
+    }).catch(() => {})
+    window.api.visualTruth?.getData(pipelineState.projectDir).then((vt) => {
+      if (vt) setVisualTruthData(vt)
+    }).catch(() => {})
+  }, [isOpen, pipelineState?.projectDir, selectedStage])
 
   // Lưu focus element trước khi mở drawer để trả lại focus khi đóng
   useEffect(() => {
@@ -285,6 +297,61 @@ export function LivePipelineInspector({
               </div>
             </div>
           </div>
+
+          {/* Claim & Evidence Ledger Inspection (when inspecting global-context or if claims exist) */}
+          {(effectiveStage === 'global-context' || claimLedger) && claimLedger && (
+            <div className="live-inspector-card" style={{ borderColor: 'rgba(99,102,241,0.3)' }}>
+              <div className="live-inspector-card-header">
+                <span className="live-inspector-card-label" style={{ color: 'var(--color-brand)' }}>
+                  ⚖ Documentary Claim & Evidence Ledger
+                </span>
+                <span className="inspector-badge inspector-badge--completed">
+                  {claimLedger.summary.coveragePct}% Coverage
+                </span>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px', margin: '8px 0', fontSize: '11px' }}>
+                <div style={{ background: 'var(--bg-void)', padding: '6px 8px', borderRadius: '4px' }}>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '9px', display: 'block' }}>TOTAL CLAIMS</span>
+                  <strong>{claimLedger.summary.totalClaims}</strong>
+                </div>
+                <div style={{ background: 'var(--bg-void)', padding: '6px 8px', borderRadius: '4px' }}>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '9px', display: 'block' }}>VERIFIED</span>
+                  <strong style={{ color: '#22c55e' }}>{claimLedger.summary.verified}</strong>
+                </div>
+                <div style={{ background: 'var(--bg-void)', padding: '6px 8px', borderRadius: '4px' }}>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '9px', display: 'block' }}>UNSOURCED</span>
+                  <strong style={{ color: claimLedger.summary.unsourced > 0 ? '#f59e0b' : 'var(--text-muted)' }}>
+                    {claimLedger.summary.unsourced}
+                  </strong>
+                </div>
+              </div>
+              {claimLedger.summary.criticalUnsourced > 0 && (
+                <div style={{ fontSize: '10px', color: '#f59e0b', marginTop: '4px' }}>
+                  ⚠ {claimLedger.summary.criticalUnsourced} critical/high importance claims need documentary sources
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Visual Truth Reranker Inspection (when inspecting stock-search) */}
+          {effectiveStage === 'stock-search' && (
+            <div className="live-inspector-card" style={{ borderColor: 'rgba(34,197,94,0.3)' }}>
+              <div className="live-inspector-card-header">
+                <span className="live-inspector-card-label" style={{ color: '#22c55e' }}>
+                  🎯 Visual Truth Reranker
+                </span>
+                <span className="inspector-badge inspector-badge--live">
+                  Two-Tier Verification
+                </span>
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.5, marginTop: '6px' }}>
+                <div>• Frame Sampling: FFmpeg extracts representative frames at 20%, 50%, 80%</div>
+                <div>• Vision Evaluation: Multi-factor scoring against Global Context & Forbidden Substitutions</div>
+                <div>• Verified Candidates: {visualTruthData ? Object.keys(visualTruthData.verifications || {}).length : 0} analyzed</div>
+                <div>• Fail-Safe Fallback: Active (auto-switches to metadata ranking on timeout or rate limit)</div>
+              </div>
+            </div>
+          )}
 
           {/* Warnings Banner if any */}
           {stageData?.warning && (

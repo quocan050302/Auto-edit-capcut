@@ -23,7 +23,11 @@ import type {
   AutoPipelineOptions,
   AutoPipelineState,
   PipelineStage,
-  PipelineRecoveryResult
+  PipelineRecoveryResult,
+  ClaimEvidenceLedger,
+  DocumentaryClaim,
+  EvidenceSource,
+  ClaimVerificationStatus
 } from '../../shared/types'
 
 
@@ -316,6 +320,54 @@ const api = {
 
     setSettings: (params: { projectDir?: string; settings: Partial<ProductionIntelligenceSettings> }): Promise<ProductionIntelligenceSettings> =>
       ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_SET, params)
+  },
+
+  claims: {
+    getLedger: (projectDir: string): Promise<ClaimEvidenceLedger | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_GET_LEDGER, projectDir),
+
+    updateStatus: (params: {
+      projectDir: string
+      claimId: string
+      status: ClaimVerificationStatus
+      warningText?: string
+    }): Promise<{ success: boolean; claim?: DocumentaryClaim; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_UPDATE_STATUS, params),
+
+    addSource: (params: {
+      projectDir: string
+      source: Omit<EvidenceSource, 'id'>
+    }): Promise<{ success: boolean; source?: EvidenceSource; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_ADD_SOURCE, params),
+
+    removeSource: (params: { projectDir: string; sourceId: string }): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_REMOVE_SOURCE, params),
+
+    linkSource: (params: {
+      projectDir: string
+      claimId: string
+      sourceId: string
+      newStatus?: ClaimVerificationStatus
+    }): Promise<{ success: boolean; claim?: DocumentaryClaim; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_LINK_SOURCE, params),
+
+    unlinkSource: (params: {
+      projectDir: string
+      claimId: string
+      sourceId: string
+    }): Promise<{ success: boolean; claim?: DocumentaryClaim; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_UNLINK_SOURCE, params),
+
+    exportManifests: (params: {
+      projectDir: string
+      exportDir?: string
+    }): Promise<{ success: boolean; csvPath?: string; jsonPath?: string; licensesPath?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS, params)
+  },
+
+  visualTruth: {
+    getData: (projectDir: string): Promise<any> =>
+      ipcRenderer.invoke(IPC_CHANNELS.VISUAL_TRUTH_GET_DATA, projectDir)
   },
 
   pipeline: {

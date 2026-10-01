@@ -16,13 +16,17 @@ export type AiTaskType =
   | "caption_planning"
   | "stock_query"
   | "retention_qa"
+  | "visual_truth"
+  | "claim_analysis"
 
 export const MODEL_ROUTES: Record<AiTaskType, string[]> = {
   planning: ["gemini-3.8-flash", "gemini-3.5-flash"],
   global_context: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   caption_planning: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   stock_query: ["gemini-3.5-flash-lite", "gemini-3.5-flash"],
-  retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+  retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  visual_truth: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 }
 
 export const STOCK_QUERY_RETRY_POLICY = {
