@@ -126,6 +126,24 @@ class CompetitorService:
 
         consistency = "High" if len(repeat_topics) >= 3 else ("Moderate" if len(repeat_topics) >= 1 else "Broad")
 
+        # Build raw video list for thumbnail intelligence
+        videos_for_thumbnail = []
+        for v in videos:
+            age_days = calculate_age_days(v.published_at)
+            vpd = calculate_lifetime_velocity(v.views, v.published_at)
+            ratio = compute_outlier_ratio(v.views, median_views)
+            videos_for_thumbnail.append({
+                "video_id": v.video_id,
+                "title": v.title,
+                "published_at": v.published_at,
+                "age_days": round(age_days, 1),
+                "views": v.views,
+                "views_per_day": round(vpd, 1),
+                "outlier_ratio": ratio,
+                "thumbnail_url": v.thumbnail_url or "",
+                "thumbnail_quality": getattr(v, 'thumbnail_quality', 'unknown'),
+            })
+
         return CompetitorResponse(
             channel_id=channel_id,
             channel_title=channel_data.title,
@@ -142,5 +160,7 @@ class CompetitorService:
             best_repeated_topics=repeat_topics or ["General Production"],
             winning_title_patterns=title_patterns,
             upload_cadence_days=cadence_days,
-            topic_consistency=consistency
+            topic_consistency=consistency,
+            # V2: Pass video list for frontend to run thumbnail intelligence
+            videos_for_thumbnail=videos_for_thumbnail,
         )

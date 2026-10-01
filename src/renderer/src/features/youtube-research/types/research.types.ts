@@ -311,6 +311,237 @@ export interface CompetitorAnalysisResult {
   winning_title_patterns: string[]
   upload_cadence_days: number
   topic_consistency: 'High' | 'Moderate' | 'Broad'
+  // V2 — thumbnail intelligence
+  videos_for_thumbnail?: VideoForThumbnail[] | null
+  thumbnail_intelligence?: ThumbnailIntelligenceResult | null
+}
+
+export interface VideoForThumbnail {
+  video_id: string
+  title: string
+  published_at: string
+  age_days: number
+  views: number
+  views_per_day: number
+  outlier_ratio: number
+  thumbnail_url: string
+  thumbnail_quality: string
+}
+
+// ── Thumbnail Intelligence Types (V2) ─────────────────────────────────────────
+
+export type PerformanceGroup = 'outlier' | 'baseline' | 'low'
+export type ThumbnailConfidence = 'insufficient' | 'low' | 'medium' | 'high'
+
+export interface NormalizedBox {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface DominantColor {
+  hex: string
+  rgb: [number, number, number]
+  fraction: number
+  label: string
+}
+
+export interface ThumbnailOcrAnalysis {
+  text: string
+  word_count: number
+  line_count: number
+  char_count: number
+  has_uppercase: boolean
+  uppercase_ratio: number
+  has_numbers: boolean
+  has_currency: boolean
+  has_question: boolean
+  has_exclamation: boolean
+  repeats_title: boolean
+  text_coverage_pct: number
+  text_alignment: string
+  confidence: number
+  is_uncertain: boolean
+  font_category: string
+}
+
+export interface ThumbnailCompositionAnalysis {
+  layout_type: string
+  main_focal_point: string
+  has_negative_space: boolean
+  background_complexity: 'low' | 'medium' | 'high'
+  subject_size_pct: number
+  face_size_pct: number
+  main_subject_box?: NormalizedBox | null
+  text_region_box?: NormalizedBox | null
+  duration_badge_risk: boolean
+}
+
+export interface ThumbnailSubjectAnalysis {
+  has_person: boolean
+  person_count: number
+  face_count: number
+  shot_type: string
+  facial_expression: string
+  gaze_direction: string
+  has_proof_object: boolean
+  has_arrow_circle: boolean
+  has_comparison: boolean
+  has_contradiction: boolean
+}
+
+export interface ThumbnailColorAnalysis {
+  dominant_colors: DominantColor[]
+  background_color: string
+  accent_color: string
+  warm_cool_balance: 'warm' | 'cool' | 'neutral'
+  saturation: number
+  brightness: number
+  contrast: number
+  has_yellow: boolean
+  has_red: boolean
+}
+
+export interface ThumbnailHook {
+  hook_type: string
+  confidence: number
+  visual_evidence: string
+  text_evidence: string
+  title_evidence: string
+}
+
+export interface ThumbnailTitlePairing {
+  relationship: string
+  redundancy_pct: number
+  has_curiosity_gap: boolean
+  has_promise_mismatch: boolean
+  thumbnail_adds: string
+}
+
+export interface MobileReadability {
+  score: number
+  text_readable: boolean
+  face_recognizable: boolean
+  main_object_clear: boolean
+  duration_badge_overlap_risk: boolean
+  breakdown: Record<string, number>
+}
+
+export interface ThumbnailAnalysis {
+  video_id: string
+  video_title: string
+  thumbnail_url: string
+  thumbnail_hash: string
+  thumbnail_quality: string
+  width: number
+  height: number
+  performance_group: PerformanceGroup
+  views: number
+  views_per_day: number
+  outlier_ratio: number
+  video_age_days: number
+  ocr: ThumbnailOcrAnalysis
+  composition: ThumbnailCompositionAnalysis
+  subjects: ThumbnailSubjectAnalysis
+  colors: ThumbnailColorAnalysis
+  hooks: ThumbnailHook[]
+  title_pairing: ThumbnailTitlePairing
+  mobile_readability: MobileReadability
+  provider: string
+  model?: string | null
+  analysis_version: string
+  confidence: number
+  warnings: string[]
+  is_error: boolean
+  error_reason: string
+}
+
+export interface ThumbnailPattern {
+  pattern_id: string
+  name: string
+  description: string
+  outlier_count: number
+  outlier_total: number
+  baseline_count: number
+  baseline_total: number
+  low_count: number
+  low_total: number
+  sample_size: number
+  confidence: ThumbnailConfidence
+  evidence_video_ids: string[]
+  is_winning: boolean
+  is_avoid: boolean
+}
+
+export interface ThumbnailBlueprint {
+  id: string
+  name: string
+  use_when: string
+  target_hook: string
+  based_on_pattern_ids: string[]
+  layout_description: string
+  subject_recipe: string
+  background_recipe: string
+  text_recipe: string
+  color_recipe: string
+  lighting_recipe: string
+  hierarchy_recipe: string
+  title_pairing_recipe: string
+  overlay_text_formula: string[]
+  image_prompt_template: string
+  negative_prompt: string
+  evidence: string[]
+  confidence: ThumbnailConfidence
+  originality_rules: string[]
+}
+
+export interface ThumbnailGroupStats {
+  n: number
+  has_text_pct?: number
+  has_face_pct?: number
+  has_proof_pct?: number
+  has_arrow_pct?: number
+  has_comparison_pct?: number
+  has_yellow_pct?: number
+  has_red_pct?: number
+  median_word_count?: number
+  median_brightness?: number
+  median_contrast?: number
+  median_saturation?: number
+  median_mobile_score?: number
+  median_subject_size?: number
+  median_outlier_ratio?: number
+  top_hook?: string
+  top_layout?: string
+}
+
+export interface ThumbnailIntelligenceResult {
+  channel_id: string
+  analyzed_count: number
+  cached_count: number
+  failed_count: number
+  skipped_count: number
+  outlier_count: number
+  baseline_count: number
+  low_count: number
+  overall_confidence: ThumbnailConfidence
+  confidence_score: number
+  analyses: ThumbnailAnalysis[]
+  patterns: ThumbnailPattern[]
+  winning_patterns: ThumbnailPattern[]
+  avoid_patterns: ThumbnailPattern[]
+  blueprints: ThumbnailBlueprint[]
+  group_stats: {
+    outlier?: ThumbnailGroupStats
+    baseline?: ThumbnailGroupStats
+    low?: ThumbnailGroupStats
+  }
+  analysis_version: string
+  provider: string
+  limitations: string[]
+  failure_details: Array<{ video_id: string; title: string; reason: string; stage: string }>
+  created_at: string
 }
 
 export interface AiInsightsReport {

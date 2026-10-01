@@ -4,6 +4,7 @@ import type {
   SavedResearchProject,
   ResearchSettings,
   CompetitorAnalysisResult,
+  ThumbnailIntelligenceResult,
   MarketCode,
   ContentType,
   TimeRange,
@@ -232,6 +233,22 @@ export class ResearchApi {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ channel_url: channelUrl, market }),
       timeoutMs: 30000
+    })
+  }
+
+  async analyzeThumbnailIntelligence(payload: {
+    channel_id: string
+    channel_title: string
+    videos: Array<Record<string, unknown>>
+    channel_median_views: number
+    p75_views: number
+    max_videos?: number
+  }): Promise<ThumbnailIntelligenceResult> {
+    return this.request('/api/research/competitor/thumbnail-intelligence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      timeoutMs: 120000  // 2 min — downloading 30 thumbnails takes time
     })
   }
 

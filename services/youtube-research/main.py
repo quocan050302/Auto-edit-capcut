@@ -28,6 +28,7 @@ from schemas.research_schemas import (
     KeywordExpandResponse,
     CompetitorRequest,
     CompetitorResponse,
+    ThumbnailIntelligenceRequest,
     SavedProjectCreate,
     SavedProjectUpdate,
     SavedProjectSchema,
@@ -303,6 +304,31 @@ async def analyze_competitor_endpoint(req: CompetitorRequest):
     except Exception as e:
         research_logger.error(f"[Competitor] Error analyzing {req.channel_url}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to analyze competitor: {str(e)}")
+
+
+@app.post("/api/research/competitor/thumbnail-intelligence")
+async def analyze_thumbnail_intelligence_endpoint(req: ThumbnailIntelligenceRequest):
+    """
+    Analyze thumbnails of recently collected competitor videos.
+    Runs classification, download, analysis, pattern detection, blueprint generation.
+    Does NOT affect existing channel baseline data.
+    Returns: ThumbnailIntelligenceResult as dict
+    """
+    try:
+        from services.thumbnail_intelligence_service import ThumbnailIntelligenceService
+        svc = ThumbnailIntelligenceService(ai_engine=discovery_service.ai_engine)
+        result = await svc.run(
+            channel_id=req.channel_id,
+            channel_title=req.channel_title,
+            videos=req.videos,
+            channel_median_views=req.channel_median_views,
+            p75_views=req.p75_views,
+            max_videos=req.max_videos,
+        )
+        return result.to_dict()
+    except Exception as e:
+        research_logger.error(f"[ThumbnailIntel] Error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Thumbnail intelligence failed: {str(e)}")
 
 # ─── Saved Projects ───────────────────────────────────────────────────────────
 

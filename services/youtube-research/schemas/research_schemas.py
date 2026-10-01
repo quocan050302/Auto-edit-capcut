@@ -154,6 +154,68 @@ class CompetitorResponse(BaseModel):
     winning_title_patterns: List[str]
     upload_cadence_days: float
     topic_consistency: str
+    # V2: Thumbnail Intelligence (optional — does not block baseline)
+    thumbnail_intelligence: Optional[Dict[str, Any]] = None
+    videos_for_thumbnail: Optional[List[Dict[str, Any]]] = None
+
+# ── Thumbnail Intelligence Schemas (V2) ──────────────────────────────────────
+
+class ThumbnailPatternSchema(BaseModel):
+    pattern_id: str
+    name: str
+    description: str
+    outlier_count: int = 0
+    outlier_total: int = 0
+    baseline_count: int = 0
+    baseline_total: int = 0
+    low_count: int = 0
+    low_total: int = 0
+    sample_size: int = 0
+    confidence: str = "low"
+    evidence_video_ids: List[str] = []
+    is_winning: bool = False
+    is_avoid: bool = False
+
+class ThumbnailBlueprintSchema(BaseModel):
+    id: str
+    name: str
+    use_when: str
+    target_hook: str
+    based_on_pattern_ids: List[str] = []
+    layout_description: str = ""
+    subject_recipe: str = ""
+    background_recipe: str = ""
+    text_recipe: str = ""
+    color_recipe: str = ""
+    lighting_recipe: str = ""
+    hierarchy_recipe: str = ""
+    title_pairing_recipe: str = ""
+    overlay_text_formula: List[str] = []
+    image_prompt_template: str = ""
+    negative_prompt: str = ""
+    evidence: List[str] = []
+    confidence: str = "low"
+    originality_rules: List[str] = []
+
+class ThumbnailSampleVideoSchema(BaseModel):
+    video_id: str
+    title: str
+    published_at: str
+    age_days: float
+    views: int
+    views_per_day: float
+    outlier_ratio: float
+    performance_group: str
+    thumbnail_url: str
+    thumbnail_quality: str = "unknown"
+
+class ThumbnailIntelligenceRequest(BaseModel):
+    channel_id: str
+    channel_title: str
+    videos: List[Dict[str, Any]]
+    channel_median_views: float
+    p75_views: float
+    max_videos: int = 30
 
 class TopOpportunitySchema(BaseModel):
     keyword: str

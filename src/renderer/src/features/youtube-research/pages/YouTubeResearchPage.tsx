@@ -535,9 +535,11 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
           {activeTab === 'competitors' && (
             <CompetitorTab
               onAnalyzeCompetitor={(url, mkt) => researchApi.analyzeCompetitor(url, mkt)}
+              onAnalyzeThumbnails={(payload) => researchApi.analyzeThumbnailIntelligence(payload)}
               onCreateProjectFromVideo={(title) => {
                 setHandoffKeyword(title)
               }}
+              isAdvancedView={isAdvancedView}
             />
           )}
 
