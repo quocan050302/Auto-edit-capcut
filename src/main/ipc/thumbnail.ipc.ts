@@ -486,6 +486,25 @@ export function registerThumbnailHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  // Read a local image file and return as base64 data URL.
+  // This sidesteps file:// CSP restrictions in the renderer completely.
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_READ_IMAGE,
+    async (_event, filePath: string): Promise<{ dataUrl: string } | { error: string }> => {
+      try {
+        if (!filePath || !fs.existsSync(filePath)) {
+          return { error: `File not found: ${filePath}` }
+        }
+        const buf = fs.readFileSync(filePath)
+        const ext = path.extname(filePath).toLowerCase().slice(1)
+        const mime = ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png'
+        return { dataUrl: `data:${mime};base64,${buf.toString('base64')}` }
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
   // ─── FlowKit Runtime Manager IPC ──────────────────────────────────────────
 
   ipcMain.handle(

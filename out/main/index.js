@@ -1,6 +1,7 @@
 "use strict";
 const electron = require("electron");
 const path = require("path");
+const url = require("url");
 const utils = require("@electron-toolkit/utils");
 const fs = require("fs");
 const uuid = require("uuid");
@@ -14,7 +15,6 @@ const bundler = require("@remotion/bundler");
 const renderer = require("@remotion/renderer");
 const https = require("https");
 const http = require("http");
-const url = require("url");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -7667,10 +7667,11 @@ class GoogleFlowClient {
       try {
         const provResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/providers/status`, { method: "GET" }, 3e3);
         if (provResp.ok) {
-          const provs = await provResp.json();
-          const flowProv = provs.find((p) => p.name === "flow");
+          const body = await provResp.json();
+          const provsArray = Array.isArray(body) ? body : Array.isArray(body.providers) ? body.providers : [];
+          const flowProv = provsArray.find((p) => p.name === "flow");
           if (flowProv) {
-            health.providerAvailable = flowProv.available;
+            health.providerAvailable = Boolean(flowProv.available);
             health.supportsImageGeneration = Boolean(flowProv.capabilities?.generate_image);
           }
         }
@@ -7864,7 +7865,7 @@ class GoogleFlowClient {
       let errorMsg = `HTTP ${resp.status}`;
       try {
         const errJson = await resp.json();
-        errorMsg = errJson.error || errJson.detail || errorMsg;
+        errorMsg = String(errJson.error || errJson.detail || errorMsg);
       } catch {
       }
       return { success: false, statusCode: resp.status, error: String(errorMsg) };
@@ -8057,6 +8058,7 @@ class FlowKitRuntimeManager {
     }
     const bridgePort = this.parseBridgePort();
     const flowProjectId = this.settings.flowProjectId || "";
+    await this.freePort(bridgePort);
     this.isStarting = true;
     this.broadcastLog(`[FlowKitRuntime] Starting FlowKit bridge...
 Python: ${pythonExe}
@@ -8130,6 +8132,36 @@ Port: ${bridgePort}`);
     }, 5e3);
     this.managedProcess = null;
     this.broadcastStatus();
+  }
+  /**
+   * Kill any process occupying `port` on localhost so the bridge can bind.
+   * Only acts on the external/zombie case — if we own `managedProcess` on that
+   * port, `stopBridge()` should have been called first.
+   *
+   * macOS/Linux only. No-op on Windows (port conflicts will surface naturally).
+   */
+  async freePort(port) {
+    if (process.platform === "win32") return;
+    return new Promise((resolve) => {
+      const lsof = cp__namespace.spawn("lsof", ["-ti", `:${port}`]);
+      let pids = "";
+      lsof.stdout?.on("data", (d) => {
+        pids += d.toString();
+      });
+      lsof.on("close", () => {
+        const pidList = pids.trim().split("\n").filter(Boolean);
+        if (pidList.length === 0) return resolve();
+        for (const pid of pidList) {
+          try {
+            process.kill(parseInt(pid, 10), "SIGKILL");
+          } catch {
+          }
+        }
+        logger.info(`[FlowKitRuntime] Freed port ${port}: killed PIDs [${pidList.join(", ")}]`);
+        setTimeout(resolve, 500);
+      });
+      lsof.on("error", () => resolve());
+    });
   }
   handleAppQuit() {
     if (this.settings.mode === "managed") {
@@ -8232,8 +8264,9 @@ Port: ${bridgePort}`);
     try {
       const provResp = await this.fetchWithTimeout(`${url2}/api/providers/status`, 5e3);
       if (provResp.ok) {
-        const provs = await provResp.json();
-        const flowProv = provs.find((p) => p.name === "flow");
+        const body = await provResp.json();
+        const provsArray = Array.isArray(body) ? body : Array.isArray(body?.providers) ? body.providers : [];
+        const flowProv = provsArray.find((p) => p.name === "flow");
         if (flowProv?.available && flowProv.capabilities?.generate_image) {
           result.imageGenerationReady = true;
         }
@@ -8938,7 +8971,7 @@ class ThumbnailOrchestrator {
         reconcileThumbnailArtifacts(projectDir, state2);
         saveThumbnailJobStateAtomic(projectDir, state2);
         const cooldown = params.cooldownMs ?? this.defaultCooldownMs;
-        await this.runSequentialCandidates(state2, abortController.signal, cooldown);
+        await this.runConcurrentCandidates(state2, abortController.signal, cooldown);
         return this.finalizeJob(state2, projectDir);
       } finally {
         this.activeJobs.delete(projectDir);
@@ -9008,7 +9041,7 @@ class ThumbnailOrchestrator {
     const abortController = new AbortController();
     const executionPromise = (async () => {
       try {
-        await this.runSequentialCandidates(state2, abortController.signal, this.defaultCooldownMs);
+        await this.runConcurrentCandidates(state2, abortController.signal, this.defaultCooldownMs);
         return this.finalizeJob(state2, projectDir);
       } finally {
         this.activeJobs.delete(projectDir);
@@ -9200,7 +9233,9 @@ class ThumbnailOrchestrator {
   /**
    * Run candidates strictly sequentially, one at a time.
    * Uses ONE retry loop here in the orchestrator. GoogleFlowClient does NOT retry.
+   * @deprecated Kept as fallback. Active path uses runConcurrentCandidates.
    */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   async runSequentialCandidates(state2, signal, cooldownMs) {
     const candidates = state2.candidates;
     const MAX_CANDIDATE_ATTEMPTS = 4;
@@ -9316,6 +9351,116 @@ class ThumbnailOrchestrator {
         }
       }
     }
+  }
+  // ─── Private: runConcurrentCandidates ─────────────────────────────────────
+  /**
+   * Run all pending candidates in parallel (Promise.allSettled).
+   * Each candidate gets its own retry loop (MAX_CANDIDATE_ATTEMPTS).
+   * Progress is broadcast immediately when each candidate completes.
+   * Connector errors (bridge offline) abort ALL siblings via AbortController.
+   */
+  async runConcurrentCandidates(state2, signal, _cooldownMs) {
+    const candidates = state2.candidates.filter((c) => c.status !== "completed");
+    if (candidates.length === 0) return;
+    const MAX_CANDIDATE_ATTEMPTS = 4;
+    const innerAbort = new AbortController();
+    signal.addEventListener("abort", () => innerAbort.abort(), { once: true });
+    const runOne = async (candidate) => {
+      if (signal.aborted || innerAbort.signal.aborted) {
+        state2.status = "cancelled";
+        return;
+      }
+      const attemptsAtStart = candidate.attempts || 0;
+      let succeeded = false;
+      let lastError = null;
+      if (!await this.runtimeManager.isBridgeStillReachable()) {
+        logger.warn(`[ThumbnailOrchestrator] Bridge offline before concurrent candidate ${candidate.optionId}.`);
+        innerAbort.abort();
+        this.pauseBatchForBridgeOffline(state2, 0, state2.candidates);
+        return;
+      }
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: (state2.candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
+        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
+        candidate,
+        jobState: state2
+      });
+      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
+        if (signal.aborted || innerAbort.signal.aborted) {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+        logger.info(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS}`);
+        try {
+          await this.processSingleCandidate(state2, candidate, innerAbort.signal);
+          succeeded = true;
+          break;
+        } catch (err) {
+          if (err instanceof ThumbnailCancelledError) {
+            state2.status = "cancelled";
+            saveThumbnailJobStateAtomic(state2.projectDir, state2);
+            return;
+          }
+          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+          lastError = structured;
+          logger.error(
+            `[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
+          );
+          if (structured.scope === "connector") {
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Connector error on ${candidate.optionId}. Aborting all concurrent candidates.`);
+            candidate.status = "pending";
+            candidate.error = void 0;
+            candidate.attempts = attemptsAtStart;
+            innerAbort.abort();
+            this.pauseBatchForBridgeOffline(state2, 0, state2.candidates, structured);
+            return;
+          }
+          if (!structured.retryable) break;
+          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
+            const backoffMs = Math.min(3e3 * attempt, 15e3);
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Retryable error on ${candidate.optionId}. Waiting ${backoffMs}ms...`);
+            try {
+              await abortableDelay(backoffMs, innerAbort.signal);
+            } catch {
+              state2.status = "cancelled";
+              saveThumbnailJobStateAtomic(state2.projectDir, state2);
+              return;
+            }
+          }
+        }
+      }
+      if (!succeeded && lastError) {
+        candidate.status = "failed";
+        candidate.error = `${lastError.code}: ${lastError.message}`;
+        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
+        logger.error(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
+      }
+      saveThumbnailJobStateAtomic(state2.projectDir, state2);
+      saveThumbnailManifest(state2.projectDir, state2);
+      const updatedCompleted = state2.candidates.filter((c) => c.status === "completed").length;
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: candidate.status === "completed" ? "exporting" : "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: updatedCompleted,
+        totalCount: 5,
+        progress: updatedCompleted / 5,
+        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
+        candidate,
+        jobState: state2
+      });
+    };
+    await Promise.allSettled(candidates.map((c) => runOne(c)));
   }
   // ─── Private: processSingleCandidate ──────────────────────────────────────
   /**
@@ -17244,6 +17389,12 @@ function createWindow() {
 }
 electron.app.whenReady().then(() => {
   utils.electronApp.setAppUserModelId("com.videofactory.app");
+  electron.protocol.handle("app-media", (request) => {
+    const rawPath = request.url.slice("app-media://".length);
+    const decoded = decodeURIComponent(rawPath);
+    const normalized = path.normalize(decoded);
+    return electron.net.fetch(url.pathToFileURL(normalized).href);
+  });
   electron.app.on("browser-window-created", (_, window) => {
     utils.optimizer.watchWindowShortcuts(window);
   });

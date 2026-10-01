@@ -1034,6 +1034,7 @@ export const IPC_CHANNELS = {
   THUMBNAIL_CANDIDATE_SELECT: 'thumbnail:candidate-select',
 
   THUMBNAIL_OPEN_FOLDER: 'thumbnail:open-folder',
+  THUMBNAIL_READ_IMAGE: 'thumbnail:read-image',
   THUMBNAIL_PROGRESS: 'thumbnail:progress',
 
   // FlowKit Runtime Manager

@@ -547,6 +547,9 @@ const api = {
     }): Promise<{ success: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_OPEN_FOLDER, params),
 
+    readImage: (filePath: string): Promise<{ dataUrl: string } | { error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_READ_IMAGE, filePath),
+
     onProgress: (callback: (payload: ThumbnailProgressPayload) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, payload: ThumbnailProgressPayload): void => {
         callback(payload)

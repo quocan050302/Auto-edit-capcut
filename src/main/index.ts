@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, ipcMain, shell, protocol, net } from 'electron'
+import { join, normalize } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerFsHandlers } from './ipc/fs.ipc'
 import { registerProjectHandlers } from './ipc/project.ipc'
@@ -61,6 +62,19 @@ function createWindow(): BrowserWindow {
 
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.videofactory.app')
+
+  // ── Register safe local-file protocol for renderer image access ──────────
+  // Usage: <img src="app-media:///absolute/path/to/file.png" />
+  // Serves any file path prefixed with app-media:///. This avoids the CSP
+  // restriction on raw file:// URLs while keeping webSecurity enabled.
+  protocol.handle('app-media', (request) => {
+    // Strip the protocol prefix to get the absolute path
+    // e.g. app-media:///Users/foo/bar.png → /Users/foo/bar.png
+    const rawPath = request.url.slice('app-media://'.length)
+    const decoded = decodeURIComponent(rawPath)
+    const normalized = normalize(decoded)
+    return net.fetch(pathToFileURL(normalized).href)
+  })
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)

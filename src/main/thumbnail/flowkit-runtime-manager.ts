@@ -254,6 +254,11 @@ export class FlowKitRuntimeManager {
     const bridgePort = this.parseBridgePort()
     const flowProjectId = this.settings.flowProjectId || ''
 
+    // Kill any zombie process holding the bridge port before spawning.
+    // This handles the common case where a previous session left a stale
+    // Python agent alive that we did not spawn (e.g. manual run + app restart).
+    await this.freePort(bridgePort)
+
     this.isStarting = true
     this.broadcastLog(`[FlowKitRuntime] Starting FlowKit bridge...\nPython: ${pythonExe}\nCwd: ${flowKitPath}\nPort: ${bridgePort}`)
 
@@ -337,6 +342,37 @@ export class FlowKitRuntimeManager {
     }, 5000)
     this.managedProcess = null
     this.broadcastStatus()
+  }
+
+  /**
+   * Kill any process occupying `port` on localhost so the bridge can bind.
+   * Only acts on the external/zombie case — if we own `managedProcess` on that
+   * port, `stopBridge()` should have been called first.
+   *
+   * macOS/Linux only. No-op on Windows (port conflicts will surface naturally).
+   */
+  private async freePort(port: number): Promise<void> {
+    if (process.platform === 'win32') return
+    return new Promise((resolve) => {
+      const lsof = cp.spawn('lsof', ['-ti', `:${port}`])
+      let pids = ''
+      lsof.stdout?.on('data', (d: Buffer) => { pids += d.toString() })
+      lsof.on('close', () => {
+        const pidList = pids.trim().split('\n').filter(Boolean)
+        if (pidList.length === 0) return resolve()
+        for (const pid of pidList) {
+          try {
+            process.kill(parseInt(pid, 10), 'SIGKILL')
+          } catch {
+            // Process may have already exited between lsof and kill — ignore.
+          }
+        }
+        logger.info(`[FlowKitRuntime] Freed port ${port}: killed PIDs [${pidList.join(', ')}]`)
+        // Give the OS ~500 ms to release the socket before we bind again.
+        setTimeout(resolve, 500)
+      })
+      lsof.on('error', () => resolve()) // lsof not found; proceed anyway
+    })
   }
 
   public handleAppQuit(): void {
@@ -461,11 +497,19 @@ export class FlowKitRuntimeManager {
     }
 
     // 4. Check /api/providers/status for image generation capability
+    // Response shape: { default: string, providers: [{name, available, capabilities}, ...] }
     try {
       const provResp = await this.fetchWithTimeout(`${url}/api/providers/status`, 5000)
       if (provResp.ok) {
-        const provs = await provResp.json() as Array<{ name: string; available: boolean; capabilities?: { generate_image?: boolean } }>
-        const flowProv = provs.find((p) => p.name === 'flow')
+        const body = await provResp.json() as
+          | { providers?: Array<{ name: string; available?: boolean; capabilities?: { generate_image?: boolean } }> }
+          | Array<{ name: string; available: boolean; capabilities?: { generate_image?: boolean } }>
+
+        const provsArray = Array.isArray(body)
+          ? body
+          : Array.isArray(body?.providers) ? body.providers : []
+
+        const flowProv = provsArray.find((p) => p.name === 'flow')
         if (flowProv?.available && flowProv.capabilities?.generate_image) {
           result.imageGenerationReady = true
         }
