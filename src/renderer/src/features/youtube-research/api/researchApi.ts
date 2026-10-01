@@ -8,6 +8,7 @@ import type {
   ContentType,
   TimeRange
 } from '../types/research.types'
+import { isResearchStageTerminal } from '../types/research.types'
 
 export const SIDECAR_DEFAULT_URL = 'http://127.0.0.1:8765'
 
@@ -134,13 +135,13 @@ export class ResearchApi {
       }
 
       if (err instanceof DOMException && err.name === 'AbortError') {
-        throw new ResearchApiError('The research service did not respond in time.', 'TIMEOUT')
+        throw new ResearchApiError('The research request timed out before a response was received. Please verify that the local FastAPI sidecar is running.', 'TIMEOUT')
       }
 
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CSP')) {
         throw new ResearchApiError(
-          'The Electron renderer was blocked or could not connect to the local research service at ' + this.baseUrl,
+          'Research service is not responding (blocked or could not connect). Please verify that the local FastAPI sidecar is running at ' + this.baseUrl,
           'API_OFFLINE'
         )
       }
@@ -295,6 +296,8 @@ export class ResearchApi {
     let eventSource: EventSource | null = null
     let pollInterval: NodeJS.Timeout | null = null
 
+    console.log(`[YouTubeResearch] progress.sse.connect run_id=${runId}`)
+
     const cleanup = () => {
       closed = true
       if (eventSource) {
@@ -309,12 +312,15 @@ export class ResearchApi {
 
     const startPollingFallback = () => {
       if (closed || pollInterval) return
+      console.log(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`)
       pollInterval = setInterval(async () => {
         if (closed) return
         try {
           const status = await this.getRunStatus(runId)
+          if (closed) return
           onProgress(status)
-          if (['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(status.stage)) {
+          if (isResearchStageTerminal(status.stage)) {
+            console.log(`[YouTubeResearch] progress.terminal stage=${status.stage}`)
             cleanup()
             onComplete(status)
           }
@@ -337,18 +343,19 @@ export class ResearchApi {
           }
           const data = JSON.parse(event.data) as ResearchProgressState
           onProgress(data)
-          if (['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(data.stage)) {
+          if (isResearchStageTerminal(data.stage)) {
+            console.log(`[YouTubeResearch] progress.terminal stage=${data.stage}`)
             cleanup()
             onComplete(data)
           }
         } catch (err) {
-          console.warn('[Research SSE] Parse warning', err)
+          console.warn('[YouTubeResearch] SSE parse warning', err)
         }
       }
 
       eventSource.onerror = (err) => {
         if (closed) return
-        console.warn('[Research SSE] SSE stream connection dropped. Switching to status polling fallback.', err)
+        console.warn(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`, err)
         if (eventSource) {
           eventSource.close()
           eventSource = null
@@ -357,7 +364,7 @@ export class ResearchApi {
         startPollingFallback()
       }
     } catch (err) {
-      console.warn('[Research SSE] Failed to instantiate EventSource, using status polling fallback', err)
+      console.warn(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`, err)
       startPollingFallback()
     }
 

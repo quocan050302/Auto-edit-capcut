@@ -12,6 +12,7 @@ import type {
   ResearchProjectHandoffPayload,
   ApiConnectionStatus
 } from '../types/research.types'
+import { isResearchRunActive } from '../types/research.types'
 import { researchApi, ResearchApiError } from '../api/researchApi'
 import { ResearchErrorBoundary } from '../components/ResearchErrorBoundary'
 import { ResearchHeader } from '../components/ResearchHeader'
@@ -46,6 +47,7 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
   const [discoverErrorDetails, setDiscoverErrorDetails] = useState<unknown>(null)
 
   // Active Research State
+  const [isStartingResearch, setIsStartingResearch] = useState<boolean>(false)
   const [activeProgress, setActiveProgress] = useState<ResearchProgressState | null>(null)
   const [activeResult, setActiveResult] = useState<ResearchRunResult | null>(null)
   const [activeRunId, setActiveRunId] = useState<string | undefined>(undefined)
@@ -142,57 +144,113 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
     limit: number
     filters: Record<string, unknown>
   }) => {
+    // Prevent double-clicks or starting when already active
+    if (isStartingResearch || isResearchRunActive(activeProgress)) {
+      console.warn('[YouTubeResearch] discover.request.skipped - research already starting or active')
+      return
+    }
+
+    console.log(`[YouTubeResearch] analyze.click topic="${params.topic}" market=${params.market}`)
     setDiscoverError(null)
     setDiscoverErrorDetails(null)
+    setIsStartingResearch(true)
 
-    if (apiReachabilityStatus === 'blocked') {
-      try {
-        const health = await researchApi.checkHealth()
-        if (health) setApiReachabilityStatus('reachable')
-      } catch (err) {
-        setDiscoverError('The local research service is running, but this window cannot connect to its API (connection blocked).')
-        setDiscoverErrorDetails(err)
-        return
-      }
+    // Immediate optimistic progress state (<100ms)
+    setActiveProgress({
+      run_id: null,
+      stage: 'STARTING',
+      progress_percent: 1,
+      message: 'Starting market analysis...',
+      videos_collected: 0,
+      channels_analyzed: 0,
+      keywords_expanded: 0,
+      elapsed_seconds: 0,
+      can_cancel: false
+    })
+
+    // Clean old SSE if any before starting new run
+    if (sseCleanupRef.current) {
+      sseCleanupRef.current()
+      sseCleanupRef.current = null
     }
 
     try {
-      const { run_id } = await researchApi.startDiscover(params)
+      if (apiReachabilityStatus === 'blocked') {
+        try {
+          const health = await researchApi.checkHealth()
+          if (health) setApiReachabilityStatus('reachable')
+        } catch (err) {
+          const errMsg = 'The local research service is running, but this window cannot connect to its API (connection blocked).'
+          console.error(`[YouTubeResearch] discover.request.failed reason=${errMsg}`, err)
+          setDiscoverError(errMsg)
+          setDiscoverErrorDetails(err)
+          setActiveProgress({
+            run_id: null,
+            stage: 'FAILED',
+            progress_percent: 0,
+            message: errMsg,
+            videos_collected: 0,
+            channels_analyzed: 0,
+            keywords_expanded: 0,
+            elapsed_seconds: 0,
+            can_cancel: false,
+            error: errMsg
+          })
+          return
+        }
+      }
+
+      console.log('[YouTubeResearch] discover.request.start')
+      const response = await researchApi.startDiscover(params)
+      if (!response?.run_id) {
+        throw new Error('Research service did not return a run ID.')
+      }
+
+      const run_id = response.run_id
+      console.log(`[YouTubeResearch] discover.request.success run_id=${run_id}`)
       setActiveRunId(run_id)
-      setActiveProgress({
+      setActiveProgress((previous) => ({
         run_id,
         stage: 'QUEUED',
-        progress_percent: 5,
-        message: 'Initializing research run...',
+        progress_percent: Math.max(previous?.progress_percent ?? 0, 5),
+        message: 'Research job queued...',
         videos_collected: 0,
         channels_analyzed: 0,
         keywords_expanded: 0,
         elapsed_seconds: 0,
         can_cancel: true
-      })
-
-      // Clean old SSE if any
-      if (sseCleanupRef.current) sseCleanupRef.current()
+      }))
 
       setSseConnected(true)
+      const currentRunId = run_id
       const cleanup = researchApi.subscribeProgress(
         run_id,
         (progress) => {
-          setActiveProgress(progress)
+          // Reject stale events from previous or mismatched runs
+          if (progress.run_id && progress.run_id !== currentRunId) {
+            return
+          }
+          setActiveProgress((previous) => {
+            if (previous && progress.stage === previous.stage && (progress.progress_percent ?? 0) < (previous.progress_percent ?? 0)) {
+              return { ...progress, progress_percent: previous.progress_percent }
+            }
+            return progress
+          })
         },
         (error) => {
-          console.warn('[Research] SSE warning:', error)
+          console.warn('[YouTubeResearch] progress.sse.warning:', error)
           setSseConnected(false)
         },
         async (completedState) => {
           setSseConnected(false)
+          console.log(`[YouTubeResearch] progress.terminal stage=${completedState.stage}`)
           if (completedState.stage === 'COMPLETED') {
             try {
-              const fullResult = await researchApi.getRunResult(run_id)
+              const fullResult = await researchApi.getRunResult(currentRunId)
               setActiveResult(fullResult)
               setProviderSource(fullResult.provider_source)
             } catch (err) {
-              console.error('[Research] Failed to fetch completed run result:', err)
+              console.error('[YouTubeResearch] Failed to fetch completed run result:', err)
             }
           }
         }
@@ -200,10 +258,24 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
 
       sseCleanupRef.current = cleanup
     } catch (err: unknown) {
-      console.error('[YouTubeResearch] Start discover failed:', err)
       const msg = err instanceof Error ? err.message : String(err)
+      console.error(`[YouTubeResearch] discover.request.failed reason=${msg}`, err)
       setDiscoverError(msg)
       setDiscoverErrorDetails(err)
+      setActiveProgress({
+        run_id: null,
+        stage: 'FAILED',
+        progress_percent: 0,
+        message: msg,
+        videos_collected: 0,
+        channels_analyzed: 0,
+        keywords_expanded: 0,
+        elapsed_seconds: 0,
+        can_cancel: false,
+        error: msg
+      })
+    } finally {
+      setIsStartingResearch(false)
     }
   }
 
@@ -391,9 +463,16 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
               }}
               onNavigateTab={(tab) => setActiveTab(tab as InternalTab)}
               apiReachabilityStatus={apiReachabilityStatus}
+              isStartingResearch={isStartingResearch}
               errorMessage={discoverError}
               errorDetails={discoverErrorDetails}
-              onDismissError={() => setDiscoverError(null)}
+              onDismissError={() => {
+                setDiscoverError(null)
+                setDiscoverErrorDetails(null)
+                if (activeProgress?.stage === 'FAILED') {
+                  setActiveProgress(null)
+                }
+              }}
               onRetryConnection={refreshStatusAndProjects}
               onRestartSidecar={handleRestartSidecar}
               isAdvancedView={isAdvancedView}

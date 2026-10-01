@@ -9,6 +9,8 @@ interface Props {
 }
 
 const ORDERED_STEPS: { stage: ResearchStage; label: string }[] = [
+  { stage: 'STARTING', label: 'Starting market analysis' },
+  { stage: 'QUEUED', label: 'Queued in background' },
   { stage: 'EXPANDING_KEYWORDS', label: 'Expanding keywords' },
   { stage: 'SEARCHING', label: 'Searching YouTube' },
   { stage: 'FETCHING_METADATA', label: 'Fetching video metadata' },
@@ -31,24 +33,25 @@ export function ResearchProgressPanel({
   onCancel,
   isCancelling
 }: Props): React.ReactElement {
-  const currentStage = progressState?.stage ?? 'QUEUED'
+  const currentStage = progressState?.stage ?? 'STARTING'
   const progressPct = progressState?.progress_percent ?? 0
   const elapsedSecs = progressState?.elapsed_seconds ?? 0
 
   const getStageStatus = (stepStage: ResearchStage): 'done' | 'current' | 'pending' => {
     const stageOrder: Record<string, number> = {
-      QUEUED: 0,
-      EXPANDING_KEYWORDS: 1,
-      SEARCHING: 2,
-      FETCHING_METADATA: 3,
-      BASIC_SCORING: 3,
-      ENRICHING_CANDIDATES: 4,
-      LOADING_CHANNEL_BASELINES: 4,
-      CALCULATING_ADVANCED_METRICS: 5,
-      CLUSTERING: 6,
-      AI_ANALYSIS: 7,
-      PERSISTING: 7,
-      COMPLETED: 8
+      STARTING: 0,
+      QUEUED: 1,
+      EXPANDING_KEYWORDS: 2,
+      SEARCHING: 3,
+      FETCHING_METADATA: 4,
+      BASIC_SCORING: 4,
+      ENRICHING_CANDIDATES: 5,
+      LOADING_CHANNEL_BASELINES: 5,
+      CALCULATING_ADVANCED_METRICS: 6,
+      CLUSTERING: 7,
+      AI_ANALYSIS: 8,
+      PERSISTING: 8,
+      COMPLETED: 9
     }
 
     const currentIdx = stageOrder[currentStage] ?? 0
@@ -69,7 +72,7 @@ export function ResearchProgressPanel({
       padding: '28px',
       boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4)'
     }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}>
         <div>
           <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '1px', color: 'var(--text-muted)' }}>
             Deep Market Research
@@ -77,9 +80,30 @@ export function ResearchProgressPanel({
           <h2 style={{ fontSize: '18px', fontWeight: 700, margin: '4px 0 0 0', color: 'var(--text-primary)' }}>
             Researching “{topic}”
           </h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '6px' }}>
+            <span style={{
+              fontSize: '11px',
+              padding: '2px 8px',
+              borderRadius: '4px',
+              background: currentStage === 'FAILED' ? 'rgba(239, 68, 68, 0.2)' : 'rgba(99, 102, 241, 0.2)',
+              color: currentStage === 'FAILED' ? '#f87171' : '#a5b4fc',
+              fontWeight: 600
+            }}>
+              Stage: {currentStage}
+            </span>
+            {progressState?.run_id ? (
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontFamily: 'var(--font-mono)' }}>
+                Run ID: {progressState.run_id}
+              </span>
+            ) : (
+              <span style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+                Connecting sidecar...
+              </span>
+            )}
+          </div>
         </div>
         <div style={{
-          fontSize: '18px',
+          fontSize: '20px',
           fontWeight: 800,
           fontFamily: 'var(--font-mono)',
           color: 'var(--brand-primary, #6366f1)'
@@ -180,19 +204,40 @@ export function ResearchProgressPanel({
         </div>
       </div>
 
-      {/* Action Footer */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-        <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-          {progressState?.message || 'Processing background analysis...'}
+      {/* Error Alert Box */}
+      {currentStage === 'FAILED' && (
+        <div style={{
+          background: 'rgba(239, 68, 68, 0.12)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          borderRadius: '8px',
+          padding: '12px 16px',
+          marginBottom: '20px',
+          fontSize: '12px',
+          color: '#fca5a5'
+        }}>
+          <div style={{ fontWeight: 600, marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span>⚠️</span>
+            <span>Research failed</span>
+          </div>
+          <div>{progressState?.error || progressState?.message || 'An unknown error occurred during research.'}</div>
         </div>
-        <button
-          className="btn btn-secondary"
-          onClick={onCancel}
-          disabled={isCancelling}
-          style={{ padding: '6px 18px', fontSize: '12px' }}
-        >
-          {isCancelling ? 'Cancelling...' : 'Cancel Research'}
-        </button>
+      )}
+
+      {/* Action Footer */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '16px' }}>
+        <div style={{ fontSize: '12px', color: currentStage === 'FAILED' ? '#f87171' : 'var(--text-muted)', fontStyle: currentStage === 'FAILED' ? 'normal' : 'italic' }}>
+          {progressState?.message || (currentStage === 'STARTING' ? 'Starting market analysis...' : 'Processing background analysis...')}
+        </div>
+        {progressState?.can_cancel !== false && !['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(currentStage) && (
+          <button
+            className="btn btn-secondary"
+            onClick={onCancel}
+            disabled={isCancelling || currentStage === 'STARTING'}
+            style={{ padding: '6px 18px', fontSize: '12px', whiteSpace: 'nowrap' }}
+          >
+            {isCancelling ? 'Cancelling...' : 'Cancel Research'}
+          </button>
+        )}
       </div>
     </div>
   )

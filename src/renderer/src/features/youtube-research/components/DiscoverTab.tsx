@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import type {
   MarketCode,
   ContentType,
@@ -7,7 +7,7 @@ import type {
   ResearchProgressState,
   ApiConnectionStatus
 } from '../types/research.types'
-import { SUPPORTED_MARKETS } from '../types/research.types'
+import { SUPPORTED_MARKETS, isResearchRunActive } from '../types/research.types'
 import { ResearchProgressPanel } from './ResearchProgressPanel'
 import { OverviewSection } from './OverviewSection'
 
@@ -29,6 +29,7 @@ interface Props {
   onCreateProject: (kw: string, angle?: string) => void
   onNavigateTab: (tab: string) => void
   apiReachabilityStatus?: ApiConnectionStatus
+  isStartingResearch?: boolean
   errorMessage?: string | null
   errorDetails?: unknown
   onDismissError?: () => void
@@ -48,6 +49,7 @@ export function DiscoverTab({
   onCreateProject,
   onNavigateTab,
   apiReachabilityStatus = 'reachable',
+  isStartingResearch = false,
   errorMessage,
   errorDetails,
   onDismissError,
@@ -75,12 +77,40 @@ export function DiscoverTab({
   const [isExpanding, setIsExpanding] = useState(false)
 
   const [showDetails, setShowDetails] = useState(false)
+  const [localValidationMessage, setLocalValidationMessage] = useState<string | null>(null)
 
-  const isRunning = activeProgress !== null && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(activeProgress.stage)
+  const progressPanelRef = useRef<HTMLDivElement>(null)
+  const prevBusyRef = useRef<boolean>(false)
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const isRunning = isResearchRunActive(activeProgress)
+  const isBusy = Boolean(isStartingResearch || isRunning)
+  const canSubmit = Boolean(topic.trim()) && !isBusy && apiReachabilityStatus !== 'blocked' && apiReachabilityStatus !== 'offline'
+  const isDisabled = !canSubmit
+
+  useEffect(() => {
+    if (isBusy && !prevBusyRef.current) {
+      // Transition from IDLE to busy: scroll progress panel into view smoothly
+      progressPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    }
+    prevBusyRef.current = isBusy
+  }, [isBusy])
+
+  const getDisabledReason = (): string | null => {
+    if (!topic.trim()) return 'Please enter a topic keyword to analyze'
+    if (isStartingResearch) return 'Starting research request...'
+    if (isRunning) return 'A research run is currently in progress'
+    if (apiReachabilityStatus === 'blocked') return 'Cannot connect to local research API (connection blocked)'
+    if (apiReachabilityStatus === 'offline') return 'Research service is offline. Please start or restart the service.'
+    return null
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!topic.trim() || isRunning || apiReachabilityStatus === 'blocked' || apiReachabilityStatus === 'offline') return
+    if (!canSubmit) {
+      setLocalValidationMessage(getDisabledReason())
+      return
+    }
+    setLocalValidationMessage(null)
 
     const filters: Record<string, unknown> = {}
     if (minViews) filters.min_views = parseInt(minViews, 10)
@@ -90,7 +120,7 @@ export function DiscoverTab({
     if (minOpportunity) filters.min_opportunity = parseFloat(minOpportunity)
     if (maxCompetition) filters.max_competition = parseFloat(maxCompetition)
 
-    onStartDiscover({
+    await onStartDiscover({
       topic: topic.trim(),
       market,
       content_type: contentType,
@@ -218,7 +248,7 @@ export function DiscoverTab({
                 value={topic}
                 onChange={(e) => setTopic(e.target.value)}
                 placeholder="e.g. grocery prices, personal finance, housing market, ai tools"
-                disabled={isRunning}
+                disabled={isBusy}
                 style={{
                   flex: 1,
                   background: 'var(--bg-base, #0a0a0f)',
@@ -233,36 +263,120 @@ export function DiscoverTab({
               <button
                 type="submit"
                 className="btn btn-primary"
-                disabled={!topic.trim() || isRunning || apiReachabilityStatus === 'blocked' || apiReachabilityStatus === 'offline'}
-                title={
-                  apiReachabilityStatus === 'blocked'
-                    ? 'Cannot connect to local research API'
-                    : apiReachabilityStatus === 'offline'
-                    ? 'Research service is offline'
-                    : undefined
-                }
+                disabled={isDisabled}
+                aria-busy={isBusy}
+                title={getDisabledReason() || undefined}
                 style={{
                   padding: '0 24px',
                   fontSize: '13px',
                   fontWeight: 700,
                   letterSpacing: '0.3px',
-                  background: 'linear-gradient(135deg, #6366f1, #4f46e5)',
+                  background: isBusy
+                    ? 'rgba(99, 102, 241, 0.45)'
+                    : isDisabled
+                    ? '#374151'
+                    : 'linear-gradient(135deg, #6366f1, #4f46e5)',
                   border: 'none',
-                  minWidth: '150px'
+                  minWidth: '150px',
+                  cursor: isDisabled ? 'not-allowed' : 'pointer',
+                  opacity: isDisabled ? 0.6 : 1,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '8px',
+                  WebkitAppRegion: 'no-drag' as any
                 }}
               >
-                {isRunning ? 'Analyzing...' : 'Analyze Market'}
+                {isBusy && (
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '12px',
+                      height: '12px',
+                      border: '2px solid rgba(255, 255, 255, 0.3)',
+                      borderTopColor: '#ffffff',
+                      borderRadius: '50%',
+                      animation: 'spin 0.8s linear infinite'
+                    }}
+                  />
+                )}
+                <span>
+                  {isStartingResearch
+                    ? 'Starting...'
+                    : activeProgress?.stage === 'QUEUED'
+                    ? 'Queued...'
+                    : isRunning
+                    ? 'Analyzing...'
+                    : 'Analyze Market'}
+                </span>
               </button>
               <button
                 type="button"
                 className="btn btn-secondary"
                 onClick={handleExpandOnly}
-                disabled={!topic.trim() || isRunning || isExpanding}
-                style={{ fontSize: '12px', padding: '0 16px' }}
+                disabled={!topic.trim() || isBusy || isExpanding}
+                style={{ fontSize: '12px', padding: '0 16px', WebkitAppRegion: 'no-drag' as any }}
               >
                 {isExpanding ? 'Finding...' : 'Find Related Keywords'}
               </button>
             </div>
+
+            {(isDisabled || localValidationMessage) && (
+              <div
+                style={{
+                  marginTop: '8px',
+                  fontSize: '12px',
+                  color:
+                    apiReachabilityStatus === 'blocked' || apiReachabilityStatus === 'offline'
+                      ? '#f87171'
+                      : isBusy
+                      ? '#818cf8'
+                      : 'var(--text-muted)',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <span>{apiReachabilityStatus === 'blocked' || apiReachabilityStatus === 'offline' ? '⚠️' : 'ℹ️'}</span>
+                <span>{localValidationMessage || getDisabledReason()}</span>
+              </div>
+            )}
+
+            {isBusy && (
+              <div
+                style={{
+                  marginTop: '12px',
+                  padding: '10px 14px',
+                  background: 'rgba(99, 102, 241, 0.1)',
+                  border: '1px solid rgba(99, 102, 241, 0.25)',
+                  borderRadius: '8px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  fontSize: '12px'
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#a5b4fc', fontWeight: 600 }}>
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      background: '#818cf8',
+                      animation: 'pulse 1.5s infinite'
+                    }}
+                  />
+                  <span>Stage: {activeProgress?.stage || (isStartingResearch ? 'STARTING' : 'QUEUED')}</span>
+                  <span style={{ color: 'var(--text-secondary)', fontWeight: 400 }}>
+                    — {activeProgress?.message || 'Starting market analysis...'}
+                  </span>
+                </div>
+                <div style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, color: '#818cf8' }}>
+                  {activeProgress?.progress_percent ?? 0}%
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Quick Selectors Row */}
@@ -280,7 +394,7 @@ export function DiscoverTab({
               <select
                 value={market}
                 onChange={(e) => setMarket(e.target.value as MarketCode)}
-                disabled={isRunning}
+                disabled={isBusy}
                 style={{
                   width: '100%',
                   background: 'var(--bg-base)',
@@ -307,7 +421,7 @@ export function DiscoverTab({
               <select
                 value={contentType}
                 onChange={(e) => setContentType(e.target.value as ContentType)}
-                disabled={isRunning}
+                disabled={isBusy}
                 style={{
                   width: '100%',
                   background: 'var(--bg-base)',
@@ -332,7 +446,7 @@ export function DiscoverTab({
               <select
                 value={timeRange}
                 onChange={(e) => setTimeRange(e.target.value as TimeRange)}
-                disabled={isRunning}
+                disabled={isBusy}
                 style={{
                   width: '100%',
                   background: 'var(--bg-base)',
@@ -360,7 +474,7 @@ export function DiscoverTab({
               <select
                 value={resultLimit}
                 onChange={(e) => setResultLimit(parseInt(e.target.value, 10))}
-                disabled={isRunning}
+                disabled={isBusy}
                 style={{
                   width: '100%',
                   background: 'var(--bg-base)',
@@ -521,17 +635,19 @@ export function DiscoverTab({
       </div>
 
       {/* ── Active Progress Panel ── */}
-      {isRunning && (
-        <ResearchProgressPanel
-          topic={topic}
-          progressState={activeProgress}
-          onCancel={onCancelResearch}
-          isCancelling={isCancelling}
-        />
+      {isBusy && (
+        <div ref={progressPanelRef} style={{ scrollMarginTop: '24px' }}>
+          <ResearchProgressPanel
+            topic={topic}
+            progressState={activeProgress}
+            onCancel={onCancelResearch}
+            isCancelling={isCancelling}
+          />
+        </div>
       )}
 
       {/* ── Active Result Overview ── */}
-      {!isRunning && activeResult && (
+      {!isBusy && activeResult && (
         <OverviewSection
           result={activeResult}
           onSelectKeyword={onSelectKeyword}

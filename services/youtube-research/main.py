@@ -1,5 +1,6 @@
 import asyncio
 import json
+import time
 import uuid
 from contextlib import asynccontextmanager
 from typing import Dict, Any, Optional, List
@@ -98,7 +99,9 @@ async def health_check():
 
 @app.post("/api/research/discover", response_model=DiscoverResponse)
 async def start_discovery(req: DiscoverRequest, db: Session = Depends(get_db)):
+    start_time = time.perf_counter()
     topic = req.topic.strip()
+    research_logger.info(f"[ResearchAPI] discover.received topic={topic} market={req.market}")
     if not topic:
         raise HTTPException(status_code=422, detail="Topic keyword cannot be empty")
 
@@ -118,6 +121,7 @@ async def start_discovery(req: DiscoverRequest, db: Session = Depends(get_db)):
         message="Queued for analysis"
     )
     repo.create_run(run)
+    research_logger.info(f"[ResearchAPI] run.created run_id={run_id}")
 
     # Spawn background async task
     task = asyncio.create_task(
@@ -132,6 +136,10 @@ async def start_discovery(req: DiscoverRequest, db: Session = Depends(get_db)):
         )
     )
     task_manager.register_run(run_id, task)
+    research_logger.info(f"[ResearchAPI] task.scheduled run_id={run_id}")
+
+    duration_ms = round((time.perf_counter() - start_time) * 1000, 2)
+    research_logger.info(f"[ResearchAPI] discover.response run_id={run_id} duration_ms={duration_ms}")
 
     return DiscoverResponse(
         run_id=run_id,
@@ -150,6 +158,7 @@ async def expand_keywords_endpoint(req: KeywordExpandRequest):
 
 @app.get("/api/research/stream/{run_id}")
 async def stream_progress(run_id: str, db: Session = Depends(get_db)):
+    research_logger.info(f"[ResearchAPI] stream.requested run_id={run_id}")
     repo = ResearchRepository(db)
     run = repo.get_run(run_id)
     if not run:

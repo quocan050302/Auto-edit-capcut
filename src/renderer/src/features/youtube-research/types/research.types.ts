@@ -27,6 +27,7 @@ export type TrendState = 'Emerging' | 'Rising' | 'Stable' | 'Cooling'
 export type ApiConnectionStatus = 'checking' | 'reachable' | 'blocked' | 'offline'
 
 export type ResearchStage =
+  | 'STARTING'
   | 'QUEUED'
   | 'EXPANDING_KEYWORDS'
   | 'SEARCHING'
@@ -43,8 +44,47 @@ export type ResearchStage =
   | 'CANCELLED'
   | 'INTERRUPTED'
 
+export const ACTIVE_RESEARCH_STAGES = [
+  'STARTING',
+  'QUEUED',
+  'RUNNING',
+  'EXPANDING_KEYWORDS',
+  'SEARCHING',
+  'FETCHING_METADATA',
+  'BASIC_SCORING',
+  'ENRICHING_CANDIDATES',
+  'LOADING_CHANNEL_BASELINES',
+  'CALCULATING_ADVANCED_METRICS',
+  'CLUSTERING',
+  'AI_ANALYSIS',
+  'PERSISTING'
+] as const
+
+export const TERMINAL_RESEARCH_STAGES = [
+  'COMPLETED',
+  'FAILED',
+  'CANCELLED',
+  'INTERRUPTED'
+] as const
+
+export function isResearchStageActive(stage?: string | null): boolean {
+  if (!stage || stage === 'IDLE') return false
+  if ((TERMINAL_RESEARCH_STAGES as readonly string[]).includes(stage)) return false
+  return true
+}
+
+export function isResearchStageTerminal(stage?: string | null): boolean {
+  if (!stage) return false
+  return (TERMINAL_RESEARCH_STAGES as readonly string[]).includes(stage)
+}
+
+export function isResearchRunActive(progress?: ResearchProgressState | null): boolean {
+  if (!progress) return false
+  return isResearchStageActive(progress.stage)
+}
+
 export interface ResearchProgressState {
-  run_id: string
+  run_id?: string | null
   stage: ResearchStage
   progress_percent: number
   message: string

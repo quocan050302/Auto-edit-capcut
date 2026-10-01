@@ -111,3 +111,30 @@ def test_run_status_endpoint(mock_execute):
     data = status_res.json()
     assert data["run_id"] == run_id
     assert data["stage"] in ("QUEUED", "EXPANDING_KEYWORDS", "SEARCHING", "COMPLETED", "FAILED", "CANCELLED")
+
+def test_unknown_run_status_returns_404():
+    """Test that requesting status of a non-existent run returns 404."""
+    res = client.get("/api/research/runs/nonexistent_run_9999/status")
+    assert res.status_code == 404
+
+def test_unknown_stream_returns_404():
+    """Test that streaming progress of a non-existent run returns 404."""
+    res = client.get("/api/research/stream/nonexistent_run_9999")
+    assert res.status_code == 404
+
+@patch("services.discovery_service.DiscoveryService.execute_discovery_run", new_callable=AsyncMock)
+def test_discover_returns_rapidly_without_awaiting_job(mock_execute):
+    """Test that discover endpoint returns immediately with run_id without blocking on execution."""
+    import time
+    start = time.perf_counter()
+    res = client.post("/api/research/discover", json={
+        "topic": "rapid response test",
+        "market": "US",
+        "content_type": "LONG",
+        "time_range": "30d"
+    })
+    duration = time.perf_counter() - start
+    assert res.status_code == 200
+    assert duration < 0.5  # Under 500ms
+    assert "run_id" in res.json()
+
