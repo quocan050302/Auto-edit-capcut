@@ -156,33 +156,32 @@ async function runTests(): Promise<void> {
     assert.strictEqual(result.fifeUrl, 'https://images.google.com/sample.jpg')
   })
 
-  await it('5. Retries on 429 rate limit with backoff and succeeds', async () => {
+  await it('5. Client throws FLOW_RATE_LIMITED on 429 (orchestrator owns retry, not client)', async () => {
     let callCount = 0
     handler = (req, res) => {
       if (req.url === '/api/flow/generate-image') {
         callCount++
-        if (callCount === 1) {
-          res.writeHead(429, { 'Retry-After': '1', 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ error: 'Rate limited by Google Flow' }))
-        } else {
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(
-            JSON.stringify({
-              media: [{ name: 'media-recovered-after-429' }]
-            })
-          )
-        }
+        res.writeHead(429, { 'Retry-After': '1', 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Rate limited by Google Flow' }))
       }
     }
 
-    const result = await client.generateImage({
-      prompt: 'Pantry canned goods',
-      candidateId: 'cand-2',
-      optionId: 'B'
-    })
+    let errorCode = ''
+    try {
+      await client.generateImage({
+        prompt: 'Pantry canned goods',
+        candidateId: 'cand-2',
+        optionId: 'B'
+      })
+      assert.fail('Should have thrown on 429')
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e)
+      errorCode = msg.startsWith('FLOW_RATE_LIMITED') ? 'FLOW_RATE_LIMITED' : msg
+    }
 
-    assert.strictEqual(result.mediaId, 'media-recovered-after-429')
-    assert.strictEqual(callCount, 2)
+    // Client makes exactly ONE request and throws — orchestrator handles retry
+    assert.strictEqual(callCount, 1, 'Client should make exactly 1 request (no internal retry)')
+    assert.strictEqual(errorCode, 'FLOW_RATE_LIMITED', 'Should throw FLOW_RATE_LIMITED for orchestrator to handle')
   })
 
   await it('6. Fails immediately without infinite retry on 400 invalid argument', async () => {

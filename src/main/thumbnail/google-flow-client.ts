@@ -136,10 +136,8 @@ export class GoogleFlowClient {
   }
 
   public async generateImage(
-    request: ThumbnailGenerateRequest,
-    options?: { maxRetries?: number }
+    request: ThumbnailGenerateRequest
   ): Promise<ThumbnailGenerateResult> {
-    const maxRetries = options?.maxRetries ?? 3
     const url = `${this.bridgeUrl}/api/flow/generate-image`
 
     const payload = {
@@ -151,133 +149,76 @@ export class GoogleFlowClient {
       reference_media_ids: []
     }
 
-    let attempt = 0
-    let lastError: Error | null = null
+    logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`)
 
-    while (attempt <= maxRetries) {
-      attempt++
-      try {
-        logger.info(
-          `[GoogleFlowClient] Generating candidate ${request.optionId} (attempt ${attempt}/${maxRetries + 1})...`
-        )
-
-        const resp = await this.fetchWithTimeout(
-          url,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-flowkit-caller': 'long-form-video-factory/thumbnail-studio'
-            },
-            body: JSON.stringify(payload)
+    let resp: Response
+    try {
+      resp = await this.fetchWithTimeout(
+        url,
+        {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-flowkit-caller': 'long-form-video-factory/thumbnail-studio'
           },
-          120000
-        )
+          body: JSON.stringify(payload)
+        },
+        120000
+      )
+    } catch (err) {
+      // Preserve the original error with cause (ECONNREFUSED etc.) — orchestrator classifies it
+      throw err
+    }
 
-        if (resp.ok) {
-          const data = (await resp.json()) as {
-            media?: Array<{
-              name?: string
-              image?: { generatedImage?: { mediaId?: string; fifeUrl?: string } }
-            }>
-            project_id?: string
-          }
+    if (resp.ok) {
+      const data = (await resp.json()) as {
+        media?: Array<{
+          name?: string
+          image?: { generatedImage?: { mediaId?: string; fifeUrl?: string } }
+        }>
+        project_id?: string
+      }
 
-          const firstMedia = data.media?.[0]
-          const mediaId = firstMedia?.image?.generatedImage?.mediaId || firstMedia?.name
-          const fifeUrl = firstMedia?.image?.generatedImage?.fifeUrl
+      const firstMedia = data.media?.[0]
+      const mediaId = firstMedia?.image?.generatedImage?.mediaId || firstMedia?.name
+      const fifeUrl = firstMedia?.image?.generatedImage?.fifeUrl
 
-          if (!mediaId) {
-            throw new Error('FLOW_GENERATION_FAILED: FlowKit returned response without mediaId.')
-          }
+      if (!mediaId) {
+        throw new Error('FLOW_GENERATION_FAILED: FlowKit returned response without mediaId.')
+      }
 
-          logger.info(`[GoogleFlowClient] Candidate ${request.optionId} generated media: ${mediaId}`)
-          return {
-            mediaId,
-            projectId: data.project_id || request.projectId || '',
-            fifeUrl,
-            raw: data
-          }
-        }
-
-        // Handle error responses
-        const status = resp.status
-        let errorBody: FlowKitErrorResponse = {}
-        try {
-          errorBody = (await resp.json()) as FlowKitErrorResponse
-        } catch {
-          // non-JSON error
-        }
-
-        const errMsg = errorBody.error || errorBody.detail || (typeof errorBody === 'string' ? errorBody : '') || `HTTP ${status}`
-
-        // 1. Extension disconnected
-        if (status === 503 || String(errMsg).toLowerCase().includes('extension not connected')) {
-          throw new Error('FLOW_EXTENSION_DISCONNECTED: Chrome extension is disconnected. Open Google Flow in Chrome and reconnect.')
-        }
-
-        // 2. Non-retryable argument errors
-        if (status === 400 || status === 422 || String(errMsg).toLowerCase().includes('invalid argument')) {
-          throw new Error(`FLOW_GENERATION_FAILED: Invalid argument: ${errMsg}`)
-        }
-
-        // 3. Rate limiting (429) & Cooldown
-        if (status === 429 || String(errMsg).toLowerCase().includes('rate limit') || String(errMsg).toLowerCase().includes('cooldown')) {
-          const retryAfterSec = parseInt(resp.headers.get('Retry-After') || '10', 10) || 10
-          if (attempt <= maxRetries) {
-            const waitMs = Math.min(retryAfterSec * 1000, 35000)
-            logger.warn(`[GoogleFlowClient] Rate limited. Waiting ${waitMs}ms before retry...`)
-            await new Promise((r) => setTimeout(r, waitMs))
-            continue
-          }
-          throw new Error(`FLOW_RATE_LIMITED: Google Flow rate limit reached. (${errMsg})`)
-        }
-
-        // 4. reCAPTCHA transient failures
-        if (String(errMsg).toLowerCase().includes('recaptcha')) {
-          if (attempt <= maxRetries) {
-            const waitMs = 5000 * attempt
-            logger.warn(`[GoogleFlowClient] reCAPTCHA challenge transient error. Retrying in ${waitMs}ms...`)
-            await new Promise((r) => setTimeout(r, waitMs))
-            continue
-          }
-          throw new Error(`FLOW_RECAPTCHA_FAILED: Google Flow reCAPTCHA verification failed. (${errMsg})`)
-        }
-
-        // 5. 502 / 503 / 504 server overload
-        if (status >= 500) {
-          if (attempt <= maxRetries) {
-            const waitMs = 4000 * Math.pow(2, attempt - 1)
-            logger.warn(`[GoogleFlowClient] Server error ${status}. Retrying in ${waitMs}ms...`)
-            await new Promise((r) => setTimeout(r, waitMs))
-            continue
-          }
-        }
-
-        throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`)
-      } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err))
-        const msg = lastError.message
-
-        if (
-          msg.startsWith('FLOW_EXTENSION_DISCONNECTED') ||
-          msg.startsWith('FLOW_RATE_LIMITED') ||
-          msg.startsWith('FLOW_RECAPTCHA_FAILED') ||
-          msg.startsWith('FLOW_GENERATION_FAILED')
-        ) {
-          throw lastError
-        }
-
-        if (attempt <= maxRetries) {
-          const waitMs = 3000 * attempt
-          logger.warn(`[GoogleFlowClient] Request exception: ${msg}. Retrying in ${waitMs}ms...`)
-          await new Promise((r) => setTimeout(r, waitMs))
-          continue
-        }
+      logger.info(`[GoogleFlowClient] Candidate ${request.optionId} generated media: ${mediaId}`)
+      return {
+        mediaId,
+        projectId: data.project_id || request.projectId || '',
+        fifeUrl,
+        raw: data
       }
     }
 
-    throw lastError || new Error('FLOW_GENERATION_FAILED: Unknown generation error')
+    // Handle HTTP error responses
+    const status = resp.status
+    let errorBody: FlowKitErrorResponse = {}
+    try {
+      errorBody = (await resp.json()) as FlowKitErrorResponse
+    } catch { /* non-JSON error */ }
+
+    const errMsg = errorBody.error || errorBody.detail || (typeof errorBody === 'string' ? errorBody : '') || `HTTP ${status}`
+
+    if (status === 503 || String(errMsg).toLowerCase().includes('extension not connected')) {
+      throw new Error(`FLOW_EXTENSION_DISCONNECTED: Chrome extension is disconnected. Open Google Flow in Chrome and reconnect.`)
+    }
+    if (status === 400 || status === 422) {
+      throw new Error(`FLOW_GENERATION_FAILED: Invalid argument: ${errMsg}`)
+    }
+    if (status === 429 || String(errMsg).toLowerCase().includes('rate limit') || String(errMsg).toLowerCase().includes('cooldown')) {
+      throw new Error(`FLOW_RATE_LIMITED: Google Flow rate limit reached. (${errMsg})`)
+    }
+    if (String(errMsg).toLowerCase().includes('recaptcha')) {
+      throw new Error(`FLOW_RECAPTCHA_FAILED: Google Flow reCAPTCHA verification failed. (${errMsg})`)
+    }
+
+    throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`)
   }
 
   public async exportImage(request: ThumbnailExportRequest): Promise<ThumbnailExportResult> {
