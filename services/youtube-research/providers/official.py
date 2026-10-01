@@ -4,23 +4,25 @@ from typing import List, Dict, Any, Optional, Tuple
 import httpx
 from providers.protocol import RawVideoData, RawChannelData
 from utils.parsers import parse_duration, calculate_age_days
+from utils.time_window import resolve_time_window, TimeWindow
 from core.logger import research_logger
 
-
-def _published_after_from_range(time_range: str) -> Optional[str]:
-    """Convert time_range string to RFC3339 publishedAfter for YouTube API."""
-    now = datetime.now(timezone.utc)
-    mapping = {
-        "7d": 7,
-        "30d": 30,
-        "90d": 90,
-        "365d": 365,
-    }
-    days = mapping.get(time_range)
-    if days is None:
-        return None
-    dt = now - timedelta(days=days)
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+def _resolve_published_bounds(
+    time_range: str,
+    published_after: Optional[str] = None,
+    published_before: Optional[str] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Return (publishedAfter, publishedBefore) RFC3339 strings.
+    If explicit bounds are given, use those directly.
+    Otherwise resolve from time_range string.
+    """
+    if published_after is not None or published_before is not None:
+        return published_after, published_before
+    if time_range == "all":
+        return None, None
+    tw = resolve_time_window(time_range)
+    return tw.to_published_after_rfc3339(), tw.to_published_before_rfc3339()
 
 
 def _classify_content_type(duration_seconds: int) -> str:
@@ -54,15 +56,22 @@ class OfficialYouTubeProvider:
         time_range: str = "30d",
         limit: int = 50,
         page_token: Optional[str] = None,
+        # V2: explicit bucket bounds (override time_range when set)
+        published_after: Optional[str] = None,
+        published_before: Optional[str] = None,
     ) -> Tuple[List[RawVideoData], Optional[str]]:
         """
         Search videos via YouTube Data API.
-        Returns (videos, next_page_token). next_page_token is None when no more pages.
+        Returns (videos, next_page_token).
+        
+        V2: Sends both publishedAfter AND publishedBefore for precise time windows.
+        When published_after/published_before are given explicitly (bucket mode),
+        they override the time_range-derived bounds.
         """
         if not self.api_key:
             return [], None
 
-        published_after = _published_after_from_range(time_range)
+        pa, pb = _resolve_published_bounds(time_range, published_after, published_before)
         search_url = "https://www.googleapis.com/youtube/v3/search"
         params: Dict[str, Any] = {
             "key": self.api_key,
@@ -75,19 +84,15 @@ class OfficialYouTubeProvider:
             "order": "relevance",
         }
 
-        if published_after:
-            params["publishedAfter"] = published_after
+        if pa:
+            params["publishedAfter"] = pa
+        if pb:
+            params["publishedBefore"] = pb
 
         if page_token:
             params["pageToken"] = page_token
 
-        # For content_type filtering at search level:
-        # LONG → medium or long (we get both and post-filter by duration)
-        # SHORT → short (YouTube Shorts bucket, we post-filter ≤60s)
-        if content_type == "LONG":
-            # Don't restrict videoDuration here — we post-filter after fetching contentDetails
-            pass
-        elif content_type == "SHORT":
+        if content_type == "SHORT":
             params["videoDuration"] = "short"
 
         video_ids: List[str] = []

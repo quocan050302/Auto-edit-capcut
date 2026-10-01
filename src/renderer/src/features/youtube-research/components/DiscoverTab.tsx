@@ -566,6 +566,9 @@ export function DiscoverTab({
                 <option value="7d">Last 7 Days</option>
                 <option value="30d">Last 30 Days (Recommended)</option>
                 <option value="90d">Last 90 Days</option>
+                <option value="4m">Last 4 Months</option>
+                <option value="5m">Last 5 Months</option>
+                <option value="6m">Last 6 Months</option>
                 <option value="1y">Past Year</option>
                 <option value="all">All Time</option>
               </select>

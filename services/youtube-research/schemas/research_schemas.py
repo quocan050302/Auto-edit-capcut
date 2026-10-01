@@ -212,6 +212,16 @@ class NearMatchSuggestionSchema(BaseModel):
     description: str
 
 # V2: Search diagnostics
+class TimeBucketDiagSchema(BaseModel):
+    bucket_index: int = 0
+    label: str = ""
+    start_utc: Optional[str] = None
+    end_utc: Optional[str] = None
+    raw_results: int = 0
+    valid_results: int = 0
+    provider_calls: int = 0
+    out_of_window_dropped: int = 0
+
 class SearchDiagnosticsSchema(BaseModel):
     queries_generated: int = 0
     queries_searched: int = 0
@@ -229,6 +239,15 @@ class SearchDiagnosticsSchema(BaseModel):
     search_stop_reason: str = ""
     search_budget_used: int = 0
     search_budget_total: int = 0
+    # V2.1 time window fields
+    time_range_key: str = ""
+    time_range_label: str = ""
+    resolved_start_utc: Optional[str] = None
+    resolved_end_utc: Optional[str] = None
+    bucket_count: int = 0
+    buckets_covered: int = 0
+    out_of_window_dropped: int = 0
+    time_buckets: List[TimeBucketDiagSchema] = []
 
 class ResearchRunResultSchema(BaseModel):
     run_id: str

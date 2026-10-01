@@ -1,16 +1,18 @@
 """
-Discovery Service — Micro-Niche Intelligence V2
+Discovery Service — Micro-Niche Intelligence V2.1
 
 Key design changes from V1:
 1. `limit` from UI controls real target unique-video count.
-2. Search budget (max API calls) derived from depth/limit, not hardcoded.
+2. Search budget taken from filters.search_query_budget (UI value).
 3. ALL candidate channels enriched (not just first 15).
 4. market_universe: ALL matching videos → competition/demand/supply.
 5. matching_evidence: only videos passing advanced filters.
 6. Three-state subscriber model: VERIFIED / UNVERIFIED / REJECTED.
 7. Near-match recovery when exact_matches == 0.
 8. Search diagnostics logged and returned.
-9. Backward-compatible response schema (old fields still present).
+9. Temporal bucket sampling: distributes queries across time buckets.
+10. Both publishedAfter AND publishedBefore sent to YouTube API.
+11. Backward-compatible response schema (old fields still present).
 """
 
 import asyncio
@@ -22,6 +24,7 @@ import json
 from core.logger import research_logger
 from core.config import settings
 from db.engine import SessionLocal
+from utils.time_window import resolve_time_window, TimeBucket, TimeWindow
 from models.entities import (
     ResearchRun,
     Video,
@@ -73,6 +76,7 @@ from schemas.research_schemas import (
     CandidateVideoSchema,
     NearMatchSuggestionSchema,
     SearchDiagnosticsSchema,
+    TimeBucketDiagSchema,
 )
 from utils.parsers import calculate_age_days
 from services.filter_service import (
@@ -88,19 +92,98 @@ from services.filter_service import (
 )
 
 
-# ─── Search Budget by limit ───────────────────────────────────────────────────
+# ─── Search Budget ────────────────────────────────────────────────────────────
 
-def _derive_search_budget(limit: int) -> Tuple[int, int]:
+def _resolve_search_budget(
+    limit: int,
+    user_budget: Optional[int],
+) -> int:
     """
-    Map UI limit → (target_unique_videos, max_search_calls).
-    Returns (target, budget).
+    Resolve the final search query budget.
+    Priority: user_budget (from UI) > limit-derived default.
+
+    The budget is the number of *search query variants* sent to the provider.
+    It does NOT include channel baseline calls.
     """
+    if user_budget is not None and user_budget >= 1:
+        return max(1, min(user_budget, 20))  # cap at 20 for safety
+    # Fallback: derive from limit (legacy behaviour)
     if limit <= 60:
-        return 100, 8       # Fast
+        return 6
     elif limit <= 200:
-        return 250, 16      # Balanced
+        return 8
     else:
-        return 500, 28      # Deep
+        return 10
+
+
+# ─── Temporal Bucket Query Planner ────────────────────────────────────────────
+
+def _plan_bucket_queries(
+    keywords: List[str],
+    time_window: TimeWindow,
+    query_budget: int,
+) -> List[Dict[str, Any]]:
+    """
+    Distribute query budget across time buckets using round-robin.
+
+    Rules:
+    - Base topic (keywords[0]) must run on every bucket.
+    - Remaining budget allocated round-robin across buckets.
+    - All buckets get at least one query before pagination or extra queries.
+
+    Returns a list of planned calls:
+    [
+        {"query": str, "bucket": TimeBucket, "bucket_idx": int},
+        ...
+    ]
+    """
+    buckets = time_window.buckets
+    n_buckets = len(buckets)
+    if n_buckets == 0:
+        # Degenerate: single bucket covering all time
+        return [
+            {"query": kw, "bucket": None, "bucket_idx": 0,
+             "published_after": time_window.to_published_after_rfc3339(),
+             "published_before": time_window.to_published_before_rfc3339()}
+            for kw in keywords[:query_budget]
+        ]
+
+    planned: List[Dict[str, Any]] = []
+    remaining_budget = query_budget
+
+    # Phase 1: Base topic runs in every bucket (guarantees all-time coverage)
+    base_kw = keywords[0] if keywords else ""
+    for b in buckets:
+        if remaining_budget <= 0:
+            break
+        planned.append({
+            "query": base_kw,
+            "bucket": b,
+            "bucket_idx": b.bucket_index,
+            "published_after": b.start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "published_before": b.end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        remaining_budget -= 1
+
+    # Phase 2: Distribute remaining keywords round-robin across buckets
+    extra_keywords = keywords[1:] if len(keywords) > 1 else []
+    kw_idx = 0
+    bucket_idx = 0
+    while remaining_budget > 0 and extra_keywords:
+        kw = extra_keywords[kw_idx % len(extra_keywords)]
+        b = buckets[bucket_idx % n_buckets]
+        planned.append({
+            "query": kw,
+            "bucket": b,
+            "bucket_idx": b.bucket_index,
+            "published_after": b.start_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "published_before": b.end_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+        kw_idx += 1
+        bucket_idx += 1
+        remaining_budget -= 1
+
+    return planned
 
 
 # ─── Near-match suggestion generator ─────────────────────────────────────────
@@ -206,8 +289,10 @@ class DiscoveryService:
         filter_stats = FilterStats()
         diag = SearchDiagnosticsSchema()
 
-        target_unique_videos, search_budget = _derive_search_budget(limit)
-        diag.search_budget_total = search_budget
+        # V2.1: Resolve time window once — single source of truth
+        time_window = resolve_time_window(time_range)
+        query_budget = _resolve_search_budget(limit, filters.search_query_budget if filters else None)
+        diag.search_budget_total = query_budget
 
         async def update_progress(
             stage: str,
@@ -285,7 +370,8 @@ class DiscoveryService:
         try:
             research_logger.info(
                 f"[Discovery] Starting run {run_id} topic={topic} market={market} "
-                f"limit={limit} budget={search_budget} target={target_unique_videos}"
+                f"time_range={time_range} window={time_window.label} "
+                f"buckets={len(time_window.buckets)} limit={limit} budget={query_budget}"
             )
             await update_progress("QUEUED", 5, "Initializing research run...")
 
@@ -329,10 +415,23 @@ class DiscoveryService:
                 await update_progress("CANCELLED", None, "Research cancelled by user")
                 return
 
-            # ── Stage 2: SEARCHING — adaptive with early stop ─────────────────
+            # ── Stage 2: SEARCHING — temporal bucket sampling ─────────────────
+            # V2.1: Distribute query budget across time buckets so all time
+            # periods get coverage. publishedAfter + publishedBefore both sent.
+
+            # Plan calls: base keyword in each bucket, then round-robin extras
+            planned_calls = _plan_bucket_queries(expanded_keywords, time_window, query_budget)
+            diag.queries_generated = keywords_count
+
+            research_logger.info(
+                f"[Discovery] Planned {len(planned_calls)} calls across "
+                f"{len(time_window.buckets)} buckets (budget={query_budget})"
+            )
+
             await update_progress(
                 "SEARCHING", 30,
-                f"Searching YouTube across {keywords_count} queries (budget={search_budget})...",
+                f"Searching YouTube across {len(planned_calls)} queries / "
+                f"{len(time_window.buckets)} time buckets ({time_window.label})...",
                 keywords_expanded=keywords_count
             )
 
@@ -343,22 +442,18 @@ class DiscoveryService:
             keyword_to_videos: Dict[str, List[Any]] = {}
 
             search_calls_used = 0
+            out_of_window_dropped = 0
             stop_reason = "budget_exhausted"
 
-            for idx, kw in enumerate(expanded_keywords):
+            for call_idx, call in enumerate(planned_calls):
                 if task_manager.is_cancelled(run_id):
                     await update_progress("CANCELLED", None, "Research cancelled by user")
                     return
 
-                # Early stop: budget exhausted
-                if search_calls_used >= search_budget:
-                    stop_reason = "budget_exhausted"
-                    break
-
-                # Early stop: target reached
-                if len(seen_video_ids) >= target_unique_videos:
-                    stop_reason = "target_reached"
-                    break
+                kw = call["query"]
+                pa = call.get("published_after")
+                pb = call.get("published_before")
+                bucket: Optional[TimeBucket] = call.get("bucket")
 
                 res_videos = await self.provider_mgr.search_videos(
                     query=kw,
@@ -366,29 +461,50 @@ class DiscoveryService:
                     language=language,
                     content_type=content_type,
                     time_range=time_range,
-                    limit=50
+                    limit=50,
+                    published_after=pa,
+                    published_before=pb,
                 )
                 search_calls_used += 1
-                diag.raw_results += len(res_videos)
+                raw_count = len(res_videos)
+                diag.raw_results += raw_count
+                if bucket:
+                    bucket.provider_calls += 1
+                    bucket.raw_results += raw_count
+
+                # Post-filter: discard videos outside the resolved time window
+                # (provider may return slightly out-of-window results)
+                videos_in_window = []
+                for v in res_videos:
+                    if time_window.is_video_in_window(v.published_at):
+                        videos_in_window.append(v)
+                    else:
+                        out_of_window_dropped += 1
+                        if bucket:
+                            bucket.out_of_window_dropped += 1
 
                 # Dedup and add to market universe
                 kw_new = []
-                for v in res_videos:
+                for v in videos_in_window:
                     if v.video_id not in seen_video_ids:
                         seen_video_ids.add(v.video_id)
                         market_universe_videos.append(v)
                         kw_new.append(v)
-                    # If already seen, still track for keyword association
                 if kw_new:
-                    keyword_to_videos[kw] = kw_new
+                    keyword_to_videos[kw] = keyword_to_videos.get(kw, []) + kw_new
+                    if bucket:
+                        bucket.valid_results += len(kw_new)
 
-                pct = 30 + int((idx + 1) / max(len(expanded_keywords), 1) * 20)
+                pct = 30 + int((call_idx + 1) / max(len(planned_calls), 1) * 20)
                 await update_progress(
                     "FETCHING_METADATA", pct,
-                    f"Collected {len(seen_video_ids)} unique videos...",
+                    f"Bucket {call.get('bucket_idx', 0)+1}/{len(time_window.buckets)}: "
+                    f"collected {len(seen_video_ids)} unique videos...",
                     videos_collected=len(seen_video_ids),
                     keywords_expanded=keywords_count
                 )
+
+            stop_reason = "budget_exhausted"
 
             diag.queries_searched = search_calls_used
             diag.search_budget_used = search_calls_used
@@ -397,10 +513,33 @@ class DiscoveryService:
                 1.0 - len(seen_video_ids) / max(diag.raw_results, 1), 3
             )
             diag.search_stop_reason = stop_reason
+            # V2.1 time window coverage
+            diag.time_range_key = time_window.range_key
+            diag.time_range_label = time_window.label
+            diag.resolved_start_utc = time_window.start_utc.isoformat() if time_window.start_utc else None
+            diag.resolved_end_utc = time_window.end_utc.isoformat()
+            diag.bucket_count = len(time_window.buckets)
+            diag.buckets_covered = sum(1 for b in time_window.buckets if b.raw_results > 0)
+            diag.out_of_window_dropped = out_of_window_dropped
+            diag.time_buckets = [
+                TimeBucketDiagSchema(
+                    bucket_index=b.bucket_index,
+                    label=b.label,
+                    start_utc=b.start_utc.isoformat(),
+                    end_utc=b.end_utc.isoformat(),
+                    raw_results=b.raw_results,
+                    valid_results=b.valid_results,
+                    provider_calls=b.provider_calls,
+                    out_of_window_dropped=b.out_of_window_dropped,
+                )
+                for b in time_window.buckets
+            ]
 
             research_logger.info(
                 f"[Discovery] Search done: {len(seen_video_ids)} unique / {diag.raw_results} raw "
-                f"queries={search_calls_used}/{search_budget} stop={stop_reason}"
+                f"queries={search_calls_used}/{query_budget} window={time_window.label} "
+                f"buckets_covered={diag.buckets_covered}/{diag.bucket_count} "
+                f"out_of_window_dropped={out_of_window_dropped} stop={stop_reason}"
             )
 
             if task_manager.is_cancelled(run_id):

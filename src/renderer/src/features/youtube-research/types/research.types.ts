@@ -19,7 +19,7 @@ export const SUPPORTED_MARKETS: MarketInfo[] = [
 ]
 
 export type ContentType = 'LONG' | 'SHORT' | 'BOTH'
-export type TimeRange = '24h' | '7d' | '30d' | '90d' | '1y' | '365d' | 'all' | 'custom'
+export type TimeRange = '24h' | '7d' | '30d' | '90d' | '4m' | '5m' | '6m' | '1y' | '365d' | 'all' | 'custom'
 export type ProviderSource = 'OFFICIAL' | 'SCRAPER' | 'MIXED'
 export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 export type CompetitionLevel = 'LOW' | 'MEDIUM' | 'HIGH'

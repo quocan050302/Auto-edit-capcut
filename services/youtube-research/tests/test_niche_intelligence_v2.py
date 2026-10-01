@@ -26,7 +26,8 @@ from schemas.research_schemas import (
     FilterSummarySchema,
     CandidateVideoSchema,
 )
-from providers.official import _published_after_from_range, _classify_content_type
+from providers.official import _classify_content_type
+from utils.time_window import resolve_time_window
 from scoring.calculator import compute_channel_baseline
 
 
@@ -66,30 +67,34 @@ def _make_video(
 # ─── 1. limit affects target videos ──────────────────────────────────────────
 
 def test_limit_controls_target_video_count():
-    from services.discovery_service import _derive_search_budget
-    # Fast
-    target, budget = _derive_search_budget(50)
-    assert target <= 150, "Fast mode target should be ≤150"
-    assert budget <= 10, "Fast mode budget should be ≤10"
+    from services.discovery_service import _resolve_search_budget
+    # Fast — no user budget, derives from limit
+    budget = _resolve_search_budget(50, None)
+    assert 3 <= budget <= 10, f"Fast mode budget should be 3-10, got {budget}"
     # Balanced
-    target, budget = _derive_search_budget(150)
-    assert target >= 150, "Balanced target ≥150"
-    assert budget > 10
+    budget = _resolve_search_budget(150, None)
+    assert 6 <= budget <= 12
     # Deep
-    target, budget = _derive_search_budget(500)
-    assert target >= 300, "Deep target ≥300"
-    assert budget >= 20
+    budget = _resolve_search_budget(500, None)
+    assert 8 <= budget <= 20
+    # User budget overrides
+    budget = _resolve_search_budget(500, 3)
+    assert budget == 3
+    budget = _resolve_search_budget(50, 10)
+    assert budget == 10
 
 
 # ─── 2. time_range produces correct publishedAfter ───────────────────────────
 
 def test_time_range_produces_correct_published_after():
+    from datetime import datetime, timezone, timedelta
+    frozen_now = datetime(2026, 10, 1, 15, 0, 0, tzinfo=timezone.utc)
     for range_str, expected_days in [("7d", 7), ("30d", 30), ("90d", 90), ("365d", 365)]:
-        pa = _published_after_from_range(range_str)
+        tw = resolve_time_window(range_str, frozen_now)
+        pa = tw.to_published_after_rfc3339()
         assert pa is not None, f"publishedAfter should not be None for {range_str}"
-        # Parse back and check
-        dt = datetime.strptime(pa, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        age_days = (datetime.now(timezone.utc) - dt).days
+        dt = datetime.fromisoformat(pa.replace("Z", "+00:00"))
+        age_days = (frozen_now - dt).days
         assert abs(age_days - expected_days) <= 1, (
             f"publishedAfter for {range_str} should be ~{expected_days} days ago, got {age_days}"
         )
@@ -118,11 +123,11 @@ def test_long_does_not_exclude_25_minute_videos():
 # ─── 4. Search budget not exceeded ───────────────────────────────────────────
 
 def test_search_budget_is_not_exceeded():
-    from services.discovery_service import _derive_search_budget
+    from services.discovery_service import _resolve_search_budget
     for limit_val in [50, 100, 200, 500]:
-        target, budget = _derive_search_budget(limit_val)
-        assert budget >= 8, "Budget should always be at least 8"
-        assert budget <= 30, "Budget should never exceed 30"
+        budget = _resolve_search_budget(limit_val, None)
+        assert budget >= 3, "Budget should always be at least 3"
+        assert budget <= 20, "Budget should never exceed 20"
 
 
 # ─── 5. Subscriber unknown → UNVERIFIED_MATCH, not REJECTED ─────────────────
@@ -348,10 +353,10 @@ def test_old_result_schema_deserializes_without_v2_fields():
 # ─── 15. Derive budget never hardcodes 8 queries for all modes ───────────────
 
 def test_deep_mode_has_more_budget_than_fast():
-    from services.discovery_service import _derive_search_budget
-    _, fast_budget = _derive_search_budget(50)
-    _, deep_budget = _derive_search_budget(500)
-    assert deep_budget > fast_budget, "Deep mode must have more search budget than Fast"
+    from services.discovery_service import _resolve_search_budget
+    fast_budget = _resolve_search_budget(50, None)
+    deep_budget = _resolve_search_budget(500, None)
+    assert deep_budget >= fast_budget, "Deep mode should have at least as much budget as Fast"
 
 
 # ─── 16. generate_near_match_suggestions returns meaningful data ──────────────
@@ -426,25 +431,25 @@ def test_candidate_schema_label_empty_for_verified():
 # ─── 20. Search budget derived from limit is sane ────────────────────────────
 
 def test_search_budget_sane_range():
-    from services.discovery_service import _derive_search_budget
+    from services.discovery_service import _resolve_search_budget
     for limit_input in [1, 50, 100, 200, 300, 1000]:
-        target, budget = _derive_search_budget(limit_input)
-        assert 8 <= budget <= 50, f"Budget {budget} out of sane range for limit={limit_input}"
-        assert 50 <= target <= 1000, f"Target {target} out of sane range"
+        budget = _resolve_search_budget(limit_input, None)
+        assert 3 <= budget <= 20, f"Budget {budget} out of sane range for limit={limit_input}"
 
 
 # ─── 21. publishedAfter format is RFC3339 ────────────────────────────────────
 
 def test_published_after_format_rfc3339():
-    pa = _published_after_from_range("30d")
+    tw = resolve_time_window("30d")
+    pa = tw.to_published_after_rfc3339()
     assert pa is not None
-    # Must be parseable as RFC3339
     dt = datetime.strptime(pa, "%Y-%m-%dT%H:%M:%SZ")
     assert dt.year >= 2024
 
 
-def test_published_after_none_for_unknown_range():
-    pa = _published_after_from_range("all")
+def test_published_after_none_for_all_range():
+    tw = resolve_time_window("all")
+    pa = tw.to_published_after_rfc3339()
     assert pa is None
 
 

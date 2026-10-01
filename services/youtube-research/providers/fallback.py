@@ -29,7 +29,10 @@ class ProviderFallbackManager:
         language: str = "en",
         content_type: str = "LONG",
         time_range: str = "30d",
-        limit: int = 50
+        limit: int = 50,
+        # V2: explicit bucket bounds forwarded from discovery service
+        published_after: Optional[str] = None,
+        published_before: Optional[str] = None,
     ) -> List[RawVideoData]:
         should_use_official_first = (
             self.use_official
@@ -41,7 +44,11 @@ class ProviderFallbackManager:
         if should_use_official_first:
             try:
                 research_logger.info(f"[Provider] Searching via Official API: {query}")
-                results = await self.official.search_videos(query, market, language, content_type, time_range, limit)
+                results, _ = await self.official.search_videos(
+                    query, market, language, content_type, time_range, limit,
+                    published_after=published_after,
+                    published_before=published_before,
+                )
                 if results:
                     self.last_provenance = "OFFICIAL"
                     return results
@@ -59,7 +66,11 @@ class ProviderFallbackManager:
         # Fallback to official if scraper failed and official was second
         if self.use_official and self.official.api_key and not self.official.quota_exceeded and not should_use_official_first:
             research_logger.info(f"[Provider] Scraper returned empty. Trying Official API fallback...")
-            res = await self.official.search_videos(query, market, language, content_type, time_range, limit)
+            res, _ = await self.official.search_videos(
+                query, market, language, content_type, time_range, limit,
+                published_after=published_after,
+                published_before=published_before,
+            )
             if res:
                 self.last_provenance = "MIXED"
                 return res
