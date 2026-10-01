@@ -429,9 +429,9 @@ export class ThumbnailOrchestrator {
         reconcileThumbnailArtifacts(projectDir, state)
         saveThumbnailJobStateAtomic(projectDir, state)
 
-        // Step B: Sequential generation
+        // Step B: Concurrent generation (all pending candidates run in parallel)
         const cooldown = params.cooldownMs ?? this.defaultCooldownMs
-        await this.runSequentialCandidates(state, abortController.signal, cooldown)
+        await this.runConcurrentCandidates(state, abortController.signal, cooldown)
 
         // Step C: Finalize
         return this.finalizeJob(state, projectDir)
@@ -527,7 +527,7 @@ export class ThumbnailOrchestrator {
 
     const executionPromise = (async (): Promise<ThumbnailJobState> => {
       try {
-        await this.runSequentialCandidates(state, abortController.signal, this.defaultCooldownMs)
+        await this.runConcurrentCandidates(state, abortController.signal, this.defaultCooldownMs)
         return this.finalizeJob(state, projectDir)
       } finally {
         this.activeJobs.delete(projectDir)
@@ -780,7 +780,9 @@ export class ThumbnailOrchestrator {
   /**
    * Run candidates strictly sequentially, one at a time.
    * Uses ONE retry loop here in the orchestrator. GoogleFlowClient does NOT retry.
+   * @deprecated Kept as fallback. Active path uses runConcurrentCandidates.
    */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private async runSequentialCandidates(
     state: ThumbnailJobState,
     signal: AbortSignal,
@@ -931,6 +933,144 @@ export class ThumbnailOrchestrator {
         }
       }
     }
+  }
+
+  // ─── Private: runConcurrentCandidates ─────────────────────────────────────
+
+  /**
+   * Run all pending candidates in parallel (Promise.allSettled).
+   * Each candidate gets its own retry loop (MAX_CANDIDATE_ATTEMPTS).
+   * Progress is broadcast immediately when each candidate completes.
+   * Connector errors (bridge offline) abort ALL siblings via AbortController.
+   */
+  private async runConcurrentCandidates(
+    state: ThumbnailJobState,
+    signal: AbortSignal,
+    _cooldownMs: number // kept for API compat — not used in concurrent mode
+  ): Promise<void> {
+    const candidates = state.candidates.filter((c) => c.status !== 'completed')
+    if (candidates.length === 0) return
+
+    const MAX_CANDIDATE_ATTEMPTS = 4
+    const innerAbort = new AbortController()
+    signal.addEventListener('abort', () => innerAbort.abort(), { once: true })
+
+    const runOne = async (candidate: ThumbnailCandidate): Promise<void> => {
+      if (signal.aborted || innerAbort.signal.aborted) {
+        state.status = 'cancelled'
+        return
+      }
+
+      const attemptsAtStart = candidate.attempts || 0
+      let succeeded = false
+      let lastError: ThumbnailFlowError | null = null
+
+      // Per-candidate bridge liveness check before starting
+      if (!(await this.runtimeManager.isBridgeStillReachable())) {
+        logger.warn(`[ThumbnailOrchestrator] Bridge offline before concurrent candidate ${candidate.optionId}.`)
+        innerAbort.abort()
+        this.pauseBatchForBridgeOffline(state, 0, state.candidates)
+        return
+      }
+
+      this.broadcastProgress({
+        projectDir: state.projectDir,
+        jobId: state.jobId,
+        status: 'generating',
+        stage: 'generating',
+        currentOptionId: candidate.optionId,
+        completedCount: state.candidates.filter((c) => c.status === 'completed').length,
+        totalCount: 5,
+        progress: (state.candidates.filter((c) => c.status === 'completed').length + 0.1) / 5,
+        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
+        candidate,
+        jobState: state
+      })
+
+      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
+        if (signal.aborted || innerAbort.signal.aborted) {
+          state.status = 'cancelled'
+          saveThumbnailJobStateAtomic(state.projectDir, state)
+          return
+        }
+
+        logger.info(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS}`)
+
+        try {
+          await this.processSingleCandidate(state, candidate, innerAbort.signal)
+          succeeded = true
+          break
+        } catch (err) {
+          if (err instanceof ThumbnailCancelledError) {
+            state.status = 'cancelled'
+            saveThumbnailJobStateAtomic(state.projectDir, state)
+            return
+          }
+
+          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl)
+          lastError = structured
+
+          logger.error(
+            `[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
+          )
+
+          if (structured.scope === 'connector') {
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Connector error on ${candidate.optionId}. Aborting all concurrent candidates.`)
+            candidate.status = 'pending'
+            candidate.error = undefined
+            candidate.attempts = attemptsAtStart
+            innerAbort.abort()
+            this.pauseBatchForBridgeOffline(state, 0, state.candidates, structured)
+            return
+          }
+
+          if (!structured.retryable) break
+
+          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
+            const backoffMs = Math.min(3000 * attempt, 15000)
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Retryable error on ${candidate.optionId}. Waiting ${backoffMs}ms...`)
+            try {
+              await abortableDelay(backoffMs, innerAbort.signal)
+            } catch {
+              state.status = 'cancelled'
+              saveThumbnailJobStateAtomic(state.projectDir, state)
+              return
+            }
+          }
+        }
+      }
+
+      if (!succeeded && lastError) {
+        candidate.status = 'failed'
+        candidate.error = `${lastError.code}: ${lastError.message}`
+        addUniqueDiagnostic(state.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`)
+        logger.error(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`)
+      }
+
+      // Checkpoint after each candidate completes (broadcast immediately for real-time UI)
+      saveThumbnailJobStateAtomic(state.projectDir, state)
+      saveThumbnailManifest(state.projectDir, state)
+
+      const updatedCompleted = state.candidates.filter((c) => c.status === 'completed').length
+      this.broadcastProgress({
+        projectDir: state.projectDir,
+        jobId: state.jobId,
+        status: 'generating',
+        stage: candidate.status === 'completed' ? 'exporting' : 'generating',
+        currentOptionId: candidate.optionId,
+        completedCount: updatedCompleted,
+        totalCount: 5,
+        progress: updatedCompleted / 5,
+        message: candidate.status === 'completed'
+          ? `Option ${candidate.optionId} ready (${candidate.exportQuality || '4K'})`
+          : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
+        candidate,
+        jobState: state
+      })
+    }
+
+    // Launch ALL pending candidates simultaneously
+    await Promise.allSettled(candidates.map((c) => runOne(c)))
   }
 
   // ─── Private: processSingleCandidate ──────────────────────────────────────

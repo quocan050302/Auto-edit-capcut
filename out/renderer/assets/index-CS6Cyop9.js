@@ -11340,193 +11340,427 @@ function normalizeApiKey(raw) {
   value = value.replace(/[\r\n]/g, "").trim();
   return value;
 }
-const GoogleFlowSettingsSection = ({
-  projectDir
-}) => {
-  const [bridgeUrl, setBridgeUrl] = reactExports.useState("http://127.0.0.1:8100");
-  const [imageModel, setImageModel] = reactExports.useState("GEM_PIX_2");
-  const [exportQuality, setExportQuality] = reactExports.useState("4k");
-  const [health, setHealth] = reactExports.useState(null);
+const StatusIndicator = ({ label, value, detail }) => {
+  const colors = {
+    ok: { dot: "#22c55e", text: "#22c55e", bg: "rgba(34,197,94,0.12)" },
+    warn: { dot: "#f59e0b", text: "#f59e0b", bg: "rgba(245,158,11,0.12)" },
+    offline: { dot: "#ef4444", text: "#ef4444", bg: "rgba(239,68,68,0.12)" },
+    unknown: { dot: "#6b7280", text: "#9ca3af", bg: "rgba(107,114,128,0.1)" }
+  };
+  const c = colors[value];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 10px",
+    borderRadius: "6px",
+    background: c.bg,
+    fontSize: "12px",
+    lineHeight: "1.3"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      width: "7px",
+      height: "7px",
+      borderRadius: "50%",
+      background: c.dot,
+      flexShrink: 0,
+      boxShadow: value === "ok" ? `0 0 6px ${c.dot}` : void 0
+    } }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#9ca3af", fontWeight: 500 }, children: label }),
+    detail && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: c.text, marginLeft: "auto", fontWeight: 500 }, children: detail })
+  ] });
+};
+const GoogleFlowSettingsSection = () => {
+  const [settings, setSettings] = reactExports.useState({
+    mode: "external",
+    bridgeUrl: "http://127.0.0.1:8100",
+    autoStartBridge: false,
+    autoOpenGoogleFlow: false
+  });
+  const [bridgeStatus, setBridgeStatus] = reactExports.useState(null);
   const [isChecking, setIsChecking] = reactExports.useState(false);
+  const [isSaving, setIsSaving] = reactExports.useState(false);
+  const [isStarting, setIsStarting] = reactExports.useState(false);
   const [saveSuccess, setSaveSuccess] = reactExports.useState(false);
+  const [pythonVersion, setPythonVersion] = reactExports.useState("");
+  const [detectingPython, setDetectingPython] = reactExports.useState(false);
+  const [startLog, setStartLog] = reactExports.useState([]);
+  const [runtimeStatus, setRuntimeStatus] = reactExports.useState(null);
+  const logEndRef = reactExports.useRef(null);
   reactExports.useEffect(() => {
-    if (projectDir) {
-      window.api.thumbnail.settings.get(projectDir).then((res) => {
-        if (res.success && res.settings) {
-          if (res.settings.imageModel) setImageModel(res.settings.imageModel);
-          if (res.settings.outputQuality) setExportQuality(res.settings.outputQuality);
-        }
-      }).catch(() => {
-      });
-    }
-    handleCheckHealth();
-  }, [projectDir]);
-  const handleCheckHealth = async (customUrl) => {
+    window.api.thumbnail.runtime.getSettings().then((res) => {
+      if (res.success && res.settings) {
+        setSettings(res.settings);
+      }
+    }).catch(() => {
+    });
+    window.api.thumbnail.runtime.getStatus().then((status) => {
+      setRuntimeStatus({ bridgeRunning: status.bridgeRunning, managedPid: status.managedPid });
+    }).catch(() => {
+    });
+    const unsubStatus = window.api.thumbnail.runtime.onStatus((status) => {
+      setRuntimeStatus({ bridgeRunning: status.bridgeRunning, managedPid: status.managedPid });
+    });
+    const unsubLog = window.api.thumbnail.runtime.onLog((entry) => {
+      setStartLog((prev) => [...prev.slice(-199), entry.message]);
+    });
+    return () => {
+      unsubStatus();
+      unsubLog();
+    };
+  }, []);
+  reactExports.useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [startLog]);
+  const handleCheckHealth = reactExports.useCallback(async () => {
     setIsChecking(true);
+    setBridgeStatus(null);
     try {
-      const res = await window.api.thumbnail.flow.checkHealth(customUrl || bridgeUrl);
-      setHealth(res);
+      const health = await window.api.thumbnail.flow.checkHealth(settings.bridgeUrl);
+      setBridgeStatus({
+        ok: health.reachable,
+        extensionConnected: health.extensionConnected,
+        signedIn: health.signedIn,
+        imageGen: health.supportsImageGeneration
+      });
     } finally {
       setIsChecking(false);
     }
+  }, [settings.bridgeUrl]);
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      const res = await window.api.thumbnail.runtime.saveSettings(settings);
+      if (res.success) {
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 2500);
+      }
+    } finally {
+      setIsSaving(false);
+    }
   };
-  const handleSaveSettings = async () => {
-    if (!projectDir) return;
-    const current = await window.api.thumbnail.settings.get(projectDir);
-    const base = current.settings || {
-      enabled: true,
-      autoGenerateAfterRender: true,
-      variantCount: 5,
-      outputLanguage: "en-US",
-      provider: "google-flow",
-      imageModel: "GEM_PIX_2",
-      outputQuality: "4k"
-    };
-    const updated = {
-      ...base,
-      imageModel,
-      outputQuality: exportQuality
-    };
-    await window.api.thumbnail.settings.save(projectDir, updated);
-    setSaveSuccess(true);
-    setTimeout(() => setSaveSuccess(false), 2500);
+  const handleBrowseFolder = async () => {
+    const res = await window.api.thumbnail.runtime.selectFolder();
+    if (res.success && res.folderPath) {
+      setSettings((s) => ({ ...s, flowKitPath: res.folderPath }));
+      setPythonVersion("");
+    } else if (!res.success && res.error && res.error !== "Cancelled") {
+      alert(`❌ ${res.error}`);
+    }
   };
-  const handleOpenFlow = async () => {
+  const handleBrowsePython = async () => {
+    const res = await window.api.thumbnail.runtime.selectPython();
+    if (res.success && res.pythonPath) {
+      setSettings((s) => ({ ...s, pythonPath: res.pythonPath }));
+      setPythonVersion("");
+    }
+  };
+  const handleDetectPython = async () => {
+    setDetectingPython(true);
+    setPythonVersion("");
+    try {
+      const res = await window.api.thumbnail.runtime.detectPython(settings.flowKitPath);
+      if (res.success && res.pythonPath) {
+        setSettings((s) => ({ ...s, pythonPath: res.pythonPath }));
+        setPythonVersion(res.version || res.pythonPath);
+      } else {
+        setPythonVersion("Not found (install Python 3.10+)");
+      }
+    } finally {
+      setDetectingPython(false);
+    }
+  };
+  const handleStartBridge = async () => {
+    setIsStarting(true);
+    setStartLog([]);
+    try {
+      const res = await window.api.thumbnail.runtime.start();
+      if (!res.success && res.error) {
+        setStartLog((prev) => [...prev, `❌ ${res.error}`]);
+      }
+    } finally {
+      setIsStarting(false);
+    }
+  };
+  const handleStopBridge = async () => {
+    await window.api.thumbnail.runtime.stop();
+  };
+  const handleOpenGoogleFlow = async () => {
     await window.api.thumbnail.flow.openFlow();
   };
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", style: { marginBottom: "24px" }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", style: { display: "flex", justifyContent: "space-between", alignItems: "center" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🎨" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Google Flow Connector" })
+  const isRunning = runtimeStatus?.bridgeRunning ?? false;
+  const isManagedMode = settings.mode === "managed";
+  const canStart = isManagedMode && Boolean(settings.flowKitPath) && !isRunning && !isStarting;
+  const getStatusValue = (v2, checked) => {
+    if (!checked) return "unknown";
+    if (v2) return "ok";
+    return "offline";
+  };
+  const sectionStyle = {
+    background: "rgba(255,255,255,0.03)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: "10px",
+    padding: "16px",
+    marginBottom: "12px"
+  };
+  const labelStyle = {
+    display: "block",
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "#9ca3af",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    marginBottom: "6px"
+  };
+  const inputStyle = {
+    width: "100%",
+    padding: "8px 10px",
+    background: "rgba(0,0,0,0.3)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "6px",
+    color: "#e5e7eb",
+    fontSize: "13px",
+    outline: "none",
+    boxSizing: "border-box"
+  };
+  const btnPrimary = {
+    padding: "7px 14px",
+    borderRadius: "6px",
+    border: "none",
+    cursor: "pointer",
+    background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+    color: "#fff",
+    fontSize: "12px",
+    fontWeight: 600,
+    whiteSpace: "nowrap"
+  };
+  const btnSecondary = {
+    padding: "7px 12px",
+    borderRadius: "6px",
+    border: "1px solid rgba(255,255,255,0.15)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#e5e7eb",
+    fontSize: "12px",
+    fontWeight: 500,
+    cursor: "pointer",
+    whiteSpace: "nowrap"
+  };
+  const btnDanger = {
+    ...btnSecondary,
+    border: "1px solid rgba(239,68,68,0.3)",
+    color: "#ef4444",
+    background: "rgba(239,68,68,0.07)"
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "16px" }, children: "🎨" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: "15px", color: "#f3f4f6" }, children: "Google Flow Connector" })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "span",
-        {
-          className: "panel-badge",
-          style: {
-            background: health?.reachable ? "rgba(34, 197, 94, 0.15)" : "rgba(239, 68, 68, 0.15)",
-            color: health?.reachable ? "#22c55e" : "#ef4444"
-          },
-          children: health?.reachable ? "Bridge Connected" : "Bridge Offline"
-        }
-      )
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        padding: "3px 10px",
+        borderRadius: "20px",
+        fontSize: "11px",
+        fontWeight: 600,
+        background: isRunning ? "rgba(34,197,94,0.15)" : "rgba(107,114,128,0.15)",
+        color: isRunning ? "#22c55e" : "#9ca3af"
+      }, children: isRunning ? `● BRIDGE RUNNING (PID ${runtimeStatus?.managedPid ?? "?"})` : "○ BRIDGE OFFLINE" })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-grid", style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: "16px", marginBottom: "20px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", style: { display: "block", marginBottom: "6px" }, children: "Bridge URL" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "input",
-            {
-              type: "text",
-              className: "input-text font-mono",
-              value: bridgeUrl,
-              onChange: (e) => setBridgeUrl(e.target.value),
-              placeholder: "http://127.0.0.1:8100",
-              style: { width: "100%" }
-            }
-          )
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", style: { display: "block", marginBottom: "6px" }, children: "Image Model" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs(
-            "select",
-            {
-              className: "settings-select",
-              value: imageModel,
-              onChange: (e) => setImageModel(e.target.value),
-              style: { width: "100%" },
-              children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "GEM_PIX_2", children: "Nano Banana Pro / GEM_PIX_2 (Default)" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "NARWHAL", children: "Imagen 3 Fast (NARWHAL)" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "HARBOR_SEAL", children: "Imagen 3 Quality (HARBOR_SEAL)" })
-              ]
-            }
-          )
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", style: { display: "block", marginBottom: "6px" }, children: "Export Quality" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "input",
-            {
-              type: "text",
-              className: "input-text font-mono",
-              value: "4K (3840 × 2160)",
-              disabled: true,
-              style: { width: "100%", opacity: 0.8 }
-            }
-          )
-        ] })
-      ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs(
-        "div",
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Runtime Mode" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "8px" }, children: ["external", "managed"].map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
         {
+          onClick: () => setSettings((s) => ({ ...s, mode: m2 })),
           style: {
-            background: "rgba(0, 0, 0, 0.25)",
-            border: "1px solid rgba(255, 255, 255, 0.08)",
-            borderRadius: "8px",
-            padding: "14px 18px",
-            marginBottom: "20px"
+            flex: 1,
+            padding: "8px",
+            borderRadius: "6px",
+            border: "none",
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: "13px",
+            transition: "all 0.15s",
+            background: settings.mode === m2 ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.04)",
+            color: settings.mode === m2 ? "#a5b4fc" : "#6b7280",
+            outline: settings.mode === m2 ? "1px solid #6366f1" : "1px solid transparent"
           },
-          children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "#f3f4f6", marginBottom: "10px" }, children: "Connection Status" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px", fontSize: "12px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: health?.reachable ? "#22c55e" : "#ef4444" }, children: "●" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: "FlowKit bridge reachable" })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: health?.extensionConnected ? "#22c55e" : "#ef4444" }, children: "●" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: "Chrome extension connected" })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: health?.signedIn ? "#22c55e" : "#ef4444" }, children: "●" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: "Google Flow signed in" })
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: health?.supportsImageGeneration ? "#22c55e" : "#ef4444" }, children: "●" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: "Image generation ready" })
-              ] })
-            ] }),
-            health?.message && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "10px", fontSize: "12px", color: health.reachable ? "#38bdf8" : "#f87171" }, children: health.message })
-          ]
+          children: m2 === "external" ? "🔌 External" : "⚙️ Managed"
+        },
+        m2
+      )) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "11px", color: "#6b7280", margin: "8px 0 0" }, children: settings.mode === "external" ? "Run FlowKit manually. App only polls /health. No process management." : "App spawns FlowKit automatically. Requires Python 3.10+ and FlowKit folder." })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Bridge URL" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          style: inputStyle,
+          value: settings.bridgeUrl,
+          onChange: (e) => setSettings((s) => ({ ...s, bridgeUrl: e.target.value })),
+          placeholder: "http://127.0.0.1:8100"
         }
       ),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "10px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              type: "button",
-              className: "btn btn-secondary btn-sm",
-              onClick: () => handleCheckHealth(),
-              disabled: isChecking,
-              children: isChecking ? "Checking..." : "Test Connection"
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              type: "button",
-              className: "btn btn-primary btn-sm",
-              onClick: handleOpenFlow,
-              children: "Open Google Flow ↗"
-            }
-          )
-        ] }),
-        projectDir && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "11px", color: "#6b7280", margin: "6px 0 0" }, children: "Default: http://127.0.0.1:8100 — must match the port FlowKit is listening on." })
+    ] }),
+    isManagedMode && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "FlowKit Folder" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginBottom: "10px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            style: { ...inputStyle, flex: 1 },
+            value: settings.flowKitPath || "",
+            readOnly: true,
+            placeholder: "Select the folder containing agent/main.py"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleBrowseFolder, children: "Browse…" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Python Executable" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", alignItems: "center" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            style: { ...inputStyle, flex: 1 },
+            value: settings.pythonPath || "",
+            onChange: (e) => setSettings((s) => ({ ...s, pythonPath: e.target.value || void 0 })),
+            placeholder: "Auto-detected (leave blank to auto-detect)"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleDetectPython, disabled: detectingPython, children: detectingPython ? "Detecting…" : "Auto Detect" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleBrowsePython, children: "Browse…" })
+      ] }),
+      pythonVersion && /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: "11px", color: pythonVersion.includes("Not found") ? "#ef4444" : "#22c55e", margin: "6px 0 0" }, children: [
+        pythonVersion.includes("Not found") ? "⚠ " : "✓ ",
+        pythonVersion
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Google Flow Project ID" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          style: inputStyle,
+          value: settings.flowProjectId || "",
+          onChange: (e) => setSettings((s) => ({ ...s, flowProjectId: e.target.value.trim() || void 0 })),
+          placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: "11px", color: "#6b7280", margin: "6px 0 0" }, children: [
+        "Get the UUID from the URL when you open a project in Google Flow:",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("code", { style: { color: "#a5b4fc" }, children: [
+          "https://flow.google.com/project/",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "UUID-HERE" }),
+          "/..."
+        ] })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: sectionStyle, children: [
+      { key: "autoStartBridge", label: "Auto Start FlowKit with App", desc: "Launch FlowKit bridge when Electron starts (Managed mode only)" },
+      { key: "autoOpenGoogleFlow", label: "Auto Open Google Flow in Browser", desc: "Open flow.google.com once per session after bridge starts" }
+    ].map(({ key, label, desc }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "#e5e7eb" }, children: label }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#6b7280", marginTop: "2px" }, children: desc })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setSettings((s) => ({ ...s, [key]: !s[key] })),
+          style: {
+            width: "40px",
+            height: "22px",
+            borderRadius: "11px",
+            border: "none",
+            cursor: "pointer",
+            flexShrink: 0,
+            marginLeft: "12px",
+            marginTop: "2px",
+            background: settings[key] ? "#6366f1" : "rgba(107,114,128,0.3)",
+            position: "relative",
+            transition: "background 0.2s"
+          },
+          children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            position: "absolute",
+            top: "3px",
+            left: settings[key] ? "21px" : "3px",
+            width: "16px",
+            height: "16px",
+            borderRadius: "50%",
+            background: "#fff",
+            transition: "left 0.2s"
+          } })
+        }
+      )
+    ] }, key)) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { ...labelStyle, marginBottom: 0 }, children: "Connection Status" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleCheckHealth, disabled: isChecking, children: isChecking ? "Checking…" : "Test Connection" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Bridge", value: getStatusValue(bridgeStatus?.ok, bridgeStatus !== null), detail: bridgeStatus?.ok ? "Online" : bridgeStatus !== null ? "Offline" : void 0 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Extension", value: getStatusValue(bridgeStatus?.extensionConnected, bridgeStatus !== null), detail: bridgeStatus?.extensionConnected ? "Connected" : bridgeStatus !== null ? "Disconnected" : void 0 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Google Flow Sign-in", value: getStatusValue(bridgeStatus?.signedIn, bridgeStatus !== null), detail: bridgeStatus?.signedIn ? "Signed In" : bridgeStatus !== null ? "Not Signed In" : void 0 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Image Generation", value: getStatusValue(bridgeStatus?.imageGen, bridgeStatus !== null), detail: bridgeStatus?.imageGen ? "Available" : bridgeStatus !== null ? "Unavailable" : void 0 })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          style: { ...btnPrimary, opacity: isSaving ? 0.7 : 1 },
+          onClick: handleSave,
+          disabled: isSaving,
+          children: saveSuccess ? "✓ Saved!" : isSaving ? "Saving…" : "💾 Save Settings"
+        }
+      ),
+      isManagedMode && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
-            type: "button",
-            className: "btn btn-secondary btn-sm",
-            onClick: handleSaveSettings,
-            style: { borderColor: saveSuccess ? "#22c55e" : void 0, color: saveSuccess ? "#22c55e" : void 0 },
-            children: saveSuccess ? "✓ Saved" : "Save Flow Settings"
+            style: { ...btnPrimary, background: canStart ? "linear-gradient(135deg, #10b981, #059669)" : void 0, opacity: canStart ? 1 : 0.5 },
+            onClick: handleStartBridge,
+            disabled: !canStart,
+            children: isStarting ? "⟳ Starting…" : "▶ Start Bridge"
           }
-        )
-      ] })
-    ] })
+        ),
+        isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnDanger, onClick: handleStopBridge, children: "■ Stop Bridge" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleOpenGoogleFlow, children: "🌐 Open Google Flow ↗" })
+    ] }),
+    isManagedMode && startLog.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      ...sectionStyle,
+      fontFamily: "monospace",
+      fontSize: "11px",
+      color: "#9ca3af",
+      maxHeight: "140px",
+      overflowY: "auto",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-all"
+    }, children: [
+      startLog.map((line, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: line.includes("❌") ? "#ef4444" : line.includes("✓") ? "#22c55e" : "#9ca3af" }, children: line }, i)),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: logEndRef })
+    ] }),
+    !isManagedMode && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { ...sectionStyle, borderColor: "rgba(99,102,241,0.2)", background: "rgba(99,102,241,0.05)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: "12px", color: "#a5b4fc", margin: 0, lineHeight: 1.6 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "External Mode — manual start required:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "1. ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: "cd <FlowKit folder>" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "2. ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: "set FLOW_PROJECT_ID=<your-uuid>" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "3. ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: "python -m agent.main" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "Then click ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("em", { children: "Test Connection" }),
+      " above."
+    ] }) })
   ] });
 };
 function SegControl({

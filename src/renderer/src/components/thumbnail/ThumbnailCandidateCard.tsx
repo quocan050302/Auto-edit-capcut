@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import type { ThumbnailCandidate } from '../../../../shared/types'
 
 interface ThumbnailCandidateCardProps {
@@ -24,15 +24,40 @@ export const ThumbnailCandidateCard: React.FC<ThumbnailCandidateCardProps> = ({
   const [showRegenModal, setShowRegenModal] = useState(false)
   const [customPromptText, setCustomPromptText] = useState(candidate.imagePrompt)
   const [copied, setCopied] = useState(false)
+  const [imageSrc, setImageSrc] = useState<string>('')
 
   const isCompleted = candidate.status === 'completed'
   const isGenerating = candidate.status === 'generating' || candidate.status === 'exporting'
   const isFailed = candidate.status === 'failed'
 
-  // Image source path - in Electron renderer, convert file path to custom protocol or file:// URL
-  const imageSrc = candidate.exportedImagePath
-    ? `atom://${candidate.exportedImagePath.replace(/\\/g, '/')}`
-    : candidate.originalImagePath || ''
+  // Load image via IPC (main process reads file → base64) to avoid Electron CSP
+  // restrictions on file:// protocol in the renderer process.
+  useEffect(() => {
+    let cancelled = false
+
+    const load = async (): Promise<void> => {
+      if (candidate.exportedImagePath) {
+        try {
+          const result = await window.api.thumbnail.readImage(candidate.exportedImagePath)
+          if (!cancelled) {
+            if ('dataUrl' in result) {
+              setImageSrc(result.dataUrl)
+            } else {
+              // Fallback to remote URL if IPC read fails
+              setImageSrc(candidate.originalImagePath || '')
+            }
+          }
+        } catch {
+          if (!cancelled) setImageSrc(candidate.originalImagePath || '')
+        }
+      } else {
+        setImageSrc(candidate.originalImagePath || '')
+      }
+    }
+
+    load()
+    return () => { cancelled = true }
+  }, [candidate.exportedImagePath, candidate.originalImagePath])
 
   const handleCopyPrompt = () => {
     navigator.clipboard.writeText(candidate.imagePrompt)
@@ -125,7 +150,7 @@ export const ThumbnailCandidateCard: React.FC<ThumbnailCandidateCardProps> = ({
       >
         {isCompleted && candidate.exportedImagePath ? (
           <img
-            src={`file:///${candidate.exportedImagePath.replace(/\\/g, '/')}`}
+            src={imageSrc}
             alt={`Option ${candidate.optionId}`}
             style={{ width: '100%', height: '100%', objectFit: 'cover' }}
             onError={(e) => {

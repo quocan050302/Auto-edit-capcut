@@ -2,13 +2,13 @@ import * as fs from 'fs'
 import * as path from 'path'
 import { logger } from '../logger'
 import { probeImageDimensions } from './utils/image-probe'
+import type { ThumbnailProviderHealth } from '../../../shared/types'
 import type {
-  ThumbnailProviderHealth,
   ThumbnailGenerateRequest,
   ThumbnailGenerateResult,
   ThumbnailExportRequest,
   ThumbnailExportResult
-} from '../../../../shared/types'
+} from './providers/thumbnail-provider'
 
 export const DEFAULT_FLOWKIT_BRIDGE_URL = 'http://127.0.0.1:8100'
 
@@ -80,17 +80,25 @@ export class GoogleFlowClient {
       }
 
       // 3. Check /api/providers/status
+      // NOTE: /api/providers/status returns
+      // { default: "flow", providers: [{name, available, capabilities}, ...] }
+      // Guard against a direct-array shape for forward compatibility.
       try {
         const provResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/providers/status`, { method: 'GET' }, 3000)
         if (provResp.ok) {
-          const provs = (await provResp.json()) as Array<{
-            name: string
-            available: boolean
-            capabilities?: { generate_image?: boolean }
-          }>
-          const flowProv = provs.find((p) => p.name === 'flow')
+          const body = (await provResp.json()) as
+            | { providers?: Array<{ name: string; available?: boolean; capabilities?: { generate_image?: boolean } }> }
+            | Array<{ name: string; available: boolean; capabilities?: { generate_image?: boolean } }>
+
+          const provsArray = Array.isArray(body)
+            ? body
+            : Array.isArray((body as { providers?: unknown }).providers)
+              ? (body as { providers: Array<{ name: string; available?: boolean; capabilities?: { generate_image?: boolean } }> }).providers
+              : []
+
+          const flowProv = provsArray.find((p) => p.name === 'flow')
           if (flowProv) {
-            health.providerAvailable = flowProv.available
+            health.providerAvailable = Boolean(flowProv.available)
             health.supportsImageGeneration = Boolean(flowProv.capabilities?.generate_image)
           }
         }
@@ -337,7 +345,7 @@ export class GoogleFlowClient {
       let errorMsg = `HTTP ${resp.status}`
       try {
         const errJson = (await resp.json()) as FlowKitErrorResponse
-        errorMsg = errJson.error || errJson.detail || errorMsg
+        errorMsg = String(errJson.error || errJson.detail || errorMsg)
       } catch {
         // non-JSON
       }

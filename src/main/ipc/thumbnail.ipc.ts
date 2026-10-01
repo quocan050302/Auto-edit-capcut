@@ -251,7 +251,8 @@ export function registerThumbnailHandlers(ipcMain: IpcMain): void {
     IPC_CHANNELS.THUMBNAIL_FLOW_OPEN,
     async (): Promise<{ success: boolean; error?: string }> => {
       try {
-        await shell.openExternal('https://labs.google/fx/tools/flow')
+        // force=true since user explicitly clicked the button
+        flowkitRuntimeManager.openGoogleFlow(true)
         return { success: true }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
@@ -485,6 +486,25 @@ export function registerThumbnailHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  // Read a local image file and return as base64 data URL.
+  // This sidesteps file:// CSP restrictions in the renderer completely.
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_READ_IMAGE,
+    async (_event, filePath: string): Promise<{ dataUrl: string } | { error: string }> => {
+      try {
+        if (!filePath || !fs.existsSync(filePath)) {
+          return { error: `File not found: ${filePath}` }
+        }
+        const buf = fs.readFileSync(filePath)
+        const ext = path.extname(filePath).toLowerCase().slice(1)
+        const mime = ext === 'jpg' ? 'image/jpeg' : ext === 'webp' ? 'image/webp' : 'image/png'
+        return { dataUrl: `data:${mime};base64,${buf.toString('base64')}` }
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
   // ─── FlowKit Runtime Manager IPC ──────────────────────────────────────────
 
   ipcMain.handle(
@@ -502,7 +522,10 @@ export function registerThumbnailHandlers(ipcMain: IpcMain): void {
     IPC_CHANNELS.FLOWKIT_RUNTIME_SAVE_SETTINGS,
     async (_event, params: Parameters<typeof flowkitRuntimeManager.applySettings>[0]): Promise<{ success: boolean; error?: string }> => {
       try {
-        flowkitRuntimeManager.applySettings(params)
+        // saveSettings = applySettings + savePersistedSettings (atomic)
+        flowkitRuntimeManager.saveSettings(params)
+        // Sync the shared GoogleFlowClient URL
+        googleFlowProvider.healthCheck(flowkitRuntimeManager.getSettings().bridgeUrl).catch(() => {})
         return { success: true }
       } catch (err) {
         return { success: false, error: String(err) }
