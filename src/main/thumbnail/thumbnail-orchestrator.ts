@@ -348,10 +348,22 @@ export class ThumbnailOrchestrator {
         logger.info(`[ThumbnailOrchestrator] Completed job found for round ${round}. Skipping.`)
         return existingState
       }
-      // Stale lease from previous crash → delegate to resumeJob
+      // Stale lease from previous crash → reconcile to 'interrupted' and return.
+      // Do NOT auto-resume here (would trigger preflight/generation without user intent).
+      // The user will click Resume manually when FlowKit is ready.
       if (existingState.status === 'generating' && isThumbnailLeaseStale(existingState.lease)) {
-        logger.info(`[ThumbnailOrchestrator] Stale lease detected. Delegating to resumeJob...`)
-        return this.resumeJob(projectDir)
+        logger.info(`[ThumbnailOrchestrator] Stale lease detected. Reconciling to interrupted state.`)
+        existingState.status = 'interrupted'
+        // Reset in-flight candidates to pending
+        for (const c of existingState.candidates) {
+          if (c.status === 'generating' || c.status === 'exporting') {
+            c.status = 'pending'
+            c.error = undefined
+          }
+        }
+        if (existingState.lease) delete existingState.lease
+        saveThumbnailJobStateAtomic(projectDir, existingState)
+        return existingState
       }
     }
 
