@@ -13732,6 +13732,7 @@ class ResearchSidecarManager {
   lastError;
   healthCheckInterval = null;
   pidFilePath;
+  lastSuccessfulHealthCheck = null;
   constructor() {
     this.pidFilePath = path.join(
       electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
@@ -13753,14 +13754,30 @@ class ResearchSidecarManager {
       version: "1.0.0",
       status: this.status,
       error: this.lastError,
-      lastHealthCheck: (/* @__PURE__ */ new Date()).toISOString()
+      lastHealthCheck: this.lastSuccessfulHealthCheck || void 0
     };
   }
   async pingHealth() {
     return new Promise((resolve) => {
       const req = http__namespace.get(`http://${this.host}:${this.port}/health`, { timeout: 2e3 }, (res) => {
         if (res.statusCode === 200) {
-          resolve(true);
+          let body = "";
+          res.on("data", (chunk) => {
+            body += chunk;
+          });
+          res.on("end", () => {
+            try {
+              const data = JSON.parse(body);
+              if (data.service === "YouTube Foreign Market Researcher" && data.status === "online") {
+                this.lastSuccessfulHealthCheck = (/* @__PURE__ */ new Date()).toISOString();
+                resolve(true);
+              } else {
+                resolve(false);
+              }
+            } catch {
+              resolve(false);
+            }
+          });
         } else {
           resolve(false);
         }
@@ -13816,7 +13833,13 @@ class ResearchSidecarManager {
         windowsHide: true
       });
       if (this.process.pid) {
-        fs__namespace.writeFileSync(this.pidFilePath, String(this.process.pid), "utf-8");
+        const metadata = {
+          pid: this.process.pid,
+          port: this.port,
+          startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          service: "YouTube Foreign Market Researcher"
+        };
+        fs__namespace.writeFileSync(this.pidFilePath, JSON.stringify(metadata, null, 2), "utf-8");
       }
       this.process.stdout?.on("data", (data) => {
         const line = data.toString().trim();
@@ -13904,11 +13927,26 @@ class ResearchSidecarManager {
   cleanupStaleProcess() {
     try {
       if (fs__namespace.existsSync(this.pidFilePath)) {
-        const oldPid = parseInt(fs__namespace.readFileSync(this.pidFilePath, "utf-8").trim(), 10);
+        const content = fs__namespace.readFileSync(this.pidFilePath, "utf-8").trim();
+        let oldPid = null;
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed && parsed.service === "YouTube Foreign Market Researcher" && typeof parsed.pid === "number") {
+            oldPid = parsed.pid;
+          }
+        } catch {
+          const numeric = parseInt(content, 10);
+          if (!isNaN(numeric)) oldPid = numeric;
+        }
         if (oldPid && !isNaN(oldPid)) {
           if (process.platform === "win32") {
             try {
               child_process.execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: "ignore" });
+            } catch {
+            }
+          } else {
+            try {
+              process.kill(oldPid, "SIGTERM");
             } catch {
             }
           }

@@ -10937,161 +10937,278 @@ const SUPPORTED_MARKETS = [
   { code: "KR", name: "South Korea", defaultLanguage: "ko", flag: "🇰🇷" }
 ];
 const SIDECAR_DEFAULT_URL = "http://127.0.0.1:8765";
+class ResearchApiError extends Error {
+  code;
+  status;
+  details;
+  constructor(message, code, status, details) {
+    super(message);
+    this.name = "ResearchApiError";
+    this.code = code;
+    this.status = status;
+    this.details = details;
+  }
+}
+function normalizeLocalSidecarUrl(url) {
+  const fallback = SIDECAR_DEFAULT_URL;
+  if (!url) return fallback;
+  try {
+    const parsed = new URL(url);
+    const localHosts = /* @__PURE__ */ new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
+    if (parsed.protocol !== "http:" || !localHosts.has(parsed.hostname)) {
+      return fallback;
+    }
+    return parsed.origin.replace(/\/+$/, "");
+  } catch {
+    return fallback;
+  }
+}
 class ResearchApi {
   baseUrl;
   constructor(baseUrl = SIDECAR_DEFAULT_URL) {
-    this.baseUrl = baseUrl;
+    this.baseUrl = normalizeLocalSidecarUrl(baseUrl);
   }
   setBaseUrl(url) {
-    this.baseUrl = url;
+    this.baseUrl = normalizeLocalSidecarUrl(url);
   }
   getBaseUrl() {
     return this.baseUrl;
   }
+  async request(endpoint, options = {}) {
+    const { timeoutMs = 12e3, ...fetchOptions } = options;
+    const url = `${this.baseUrl}${endpoint}`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    let combinedSignal = controller.signal;
+    if (fetchOptions.signal) {
+      const externalSignal = fetchOptions.signal;
+      if (externalSignal.aborted) {
+        clearTimeout(timeoutId);
+        throw new ResearchApiError("Request aborted by caller", "TIMEOUT");
+      }
+      externalSignal.addEventListener("abort", () => controller.abort());
+    }
+    try {
+      const res = await fetch(url, {
+        ...fetchOptions,
+        signal: combinedSignal
+      });
+      if (!res.ok) {
+        let errData = null;
+        try {
+          errData = await res.json();
+        } catch {
+        }
+        const detailMsg = errData?.detail || `Request failed with status ${res.status}`;
+        if (res.status === 422) {
+          throw new ResearchApiError(
+            `Invalid research request: ${typeof detailMsg === "string" ? detailMsg : JSON.stringify(detailMsg)}`,
+            "HTTP_ERROR",
+            422,
+            errData
+          );
+        }
+        if (res.status === 500) {
+          throw new ResearchApiError(
+            "The research service encountered an internal error.",
+            "HTTP_ERROR",
+            500,
+            errData
+          );
+        }
+        throw new ResearchApiError(detailMsg, "HTTP_ERROR", res.status, errData);
+      }
+      try {
+        return await res.json();
+      } catch (err) {
+        throw new ResearchApiError("Invalid JSON response from research service", "INVALID_RESPONSE");
+      }
+    } catch (err) {
+      if (err instanceof ResearchApiError) {
+        throw err;
+      }
+      if (err instanceof DOMException && err.name === "AbortError") {
+        throw new ResearchApiError("The research service did not respond in time.", "TIMEOUT");
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError") || msg.includes("CSP")) {
+        throw new ResearchApiError(
+          "The Electron renderer was blocked or could not connect to the local research service at " + this.baseUrl,
+          "API_OFFLINE"
+        );
+      }
+      throw new ResearchApiError(`Connection error: ${msg}`, "API_OFFLINE");
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  }
   async checkHealth() {
-    const res = await fetch(`${this.baseUrl}/health`, { signal: AbortSignal.timeout(3e3) });
-    if (!res.ok) throw new Error(`Health check failed with status ${res.status}`);
-    return res.json();
+    return this.request("/health", { timeoutMs: 3e3 });
   }
   async startDiscover(params) {
-    const res = await fetch(`${this.baseUrl}/api/research/discover`, {
+    return this.request("/api/research/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(params)
+      body: JSON.stringify(params),
+      timeoutMs: 15e3
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: "Failed to start research" }));
-      throw new Error(err.detail || "Failed to start research");
-    }
-    return res.json();
+  }
+  async getRunStatus(runId) {
+    return this.request(`/api/research/runs/${encodeURIComponent(runId)}/status`, { timeoutMs: 4e3 });
   }
   async expandKeywords(topic, market) {
-    const res = await fetch(`${this.baseUrl}/api/research/expand-keywords`, {
+    return this.request("/api/research/expand-keywords", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, market })
+      body: JSON.stringify({ topic, market }),
+      timeoutMs: 2e4
     });
-    if (!res.ok) throw new Error("Failed to expand keywords");
-    return res.json();
   }
   async cancelRun(runId) {
-    const res = await fetch(`${this.baseUrl}/api/research/cancel/${runId}`, {
-      method: "POST"
+    return this.request(`/api/research/cancel/${encodeURIComponent(runId)}`, {
+      method: "POST",
+      timeoutMs: 5e3
     });
-    if (!res.ok) throw new Error("Failed to cancel research");
-    return res.json();
   }
   async getRunResult(runId) {
-    const res = await fetch(`${this.baseUrl}/api/research/runs/${runId}`);
-    if (!res.ok) throw new Error("Failed to get research result");
-    return res.json();
+    return this.request(`/api/research/runs/${encodeURIComponent(runId)}`, { timeoutMs: 1e4 });
   }
   async getLatestRun(topic, market) {
     const query = new URLSearchParams();
     if (topic) query.set("topic", topic);
     if (market) query.set("market", market);
-    const res = await fetch(`${this.baseUrl}/api/research/runs/latest?${query.toString()}`);
-    if (res.status === 404) return null;
-    if (!res.ok) throw new Error("Failed to get latest run");
-    return res.json();
+    try {
+      return await this.request(`/api/research/runs/latest?${query.toString()}`, { timeoutMs: 5e3 });
+    } catch (err) {
+      if (err instanceof ResearchApiError && err.status === 404) {
+        return null;
+      }
+      throw err;
+    }
   }
   async analyzeCompetitor(channelUrl, market = "US") {
-    const res = await fetch(`${this.baseUrl}/api/research/competitor`, {
+    return this.request("/api/research/competitor", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ channel_url: channelUrl, market })
+      body: JSON.stringify({ channel_url: channelUrl, market }),
+      timeoutMs: 3e4
     });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: "Failed to analyze competitor" }));
-      throw new Error(err.detail || "Failed to analyze competitor");
-    }
-    return res.json();
   }
   async getSavedProjects() {
-    const res = await fetch(`${this.baseUrl}/api/research/saved`);
-    if (!res.ok) throw new Error("Failed to fetch saved projects");
-    return res.json();
+    return this.request("/api/research/saved", { timeoutMs: 5e3 });
   }
   async saveProject(payload) {
-    const res = await fetch(`${this.baseUrl}/api/research/saved`, {
+    return this.request("/api/research/saved", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      timeoutMs: 8e3
     });
-    if (!res.ok) throw new Error("Failed to save research project");
-    return res.json();
   }
   async renameSavedProject(id2, name) {
-    const res = await fetch(`${this.baseUrl}/api/research/saved/${id2}`, {
+    return this.request(`/api/research/saved/${encodeURIComponent(id2)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ name }),
+      timeoutMs: 5e3
     });
-    if (!res.ok) throw new Error("Failed to rename project");
-    return res.json();
   }
   async deleteSavedProject(id2) {
-    const res = await fetch(`${this.baseUrl}/api/research/saved/${id2}`, {
-      method: "DELETE"
+    return this.request(`/api/research/saved/${encodeURIComponent(id2)}`, {
+      method: "DELETE",
+      timeoutMs: 5e3
     });
-    if (!res.ok) throw new Error("Failed to delete project");
-    return res.json();
   }
   async getSettings() {
-    const res = await fetch(`${this.baseUrl}/api/research/settings`);
-    if (!res.ok) throw new Error("Failed to get research settings");
-    return res.json();
+    return this.request("/api/research/settings", { timeoutMs: 5e3 });
   }
   async updateSettings(settings) {
-    const res = await fetch(`${this.baseUrl}/api/research/settings`, {
+    return this.request("/api/research/settings", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(settings)
+      body: JSON.stringify(settings),
+      timeoutMs: 8e3
     });
-    if (!res.ok) throw new Error("Failed to update research settings");
-    return res.json();
   }
   async testYouTubeApiKey(apiKey) {
-    const res = await fetch(`${this.baseUrl}/api/research/test-api-key`, {
+    return this.request("/api/research/test-api-key", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ api_key: apiKey })
+      body: JSON.stringify({ api_key: apiKey }),
+      timeoutMs: 1e4
     });
-    if (!res.ok) throw new Error("Failed to test API key");
-    return res.json();
   }
   async testOllama(url, model) {
-    const res = await fetch(`${this.baseUrl}/api/research/test-ollama`, {
+    return this.request("/api/research/test-ollama", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url, model })
+      body: JSON.stringify({ url, model }),
+      timeoutMs: 1e4
     });
-    if (!res.ok) throw new Error("Failed to test Ollama connection");
-    return res.json();
   }
   subscribeProgress(runId, onProgress, onError, onComplete) {
-    const sseUrl = `${this.baseUrl}/api/research/stream/${runId}`;
-    const eventSource = new EventSource(sseUrl);
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        onProgress(data);
-        if (data.stage === "COMPLETED" || data.stage === "FAILED" || data.stage === "CANCELLED") {
-          eventSource.close();
-          onComplete(data);
-        }
-      } catch (err) {
-        console.error("[Research SSE] Parse error", err);
+    let closed = false;
+    let eventSource = null;
+    let pollInterval = null;
+    const cleanup = () => {
+      closed = true;
+      if (eventSource) {
+        eventSource.close();
+        eventSource = null;
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
       }
     };
-    eventSource.onerror = (err) => {
-      console.warn("[Research SSE] Connection error", err);
-      onError(new Error("Connection to research progress stream interrupted"));
-      eventSource.close();
+    const startPollingFallback = () => {
+      if (closed || pollInterval) return;
+      pollInterval = setInterval(async () => {
+        if (closed) return;
+        try {
+          const status = await this.getRunStatus(runId);
+          onProgress(status);
+          if (["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(status.stage)) {
+            cleanup();
+            onComplete(status);
+          }
+        } catch (pollErr) {
+        }
+      }, 1500);
     };
-    return () => {
-      eventSource.close();
-    };
+    try {
+      const sseUrl = `${this.baseUrl}/api/research/stream/${encodeURIComponent(runId)}`;
+      eventSource = new EventSource(sseUrl);
+      eventSource.onmessage = (event) => {
+        if (closed) return;
+        try {
+          if (!event.data || event.data.trim() === "{}" || event.data.startsWith(":")) {
+            return;
+          }
+          const data = JSON.parse(event.data);
+          onProgress(data);
+          if (["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(data.stage)) {
+            cleanup();
+            onComplete(data);
+          }
+        } catch (err) {
+          console.warn("[Research SSE] Parse warning", err);
+        }
+      };
+      eventSource.onerror = (err) => {
+        if (closed) return;
+        console.warn("[Research SSE] SSE stream connection dropped. Switching to status polling fallback.", err);
+        if (eventSource) {
+          eventSource.close();
+          eventSource = null;
+        }
+        startPollingFallback();
+      };
+    } catch (err) {
+      console.warn("[Research SSE] Failed to instantiate EventSource, using status polling fallback", err);
+      startPollingFallback();
+    }
+    return cleanup;
   }
 }
 const researchApi = new ResearchApi();
@@ -16957,7 +17074,10 @@ function ResearchHeader({
   onToggleView,
   onOpenSettings,
   sidecarStatus,
+  apiReachabilityStatus,
   onRestartSidecar,
+  onRetryConnection,
+  hasExecutedRun = false,
   lastResearchTopic
 }) {
   const getProviderColor = (p2) => {
@@ -16966,7 +17086,23 @@ function ResearchHeader({
     return "var(--text-muted, #94a3b8)";
   };
   const getSidecarBadge = () => {
-    if (sidecarStatus === "running") {
+    if (apiReachabilityStatus === "checking") {
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+        display: "inline-flex",
+        alignItems: "center",
+        gap: "5px",
+        fontSize: "11px",
+        color: "#60a5fa",
+        background: "rgba(96, 165, 250, 0.12)",
+        border: "1px solid rgba(96, 165, 250, 0.3)",
+        borderRadius: "999px",
+        padding: "2px 8px"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: 6, height: 6, borderRadius: "50%", background: "#60a5fa" } }),
+        "Connecting…"
+      ] });
+    }
+    if (sidecarStatus === "running" && apiReachabilityStatus === "reachable") {
       return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
         display: "inline-flex",
         alignItems: "center",
@@ -16981,6 +17117,24 @@ function ResearchHeader({
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: 6, height: 6, borderRadius: "50%", background: "#34d399" } }),
         "Service Active"
       ] });
+    }
+    if (sidecarStatus === "running" && apiReachabilityStatus === "blocked") {
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: onRetryConnection,
+          className: "btn btn-secondary",
+          style: {
+            fontSize: "10px",
+            padding: "2px 8px",
+            color: "#f87171",
+            background: "rgba(248, 113, 113, 0.12)",
+            border: "1px solid rgba(248, 113, 113, 0.3)"
+          },
+          title: "The Python service is running locally, but Renderer requests are blocked. Click to retry connection.",
+          children: "● Service Running — API Connection Blocked (Retry ⟳)"
+        }
+      );
     }
     if (sidecarStatus === "degraded") {
       return /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
@@ -17053,8 +17207,8 @@ function ResearchHeader({
         borderRadius: "var(--radius-sm, 6px)",
         border: "1px solid var(--border-subtle)"
       }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)" }, children: "Provider:" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, color: getProviderColor(providerSource) }, children: providerSource === "OFFICIAL" ? "Official API" : providerSource === "MIXED" ? "Mixed Mode" : "Free Public Scraper" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)" }, children: apiReachabilityStatus === "checking" ? "Provider:" : hasExecutedRun ? "Provider used:" : "Provider: " }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, color: apiReachabilityStatus === "checking" ? "var(--text-muted)" : getProviderColor(providerSource) }, children: apiReachabilityStatus === "checking" ? "Checking…" : (providerSource === "OFFICIAL" ? "Official API" : providerSource === "MIXED" ? "Mixed Mode" : "Free Public Scraper") + (!hasExecutedRun ? " configured" : "") })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
@@ -17514,7 +17668,14 @@ function DiscoverTab({
   isCancelling,
   onSelectKeyword,
   onCreateProject,
-  onNavigateTab
+  onNavigateTab,
+  apiReachabilityStatus = "reachable",
+  errorMessage,
+  errorDetails,
+  onDismissError,
+  onRetryConnection,
+  onRestartSidecar,
+  isAdvancedView = false
 }) {
   const [topic, setTopic] = reactExports.useState("grocery prices");
   const [market, setMarket] = reactExports.useState("US");
@@ -17530,10 +17691,11 @@ function DiscoverTab({
   const [maxCompetition, setMaxCompetition] = reactExports.useState("");
   const [expandedSuggestions, setExpandedSuggestions] = reactExports.useState([]);
   const [isExpanding, setIsExpanding] = reactExports.useState(false);
+  const [showDetails, setShowDetails] = reactExports.useState(false);
   const isRunning = activeProgress !== null && !["COMPLETED", "FAILED", "CANCELLED"].includes(activeProgress.stage);
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (!topic.trim() || isRunning) return;
+    if (!topic.trim() || isRunning || apiReachabilityStatus === "blocked" || apiReachabilityStatus === "offline") return;
     const filters = {};
     if (minViews) filters.min_views = parseInt(minViews, 10);
     if (maxSubs) filters.max_subscribers = parseInt(maxSubs, 10);
@@ -17568,6 +17730,77 @@ function DiscoverTab({
       padding: "24px",
       boxShadow: "0 4px 15px rgba(0, 0, 0, 0.2)"
     }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("form", { onSubmit: handleSubmit, children: [
+      errorMessage && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(239, 68, 68, 0.1)",
+        border: "1px solid rgba(239, 68, 68, 0.3)",
+        borderRadius: "8px",
+        padding: "14px 16px",
+        marginBottom: "20px",
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontWeight: 600, color: "#f87171", fontSize: "13px", display: "flex", alignItems: "center", gap: "6px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⚠️" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Research could not start" })
+          ] }),
+          onDismissError && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: onDismissError,
+              style: { background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: "16px" },
+              title: "Dismiss notice",
+              children: "✕"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "var(--text-secondary)", fontSize: "12px", lineHeight: 1.5 }, children: errorMessage }),
+        isAdvancedView && errorDetails && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: () => setShowDetails(!showDetails),
+              style: { background: "none", border: "none", color: "var(--text-brand, #818cf8)", fontSize: "11px", cursor: "pointer", padding: 0 },
+              children: showDetails ? "Hide Technical Details ▲" : "View Details ▼"
+            }
+          ),
+          showDetails && /* @__PURE__ */ jsxRuntimeExports.jsx("pre", { style: {
+            marginTop: "6px",
+            padding: "8px 12px",
+            background: "rgba(0, 0, 0, 0.3)",
+            borderRadius: "4px",
+            fontSize: "11px",
+            color: "#e2e8f0",
+            overflowX: "auto",
+            whiteSpace: "pre-wrap"
+          }, children: typeof errorDetails === "string" ? errorDetails : JSON.stringify(errorDetails, null, 2) })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginTop: "4px" }, children: [
+          onRetryConnection && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: onRetryConnection,
+              className: "btn btn-secondary",
+              style: { fontSize: "11px", padding: "4px 12px" },
+              children: "Retry Connection"
+            }
+          ),
+          onRestartSidecar && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: onRestartSidecar,
+              className: "btn btn-secondary",
+              style: { fontSize: "11px", padding: "4px 12px" },
+              children: "Restart Service"
+            }
+          )
+        ] })
+      ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "20px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: {
           display: "block",
@@ -17602,7 +17835,8 @@ function DiscoverTab({
             {
               type: "submit",
               className: "btn btn-primary",
-              disabled: !topic.trim() || isRunning,
+              disabled: !topic.trim() || isRunning || apiReachabilityStatus === "blocked" || apiReachabilityStatus === "offline",
+              title: apiReachabilityStatus === "blocked" ? "Cannot connect to local research API" : apiReachabilityStatus === "offline" ? "Research service is offline" : void 0,
               style: {
                 padding: "0 24px",
                 fontSize: "13px",
@@ -19548,8 +19782,11 @@ function YouTubeResearchPage({ onNavigate }) {
   const [activeTab, setActiveTab] = reactExports.useState("discover");
   const [isAdvancedView, setIsAdvancedView] = reactExports.useState(false);
   const [sidecarStatus, setSidecarStatus] = reactExports.useState(null);
+  const [apiReachabilityStatus, setApiReachabilityStatus] = reactExports.useState("checking");
   const [providerSource, setProviderSource] = reactExports.useState("SCRAPER");
   const [debugMode, setDebugMode] = reactExports.useState(false);
+  const [discoverError, setDiscoverError] = reactExports.useState(null);
+  const [discoverErrorDetails, setDiscoverErrorDetails] = reactExports.useState(null);
   const [activeProgress, setActiveProgress] = reactExports.useState(null);
   const [activeResult, setActiveResult] = reactExports.useState(null);
   const [activeRunId, setActiveRunId] = reactExports.useState(void 0);
@@ -19562,31 +19799,54 @@ function YouTubeResearchPage({ onNavigate }) {
   const [settingsModalOpen, setSettingsModalOpen] = reactExports.useState(false);
   const sseCleanupRef = reactExports.useRef(null);
   const refreshStatusAndProjects = async () => {
+    setApiReachabilityStatus("checking");
+    let isSidecarOnline = false;
     try {
       if (window.api?.research) {
         const sStatus = await window.api.research.getStatus();
         setSidecarStatus(sStatus);
+        isSidecarOnline = Boolean(sStatus?.online);
+        if (sStatus?.url) {
+          researchApi.setBaseUrl(sStatus.url);
+        }
       }
-      const health = await researchApi.checkHealth().catch(() => null);
-      if (health) {
+      let health = null;
+      let attempts = 0;
+      while (attempts < 3) {
+        try {
+          health = await researchApi.checkHealth();
+          if (health) break;
+        } catch {
+          attempts++;
+          if (attempts < 3) {
+            await new Promise((r2) => setTimeout(r2, attempts === 1 ? 400 : 1e3));
+          }
+        }
+      }
+      if (health && health.status === "online") {
+        setApiReachabilityStatus("reachable");
         const prov = health.providers?.last_provenance || "SCRAPER";
         setProviderSource(prov);
-      }
-      const saved = await researchApi.getSavedProjects().catch(() => []);
-      setSavedProjects(saved);
-      const settings = await researchApi.getSettings().catch(() => null);
-      if (settings) {
-        setDebugMode(settings.debug_mode);
-      }
-      if (!activeResult) {
-        const latest = await researchApi.getLatestRun().catch(() => null);
-        if (latest) {
-          setActiveResult(latest);
-          setActiveRunId(latest.run_id);
+        setDiscoverError(null);
+        const saved = await researchApi.getSavedProjects().catch(() => []);
+        setSavedProjects(saved);
+        const settings = await researchApi.getSettings().catch(() => null);
+        if (settings) {
+          setDebugMode(settings.debug_mode);
         }
+        if (!activeResult) {
+          const latest = await researchApi.getLatestRun().catch(() => null);
+          if (latest) {
+            setActiveResult(latest);
+            setActiveRunId(latest.run_id);
+          }
+        }
+      } else {
+        setApiReachabilityStatus(isSidecarOnline ? "blocked" : "offline");
       }
     } catch (err) {
       console.warn("[YouTubeResearch] Initial status check failed:", err);
+      setApiReachabilityStatus(isSidecarOnline ? "blocked" : "offline");
     }
   };
   reactExports.useEffect(() => {
@@ -19598,6 +19858,18 @@ function YouTubeResearchPage({ onNavigate }) {
     };
   }, []);
   const handleStartDiscover = async (params) => {
+    setDiscoverError(null);
+    setDiscoverErrorDetails(null);
+    if (apiReachabilityStatus === "blocked") {
+      try {
+        const health = await researchApi.checkHealth();
+        if (health) setApiReachabilityStatus("reachable");
+      } catch (err) {
+        setDiscoverError("The local research service is running, but this window cannot connect to its API (connection blocked).");
+        setDiscoverErrorDetails(err);
+        return;
+      }
+    }
     try {
       const { run_id } = await researchApi.startDiscover(params);
       setActiveRunId(run_id);
@@ -19620,7 +19892,7 @@ function YouTubeResearchPage({ onNavigate }) {
           setActiveProgress(progress);
         },
         (error) => {
-          console.warn("[Research] SSE error:", error);
+          console.warn("[Research] SSE warning:", error);
           setSseConnected(false);
         },
         async (completedState) => {
@@ -19638,7 +19910,10 @@ function YouTubeResearchPage({ onNavigate }) {
       );
       sseCleanupRef.current = cleanup;
     } catch (err) {
-      alert(`Could not start research: ${err instanceof Error ? err.message : String(err)}`);
+      console.error("[YouTubeResearch] Start discover failed:", err);
+      const msg = err instanceof Error ? err.message : String(err);
+      setDiscoverError(msg);
+      setDiscoverErrorDetails(err);
     }
   };
   const handleCancelResearch = async () => {
@@ -19729,7 +20004,10 @@ function YouTubeResearchPage({ onNavigate }) {
         onToggleView: () => setIsAdvancedView(!isAdvancedView),
         onOpenSettings: () => setSettingsModalOpen(true),
         sidecarStatus: sidecarStatus?.status || "running",
+        apiReachabilityStatus,
         onRestartSidecar: handleRestartSidecar,
+        onRetryConnection: refreshStatusAndProjects,
+        hasExecutedRun: activeResult !== null,
         lastResearchTopic: activeResult?.topic
       }
     ),
@@ -19826,7 +20104,14 @@ function YouTubeResearchPage({ onNavigate }) {
             setHandoffKeyword(kw);
             setHandoffAngle(angle);
           },
-          onNavigateTab: (tab) => setActiveTab(tab)
+          onNavigateTab: (tab) => setActiveTab(tab),
+          apiReachabilityStatus,
+          errorMessage: discoverError,
+          errorDetails: discoverErrorDetails,
+          onDismissError: () => setDiscoverError(null),
+          onRetryConnection: refreshStatusAndProjects,
+          onRestartSidecar: handleRestartSidecar,
+          isAdvancedView
         }
       ),
       activeTab === "keywords" && /* @__PURE__ */ jsxRuntimeExports.jsx(
