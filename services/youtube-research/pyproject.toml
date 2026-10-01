@@ -1,0 +1,22 @@
+[project]
+name = "youtube-foreign-market-researcher"
+version = "1.0.0"
+description = "YouTube Foreign Market Researcher - Isolated Keyword and Market Intelligence Service"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.28.0",
+    "pydantic>=2.6.0",
+    "sqlalchemy>=2.0.0",
+    "httpx>=0.27.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+pythonpath = ["."]
