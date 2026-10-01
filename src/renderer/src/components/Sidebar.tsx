@@ -1,7 +1,7 @@
 import React from 'react'
 import type { ProjectState } from '../../../../shared/types'
 
-type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'captions' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa'
+type Page = 'home' | 'input' | 'transcribe' | 'planning' | 'captions' | 'stock' | 'audio' | 'settings' | 'analysis' | 'render' | 'qa' | 'youtube-research'
 
 interface SidebarProps {
   project: ProjectState | null
@@ -137,6 +137,16 @@ const NAV_ITEMS: {
     icon: (
       <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
         <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+      </svg>
+    )
+  },
+  {
+    id: 'youtube-research',
+    label: 'YouTube Research',
+    requiresProject: false,
+    icon: (
+      <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
+        <path fillRule="evenodd" d="M12 7a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0V8.414l-4.293 4.293a1 1 0 01-1.414 0L8 10.414l-4.293 4.293a1 1 0 01-1.414-1.414l5-5a1 1 0 011.414 0L11 10.586 14.586 7H12z" clipRule="evenodd" />
       </svg>
     )
   }

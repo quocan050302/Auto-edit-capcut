@@ -20,6 +20,7 @@ import { useTranscribe } from './hooks/useTranscribe'
 import { useStock } from './hooks/useStock'
 import { useAudioDirector } from './hooks/useAudioDirector'
 import { useUiPreferences } from './hooks/useUiPreferences'
+import { YouTubeResearchPage } from './features/youtube-research/pages/YouTubeResearchPage'
 
 export type Page =
   | 'home'
@@ -34,6 +35,7 @@ export type Page =
   | 'analysis'
   | 'render'
   | 'qa'
+  | 'youtube-research'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
@@ -146,7 +148,7 @@ export default function App(): React.ReactElement {
   }, [project?.projectDir, isSimpleMode])
 
   function navigate(page: Page): void {
-    if (page !== 'home' && !project) return
+    if (page !== 'home' && page !== 'youtube-research' && !project) return
     setCurrentPage(page)
   }
 
@@ -287,6 +289,13 @@ export default function App(): React.ReactElement {
           {currentPage === 'render' && project && <RenderPage project={project} />}
 
           {currentPage === 'qa' && <QAPage />}
+
+          {currentPage === 'youtube-research' && (
+            <YouTubeResearchPage
+              project={project}
+              onNavigate={(p) => navigate(p as Page)}
+            />
+          )}
         </div>
       </div>
 

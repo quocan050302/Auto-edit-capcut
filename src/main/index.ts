@@ -11,6 +11,8 @@ import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
 import { registerPipelineHandlers } from './ipc/pipeline.ipc'
+import { registerResearchHandlers } from './ipc/research.ipc'
+import { researchSidecar } from './research/research-sidecar'
 import { pipelineOrchestrator } from './pipeline/pipeline-orchestrator'
 import { logger } from './logger'
 
@@ -69,6 +71,12 @@ app.whenReady().then(() => {
   registerAudioHandlers(ipcMain)
   registerCaptionHandlers(ipcMain)
   registerPipelineHandlers(ipcMain)
+  registerResearchHandlers(ipcMain)
+
+  // Asynchronously launch YouTube Research sidecar (non-blocking, failures do NOT crash app)
+  researchSidecar.start().catch((err) => {
+    logger.warn('[ResearchSidecar] Non-blocking startup error:', err)
+  })
 
   const mainWindow = createWindow()
 
@@ -95,12 +103,14 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   pipelineOrchestrator.handleAppQuit()
+  researchSidecar.stop().catch(() => {})
 })
 
 process.on('uncaughtException', (error) => {
   logger.error('[App] Uncaught exception:', error)
   try {
     pipelineOrchestrator.handleAppQuit()
+    researchSidecar.stop().catch(() => {})
   } catch {
     /* ignore */
   }
