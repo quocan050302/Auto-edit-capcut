@@ -595,6 +595,7 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
           <ResearchSettingsModal
             onClose={() => setSettingsModalOpen(false)}
             onSettingsUpdated={refreshStatusAndProjects}
+            onRestartSidecar={handleRestartSidecar}
           />
         )}
       </div>

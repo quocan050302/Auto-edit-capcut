@@ -6,13 +6,16 @@ import { researchApi } from '../api/researchApi'
 interface Props {
   onClose: () => void
   onSettingsUpdated: () => void
+  onRestartSidecar?: () => Promise<void>
 }
 
-export function ResearchSettingsModal({ onClose, onSettingsUpdated }: Props): React.ReactElement {
+export function ResearchSettingsModal({ onClose, onSettingsUpdated, onRestartSidecar }: Props): React.ReactElement {
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [errorIsOffline, setErrorIsOffline] = useState(false)
   const [successMsg, setSuccessMsg] = useState<string | null>(null)
+  const [restartingService, setRestartingService] = useState(false)
 
   // Settings State
   const [useOfficialApi, setUseOfficialApi] = useState(false)
@@ -184,7 +187,20 @@ export function ResearchSettingsModal({ onClose, onSettingsUpdated }: Props): Re
       onSettingsUpdated()
       setTimeout(() => setSuccessMsg(null), 3000)
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : String(err))
+      // Detect sidecar-offline errors vs real errors
+      const msg = err instanceof Error ? err.message : String(err)
+      const isOffline =
+        msg.includes('not responding') ||
+        msg.includes('blocked') ||
+        msg.includes('could not connect') ||
+        msg.includes('API_OFFLINE') ||
+        msg.includes('timed out')
+      setErrorIsOffline(isOffline)
+      setError(
+        isOffline
+          ? 'The research service is not running. Start or restart the service, then try saving again.'
+          : msg
+      )
     } finally {
       setSaving(false)
     }
@@ -521,8 +537,53 @@ export function ResearchSettingsModal({ onClose, onSettingsUpdated }: Props): Re
         )}
 
         {error && (
-          <div style={{ padding: '10px', background: 'rgba(239, 68, 68, 0.1)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)', borderRadius: '6px', fontSize: '11px' }}>
-            ⚠ {error}
+          <div style={{
+            padding: '12px 14px',
+            background: 'rgba(239, 68, 68, 0.08)',
+            color: '#f87171',
+            border: '1px solid rgba(239, 68, 68, 0.25)',
+            borderRadius: '8px',
+            fontSize: '12px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px'
+          }}>
+            <div style={{ display: 'flex', alignItems: 'flex-start', gap: '6px' }}>
+              <span>⚠</span>
+              <span>{error}</span>
+            </div>
+            {errorIsOffline && (
+              <div style={{ display: 'flex', gap: '8px', marginTop: '2px' }}>
+                {onRestartSidecar && (
+                  <button
+                    className="btn btn-secondary"
+                    disabled={restartingService}
+                    onClick={async () => {
+                      setRestartingService(true)
+                      setError(null)
+                      try {
+                        await onRestartSidecar()
+                        setSuccessMsg('Service restarted — please try saving again.')
+                      } catch {
+                        setError('Failed to restart service. Try manually restarting from the main window.')
+                      } finally {
+                        setRestartingService(false)
+                      }
+                    }}
+                    style={{ fontSize: '11px', padding: '4px 12px' }}
+                  >
+                    {restartingService ? 'Restarting...' : '⟳ Restart Research Service'}
+                  </button>
+                )}
+                <button
+                  className="btn btn-secondary"
+                  onClick={() => setError(null)}
+                  style={{ fontSize: '11px', padding: '4px 12px' }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
           </div>
         )}
 
