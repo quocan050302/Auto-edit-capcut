@@ -6,6 +6,7 @@ import { PipelineTimeline } from '../components/PipelineTimeline'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { getPageForPipelineStage } from '../navigation/pipelineStageNavigation'
+import { ThumbnailInputAutomationCard } from '../components/thumbnail/ThumbnailInputAutomationCard'
 
 export interface InputPageProps {
   project: ProjectState
@@ -512,6 +513,15 @@ export function InputPage({
           </div>
         </CollapsibleSection>
 
+        {/* Thumbnail Automation Card */}
+        <div style={{ marginTop: '20px' }}>
+          <ThumbnailInputAutomationCard
+            projectDir={project.projectDir}
+            onManageLibrary={() => onNavigate?.('thumbnail-library')}
+            disabled={isRunning}
+          />
+        </div>
+
         {/* Sticky Action Bar */}
         <div className="sticky-action-bar">
           <div className="sticky-action-bar__info">
@@ -872,6 +882,15 @@ export function InputPage({
           </div>
         </div>
       )}
+
+      {/* Thumbnail Automation Card */}
+      <div style={{ marginTop: '20px' }}>
+        <ThumbnailInputAutomationCard
+          projectDir={project.projectDir}
+          onManageLibrary={() => onNavigate?.('thumbnail-library')}
+          disabled={isRunning}
+        />
+      </div>
 
       {/* MANUAL MODE: Existing Analyze Project action panel */}
       {workflowMode === 'manual' && (

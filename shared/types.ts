@@ -1004,7 +1004,50 @@ export const IPC_CHANNELS = {
   PIPELINE_PROGRESS: 'pipeline:progress',
   PIPELINE_RETRY_STAGE: 'pipeline:retry-stage',
   PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
-  PIPELINE_RECOVER: 'pipeline:recover'
+  PIPELINE_RECOVER: 'pipeline:recover',
+
+  // Thumbnail Studio & Google Flow companion workflow
+  THUMBNAIL_TEMPLATE_LIST: 'thumbnail:template-list',
+  THUMBNAIL_TEMPLATE_CREATE: 'thumbnail:template-create',
+  THUMBNAIL_TEMPLATE_UPDATE: 'thumbnail:template-update',
+  THUMBNAIL_TEMPLATE_DUPLICATE: 'thumbnail:template-duplicate',
+  THUMBNAIL_TEMPLATE_DELETE: 'thumbnail:template-delete',
+  THUMBNAIL_TEMPLATE_IMPORT: 'thumbnail:template-import',
+  THUMBNAIL_TEMPLATE_EXPORT: 'thumbnail:template-export',
+
+  THUMBNAIL_SETTINGS_GET: 'thumbnail:settings-get',
+  THUMBNAIL_SETTINGS_SAVE: 'thumbnail:settings-save',
+
+  THUMBNAIL_FLOW_HEALTH: 'thumbnail:flow-health',
+  THUMBNAIL_FLOW_OPEN: 'thumbnail:flow-open',
+
+  THUMBNAIL_PLAN_GENERATE: 'thumbnail:plan-generate',
+  THUMBNAIL_JOB_START: 'thumbnail:job-start',
+  THUMBNAIL_JOB_GET: 'thumbnail:job-get',
+  THUMBNAIL_JOB_RESUME: 'thumbnail:job-resume',
+  THUMBNAIL_JOB_CANCEL: 'thumbnail:job-cancel',
+  THUMBNAIL_JOB_GENERATE_MORE: 'thumbnail:job-generate-more',
+
+  THUMBNAIL_CANDIDATE_RETRY: 'thumbnail:candidate-retry',
+  THUMBNAIL_CANDIDATE_REGENERATE: 'thumbnail:candidate-regenerate',
+  THUMBNAIL_CANDIDATE_EXPORT_4K: 'thumbnail:candidate-export-4k',
+  THUMBNAIL_CANDIDATE_SELECT: 'thumbnail:candidate-select',
+
+  THUMBNAIL_OPEN_FOLDER: 'thumbnail:open-folder',
+  THUMBNAIL_READ_IMAGE: 'thumbnail:read-image',
+  THUMBNAIL_PROGRESS: 'thumbnail:progress',
+
+  // FlowKit Runtime Manager
+  FLOWKIT_RUNTIME_GET_SETTINGS: 'flowkit:runtime-get-settings',
+  FLOWKIT_RUNTIME_SAVE_SETTINGS: 'flowkit:runtime-save-settings',
+  FLOWKIT_RUNTIME_START: 'flowkit:runtime-start',
+  FLOWKIT_RUNTIME_STOP: 'flowkit:runtime-stop',
+  FLOWKIT_RUNTIME_STATUS: 'flowkit:runtime-status',
+  FLOWKIT_RUNTIME_LOG: 'flowkit:runtime-log',
+  FLOWKIT_RUNTIME_SELECT_FOLDER: 'flowkit:runtime-select-folder',
+  FLOWKIT_RUNTIME_SELECT_PYTHON: 'flowkit:runtime-select-python',
+  FLOWKIT_RUNTIME_ENSURE_READY: 'flowkit:runtime-ensure-ready',
+  FLOWKIT_RUNTIME_DETECT_PYTHON: 'flowkit:runtime-detect-python'
 } as const
 
 // ─── Master Edit Plan Retention Extension ─────────────────────────────────────
@@ -1270,3 +1313,248 @@ export interface PipelineError {
   retryAfterMs?: number
   originalError?: string
 }
+
+// ─── Thumbnail Studio & Google Flow Types ─────────────────────────────────────
+
+export const THUMBNAIL_CATEGORIES = [
+  'US Grocery',
+  'Preparedness',
+  'Hutterite Documentary',
+  'Hidden Cost Documentary',
+  'Streamer Reaction',
+  'Custom'
+] as const
+
+export const BUILT_IN_PROMPT_CATEGORIES = THUMBNAIL_CATEGORIES
+export type ThumbnailCategory = (typeof THUMBNAIL_CATEGORIES)[number]
+
+export interface ThumbnailPromptTemplate {
+  id: string
+  name: string
+  description?: string
+  category: string
+  promptText: string
+  isBuiltIn: boolean
+  isDefault: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface FlowKitRuntimeSettings {
+  mode: 'external' | 'managed'
+  bridgeUrl: string
+  flowKitPath?: string
+  pythonPath?: string
+  flowProjectId?: string
+  autoStartBridge: boolean
+}
+
+export type FlowConnectionErrorCode =
+  | 'FLOWKIT_NOT_CONFIGURED'
+  | 'FLOWKIT_PATH_INVALID'
+  | 'FLOWKIT_PYTHON_NOT_FOUND'
+  | 'FLOWKIT_DEPENDENCIES_MISSING'
+  | 'FLOWKIT_BRIDGE_OFFLINE'
+  | 'FLOWKIT_START_FAILED'
+  | 'FLOWKIT_HEALTH_TIMEOUT'
+  | 'FLOW_EXTENSION_DISCONNECTED'
+  | 'FLOW_TAB_NOT_OPEN'
+  | 'FLOW_NOT_SIGNED_IN'
+  | 'FLOW_PROJECT_ID_MISSING'
+  | 'FLOW_PROJECT_ID_INVALID'
+  | 'FLOW_PROVIDER_UNAVAILABLE'
+  | 'FLOW_IMAGE_GENERATION_UNAVAILABLE'
+
+export interface FlowReadinessResult {
+  ready: boolean
+  bridgeReachable: boolean
+  extensionConnected: boolean
+  flowConnected: boolean
+  flowProjectIdPresent: boolean
+  imageGenerationReady: boolean
+  export4kStatus: 'available' | 'unknown' | 'unavailable'
+  blockingCode?: FlowConnectionErrorCode
+  message: string
+  diagnostics?: Record<string, unknown>
+}
+
+export interface ProjectThumbnailSettings {
+  enabled: boolean
+  autoGenerateAfterRender: boolean
+  selectedTemplateId?: string
+  templateSnapshot?: string
+  templateSnapshotHash?: string
+  existingVideoTitle?: string
+  variantCount: 5
+  outputLanguage: 'en-US'
+  provider: 'google-flow'
+  imageModel: string
+  outputQuality: '4k'
+  // FlowKit connection
+  flowKitSettings?: FlowKitRuntimeSettings
+}
+
+export interface ThumbnailProviderHealth {
+  reachable: boolean
+  providerAvailable: boolean
+  extensionConnected: boolean
+  signedIn: boolean
+  supportsImageGeneration: boolean
+  requestedExportQuality: '4k'
+  message?: string
+  details?: {
+    version?: string
+    flowProjectId?: string
+    generationThrottle?: {
+      min_interval_s?: number
+      cooldown_active?: boolean
+      unusual_activity_cooldown_s?: number
+      [key: string]: unknown
+    }
+  }
+}
+
+export interface ThumbnailPlanOption {
+  id: 'A' | 'B' | 'C' | 'D' | 'E'
+  conceptName: string
+  yellowText: string
+  whiteText: string
+  visualConcept: string
+  imagePrompt: string
+  titleClear: string
+  titleCuriosity: string
+  whyItWorks: string
+}
+
+export interface ThumbnailPlanScriptInsight {
+  mainTopic: string
+  groundedHook: string
+  strongestVisualDetail: string
+  viewerConcernOrGoal: string
+  unsupportedClaimsToAvoid: string[]
+}
+
+export interface ThumbnailPlan {
+  scriptInsight: ThumbnailPlanScriptInsight
+  options: ThumbnailPlanOption[]
+  recommendedOptionId: string
+  recommendationReason: string
+  postGenerationCheck: string
+  generatedAt?: string
+  modelUsed?: string
+  generationRound?: number
+}
+
+export type ThumbnailJobStatus =
+  | 'idle'
+  | 'planning'
+  | 'awaiting-review'
+  | 'generating'
+  | 'exporting'
+  | 'partial'
+  | 'completed'
+  | 'needs-attention'
+  | 'failed'
+  | 'cancelled'
+  | 'interrupted'
+
+export interface ThumbnailCandidate {
+  id: string
+  optionId: 'A' | 'B' | 'C' | 'D' | 'E'
+  round: number
+  revision: number
+  conceptName: string
+  yellowText: string
+  whiteText: string
+  imagePrompt: string
+  titleClear: string
+  titleCuriosity: string
+  status:
+    | 'pending'
+    | 'generating'
+    | 'exporting'
+    | 'completed'
+    | 'failed'
+  attempts: number
+  mediaId?: string
+  originalImagePath?: string
+  exportedImagePath?: string
+  actualWidth?: number
+  actualHeight?: number
+  exportQuality?: 'native-4k' | '2k-fallback' | 'original-fallback'
+  error?: string
+}
+
+export interface ThumbnailJobState {
+  schemaVersion: number
+  version: number
+  jobId: string
+  jobKey: string
+  projectDir: string
+  renderOutputPath: string
+  status: ThumbnailJobStatus
+  generationRound: number
+  scriptHash: string
+  templateSnapshotHash: string
+  flowProjectId?: string
+  candidates: ThumbnailCandidate[]
+  selectedCandidateId?: string
+  createdAt: string
+  updatedAt: string
+  completedAt?: string
+  warnings: string[]
+  errors: string[]
+  lease?: {
+    jobId: string
+    appInstanceId: string
+    pid: number
+    acquiredAt: string
+    heartbeatAt: string
+  }
+}
+
+export interface ThumbnailManifest {
+  projectId: string
+  renderOutput: string
+  scriptHash: string
+  templateId?: string
+  templateSnapshotHash?: string
+  generationRound: number
+  flowModel: string
+  flowProjectId?: string
+  candidates: {
+    id: string
+    optionId: 'A' | 'B' | 'C' | 'D' | 'E'
+    conceptName: string
+    yellowText: string
+    whiteText: string
+    titleClear: string
+    titleCuriosity: string
+    imagePrompt: string
+    mediaId?: string
+    actualDimensions?: { width: number; height: number }
+    actualExportQuality?: 'native-4k' | '2k-fallback' | 'original-fallback'
+    filePath?: string
+    status: string
+    error?: string
+  }[]
+  selectedCandidateId?: string
+  createdAt: string
+  completedAt?: string
+  errors: string[]
+}
+
+export interface ThumbnailProgressPayload {
+  projectDir: string
+  jobId: string
+  status: ThumbnailJobStatus
+  stage: 'idle' | 'planning' | 'generating' | 'exporting' | 'completed' | 'failed'
+  currentOptionId?: 'A' | 'B' | 'C' | 'D' | 'E'
+  completedCount: number
+  totalCount: number
+  progress: number // 0 to 1
+  message: string
+  candidate?: ThumbnailCandidate
+  jobState?: ThumbnailJobState
+}
+

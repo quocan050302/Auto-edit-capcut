@@ -1,5 +1,6 @@
-import { app, BrowserWindow, ipcMain, shell } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, ipcMain, shell, protocol, net } from 'electron'
+import { join, normalize } from 'path'
+import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { registerFsHandlers } from './ipc/fs.ipc'
 import { registerProjectHandlers } from './ipc/project.ipc'
@@ -11,8 +12,16 @@ import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
 import { registerPipelineHandlers } from './ipc/pipeline.ipc'
+import { registerThumbnailHandlers } from './ipc/thumbnail.ipc'
 import { pipelineOrchestrator } from './pipeline/pipeline-orchestrator'
+import { thumbnailOrchestrator } from './thumbnail/thumbnail-orchestrator'
+import { flowkitRuntimeManager } from './thumbnail/flowkit-runtime-manager'
+import { googleFlowClient } from './thumbnail/google-flow-client'
 import { logger } from './logger'
+
+// Initialize FlowKit Runtime Manager with persisted settings BEFORE IPC is registered.
+// This ensures any UI startup health checks use the correct saved bridge URL.
+flowkitRuntimeManager.initialize(googleFlowClient)
 
 function createWindow(): BrowserWindow {
   const mainWindow = new BrowserWindow({
@@ -54,6 +63,19 @@ function createWindow(): BrowserWindow {
 app.whenReady().then(() => {
   electronApp.setAppUserModelId('com.videofactory.app')
 
+  // ── Register safe local-file protocol for renderer image access ──────────
+  // Usage: <img src="app-media:///absolute/path/to/file.png" />
+  // Serves any file path prefixed with app-media:///. This avoids the CSP
+  // restriction on raw file:// URLs while keeping webSecurity enabled.
+  protocol.handle('app-media', (request) => {
+    // Strip the protocol prefix to get the absolute path
+    // e.g. app-media:///Users/foo/bar.png → /Users/foo/bar.png
+    const rawPath = request.url.slice('app-media://'.length)
+    const decoded = decodeURIComponent(rawPath)
+    const normalized = normalize(decoded)
+    return net.fetch(pathToFileURL(normalized).href)
+  })
+
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
   })
@@ -69,8 +91,12 @@ app.whenReady().then(() => {
   registerAudioHandlers(ipcMain)
   registerCaptionHandlers(ipcMain)
   registerPipelineHandlers(ipcMain)
+  registerThumbnailHandlers(ipcMain)
 
   const mainWindow = createWindow()
+
+  // Auto-start FlowKit bridge in background if configured (non-blocking)
+  flowkitRuntimeManager.autoStartIfConfigured()
 
   // Window control IPC
   ipcMain.on('window:minimize', () => mainWindow.minimize())
@@ -95,12 +121,16 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   pipelineOrchestrator.handleAppQuit()
+  thumbnailOrchestrator.handleAppQuit()
+  flowkitRuntimeManager.handleAppQuit()
 })
 
 process.on('uncaughtException', (error) => {
   logger.error('[App] Uncaught exception:', error)
   try {
     pipelineOrchestrator.handleAppQuit()
+    thumbnailOrchestrator.handleAppQuit()
+    flowkitRuntimeManager.handleAppQuit()
   } catch {
     /* ignore */
   }

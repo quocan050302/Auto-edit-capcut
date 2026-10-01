@@ -77,6 +77,16 @@ const IPC_CHANNELS = {
   RENDER_PREFLIGHT_RUN: "render:preflight-run",
   RENDER_QA_GET: "render:qa-get",
   RENDER_QA_PROGRESS: "render:qa-progress",
+  // Production Intelligence — Claim & Evidence Ledger
+  CLAIM_GET_LEDGER: "claim:get-ledger",
+  CLAIM_UPDATE_STATUS: "claim:update-status",
+  CLAIM_ADD_SOURCE: "claim:add-source",
+  CLAIM_REMOVE_SOURCE: "claim:remove-source",
+  CLAIM_LINK_SOURCE: "claim:link-source",
+  CLAIM_UNLINK_SOURCE: "claim:unlink-source",
+  CLAIM_EXPORT_MANIFESTS: "claim:export-manifests",
+  // Production Intelligence — Visual Truth Reranker
+  VISUAL_TRUTH_GET_DATA: "visual-truth:get-data",
   // Auto Production Pipeline
   PIPELINE_START: "pipeline:start",
   PIPELINE_RESUME: "pipeline:resume",
@@ -85,7 +95,42 @@ const IPC_CHANNELS = {
   PIPELINE_PROGRESS: "pipeline:progress",
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
-  PIPELINE_RECOVER: "pipeline:recover"
+  PIPELINE_RECOVER: "pipeline:recover",
+  // Thumbnail Studio & Google Flow companion workflow
+  THUMBNAIL_TEMPLATE_LIST: "thumbnail:template-list",
+  THUMBNAIL_TEMPLATE_CREATE: "thumbnail:template-create",
+  THUMBNAIL_TEMPLATE_UPDATE: "thumbnail:template-update",
+  THUMBNAIL_TEMPLATE_DUPLICATE: "thumbnail:template-duplicate",
+  THUMBNAIL_TEMPLATE_DELETE: "thumbnail:template-delete",
+  THUMBNAIL_TEMPLATE_IMPORT: "thumbnail:template-import",
+  THUMBNAIL_TEMPLATE_EXPORT: "thumbnail:template-export",
+  THUMBNAIL_SETTINGS_GET: "thumbnail:settings-get",
+  THUMBNAIL_SETTINGS_SAVE: "thumbnail:settings-save",
+  THUMBNAIL_FLOW_HEALTH: "thumbnail:flow-health",
+  THUMBNAIL_FLOW_OPEN: "thumbnail:flow-open",
+  THUMBNAIL_PLAN_GENERATE: "thumbnail:plan-generate",
+  THUMBNAIL_JOB_START: "thumbnail:job-start",
+  THUMBNAIL_JOB_GET: "thumbnail:job-get",
+  THUMBNAIL_JOB_RESUME: "thumbnail:job-resume",
+  THUMBNAIL_JOB_CANCEL: "thumbnail:job-cancel",
+  THUMBNAIL_JOB_GENERATE_MORE: "thumbnail:job-generate-more",
+  THUMBNAIL_CANDIDATE_RETRY: "thumbnail:candidate-retry",
+  THUMBNAIL_CANDIDATE_REGENERATE: "thumbnail:candidate-regenerate",
+  THUMBNAIL_CANDIDATE_EXPORT_4K: "thumbnail:candidate-export-4k",
+  THUMBNAIL_CANDIDATE_SELECT: "thumbnail:candidate-select",
+  THUMBNAIL_OPEN_FOLDER: "thumbnail:open-folder",
+  THUMBNAIL_PROGRESS: "thumbnail:progress",
+  // FlowKit Runtime Manager
+  FLOWKIT_RUNTIME_GET_SETTINGS: "flowkit:runtime-get-settings",
+  FLOWKIT_RUNTIME_SAVE_SETTINGS: "flowkit:runtime-save-settings",
+  FLOWKIT_RUNTIME_START: "flowkit:runtime-start",
+  FLOWKIT_RUNTIME_STOP: "flowkit:runtime-stop",
+  FLOWKIT_RUNTIME_STATUS: "flowkit:runtime-status",
+  FLOWKIT_RUNTIME_LOG: "flowkit:runtime-log",
+  FLOWKIT_RUNTIME_SELECT_FOLDER: "flowkit:runtime-select-folder",
+  FLOWKIT_RUNTIME_SELECT_PYTHON: "flowkit:runtime-select-python",
+  FLOWKIT_RUNTIME_ENSURE_READY: "flowkit:runtime-ensure-ready",
+  FLOWKIT_RUNTIME_DETECT_PYTHON: "flowkit:runtime-detect-python"
 };
 const api = {
   window: {
@@ -220,6 +265,18 @@ const api = {
     getSettings: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_GET, projectDir),
     setSettings: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_SETTINGS_SET, params)
   },
+  claims: {
+    getLedger: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_GET_LEDGER, projectDir),
+    updateStatus: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_UPDATE_STATUS, params),
+    addSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_ADD_SOURCE, params),
+    removeSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_REMOVE_SOURCE, params),
+    linkSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_LINK_SOURCE, params),
+    unlinkSource: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_UNLINK_SOURCE, params),
+    exportManifests: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS, params)
+  },
+  visualTruth: {
+    getData: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.VISUAL_TRUTH_GET_DATA, projectDir)
+  },
   pipeline: {
     start: (options) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_START, options),
     resume: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RESUME, { projectDir }),
@@ -236,6 +293,74 @@ const api = {
       return () => {
         electron.ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
       };
+    }
+  },
+  thumbnail: {
+    templates: {
+      list: () => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_LIST),
+      create: (data) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_CREATE, data),
+      update: (id, updates) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_UPDATE, { id, updates }),
+      duplicate: (id, newName) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_DUPLICATE, { id, newName }),
+      delete: (id) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_DELETE, { id }),
+      import: (jsonContent) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_IMPORT, { jsonContent }),
+      export: (ids, saveToFile) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_EXPORT, { ids, saveToFile })
+    },
+    settings: {
+      get: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_SETTINGS_GET, { projectDir }),
+      save: (projectDir, settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_SETTINGS_SAVE, { projectDir, settings })
+    },
+    flow: {
+      checkHealth: (bridgeUrl) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_FLOW_HEALTH, { bridgeUrl }),
+      openFlow: () => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_FLOW_OPEN)
+    },
+    jobs: {
+      generatePlan: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_PLAN_GENERATE, params),
+      start: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_START, params),
+      get: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_GET, { projectDir }),
+      resume: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_RESUME, { projectDir }),
+      cancel: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_CANCEL, { projectDir }),
+      generateMore: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_GENERATE_MORE, params)
+    },
+    candidates: {
+      retry: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_RETRY, params),
+      regenerate: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_REGENERATE, params),
+      export4k: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_EXPORT_4K, params),
+      select: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_SELECT, params)
+    },
+    openFolder: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_OPEN_FOLDER, params),
+    onProgress: (callback) => {
+      const handler = (_event, payload) => {
+        callback(payload);
+      };
+      electron.ipcRenderer.on(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler);
+      return () => {
+        electron.ipcRenderer.off(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler);
+      };
+    },
+    runtime: {
+      getSettings: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_GET_SETTINGS),
+      saveSettings: (settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SAVE_SETTINGS, settings),
+      start: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_START),
+      stop: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STOP),
+      getStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS),
+      ensureReady: (bridgeUrl) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_ENSURE_READY, bridgeUrl ? { bridgeUrl } : void 0),
+      detectPython: (flowKitPath) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_DETECT_PYTHON, flowKitPath ? { flowKitPath } : void 0),
+      selectFolder: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_FOLDER),
+      selectPython: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_PYTHON),
+      onStatus: (callback) => {
+        const handler = (_event, status) => {
+          callback(status);
+        };
+        electron.ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler);
+        return () => electron.ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler);
+      },
+      onLog: (callback) => {
+        const handler = (_event, entry) => {
+          callback(entry);
+        };
+        electron.ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler);
+        return () => electron.ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler);
+      }
     }
   }
 };
