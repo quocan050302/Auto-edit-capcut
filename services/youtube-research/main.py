@@ -502,6 +502,9 @@ async def update_settings_endpoint(req: SettingsUpdateSchema):
         priority=settings.provider_priority
     )
 
+    # Persist settings to disk so they survive sidecar restarts
+    settings.save()
+
     return await get_settings_endpoint()
 
 @app.post("/api/research/test-api-key")
