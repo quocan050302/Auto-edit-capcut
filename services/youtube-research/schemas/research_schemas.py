@@ -1,5 +1,14 @@
 from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
+
+class ResearchFilters(BaseModel):
+    min_views: Optional[int] = Field(default=None, ge=0)
+    max_subscribers: Optional[int] = Field(default=None, ge=0)
+    min_views_per_day: Optional[float] = Field(default=None, ge=0)
+    min_outlier_ratio: Optional[float] = Field(default=None, ge=0)
+    min_opportunity: Optional[float] = Field(default=None, ge=0, le=100)
+    max_competition: Optional[float] = Field(default=None, ge=0, le=100)
+    model_config = ConfigDict(extra="forbid")
 
 class DiscoverRequest(BaseModel):
     topic: str
@@ -7,7 +16,7 @@ class DiscoverRequest(BaseModel):
     content_type: str = "LONG"
     time_range: str = "30d"
     limit: int = 50
-    filters: Optional[Dict[str, Any]] = None
+    filters: ResearchFilters = Field(default_factory=ResearchFilters)
 
 class DiscoverResponse(BaseModel):
     run_id: str
@@ -146,6 +155,15 @@ class DataSourceSchema(BaseModel):
     source: str
     note: Optional[str] = None
 
+class FilterSummarySchema(BaseModel):
+    applied_filters: Dict[str, float | int] = {}
+    raw_videos_collected: int = 0
+    videos_after_metadata_filters: int = 0
+    videos_after_all_filters: int = 0
+    keywords_before_filters: int = 0
+    keywords_after_filters: int = 0
+    excluded_by_reason: Dict[str, int] = {}
+
 class ResearchRunResultSchema(BaseModel):
     run_id: str
     project_id: Optional[str] = None
@@ -166,6 +184,7 @@ class ResearchRunResultSchema(BaseModel):
     topic_clusters: List[TopicClusterSchema]
     ai_insights: Optional[AiReportSchema] = None
     data_sources: List[DataSourceSchema]
+    filter_summary: Optional[FilterSummarySchema] = None
 
 class ProgressStateSchema(BaseModel):
     run_id: str

@@ -241,6 +241,25 @@ export interface AiInsightsReport {
   }>
 }
 
+export interface ResearchFilters {
+  min_views?: number
+  max_subscribers?: number
+  min_views_per_day?: number
+  min_outlier_ratio?: number
+  min_opportunity?: number
+  max_competition?: number
+}
+
+export interface ResearchFilterSummary {
+  applied_filters: Record<string, number>
+  raw_videos_collected: number
+  videos_after_metadata_filters: number
+  videos_after_all_filters: number
+  keywords_before_filters: number
+  keywords_after_filters: number
+  excluded_by_reason: Record<string, number>
+}
+
 export interface ResearchRunResult {
   run_id: string
   project_id?: string
@@ -276,6 +295,7 @@ export interface ResearchRunResult {
   topic_clusters: TopicClusterItem[]
   ai_insights?: AiInsightsReport | null
   data_sources: Array<{ metric: string; source: string; note?: string }>
+  filter_summary?: ResearchFilterSummary
 }
 
 export interface SavedResearchProject {

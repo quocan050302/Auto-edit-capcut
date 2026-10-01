@@ -10,7 +10,8 @@ import type {
   ProviderSource,
   ResearchSidecarStatus,
   ResearchProjectHandoffPayload,
-  ApiConnectionStatus
+  ApiConnectionStatus,
+  ResearchFilters
 } from '../types/research.types'
 import { isResearchRunActive } from '../types/research.types'
 import { researchApi, ResearchApiError } from '../api/researchApi'
@@ -142,7 +143,7 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
     content_type: ContentType
     time_range: TimeRange
     limit: number
-    filters: Record<string, unknown>
+    filters: ResearchFilters
   }) => {
     // Prevent double-clicks or starting when already active
     if (isStartingResearch || isResearchRunActive(activeProgress)) {

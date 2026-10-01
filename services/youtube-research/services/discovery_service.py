@@ -51,9 +51,18 @@ from schemas.research_schemas import (
     AiReportSchema,
     TopOpportunitySchema,
     OverviewMetricsSchema,
-    DataSourceSchema
+    DataSourceSchema,
+    ResearchFilters,
+    FilterSummarySchema
 )
 from utils.parsers import calculate_age_days
+from services.filter_service import (
+    FilterStats,
+    get_active_filters,
+    apply_metadata_filters,
+    apply_enriched_video_filters,
+    apply_keyword_filters
+)
 
 class DiscoveryService:
     def __init__(self, provider_mgr: ProviderFallbackManager):
@@ -69,11 +78,16 @@ class DiscoveryService:
         content_type: str = "LONG",
         time_range: str = "30d",
         limit: int = 50,
-        filters: Optional[Dict[str, Any]] = None
+        filters: Optional[ResearchFilters] = None
     ) -> None:
+        if filters is None:
+            filters = ResearchFilters()
+            
         start_time = time.time()
         db = SessionLocal()
         repo = ResearchRepository(db)
+        
+        filter_stats = FilterStats()
 
         async def update_progress(
             stage: str,
@@ -219,8 +233,13 @@ class DiscoveryService:
                     time_range=time_range,
                     limit=20
                 )
-                keyword_to_videos[kw] = res_videos
-                for v in res_videos:
+                
+                filter_stats.raw_videos += len(res_videos)
+                filtered_res = apply_metadata_filters(res_videos, filters, filter_stats)
+                filter_stats.matched_metadata += len(filtered_res)
+                
+                keyword_to_videos[kw] = filtered_res
+                for v in filtered_res:
                     if v.video_id not in seen_video_ids:
                         seen_video_ids.add(v.video_id)
                         all_raw_videos.append(v)
@@ -356,8 +375,19 @@ class DiscoveryService:
                     "outlier_ratio": ratio,
                     "views_per_day": vpd,
                     "is_breakout": is_breakout,
-                    "channel_median": median_v
+                    "channel_median": median_v,
+                    "channel_subscribers": sub_count
                 })
+
+            # Apply Enriched Filters
+            enriched_video_dicts = apply_enriched_video_filters(enriched_video_dicts, filters, filter_stats)
+            valid_video_ids = {v['video_id'] for v in enriched_video_dicts}
+            
+            breakout_items = [b for b in breakout_items if b.video_id in valid_video_ids]
+            
+            # Clean up keyword_to_videos based on enriched filters
+            for kw in list(keyword_to_videos.keys()):
+                keyword_to_videos[kw] = [v for v in keyword_to_videos[kw] if v.video_id in valid_video_ids]
 
             # Sort breakouts by outlier ratio descending
             breakout_items.sort(key=lambda x: (x.is_small_channel_breakout, x.outlier_ratio), reverse=True)
@@ -464,6 +494,34 @@ class DiscoveryService:
 
             # Sort keywords by opportunity score descending
             keyword_records.sort(key=lambda x: x.opportunity_score, reverse=True)
+            
+            # Apply Keyword Filters
+            filter_stats.keywords_before_filters = len(keyword_records)
+            keyword_records = apply_keyword_filters(keyword_records, filters, filter_stats)
+            filter_stats.keywords_after_filters = len(keyword_records)
+            
+            # Filter Summary Construction
+            filter_stats.videos_after_all_filters = len(enriched_video_dicts)
+            filter_stats.videos_after_metadata_filters = filter_stats.matched_metadata
+            
+            filter_summary = FilterSummarySchema(
+                applied_filters=get_active_filters(filters),
+                raw_videos_collected=filter_stats.raw_videos,
+                videos_after_metadata_filters=filter_stats.videos_after_metadata_filters,
+                videos_after_all_filters=filter_stats.videos_after_all_filters,
+                keywords_before_filters=filter_stats.keywords_before_filters,
+                keywords_after_filters=filter_stats.keywords_after_filters,
+                excluded_by_reason={
+                    "min_views": filter_stats.excluded_min_views,
+                    "min_views_per_day": filter_stats.excluded_min_views_per_day,
+                    "max_subscribers": filter_stats.excluded_max_subscribers,
+                    "unknown_subscribers": filter_stats.excluded_unknown_subscribers,
+                    "min_outlier": filter_stats.excluded_min_outlier,
+                    "missing_baseline": filter_stats.excluded_missing_baseline,
+                    "min_opportunity": filter_stats.excluded_min_opportunity,
+                    "max_competition": filter_stats.excluded_max_competition
+                }
+            )
 
             # Stage 6: CLUSTERING
             await update_progress("CLUSTERING", 88, "Clustering topic themes...", videos_collected=len(all_raw_videos), channels_analyzed=len(channel_baselines), keywords_expanded=keywords_count)
@@ -498,7 +556,7 @@ class DiscoveryService:
                 )
 
             # Overall metrics
-            unique_total_channels = len(set(v.channel_id for v in all_raw_videos))
+            unique_total_channels = len(set(v['channel_id'] for v in enriched_video_dicts))
             small_channel_wins_count = sum(1 for b in breakout_items if b.is_small_channel_breakout)
             overall_confidence, _ = compute_confidence_level(
                 sample_size=len(all_raw_videos),
@@ -541,7 +599,8 @@ class DiscoveryService:
                 trend_radar=trend_radar_items[:12],
                 topic_clusters=topic_clusters,
                 ai_insights=ai_report,
-                data_sources=data_sources
+                data_sources=data_sources,
+                filter_summary=filter_summary
             )
 
             # Save full JSON to run record

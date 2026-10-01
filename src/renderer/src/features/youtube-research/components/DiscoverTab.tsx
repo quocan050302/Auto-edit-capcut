@@ -5,11 +5,24 @@ import type {
   TimeRange,
   ResearchRunResult,
   ResearchProgressState,
-  ApiConnectionStatus
+  ApiConnectionStatus,
+  ResearchFilters
 } from '../types/research.types'
 import { SUPPORTED_MARKETS, isResearchRunActive } from '../types/research.types'
 import { ResearchProgressPanel } from './ResearchProgressPanel'
 import { OverviewSection } from './OverviewSection'
+
+function parseOptionalNumber(
+  value: string,
+  options?: { min?: number; max?: number; integer?: boolean }
+): number | undefined {
+  if (!value || value.trim() === '') return undefined
+  const num = options?.integer ? parseInt(value, 10) : parseFloat(value)
+  if (isNaN(num) || !isFinite(num)) return undefined
+  if (options?.min !== undefined && num < options.min) return undefined
+  if (options?.max !== undefined && num > options.max) return undefined
+  return num
+}
 
 interface Props {
   onStartDiscover: (params: {
@@ -18,7 +31,7 @@ interface Props {
     content_type: ContentType
     time_range: TimeRange
     limit: number
-    filters: Record<string, unknown>
+    filters: ResearchFilters
   }) => Promise<void>
   onExpandKeywords: (topic: string, market: MarketCode) => Promise<string[]>
   activeProgress: ResearchProgressState | null
@@ -78,6 +91,7 @@ export function DiscoverTab({
 
   const [showDetails, setShowDetails] = useState(false)
   const [localValidationMessage, setLocalValidationMessage] = useState<string | null>(null)
+  const [activeRunFilters, setActiveRunFilters] = useState<ResearchFilters>({})
 
   const progressPanelRef = useRef<HTMLDivElement>(null)
   const prevBusyRef = useRef<boolean>(false)
@@ -109,20 +123,45 @@ export function DiscoverTab({
     return null
   }
 
-  const handleExecuteDiscover = async () => {
+  const handleExecuteDiscover = async (useSnapshot: boolean = false) => {
     if (!topic.trim()) {
       setLocalValidationMessage('Please enter a topic keyword to analyze')
       return
     }
-    setLocalValidationMessage(null)
 
-    const filters: Record<string, unknown> = {}
-    if (minViews) filters.min_views = parseInt(minViews, 10)
-    if (maxSubs) filters.max_subscribers = parseInt(maxSubs, 10)
-    if (minVpd) filters.min_views_per_day = parseFloat(minVpd)
-    if (minOutlier) filters.min_outlier_ratio = parseFloat(minOutlier)
-    if (minOpportunity) filters.min_opportunity = parseFloat(minOpportunity)
-    if (maxCompetition) filters.max_competition = parseFloat(maxCompetition)
+    let filtersToUse: ResearchFilters
+
+    if (useSnapshot) {
+      filtersToUse = activeRunFilters
+      setLocalValidationMessage(null)
+    } else {
+      const minViewsVal = parseOptionalNumber(minViews, { min: 0, integer: true })
+      const maxSubsVal = parseOptionalNumber(maxSubs, { min: 0, integer: true })
+      const minVpdVal = parseOptionalNumber(minVpd, { min: 0 })
+      const minOutlierVal = parseOptionalNumber(minOutlier, { min: 0 })
+      const minOpportunityVal = parseOptionalNumber(minOpportunity, { min: 0, max: 100 })
+      const maxCompetitionVal = parseOptionalNumber(maxCompetition, { min: 0, max: 100 })
+
+      if (minViews && minViewsVal === undefined) return setLocalValidationMessage('Minimum Views must be a positive number')
+      if (maxSubs && maxSubsVal === undefined) return setLocalValidationMessage('Maximum Subscribers must be a positive number')
+      if (minVpd && minVpdVal === undefined) return setLocalValidationMessage('Minimum Views/Day must be a positive number')
+      if (minOutlier && minOutlierVal === undefined) return setLocalValidationMessage('Minimum Outlier Ratio must be a positive number')
+      if (minOpportunity && minOpportunityVal === undefined) return setLocalValidationMessage('Minimum Opportunity must be between 0 and 100')
+      if (maxCompetition && maxCompetitionVal === undefined) return setLocalValidationMessage('Maximum Competition must be between 0 and 100')
+
+      setLocalValidationMessage(null)
+
+      const filters: ResearchFilters = {}
+      if (minViewsVal !== undefined) filters.min_views = minViewsVal
+      if (maxSubsVal !== undefined) filters.max_subscribers = maxSubsVal
+      if (minVpdVal !== undefined) filters.min_views_per_day = minVpdVal
+      if (minOutlierVal !== undefined) filters.min_outlier_ratio = minOutlierVal
+      if (minOpportunityVal !== undefined) filters.min_opportunity = minOpportunityVal
+      if (maxCompetitionVal !== undefined) filters.max_competition = maxCompetitionVal
+
+      filtersToUse = filters
+      setActiveRunFilters(filters)
+    }
 
     await onStartDiscover({
       topic: topic.trim(),
@@ -130,7 +169,7 @@ export function DiscoverTab({
       content_type: contentType,
       time_range: timeRange,
       limit: resultLimit,
-      filters
+      filters: filtersToUse
     })
   }
 
@@ -140,7 +179,7 @@ export function DiscoverTab({
       setLocalValidationMessage(getDisabledReason())
       return
     }
-    await handleExecuteDiscover()
+    await handleExecuteDiscover(false)
   }
 
   const handleExpandOnly = async () => {
@@ -655,7 +694,7 @@ export function DiscoverTab({
             progressState={activeProgress}
             onCancel={onCancelResearch}
             isCancelling={isCancelling}
-            onRetry={canSubmit ? handleExecuteDiscover : undefined}
+            onRetry={canSubmit ? () => handleExecuteDiscover(true) : undefined}
             onRestartService={onRestartSidecar}
             onDismiss={onDismissError}
           />
@@ -668,6 +707,24 @@ export function DiscoverTab({
           result={activeResult}
           onSelectKeyword={onSelectKeyword}
           onCreateProjectFromKeyword={onCreateProject}
+          onRetry={() => {
+            setMinViews('')
+            setMaxSubs('')
+            setMinVpd('')
+            setMinOutlier('')
+            setMinOpportunity('')
+            setMaxCompetition('')
+            setActiveRunFilters({})
+            
+            onStartDiscover({
+              topic: activeResult.topic,
+              market: activeResult.market as MarketCode,
+              content_type: activeResult.content_type as ContentType,
+              time_range: activeResult.time_range as TimeRange,
+              limit: resultLimit,
+              filters: {}
+            })
+          }}
         />
       )}
     </div>

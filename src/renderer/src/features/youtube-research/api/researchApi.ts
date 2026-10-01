@@ -6,7 +6,8 @@ import type {
   CompetitorAnalysisResult,
   MarketCode,
   ContentType,
-  TimeRange
+  TimeRange,
+  ResearchFilters
 } from '../types/research.types'
 import { isResearchStageTerminal } from '../types/research.types'
 
@@ -176,7 +177,7 @@ export class ResearchApi {
     content_type: ContentType
     time_range: TimeRange
     limit?: number
-    filters?: Record<string, unknown>
+    filters?: ResearchFilters
   }): Promise<{ run_id: string; status: string; message?: string }> {
     return this.request('/api/research/discover', {
       method: 'POST',

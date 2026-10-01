@@ -5,19 +5,91 @@ interface Props {
   result: ResearchRunResult
   onSelectKeyword: (kw: string) => void
   onCreateProjectFromKeyword: (kw: string, angle?: string) => void
+  onRetry?: () => void
 }
 
 export function OverviewSection({
   result,
   onSelectKeyword,
-  onCreateProjectFromKeyword
+  onCreateProjectFromKeyword,
+  onRetry
 }: Props): React.ReactElement {
   const topOpp = result.top_opportunity
   const metrics = result.overview_metrics
   const ai = result.ai_insights
+  const filterSummary = result.filter_summary
+
+  if (result.keywords.length === 0) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', alignItems: 'center', marginTop: '60px' }}>
+        <div style={{ fontSize: '48px' }}>📭</div>
+        <h2 style={{ fontSize: '20px', fontWeight: 700, margin: 0 }}>No Results Found</h2>
+        <p style={{ color: 'var(--text-secondary)', textAlign: 'center', maxWidth: '400px', lineHeight: 1.6 }}>
+          Your search did not yield any keywords that met all the advanced filter criteria. Try adjusting your filters or running the research without filters to see the raw data.
+        </p>
+        
+        {filterSummary && filterSummary.applied_filters && Object.keys(filterSummary.applied_filters).length > 0 && (
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', justifyContent: 'center', marginTop: '12px' }}>
+            {Object.entries(filterSummary.applied_filters).map(([key, value]) => (
+              <span key={key} style={{
+                background: 'rgba(239, 68, 68, 0.1)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                color: '#f87171',
+                padding: '4px 10px',
+                borderRadius: '999px',
+                fontSize: '11px'
+              }}>
+                {key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}: {value as React.ReactNode}
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div style={{ marginTop: '24px' }}>
+          <button
+            className="btn btn-primary"
+            onClick={onRetry}
+            style={{ padding: '8px 24px', fontSize: '13px' }}
+          >
+            Run Without Filters
+          </button>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
+      {/* ── Applied Filters Summary ── */}
+      {filterSummary && filterSummary.applied_filters && Object.keys(filterSummary.applied_filters).length > 0 && (
+        <div style={{
+          background: 'rgba(99, 102, 241, 0.05)',
+          border: '1px solid rgba(99, 102, 241, 0.2)',
+          borderRadius: '8px',
+          padding: '12px 16px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '12px',
+          flexWrap: 'wrap'
+        }}>
+          <span style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: 600 }}>Applied Filters:</span>
+          {Object.entries(filterSummary.applied_filters).map(([key, value]) => (
+            <span key={key} style={{
+              background: 'rgba(99, 102, 241, 0.15)',
+              border: '1px solid rgba(99, 102, 241, 0.3)',
+              color: '#a5b4fc',
+              padding: '2px 8px',
+              borderRadius: '999px',
+              fontSize: '11px'
+            }}>
+              {key.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}: {value as React.ReactNode}
+            </span>
+          ))}
+          <div style={{ marginLeft: 'auto', fontSize: '11px', color: 'var(--text-muted)' }}>
+            Excluded {filterSummary.keywords_before_filters - filterSummary.keywords_after_filters} keywords / {filterSummary.raw_videos_collected - filterSummary.videos_after_all_filters} videos
+          </div>
+        </div>
+      )}
       {/* ── Top Market Opportunity Card ── */}
       {topOpp && (
         <div style={{
