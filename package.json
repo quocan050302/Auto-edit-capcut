@@ -9,7 +9,10 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext .ts,.tsx",
-    "test": "npx tsx test/production-intelligence.test.ts && npx tsx test/stock-gemini-fixes.test.ts && npx tsx test/model-router-and-batch.test.ts && npx tsx test/auto-production-pipeline.test.ts && npx tsx test/client-friendly-ui.test.ts && npx tsx test/pipeline-inspector.test.ts && npx tsx test/visual-truth-and-claims.test.ts",
+    "test": "npx tsx test/production-intelligence.test.ts && npx tsx test/stock-gemini-fixes.test.ts && npx tsx test/model-router-and-batch.test.ts && npx tsx test/auto-production-pipeline.test.ts && npx tsx test/client-friendly-ui.test.ts && npx tsx test/pipeline-inspector.test.ts && npx tsx test/visual-truth-and-claims.test.ts && npx tsx test/youtube-research-regression.test.ts",
+    "test:research": "cd services/youtube-research && uv run --with pytest pytest",
+    "restart-research": "powershell -Command \"try { Stop-Process -Id (Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue } catch {}; cd services/youtube-research; uv run uvicorn main:app --host 127.0.0.1 --port 8765\"",
+    "stop-dev": "powershell -Command \"try { Stop-Process -Id (Get-NetTCPConnection -LocalPort 8765 -ErrorAction SilentlyContinue).OwningProcess -Force -ErrorAction SilentlyContinue } catch {}; Write-Host 'Development services stopped.'\"",
     "remotion:studio": "npx remotion studio src/remotion/index.ts"
   },
   "keywords": [
