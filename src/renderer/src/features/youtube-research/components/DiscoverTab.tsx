@@ -84,16 +84,21 @@ export function DiscoverTab({
 
   const isRunning = isResearchRunActive(activeProgress)
   const isBusy = Boolean(isStartingResearch || isRunning)
+  const shouldShowProgressPanel =
+    isBusy ||
+    activeProgress?.stage === 'FAILED' ||
+    activeProgress?.stage === 'INTERRUPTED' ||
+    activeProgress?.stage === 'CANCELLED'
   const canSubmit = Boolean(topic.trim()) && !isBusy && apiReachabilityStatus !== 'blocked' && apiReachabilityStatus !== 'offline'
   const isDisabled = !canSubmit
 
   useEffect(() => {
-    if (isBusy && !prevBusyRef.current) {
-      // Transition from IDLE to busy: scroll progress panel into view smoothly
+    if (shouldShowProgressPanel && !prevBusyRef.current) {
+      // Transition from IDLE to busy/panel: scroll progress panel into view smoothly
       progressPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
     }
-    prevBusyRef.current = isBusy
-  }, [isBusy])
+    prevBusyRef.current = shouldShowProgressPanel
+  }, [shouldShowProgressPanel])
 
   const getDisabledReason = (): string | null => {
     if (!topic.trim()) return 'Please enter a topic keyword to analyze'
@@ -104,10 +109,9 @@ export function DiscoverTab({
     return null
   }
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!canSubmit) {
-      setLocalValidationMessage(getDisabledReason())
+  const handleExecuteDiscover = async () => {
+    if (!topic.trim()) {
+      setLocalValidationMessage('Please enter a topic keyword to analyze')
       return
     }
     setLocalValidationMessage(null)
@@ -128,6 +132,15 @@ export function DiscoverTab({
       limit: resultLimit,
       filters
     })
+  }
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!canSubmit) {
+      setLocalValidationMessage(getDisabledReason())
+      return
+    }
+    await handleExecuteDiscover()
   }
 
   const handleExpandOnly = async () => {
@@ -635,19 +648,22 @@ export function DiscoverTab({
       </div>
 
       {/* ── Active Progress Panel ── */}
-      {isBusy && (
+      {shouldShowProgressPanel && (
         <div ref={progressPanelRef} style={{ scrollMarginTop: '24px' }}>
           <ResearchProgressPanel
             topic={topic}
             progressState={activeProgress}
             onCancel={onCancelResearch}
             isCancelling={isCancelling}
+            onRetry={canSubmit ? handleExecuteDiscover : undefined}
+            onRestartService={onRestartSidecar}
+            onDismiss={onDismissError}
           />
         </div>
       )}
 
       {/* ── Active Result Overview ── */}
-      {!isBusy && activeResult && (
+      {!shouldShowProgressPanel && activeResult && (
         <OverviewSection
           result={activeResult}
           onSelectKeyword={onSelectKeyword}

@@ -13733,6 +13733,11 @@ class ResearchSidecarManager {
   healthCheckInterval = null;
   pidFilePath;
   lastSuccessfulHealthCheck = null;
+  isAppQuitting = false;
+  manualStopRequested = false;
+  restartAttempts = 0;
+  restartTimer = null;
+  isRestarting = false;
   constructor() {
     this.pidFilePath = path.join(
       electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
@@ -13744,6 +13749,16 @@ class ResearchSidecarManager {
       ResearchSidecarManager.instance = new ResearchSidecarManager();
     }
     return ResearchSidecarManager.instance;
+  }
+  markAppQuitting() {
+    this.isAppQuitting = true;
+    this.clearRestartTimer();
+  }
+  clearRestartTimer() {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
   }
   getStatus() {
     return {
@@ -13790,13 +13805,20 @@ class ResearchSidecarManager {
     });
   }
   async start() {
+    if (this.isAppQuitting) {
+      return this.getStatus();
+    }
+    this.clearRestartTimer();
     if (this.status === "running" && this.process) {
       return this.getStatus();
     }
     const isAlive = await this.pingHealth();
     if (isAlive) {
       logger.info(`[ResearchSidecar] Sidecar already responding on http://${this.host}:${this.port}/health`);
+      logger.info(`[ResearchSidecar] spawn.success pid=${this.process?.pid ?? "existing"} (reusing alive process)`);
       this.status = "running";
+      this.lastError = void 0;
+      this.restartAttempts = 0;
       this.startMonitoring();
       return this.getStatus();
     }
@@ -13810,7 +13832,7 @@ class ResearchSidecarManager {
       return this.getStatus();
     }
     this.status = "starting";
-    logger.info(`[ResearchSidecar] Spawning YouTube Research sidecar via uv...`, { uvPath, serviceDir });
+    logger.info(`[ResearchSidecar] spawn.start via uv...`, { uvPath, serviceDir });
     try {
       const args = [
         "run",
@@ -13833,6 +13855,7 @@ class ResearchSidecarManager {
         windowsHide: true
       });
       if (this.process.pid) {
+        logger.info(`[ResearchSidecar] spawn.success pid=${this.process.pid}`);
         const metadata = {
           pid: this.process.pid,
           port: this.port,
@@ -13855,11 +13878,13 @@ class ResearchSidecarManager {
         this.lastError = err.message;
       });
       this.process.on("exit", (code, signal) => {
-        logger.info(`[ResearchSidecar] Exited with code ${code}, signal ${signal}`);
+        const expected = this.manualStopRequested || this.isAppQuitting;
+        logger.info(`[ResearchSidecar] process.exit code=${code} signal=${signal} expected=${expected}`);
         this.process = null;
-        if (this.status !== "stopped") {
-          this.status = "error";
-          this.lastError = `Process exited with code ${code}`;
+        if (!expected) {
+          this.handleUnexpectedExit();
+        } else {
+          this.status = "stopped";
         }
       });
       let attempts = 0;
@@ -13869,6 +13894,7 @@ class ResearchSidecarManager {
         if (healthy) {
           this.status = "running";
           this.lastError = void 0;
+          this.restartAttempts = 0;
           logger.info(`[ResearchSidecar] Successfully connected on http://${this.host}:${this.port}`);
           this.startMonitoring();
           return this.getStatus();
@@ -13887,7 +13913,48 @@ class ResearchSidecarManager {
       return this.getStatus();
     }
   }
-  async stop() {
+  handleUnexpectedExit() {
+    if (this.isAppQuitting || this.manualStopRequested) {
+      this.status = "stopped";
+      return;
+    }
+    if (this.restartAttempts < 3) {
+      this.restartAttempts++;
+      const delayMs = Math.pow(2, this.restartAttempts - 1) * 1e3;
+      logger.warn(`[ResearchSidecar] restart.scheduled attempt=${this.restartAttempts} delay_ms=${delayMs}`);
+      this.status = "starting";
+      this.clearRestartTimer();
+      this.restartTimer = setTimeout(async () => {
+        this.restartTimer = null;
+        if (this.isAppQuitting || this.manualStopRequested) return;
+        try {
+          this.isRestarting = true;
+          const status = await this.start();
+          if (status.online) {
+            logger.info(`[ResearchSidecar] restart.success pid=${status.pid}`);
+          } else {
+            logger.warn(`[ResearchSidecar] restart attempt ${this.restartAttempts} did not come online`);
+          }
+        } catch (err) {
+          logger.warn(`[ResearchSidecar] restart attempt ${this.restartAttempts} failed: ${err?.message || err}`);
+        } finally {
+          this.isRestarting = false;
+        }
+      }, delayMs);
+    } else {
+      logger.error("[ResearchSidecar] restart.exhausted max attempts reached (3)");
+      this.status = "error";
+      this.lastError = "Research sidecar exited unexpectedly and failed all auto-restart attempts";
+    }
+  }
+  async stop(isManual = false) {
+    this.clearRestartTimer();
+    if (this.isAppQuitting) {
+      logger.info("[ResearchSidecar] stop.app_quit");
+    } else {
+      this.manualStopRequested = isManual;
+      logger.info(isManual ? "[ResearchSidecar] stop.manual" : "[ResearchSidecar] stop.internal");
+    }
     this.status = "stopped";
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
@@ -13908,7 +13975,10 @@ class ResearchSidecarManager {
     this.cleanupStaleProcess();
   }
   async restart() {
-    await this.stop();
+    this.clearRestartTimer();
+    this.restartAttempts = 0;
+    this.manualStopRequested = false;
+    await this.stop(false);
     await new Promise((r) => setTimeout(r, 1e3));
     return await this.start();
   }
@@ -13938,7 +14008,7 @@ class ResearchSidecarManager {
           const numeric = parseInt(content, 10);
           if (!isNaN(numeric)) oldPid = numeric;
         }
-        if (oldPid && !isNaN(oldPid)) {
+        if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
           if (process.platform === "win32") {
             try {
               child_process.execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: "ignore" });
@@ -13951,7 +14021,9 @@ class ResearchSidecarManager {
             }
           }
         }
-        fs__namespace.unlinkSync(this.pidFilePath);
+        if (fs__namespace.existsSync(this.pidFilePath)) {
+          fs__namespace.unlinkSync(this.pidFilePath);
+        }
       }
     } catch {
     }
@@ -14140,17 +14212,13 @@ electron.app.on("window-all-closed", () => {
 });
 electron.app.on("before-quit", () => {
   pipelineOrchestrator.handleAppQuit();
-  researchSidecar.stop().catch(() => {
+  researchSidecar.markAppQuitting();
+  researchSidecar.stop().catch((error) => {
+    logger.warn("[ResearchSidecar] Failed to stop during app quit:", error);
   });
 });
 process.on("uncaughtException", (error) => {
   logger.error("[App] Uncaught exception:", error);
-  try {
-    pipelineOrchestrator.handleAppQuit();
-    researchSidecar.stop().catch(() => {
-    });
-  } catch {
-  }
 });
 process.on("unhandledRejection", (reason) => {
   logger.error("[App] Unhandled rejection:", reason);

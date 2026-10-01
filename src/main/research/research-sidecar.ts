@@ -18,6 +18,12 @@ export class ResearchSidecarManager {
   private pidFilePath: string
   private lastSuccessfulHealthCheck: string | null = null
 
+  private isAppQuitting: boolean = false
+  private manualStopRequested: boolean = false
+  private restartAttempts: number = 0
+  private restartTimer: NodeJS.Timeout | null = null
+  private isRestarting: boolean = false
+
   private constructor() {
     this.pidFilePath = join(
       app && typeof app.getPath === 'function' ? app.getPath('userData') : process.cwd(),
@@ -30,6 +36,18 @@ export class ResearchSidecarManager {
       ResearchSidecarManager.instance = new ResearchSidecarManager()
     }
     return ResearchSidecarManager.instance
+  }
+
+  public markAppQuitting(): void {
+    this.isAppQuitting = true
+    this.clearRestartTimer()
+  }
+
+  private clearRestartTimer(): void {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer)
+      this.restartTimer = null
+    }
   }
 
   public getStatus(): ResearchSidecarStatus {
@@ -77,6 +95,12 @@ export class ResearchSidecarManager {
   }
 
   public async start(): Promise<ResearchSidecarStatus> {
+    if (this.isAppQuitting) {
+      return this.getStatus()
+    }
+
+    this.clearRestartTimer()
+
     if (this.status === 'running' && this.process) {
       return this.getStatus()
     }
@@ -85,7 +109,10 @@ export class ResearchSidecarManager {
     const isAlive = await this.pingHealth()
     if (isAlive) {
       logger.info(`[ResearchSidecar] Sidecar already responding on http://${this.host}:${this.port}/health`)
+      logger.info(`[ResearchSidecar] spawn.success pid=${this.process?.pid ?? 'existing'} (reusing alive process)`)
       this.status = 'running'
+      this.lastError = undefined
+      this.restartAttempts = 0
       this.startMonitoring()
       return this.getStatus()
     }
@@ -107,7 +134,7 @@ export class ResearchSidecarManager {
     }
 
     this.status = 'starting'
-    logger.info(`[ResearchSidecar] Spawning YouTube Research sidecar via uv...`, { uvPath, serviceDir })
+    logger.info(`[ResearchSidecar] spawn.start via uv...`, { uvPath, serviceDir })
 
     try {
       const args = [
@@ -130,6 +157,7 @@ export class ResearchSidecarManager {
       })
 
       if (this.process.pid) {
+        logger.info(`[ResearchSidecar] spawn.success pid=${this.process.pid}`)
         const metadata = {
           pid: this.process.pid,
           port: this.port,
@@ -156,11 +184,13 @@ export class ResearchSidecarManager {
       })
 
       this.process.on('exit', (code, signal) => {
-        logger.info(`[ResearchSidecar] Exited with code ${code}, signal ${signal}`)
+        const expected = this.manualStopRequested || this.isAppQuitting
+        logger.info(`[ResearchSidecar] process.exit code=${code} signal=${signal} expected=${expected}`)
         this.process = null
-        if (this.status !== 'stopped') {
-          this.status = 'error'
-          this.lastError = `Process exited with code ${code}`
+        if (!expected) {
+          this.handleUnexpectedExit()
+        } else {
+          this.status = 'stopped'
         }
       })
 
@@ -172,6 +202,7 @@ export class ResearchSidecarManager {
         if (healthy) {
           this.status = 'running'
           this.lastError = undefined
+          this.restartAttempts = 0
           logger.info(`[ResearchSidecar] Successfully connected on http://${this.host}:${this.port}`)
           this.startMonitoring()
           return this.getStatus()
@@ -193,7 +224,51 @@ export class ResearchSidecarManager {
     }
   }
 
-  public async stop(): Promise<void> {
+  private handleUnexpectedExit(): void {
+    if (this.isAppQuitting || this.manualStopRequested) {
+      this.status = 'stopped'
+      return
+    }
+
+    if (this.restartAttempts < 3) {
+      this.restartAttempts++
+      const delayMs = Math.pow(2, this.restartAttempts - 1) * 1000 // 1s, 2s, 4s
+      logger.warn(`[ResearchSidecar] restart.scheduled attempt=${this.restartAttempts} delay_ms=${delayMs}`)
+      this.status = 'starting'
+      this.clearRestartTimer()
+      this.restartTimer = setTimeout(async () => {
+        this.restartTimer = null
+        if (this.isAppQuitting || this.manualStopRequested) return
+        try {
+          this.isRestarting = true
+          const status = await this.start()
+          if (status.online) {
+            logger.info(`[ResearchSidecar] restart.success pid=${status.pid}`)
+          } else {
+            logger.warn(`[ResearchSidecar] restart attempt ${this.restartAttempts} did not come online`)
+          }
+        } catch (err: any) {
+          logger.warn(`[ResearchSidecar] restart attempt ${this.restartAttempts} failed: ${err?.message || err}`)
+        } finally {
+          this.isRestarting = false
+        }
+      }, delayMs)
+    } else {
+      logger.error('[ResearchSidecar] restart.exhausted max attempts reached (3)')
+      this.status = 'error'
+      this.lastError = 'Research sidecar exited unexpectedly and failed all auto-restart attempts'
+    }
+  }
+
+  public async stop(isManual: boolean = false): Promise<void> {
+    this.clearRestartTimer()
+    if (this.isAppQuitting) {
+      logger.info('[ResearchSidecar] stop.app_quit')
+    } else {
+      this.manualStopRequested = isManual
+      logger.info(isManual ? '[ResearchSidecar] stop.manual' : '[ResearchSidecar] stop.internal')
+    }
+
     this.status = 'stopped'
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval)
@@ -218,7 +293,10 @@ export class ResearchSidecarManager {
   }
 
   public async restart(): Promise<ResearchSidecarStatus> {
-    await this.stop()
+    this.clearRestartTimer()
+    this.restartAttempts = 0
+    this.manualStopRequested = false
+    await this.stop(false)
     await new Promise((r) => setTimeout(r, 1000))
     return await this.start()
   }
@@ -251,7 +329,7 @@ export class ResearchSidecarManager {
           if (!isNaN(numeric)) oldPid = numeric
         }
 
-        if (oldPid && !isNaN(oldPid)) {
+        if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
           if (process.platform === 'win32') {
             try {
               execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: 'ignore' })
@@ -266,7 +344,9 @@ export class ResearchSidecarManager {
             }
           }
         }
-        fs.unlinkSync(this.pidFilePath)
+        if (fs.existsSync(this.pidFilePath)) {
+          fs.unlinkSync(this.pidFilePath)
+        }
       }
     } catch {
       /* ignore */

@@ -20,6 +20,60 @@ class TaskManager:
     def register_run(self, run_id: str, task: asyncio.Task) -> None:
         self.active_tasks[run_id] = task
         self.cancellation_events[run_id] = asyncio.Event()
+        task.add_done_callback(lambda t: self._handle_task_done(run_id, t))
+
+    def _handle_task_done(self, run_id: str, completed_task: asyncio.Task) -> None:
+        try:
+            if completed_task.cancelled():
+                research_logger.info(f"[TaskManager] Task {run_id} was cancelled.")
+                self._ensure_terminal_state(run_id, stage="CANCELLED", message="Research task cancelled.")
+                return
+
+            exc = completed_task.exception()
+            if exc:
+                research_logger.error(f"[TaskManager] Task {run_id} finished with unhandled exception: {exc}", exc_info=exc)
+                self._ensure_terminal_state(run_id, stage="FAILED", message=f"Task error: {str(exc)}", error=str(exc))
+                return
+        except Exception as err:
+            research_logger.error(f"[TaskManager] Error in _handle_task_done for {run_id}: {err}")
+
+    def _ensure_terminal_state(self, run_id: str, stage: str, message: str, error: Optional[str] = None) -> None:
+        latest = self.latest_progress.get(run_id)
+        if latest and latest.stage in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"):
+            return
+
+        try:
+            from db.engine import SessionLocal
+            from repositories.research_repo import ResearchRepository
+            db = SessionLocal()
+            try:
+                repo = ResearchRepository(db)
+                repo.update_run_stage(run_id=run_id, stage=stage, progress_percent=100, message=message, error=error)
+            finally:
+                db.close()
+        except Exception as e:
+            research_logger.error(f"[TaskManager] Failed to persist terminal state {stage} for run {run_id}: {e}", exc_info=True)
+
+        elapsed = latest.elapsed_seconds if latest else 0
+        state = ProgressStateSchema(
+            run_id=run_id,
+            stage=stage,
+            progress_percent=100,
+            message=message,
+            videos_collected=latest.videos_collected if latest else 0,
+            channels_analyzed=latest.channels_analyzed if latest else 0,
+            keywords_expanded=latest.keywords_expanded if latest else 0,
+            elapsed_seconds=elapsed,
+            can_cancel=False,
+            error=error
+        )
+        self.latest_progress[run_id] = state
+        if run_id in self.progress_subscribers:
+            for q in list(self.progress_subscribers[run_id]):
+                try:
+                    q.put_nowait(state)
+                except Exception:
+                    pass
 
     def is_cancelled(self, run_id: str) -> bool:
         event = self.cancellation_events.get(run_id)

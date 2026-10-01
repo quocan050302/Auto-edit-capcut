@@ -10956,6 +10956,16 @@ function isResearchRunActive(progress) {
   return isResearchStageActive(progress.stage);
 }
 const SIDECAR_DEFAULT_URL = "http://127.0.0.1:8765";
+class ResearchProgressConnectionError extends Error {
+  code;
+  runId;
+  constructor(message, code, runId) {
+    super(message);
+    this.name = "ResearchProgressConnectionError";
+    this.code = code;
+    this.runId = runId;
+  }
+}
 class ResearchApiError extends Error {
   code;
   status;
@@ -11169,6 +11179,8 @@ class ResearchApi {
     let closed = false;
     let eventSource = null;
     let pollInterval = null;
+    let consecutiveFailures = 0;
+    const MAX_CONSECUTIVE_FAILURES = 4;
     console.log(`[YouTubeResearch] progress.sse.connect run_id=${runId}`);
     const cleanup = () => {
       closed = true;
@@ -11183,12 +11195,16 @@ class ResearchApi {
     };
     const startPollingFallback = () => {
       if (closed || pollInterval) return;
-      console.log(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`);
+      console.log(`[YouTubeResearch] progress.polling.start run_id=${runId}`);
       pollInterval = setInterval(async () => {
         if (closed) return;
         try {
           const status = await this.getRunStatus(runId);
           if (closed) return;
+          if (consecutiveFailures > 0) {
+            console.log(`[YouTubeResearch] progress.polling.recovered run_id=${runId}`);
+            consecutiveFailures = 0;
+          }
           onProgress(status);
           if (isResearchStageTerminal(status.stage)) {
             console.log(`[YouTubeResearch] progress.terminal stage=${status.stage}`);
@@ -11196,8 +11212,36 @@ class ResearchApi {
             onComplete(status);
           }
         } catch (pollErr) {
+          if (closed) return;
+          consecutiveFailures++;
+          console.warn(`[YouTubeResearch] progress.polling.failure attempt=${consecutiveFailures}`, pollErr);
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            console.error(`[YouTubeResearch] progress.connection.exhausted run_id=${runId}`);
+            console.warn(`[YouTubeResearch] run.interrupted run_id=${runId}`);
+            cleanup();
+            const connErr = new ResearchProgressConnectionError(
+              "The local research service stopped unexpectedly. Polling attempts exhausted.",
+              "SIDECAR_DISCONNECTED",
+              runId
+            );
+            onError(connErr);
+            const interruptedState = {
+              run_id: runId,
+              stage: "INTERRUPTED",
+              progress_percent: 15,
+              message: "The local research service stopped unexpectedly. Your research run was interrupted. Restart the service and try again.",
+              videos_collected: 0,
+              channels_analyzed: 0,
+              keywords_expanded: 0,
+              elapsed_seconds: 0,
+              can_cancel: false,
+              error: "Service disconnected"
+            };
+            onProgress(interruptedState);
+            onComplete(interruptedState);
+          }
         }
-      }, 1500);
+      }, 2e3);
     };
     try {
       const sseUrl = `${this.baseUrl}/api/research/stream/${encodeURIComponent(runId)}`;
@@ -11221,7 +11265,7 @@ class ResearchApi {
       };
       eventSource.onerror = (err) => {
         if (closed) return;
-        console.warn(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`, err);
+        console.warn(`[YouTubeResearch] progress.sse.disconnected run_id=${runId}`, err);
         if (eventSource) {
           eventSource.close();
           eventSource = null;
@@ -11229,7 +11273,7 @@ class ResearchApi {
         startPollingFallback();
       };
     } catch (err) {
-      console.warn(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`, err);
+      console.warn(`[YouTubeResearch] progress.sse.disconnected run_id=${runId}`, err);
       startPollingFallback();
     }
     return cleanup;
@@ -17278,11 +17322,36 @@ function ResearchProgressPanel({
   topic,
   progressState,
   onCancel,
-  isCancelling
+  isCancelling,
+  onRetry,
+  onRestartService,
+  onDismiss
 }) {
   const currentStage = progressState?.stage ?? "STARTING";
   const progressPct = progressState?.progress_percent ?? 0;
-  const elapsedSecs = progressState?.elapsed_seconds ?? 0;
+  const isTerminal = isResearchStageTerminal(currentStage);
+  const [localElapsed, setLocalElapsed] = reactExports.useState(progressState?.elapsed_seconds ?? 0);
+  const lastEventElapsedRef = reactExports.useRef(progressState?.elapsed_seconds ?? 0);
+  const lastProgressAtRef = reactExports.useRef(Date.now());
+  const [isStalled, setIsStalled] = reactExports.useState(false);
+  reactExports.useEffect(() => {
+    if (progressState?.elapsed_seconds !== void 0 && progressState.elapsed_seconds > lastEventElapsedRef.current) {
+      lastEventElapsedRef.current = progressState.elapsed_seconds;
+      setLocalElapsed((prev) => Math.max(prev, progressState.elapsed_seconds));
+    }
+    lastProgressAtRef.current = Date.now();
+    setIsStalled(false);
+  }, [progressState?.elapsed_seconds, progressState?.progress_percent, progressState?.stage]);
+  reactExports.useEffect(() => {
+    if (isTerminal) return;
+    const timer = setInterval(() => {
+      setLocalElapsed((prev) => prev + 1);
+      if (Date.now() - lastProgressAtRef.current > 12e3) {
+        setIsStalled(true);
+      }
+    }, 1e3);
+    return () => clearInterval(timer);
+  }, [isTerminal]);
   const getStageStatus = (stepStage) => {
     const stageOrder = {
       STARTING: 0,
@@ -17305,6 +17374,13 @@ function ResearchProgressPanel({
     if (currentIdx === stepIdx) return "current";
     return "pending";
   };
+  const stageBadgeColor = () => {
+    if (currentStage === "FAILED") return { bg: "rgba(239, 68, 68, 0.2)", text: "#f87171" };
+    if (currentStage === "INTERRUPTED") return { bg: "rgba(245, 158, 11, 0.2)", text: "#fbbf24" };
+    if (currentStage === "CANCELLED") return { bg: "rgba(156, 163, 175, 0.2)", text: "#9ca3af" };
+    return { bg: "rgba(99, 102, 241, 0.2)", text: "#a5b4fc" };
+  };
+  const badgeStyle = stageBadgeColor();
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
     maxWidth: "680px",
     margin: "40px auto",
@@ -17327,8 +17403,8 @@ function ResearchProgressPanel({
             fontSize: "11px",
             padding: "2px 8px",
             borderRadius: "4px",
-            background: currentStage === "FAILED" ? "rgba(239, 68, 68, 0.2)" : "rgba(99, 102, 241, 0.2)",
-            color: currentStage === "FAILED" ? "#f87171" : "#a5b4fc",
+            background: badgeStyle.bg,
+            color: badgeStyle.text,
             fontWeight: 600
           }, children: [
             "Stage: ",
@@ -17344,7 +17420,7 @@ function ResearchProgressPanel({
         fontSize: "20px",
         fontWeight: 800,
         fontFamily: "var(--font-mono)",
-        color: "var(--brand-primary, #6366f1)"
+        color: currentStage === "FAILED" ? "#f87171" : currentStage === "INTERRUPTED" ? "#fbbf24" : "var(--brand-primary, #6366f1)"
       }, children: [
         progressPct,
         "%"
@@ -17356,14 +17432,29 @@ function ResearchProgressPanel({
       background: "var(--bg-base, #0a0a0f)",
       borderRadius: "999px",
       overflow: "hidden",
-      marginBottom: "24px"
+      marginBottom: "20px"
     }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
       height: "100%",
       width: `${Math.min(100, Math.max(2, progressPct))}%`,
-      background: "linear-gradient(90deg, #6366f1, #818cf8)",
+      background: currentStage === "FAILED" ? "linear-gradient(90deg, #ef4444, #f87171)" : currentStage === "INTERRUPTED" ? "linear-gradient(90deg, #f59e0b, #fbbf24)" : "linear-gradient(90deg, #6366f1, #818cf8)",
       borderRadius: "999px",
       transition: "width 0.4s ease"
     } }) }),
+    isStalled && !isTerminal && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      padding: "8px 12px",
+      background: "rgba(99, 102, 241, 0.1)",
+      border: "1px solid rgba(99, 102, 241, 0.25)",
+      borderRadius: "6px",
+      fontSize: "11px",
+      color: "#a5b4fc",
+      marginBottom: "16px",
+      display: "flex",
+      alignItems: "center",
+      gap: "6px"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⏳" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Still waiting for keyword sources..." })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
       display: "flex",
       flexDirection: "column",
@@ -17377,11 +17468,11 @@ function ResearchProgressPanel({
       return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px", fontSize: "12px" }, children: [
         status === "done" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#34d399", fontWeight: 700, width: "16px", textAlign: "center" }, children: "✓" }),
         status === "current" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
-          color: "#818cf8",
+          color: currentStage === "FAILED" ? "#f87171" : currentStage === "INTERRUPTED" ? "#fbbf24" : "#818cf8",
           fontSize: "10px",
           width: "16px",
           textAlign: "center",
-          animation: "pulse 1.5s infinite"
+          animation: isTerminal ? "none" : "pulse 1.5s infinite"
         }, children: "●" }),
         status === "pending" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: "10px", width: "16px", textAlign: "center" }, children: "○" }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
@@ -17411,27 +17502,137 @@ function ResearchProgressPanel({
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: "Elapsed time" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginTop: "2px", fontFamily: "var(--font-mono)" }, children: formatElapsed(elapsedSecs) })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", marginTop: "2px", fontFamily: "var(--font-mono)" }, children: formatElapsed(localElapsed) })
+      ] })
+    ] }),
+    currentStage === "INTERRUPTED" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(245, 158, 11, 0.12)",
+      border: "1px solid rgba(245, 158, 11, 0.3)",
+      borderRadius: "8px",
+      padding: "14px 16px",
+      marginBottom: "20px",
+      fontSize: "12px",
+      color: "#fcd34d"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontWeight: 700, marginBottom: "6px", display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🔌" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Research Interrupted" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: "12px", lineHeight: 1.5, color: "#fef3c7" }, children: "The local research service stopped unexpectedly. Your research run was interrupted. Restart the service and try again." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+        onRestartService && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-secondary",
+            onClick: onRestartService,
+            style: { padding: "6px 14px", fontSize: "11px", background: "rgba(255,255,255,0.1)" },
+            children: "Restart Service"
+          }
+        ),
+        onRetry && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-primary",
+            onClick: onRetry,
+            style: { padding: "6px 14px", fontSize: "11px" },
+            children: "Retry Research"
+          }
+        ),
+        onDismiss && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-secondary",
+            onClick: onDismiss,
+            style: { padding: "6px 14px", fontSize: "11px" },
+            children: "Dismiss"
+          }
+        )
       ] })
     ] }),
     currentStage === "FAILED" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       background: "rgba(239, 68, 68, 0.12)",
       border: "1px solid rgba(239, 68, 68, 0.3)",
       borderRadius: "8px",
-      padding: "12px 16px",
+      padding: "14px 16px",
       marginBottom: "20px",
       fontSize: "12px",
       color: "#fca5a5"
     }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontWeight: 600, marginBottom: "4px", display: "flex", alignItems: "center", gap: "6px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontWeight: 700, marginBottom: "6px", display: "flex", alignItems: "center", gap: "8px", fontSize: "13px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⚠️" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Research failed" })
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Research Failed" })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: progressState?.error || progressState?.message || "An unknown error occurred during research." })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: "12px", lineHeight: 1.5 }, children: progressState?.error || progressState?.message || "An unknown error occurred during research." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+        onRetry && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-primary",
+            onClick: onRetry,
+            style: { padding: "6px 14px", fontSize: "11px" },
+            children: "Retry Research"
+          }
+        ),
+        onDismiss && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-secondary",
+            onClick: onDismiss,
+            style: { padding: "6px 14px", fontSize: "11px" },
+            children: "Dismiss"
+          }
+        )
+      ] })
+    ] }),
+    currentStage === "CANCELLED" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(156, 163, 175, 0.12)",
+      border: "1px solid rgba(156, 163, 175, 0.3)",
+      borderRadius: "8px",
+      padding: "14px 16px",
+      marginBottom: "20px",
+      fontSize: "12px",
+      color: "#e5e7eb"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontWeight: 700, marginBottom: "6px", display: "flex", alignItems: "center", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🛑" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Research Cancelled" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: "12px" }, children: progressState?.message || "Research run was cancelled by user." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+        onRetry && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-primary",
+            onClick: onRetry,
+            style: { padding: "6px 14px", fontSize: "11px" },
+            children: "Start New Research"
+          }
+        ),
+        onDismiss && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-secondary",
+            onClick: onDismiss,
+            style: { padding: "6px 14px", fontSize: "11px" },
+            children: "Dismiss"
+          }
+        )
+      ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: "16px" }, children: [
-      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: currentStage === "FAILED" ? "#f87171" : "var(--text-muted)", fontStyle: currentStage === "FAILED" ? "normal" : "italic" }, children: progressState?.message || (currentStage === "STARTING" ? "Starting market analysis..." : "Processing background analysis...") }),
-      progressState?.can_cancel !== false && !["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"].includes(currentStage) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        fontSize: "12px",
+        color: currentStage === "FAILED" ? "#f87171" : currentStage === "INTERRUPTED" ? "#fbbf24" : "var(--text-muted)",
+        fontStyle: isTerminal ? "normal" : "italic"
+      }, children: progressState?.message || (currentStage === "STARTING" ? "Starting market analysis..." : "Processing background analysis...") }),
+      progressState?.can_cancel !== false && !isTerminal && /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
           className: "btn btn-secondary",
@@ -17757,14 +17958,15 @@ function DiscoverTab({
   const prevBusyRef = reactExports.useRef(false);
   const isRunning = isResearchRunActive(activeProgress);
   const isBusy = Boolean(isStartingResearch || isRunning);
+  const shouldShowProgressPanel = isBusy || activeProgress?.stage === "FAILED" || activeProgress?.stage === "INTERRUPTED" || activeProgress?.stage === "CANCELLED";
   const canSubmit = Boolean(topic.trim()) && !isBusy && apiReachabilityStatus !== "blocked" && apiReachabilityStatus !== "offline";
   const isDisabled = !canSubmit;
   reactExports.useEffect(() => {
-    if (isBusy && !prevBusyRef.current) {
+    if (shouldShowProgressPanel && !prevBusyRef.current) {
       progressPanelRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
-    prevBusyRef.current = isBusy;
-  }, [isBusy]);
+    prevBusyRef.current = shouldShowProgressPanel;
+  }, [shouldShowProgressPanel]);
   const getDisabledReason = () => {
     if (!topic.trim()) return "Please enter a topic keyword to analyze";
     if (isStartingResearch) return "Starting research request...";
@@ -17773,10 +17975,9 @@ function DiscoverTab({
     if (apiReachabilityStatus === "offline") return "Research service is offline. Please start or restart the service.";
     return null;
   };
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    if (!canSubmit) {
-      setLocalValidationMessage(getDisabledReason());
+  const handleExecuteDiscover = async () => {
+    if (!topic.trim()) {
+      setLocalValidationMessage("Please enter a topic keyword to analyze");
       return;
     }
     setLocalValidationMessage(null);
@@ -17795,6 +17996,14 @@ function DiscoverTab({
       limit: resultLimit,
       filters
     });
+  };
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!canSubmit) {
+      setLocalValidationMessage(getDisabledReason());
+      return;
+    }
+    await handleExecuteDiscover();
   };
   const handleExpandOnly = async () => {
     if (!topic.trim() || isExpanding) return;
@@ -18281,16 +18490,19 @@ function DiscoverTab({
         )) })
       ] })
     ] }) }),
-    isBusy && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: progressPanelRef, style: { scrollMarginTop: "24px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+    shouldShowProgressPanel && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: progressPanelRef, style: { scrollMarginTop: "24px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
       ResearchProgressPanel,
       {
         topic,
         progressState: activeProgress,
         onCancel: onCancelResearch,
-        isCancelling
+        isCancelling,
+        onRetry: canSubmit ? handleExecuteDiscover : void 0,
+        onRestartService: onRestartSidecar,
+        onDismiss: onDismissError
       }
     ) }),
-    !isBusy && activeResult && /* @__PURE__ */ jsxRuntimeExports.jsx(
+    !shouldShowProgressPanel && activeResult && /* @__PURE__ */ jsxRuntimeExports.jsx(
       OverviewSection,
       {
         result: activeResult,
@@ -20114,6 +20326,22 @@ function YouTubeResearchPage({ onNavigate }) {
         (error) => {
           console.warn("[YouTubeResearch] progress.sse.warning:", error);
           setSseConnected(false);
+          const isDisconnect = error.code === "SIDECAR_DISCONNECTED" || error.code === "POLLING_EXHAUSTED" || error.message?.includes("disconnected") || error.message?.includes("exhausted");
+          if (isDisconnect) {
+            console.warn(`[YouTubeResearch] run.interrupted run_id=${currentRunId}`);
+            setActiveProgress({
+              run_id: currentRunId,
+              stage: "INTERRUPTED",
+              progress_percent: 15,
+              message: "The local research service stopped unexpectedly. Your research run was interrupted. Restart the service and try again.",
+              videos_collected: 0,
+              channels_analyzed: 0,
+              keywords_expanded: 0,
+              elapsed_seconds: 0,
+              can_cancel: false,
+              error: "Research service disconnected"
+            });
+          }
         },
         async (completedState) => {
           setSseConnected(false);
@@ -20347,7 +20575,7 @@ function YouTubeResearchPage({ onNavigate }) {
           onDismissError: () => {
             setDiscoverError(null);
             setDiscoverErrorDetails(null);
-            if (activeProgress?.stage === "FAILED") {
+            if (activeProgress && ["FAILED", "INTERRUPTED", "CANCELLED"].includes(activeProgress.stage)) {
               setActiveProgress(null);
             }
           },

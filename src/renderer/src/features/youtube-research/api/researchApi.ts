@@ -19,6 +19,20 @@ export type ResearchApiErrorCode =
   | 'HTTP_ERROR'
   | 'INVALID_RESPONSE'
 
+export type ResearchProgressConnectionErrorCode = 'SIDECAR_DISCONNECTED' | 'POLLING_EXHAUSTED'
+
+export class ResearchProgressConnectionError extends Error {
+  code: ResearchProgressConnectionErrorCode
+  runId: string
+
+  constructor(message: string, code: ResearchProgressConnectionErrorCode, runId: string) {
+    super(message)
+    this.name = 'ResearchProgressConnectionError'
+    this.code = code
+    this.runId = runId
+  }
+}
+
 export class ResearchApiError extends Error {
   code: ResearchApiErrorCode
   status?: number
@@ -295,6 +309,8 @@ export class ResearchApi {
     let closed = false
     let eventSource: EventSource | null = null
     let pollInterval: NodeJS.Timeout | null = null
+    let consecutiveFailures = 0
+    const MAX_CONSECUTIVE_FAILURES = 4
 
     console.log(`[YouTubeResearch] progress.sse.connect run_id=${runId}`)
 
@@ -312,12 +328,16 @@ export class ResearchApi {
 
     const startPollingFallback = () => {
       if (closed || pollInterval) return
-      console.log(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`)
+      console.log(`[YouTubeResearch] progress.polling.start run_id=${runId}`)
       pollInterval = setInterval(async () => {
         if (closed) return
         try {
           const status = await this.getRunStatus(runId)
           if (closed) return
+          if (consecutiveFailures > 0) {
+            console.log(`[YouTubeResearch] progress.polling.recovered run_id=${runId}`)
+            consecutiveFailures = 0
+          }
           onProgress(status)
           if (isResearchStageTerminal(status.stage)) {
             console.log(`[YouTubeResearch] progress.terminal stage=${status.stage}`)
@@ -325,9 +345,36 @@ export class ResearchApi {
             onComplete(status)
           }
         } catch (pollErr) {
-          // ignore transient poll error
+          if (closed) return
+          consecutiveFailures++
+          console.warn(`[YouTubeResearch] progress.polling.failure attempt=${consecutiveFailures}`, pollErr)
+          if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+            console.error(`[YouTubeResearch] progress.connection.exhausted run_id=${runId}`)
+            console.warn(`[YouTubeResearch] run.interrupted run_id=${runId}`)
+            cleanup()
+            const connErr = new ResearchProgressConnectionError(
+              'The local research service stopped unexpectedly. Polling attempts exhausted.',
+              'SIDECAR_DISCONNECTED',
+              runId
+            )
+            onError(connErr)
+            const interruptedState: ResearchProgressState = {
+              run_id: runId,
+              stage: 'INTERRUPTED',
+              progress_percent: 15,
+              message: 'The local research service stopped unexpectedly. Your research run was interrupted. Restart the service and try again.',
+              videos_collected: 0,
+              channels_analyzed: 0,
+              keywords_expanded: 0,
+              elapsed_seconds: 0,
+              can_cancel: false,
+              error: 'Service disconnected'
+            }
+            onProgress(interruptedState)
+            onComplete(interruptedState)
+          }
         }
-      }, 1500)
+      }, 2000)
     }
 
     try {
@@ -355,7 +402,7 @@ export class ResearchApi {
 
       eventSource.onerror = (err) => {
         if (closed) return
-        console.warn(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`, err)
+        console.warn(`[YouTubeResearch] progress.sse.disconnected run_id=${runId}`, err)
         if (eventSource) {
           eventSource.close()
           eventSource = null
@@ -364,7 +411,7 @@ export class ResearchApi {
         startPollingFallback()
       }
     } catch (err) {
-      console.warn(`[YouTubeResearch] progress.sse.fallback_to_polling run_id=${runId}`, err)
+      console.warn(`[YouTubeResearch] progress.sse.disconnected run_id=${runId}`, err)
       startPollingFallback()
     }
 

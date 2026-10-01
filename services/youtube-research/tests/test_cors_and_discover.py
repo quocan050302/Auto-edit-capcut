@@ -110,7 +110,7 @@ def test_run_status_endpoint(mock_execute):
     assert status_res.status_code == 200
     data = status_res.json()
     assert data["run_id"] == run_id
-    assert data["stage"] in ("QUEUED", "EXPANDING_KEYWORDS", "SEARCHING", "COMPLETED", "FAILED", "CANCELLED")
+    assert data["stage"] in ("QUEUED", "EXPANDING_KEYWORDS", "SEARCHING", "COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED")
 
 def test_unknown_run_status_returns_404():
     """Test that requesting status of a non-existent run returns 404."""

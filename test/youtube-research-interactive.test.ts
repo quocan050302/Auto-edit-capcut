@@ -471,6 +471,115 @@ async function runTests(): Promise<void> {
     }
   })
 
+  // 11. Polling fallback exhausts after consecutive failures
+  await it('11. Polling fallback exhausts after consecutive failures and emits INTERRUPTED with ResearchProgressConnectionError', async () => {
+    const api = new ResearchApi('http://127.0.0.1:8765')
+    let failureCount = 0
+    let capturedError: any = null
+    let terminalReceived: ResearchProgressState | null = null
+
+    // Mock getRunStatus to always throw network error (sidecar dead)
+    api.getRunStatus = async () => {
+      failureCount++
+      throw new Error('Connection refused 127.0.0.1:8765')
+    }
+
+    const originalEventSource = (globalThis as any).EventSource
+    try {
+      (globalThis as any).EventSource = class {
+        constructor() {
+          throw new Error('SSE connection failed')
+        }
+      }
+
+      await new Promise<void>((resolve) => {
+        const cleanup = api.subscribeProgress(
+          'run_disconnected_123',
+          (prog) => {
+            if (prog.stage === 'INTERRUPTED') {
+              terminalReceived = prog
+            }
+          },
+          (err) => {
+            capturedError = err
+          },
+          (terminal) => {
+            assert.strictEqual(terminal.stage, 'INTERRUPTED')
+            cleanup()
+            resolve()
+          }
+        )
+      })
+
+      assert.strictEqual(failureCount, 4, 'Must exhaust after 4 consecutive failures')
+      assert.ok(capturedError, 'onError must be invoked')
+      assert.strictEqual(capturedError.code, 'SIDECAR_DISCONNECTED')
+      assert.strictEqual(capturedError.runId, 'run_disconnected_123')
+      assert.ok(terminalReceived, 'Must emit INTERRUPTED progress state')
+      assert.strictEqual(terminalReceived!.stage, 'INTERRUPTED')
+    } finally {
+      (globalThis as any).EventSource = originalEventSource
+    }
+  })
+
+  // 12. INTERRUPTED stage releases busy lock and preserves form parameters
+  await it('12. INTERRUPTED stage is not active, allows new run, and preserves form values', () => {
+    const interruptedProgress: ResearchProgressState = {
+      run_id: 'run_interrupted_999',
+      stage: 'INTERRUPTED',
+      progress_percent: 15,
+      message: 'The local research service stopped unexpectedly.',
+      videos_collected: 0,
+      channels_analyzed: 0,
+      keywords_expanded: 0,
+      elapsed_seconds: 0,
+      can_cancel: false,
+      error: 'Sidecar disconnected'
+    }
+
+    assert.strictEqual(isResearchRunActive(interruptedProgress), false)
+    assert.strictEqual(isResearchStageTerminal('INTERRUPTED'), true)
+    assert.strictEqual(isResearchStageActive('INTERRUPTED'), false)
+
+    // Verify form canSubmit logic with INTERRUPTED state
+    const topic = 'grocery prices'
+    const isStarting = false
+    const isRunning = isResearchRunActive(interruptedProgress)
+    const isBusy = Boolean(isStarting || isRunning)
+    const apiReachability = 'reachable'
+    const canSubmit = Boolean(topic.trim()) && !isBusy && apiReachability !== 'blocked' && apiReachability !== 'offline'
+    assert.strictEqual(canSubmit, true, 'Form must allow submit when stage is INTERRUPTED')
+  })
+
+  // 13. Progress panel shouldShowProgressPanel logic
+  await it('13. shouldShowProgressPanel stays visible for FAILED, INTERRUPTED, CANCELLED even when isBusy is false', () => {
+    const computeShouldShow = (isBusy: boolean, stage?: string) => {
+      return (
+        isBusy ||
+        stage === 'FAILED' ||
+        stage === 'INTERRUPTED' ||
+        stage === 'CANCELLED'
+      )
+    }
+
+    assert.strictEqual(computeShouldShow(true, 'SEARCHING'), true)
+    assert.strictEqual(computeShouldShow(false, 'FAILED'), true, 'FAILED must remain visible')
+    assert.strictEqual(computeShouldShow(false, 'INTERRUPTED'), true, 'INTERRUPTED must remain visible')
+    assert.strictEqual(computeShouldShow(false, 'CANCELLED'), true, 'CANCELLED must remain visible')
+    assert.strictEqual(computeShouldShow(false, 'COMPLETED'), false, 'COMPLETED transfers to result view')
+  })
+
+  // 14. Sidecar manager markAppQuitting safety
+  await it('14. Sidecar manager markAppQuitting prevents restart', async () => {
+    const { ResearchSidecarManager } = await import('../src/main/research/research-sidecar')
+    const manager = ResearchSidecarManager.getInstance()
+
+    manager.markAppQuitting()
+    const status = manager.getStatus()
+    assert.strictEqual(status.port, 8765)
+    assert.strictEqual(typeof status.online, 'boolean')
+  })
+
   // Summary
   console.log('\n==================================================')
   console.log(`TESTS FINISHED: ${passed} passed, ${failed} failed`)

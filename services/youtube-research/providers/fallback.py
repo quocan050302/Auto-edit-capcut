@@ -92,12 +92,23 @@ class ProviderFallbackManager:
 
         return res
 
-    async def get_health_status(self) -> Dict[str, Any]:
-        scraper_health = await self.scraper.check_health()
-        official_health = await self.official.check_health()
+    def get_cached_health(self) -> Dict[str, Any]:
         return {
-            "scraper": scraper_health,
-            "official": official_health,
+            "scraper": {
+                "provider": self.scraper.name,
+                "status": self.scraper.health_status,
+                "error_count": self.scraper.error_count,
+                "last_error": self.scraper.last_error
+            },
+            "official": {
+                "provider": self.official.name,
+                "status": self.official.health_status,
+                "quota_exceeded": self.official.quota_exceeded,
+                "last_error": self.official.last_error
+            },
             "active_preference": "official" if (self.use_official and self.official.api_key) else "scraper",
             "last_provenance": self.last_provenance
         }
+
+    async def get_health_status(self) -> Dict[str, Any]:
+        return self.get_cached_health()

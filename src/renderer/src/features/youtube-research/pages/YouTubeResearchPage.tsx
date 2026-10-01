@@ -240,6 +240,26 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
         (error) => {
           console.warn('[YouTubeResearch] progress.sse.warning:', error)
           setSseConnected(false)
+          const isDisconnect =
+            (error as any).code === 'SIDECAR_DISCONNECTED' ||
+            (error as any).code === 'POLLING_EXHAUSTED' ||
+            error.message?.includes('disconnected') ||
+            error.message?.includes('exhausted')
+          if (isDisconnect) {
+            console.warn(`[YouTubeResearch] run.interrupted run_id=${currentRunId}`)
+            setActiveProgress({
+              run_id: currentRunId,
+              stage: 'INTERRUPTED',
+              progress_percent: 15,
+              message: 'The local research service stopped unexpectedly. Your research run was interrupted. Restart the service and try again.',
+              videos_collected: 0,
+              channels_analyzed: 0,
+              keywords_expanded: 0,
+              elapsed_seconds: 0,
+              can_cancel: false,
+              error: 'Research service disconnected'
+            })
+          }
         },
         async (completedState) => {
           setSseConnected(false)
@@ -469,7 +489,7 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
               onDismissError={() => {
                 setDiscoverError(null)
                 setDiscoverErrorDetails(null)
-                if (activeProgress?.stage === 'FAILED') {
+                if (activeProgress && ['FAILED', 'INTERRUPTED', 'CANCELLED'].includes(activeProgress.stage)) {
                   setActiveProgress(null)
                 }
               }}

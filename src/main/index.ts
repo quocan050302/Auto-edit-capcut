@@ -103,17 +103,14 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   pipelineOrchestrator.handleAppQuit()
-  researchSidecar.stop().catch(() => {})
+  researchSidecar.markAppQuitting()
+  researchSidecar.stop().catch((error) => {
+    logger.warn('[ResearchSidecar] Failed to stop during app quit:', error)
+  })
 })
 
 process.on('uncaughtException', (error) => {
   logger.error('[App] Uncaught exception:', error)
-  try {
-    pipelineOrchestrator.handleAppQuit()
-    researchSidecar.stop().catch(() => {})
-  } catch {
-    /* ignore */
-  }
 })
 
 process.on('unhandledRejection', (reason) => {

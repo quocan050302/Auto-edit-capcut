@@ -88,7 +88,8 @@ app.add_middleware(
 
 @app.get("/health")
 async def health_check():
-    prov_health = await provider_manager.get_health_status()
+    # Instantaneous liveness check: does not touch external network or YouTube APIs
+    prov_health = provider_manager.get_cached_health()
     return {
         "status": "online",
         "service": "YouTube Foreign Market Researcher",
@@ -96,6 +97,22 @@ async def health_check():
         "providers": prov_health,
         "database": "sqlite_connected"
     }
+
+@app.get("/api/research/providers/health")
+async def provider_diagnostic_health():
+    try:
+        prov_health = await asyncio.wait_for(provider_manager.get_health_status(), timeout=5.0)
+        return {
+            "status": "online",
+            "providers": prov_health
+        }
+    except Exception as e:
+        research_logger.warning(f"[Health] Provider diagnostic health check error: {e}")
+        return {
+            "status": "degraded",
+            "error": str(e),
+            "providers": provider_manager.get_cached_health()
+        }
 
 @app.post("/api/research/discover", response_model=DiscoverResponse)
 async def start_discovery(req: DiscoverRequest, db: Session = Depends(get_db)):

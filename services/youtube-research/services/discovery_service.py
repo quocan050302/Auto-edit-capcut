@@ -85,16 +85,42 @@ class DiscoveryService:
             error: Optional[str] = None
         ):
             elapsed = int(time.time() - start_time)
-            repo.update_run_stage(
-                run_id=run_id,
-                stage=stage,
-                progress_percent=pct,
-                message=msg,
-                videos_collected=videos_c,
-                channels_analyzed=channels_a,
-                keywords_expanded=keywords_e,
-                error=error
-            )
+            try:
+                repo.update_run_stage(
+                    run_id=run_id,
+                    stage=stage,
+                    progress_percent=pct,
+                    message=msg,
+                    videos_collected=videos_c,
+                    channels_analyzed=channels_a,
+                    keywords_expanded=keywords_e,
+                    error=error
+                )
+            except Exception as db_err:
+                research_logger.warning(f"[Discovery] Failed to update stage in primary DB session ({db_err}), retrying with fresh session...")
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                try:
+                    fresh_db = SessionLocal()
+                    try:
+                        fresh_repo = ResearchRepository(fresh_db)
+                        fresh_repo.update_run_stage(
+                            run_id=run_id,
+                            stage=stage,
+                            progress_percent=pct,
+                            message=msg,
+                            videos_collected=videos_c,
+                            channels_analyzed=channels_a,
+                            keywords_expanded=keywords_e,
+                            error=error
+                        )
+                    finally:
+                        fresh_db.close()
+                except Exception as final_db_err:
+                    research_logger.error(f"[Discovery] Failed to persist stage in fallback session: {final_db_err}")
+
             state = ProgressStateSchema(
                 run_id=run_id,
                 stage=stage,
@@ -107,7 +133,10 @@ class DiscoveryService:
                 can_cancel=stage not in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"),
                 error=error
             )
-            await task_manager.emit_progress(state)
+            try:
+                await task_manager.emit_progress(state)
+            except Exception as emit_err:
+                research_logger.warning(f"[Discovery] Failed to emit progress event: {emit_err}")
 
         try:
             research_logger.info(f"[Discovery] Starting run {run_id} for topic: {topic} (market={market})")
@@ -118,22 +147,45 @@ class DiscoveryService:
                 return
 
             # Stage 1: EXPANDING_KEYWORDS
+            research_logger.info(f"[Discovery] stage.start run_id={run_id} stage=EXPANDING_KEYWORDS")
             await update_progress("EXPANDING_KEYWORDS", 15, f"Expanding keyword queries for '{topic}'...")
-            expanded_keywords, sources = await keyword_expander.expand_keywords(
-                seed=topic,
-                market=market,
-                language=language,
-                max_keywords=settings.max_expanded_keywords
-            )
+
+            async def on_expand_progress(pct: int, msg: str):
+                await update_progress("EXPANDING_KEYWORDS", pct, msg)
+
+            try:
+                expanded_keywords, sources = await asyncio.wait_for(
+                    keyword_expander.expand_keywords(
+                        seed=topic,
+                        market=market,
+                        language=language,
+                        max_keywords=settings.max_expanded_keywords,
+                        progress_callback=on_expand_progress
+                    ),
+                    timeout=22.0
+                )
+            except asyncio.TimeoutError:
+                research_logger.warning(f"[Discovery] [KeywordExpand] timeout fallback=true run_id={run_id}")
+                expanded_keywords, sources = keyword_expander.build_rule_based_fallback(
+                    seed=topic,
+                    max_keywords=settings.max_expanded_keywords
+                )
+            except Exception as expand_err:
+                research_logger.warning(f"[Discovery] Keyword expander exception ({expand_err}), using rule fallback: run_id={run_id}")
+                expanded_keywords, sources = keyword_expander.build_rule_based_fallback(
+                    seed=topic,
+                    max_keywords=settings.max_expanded_keywords
+                )
+
             keywords_count = len(expanded_keywords)
-            research_logger.info(f"[Discovery] Expanded to {keywords_count} keywords")
+            research_logger.info(f"[Discovery] stage.complete run_id={run_id} stage=EXPANDING_KEYWORDS count={keywords_count}")
 
             if task_manager.is_cancelled(run_id):
                 await update_progress("CANCELLED", 100, "Research cancelled by user")
                 return
 
             # Stage 2: SEARCHING & FETCHING_METADATA (Pass 1 - Broad Collection)
-            await update_progress("SEARCHING", 30, f"Searching YouTube across {keywords_count} queries...", keywords_expanded=keywords_count)
+            await update_progress("SEARCHING", 30, f"Searching YouTube across {keywords_count} queries...", keywords_e=keywords_count)
             all_raw_videos = []
             seen_video_ids = set()
             keyword_to_videos: Dict[str, List[Any]] = {}
@@ -489,10 +541,13 @@ class DiscoveryService:
 
         except asyncio.CancelledError:
             research_logger.info(f"[Discovery] Run {run_id} cancelled.")
-            await update_progress("CANCELLED", 100, "Research run was cancelled.")
+            await asyncio.shield(update_progress("CANCELLED", 100, "Research run was cancelled."))
         except Exception as e:
             research_logger.error(f"[Discovery] Error in run {run_id}: {e}", exc_info=True)
-            await update_progress("FAILED", 100, f"Research error: {str(e)}", error=str(e))
+            await asyncio.shield(update_progress("FAILED", 100, f"Research error: {str(e)}", error=str(e)))
         finally:
-            db.close()
+            try:
+                db.close()
+            except Exception:
+                pass
             task_manager.cleanup_run(run_id)
