@@ -495,17 +495,11 @@ async def update_settings_endpoint(req: SettingsUpdateSchema):
     if req.debug_mode is not None:
         settings.debug = req.debug_mode
 
-    # Update providers & AI instances
+    # Update providers
     provider_manager.update_configuration(
         api_key=settings.official_api_key,
         use_official=settings.use_official_api,
         priority=settings.provider_priority
-    )
-    ai_engine.update_config(
-        provider=settings.ai_provider,
-        ollama_url=settings.ollama_base_url,
-        ollama_model=settings.ollama_model,
-        cloud_api_key=settings.cloud_ai_key
     )
 
     return await get_settings_endpoint()
