@@ -9,27 +9,150 @@ import type {
   TimeRange
 } from '../types/research.types'
 
-const SIDECAR_DEFAULT_URL = 'http://127.0.0.1:8765'
+export const SIDECAR_DEFAULT_URL = 'http://127.0.0.1:8765'
+
+export type ResearchApiErrorCode =
+  | 'API_OFFLINE'
+  | 'API_BLOCKED'
+  | 'TIMEOUT'
+  | 'HTTP_ERROR'
+  | 'INVALID_RESPONSE'
+
+export class ResearchApiError extends Error {
+  code: ResearchApiErrorCode
+  status?: number
+  details?: unknown
+
+  constructor(
+    message: string,
+    code: ResearchApiErrorCode,
+    status?: number,
+    details?: unknown
+  ) {
+    super(message)
+    this.name = 'ResearchApiError'
+    this.code = code
+    this.status = status
+    this.details = details
+  }
+}
+
+export function normalizeLocalSidecarUrl(url?: string): string {
+  const fallback = SIDECAR_DEFAULT_URL
+  if (!url) return fallback
+  try {
+    const parsed = new URL(url)
+    const localHosts = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+    if (parsed.protocol !== 'http:' || !localHosts.has(parsed.hostname)) {
+      return fallback
+    }
+    // Remove trailing slashes
+    return parsed.origin.replace(/\/+$/, '')
+  } catch {
+    return fallback
+  }
+}
 
 export class ResearchApi {
   private baseUrl: string
 
   constructor(baseUrl: string = SIDECAR_DEFAULT_URL) {
-    this.baseUrl = baseUrl
+    this.baseUrl = normalizeLocalSidecarUrl(baseUrl)
   }
 
-  setBaseUrl(url: string): void {
-    this.baseUrl = url
+  setBaseUrl(url?: string): void {
+    this.baseUrl = normalizeLocalSidecarUrl(url)
   }
 
   getBaseUrl(): string {
     return this.baseUrl
   }
 
-  async checkHealth(): Promise<{ status: string; version: string; providers: Record<string, string> }> {
-    const res = await fetch(`${this.baseUrl}/health`, { signal: AbortSignal.timeout(3000) })
-    if (!res.ok) throw new Error(`Health check failed with status ${res.status}`)
-    return res.json()
+  private async request<T>(
+    endpoint: string,
+    options: RequestInit & { timeoutMs?: number } = {}
+  ): Promise<T> {
+    const { timeoutMs = 12000, ...fetchOptions } = options
+    const url = `${this.baseUrl}${endpoint}`
+
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+
+    // Chain custom signal if provided
+    let combinedSignal = controller.signal
+    if (fetchOptions.signal) {
+      const externalSignal = fetchOptions.signal
+      if (externalSignal.aborted) {
+        clearTimeout(timeoutId)
+        throw new ResearchApiError('Request aborted by caller', 'TIMEOUT')
+      }
+      externalSignal.addEventListener('abort', () => controller.abort())
+    }
+
+    try {
+      const res = await fetch(url, {
+        ...fetchOptions,
+        signal: combinedSignal
+      })
+
+      if (!res.ok) {
+        let errData: any = null
+        try {
+          errData = await res.json()
+        } catch {
+          // not json
+        }
+
+        const detailMsg = errData?.detail || `Request failed with status ${res.status}`
+        if (res.status === 422) {
+          throw new ResearchApiError(
+            `Invalid research request: ${typeof detailMsg === 'string' ? detailMsg : JSON.stringify(detailMsg)}`,
+            'HTTP_ERROR',
+            422,
+            errData
+          )
+        }
+        if (res.status === 500) {
+          throw new ResearchApiError(
+            'The research service encountered an internal error.',
+            'HTTP_ERROR',
+            500,
+            errData
+          )
+        }
+        throw new ResearchApiError(detailMsg, 'HTTP_ERROR', res.status, errData)
+      }
+
+      try {
+        return (await res.json()) as T
+      } catch (err) {
+        throw new ResearchApiError('Invalid JSON response from research service', 'INVALID_RESPONSE')
+      }
+    } catch (err: unknown) {
+      if (err instanceof ResearchApiError) {
+        throw err
+      }
+
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new ResearchApiError('The research service did not respond in time.', 'TIMEOUT')
+      }
+
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('CSP')) {
+        throw new ResearchApiError(
+          'The Electron renderer was blocked or could not connect to the local research service at ' + this.baseUrl,
+          'API_OFFLINE'
+        )
+      }
+
+      throw new ResearchApiError(`Connection error: ${msg}`, 'API_OFFLINE')
+    } finally {
+      clearTimeout(timeoutId)
+    }
+  }
+
+  async checkHealth(): Promise<{ status: string; service: string; version: string; providers?: Record<string, unknown> }> {
+    return this.request('/health', { timeoutMs: 3000 })
   }
 
   async startDiscover(params: {
@@ -39,70 +162,64 @@ export class ResearchApi {
     time_range: TimeRange
     limit?: number
     filters?: Record<string, unknown>
-  }): Promise<{ run_id: string; status: string }> {
-    const res = await fetch(`${this.baseUrl}/api/research/discover`, {
+  }): Promise<{ run_id: string; status: string; message?: string }> {
+    return this.request('/api/research/discover', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(params)
+      body: JSON.stringify(params),
+      timeoutMs: 15000
     })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Failed to start research' }))
-      throw new Error(err.detail || 'Failed to start research')
-    }
-    return res.json()
+  }
+
+  async getRunStatus(runId: string): Promise<ResearchProgressState> {
+    return this.request(`/api/research/runs/${encodeURIComponent(runId)}/status`, { timeoutMs: 4000 })
   }
 
   async expandKeywords(topic: string, market: MarketCode): Promise<{ keywords: string[]; sources: Record<string, string[]> }> {
-    const res = await fetch(`${this.baseUrl}/api/research/expand-keywords`, {
+    return this.request('/api/research/expand-keywords', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, market })
+      body: JSON.stringify({ topic, market }),
+      timeoutMs: 20000
     })
-    if (!res.ok) throw new Error('Failed to expand keywords')
-    return res.json()
   }
 
   async cancelRun(runId: string): Promise<{ success: boolean; message: string }> {
-    const res = await fetch(`${this.baseUrl}/api/research/cancel/${runId}`, {
-      method: 'POST'
+    return this.request(`/api/research/cancel/${encodeURIComponent(runId)}`, {
+      method: 'POST',
+      timeoutMs: 5000
     })
-    if (!res.ok) throw new Error('Failed to cancel research')
-    return res.json()
   }
 
   async getRunResult(runId: string): Promise<ResearchRunResult> {
-    const res = await fetch(`${this.baseUrl}/api/research/runs/${runId}`)
-    if (!res.ok) throw new Error('Failed to get research result')
-    return res.json()
+    return this.request(`/api/research/runs/${encodeURIComponent(runId)}`, { timeoutMs: 10000 })
   }
 
   async getLatestRun(topic?: string, market?: MarketCode): Promise<ResearchRunResult | null> {
     const query = new URLSearchParams()
     if (topic) query.set('topic', topic)
     if (market) query.set('market', market)
-    const res = await fetch(`${this.baseUrl}/api/research/runs/latest?${query.toString()}`)
-    if (res.status === 404) return null
-    if (!res.ok) throw new Error('Failed to get latest run')
-    return res.json()
+    try {
+      return await this.request(`/api/research/runs/latest?${query.toString()}`, { timeoutMs: 5000 })
+    } catch (err) {
+      if (err instanceof ResearchApiError && err.status === 404) {
+        return null
+      }
+      throw err
+    }
   }
 
   async analyzeCompetitor(channelUrl: string, market: MarketCode = 'US'): Promise<CompetitorAnalysisResult> {
-    const res = await fetch(`${this.baseUrl}/api/research/competitor`, {
+    return this.request('/api/research/competitor', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ channel_url: channelUrl, market })
+      body: JSON.stringify({ channel_url: channelUrl, market }),
+      timeoutMs: 30000
     })
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({ detail: 'Failed to analyze competitor' }))
-      throw new Error(err.detail || 'Failed to analyze competitor')
-    }
-    return res.json()
   }
 
   async getSavedProjects(): Promise<SavedResearchProject[]> {
-    const res = await fetch(`${this.baseUrl}/api/research/saved`)
-    if (!res.ok) throw new Error('Failed to fetch saved projects')
-    return res.json()
+    return this.request('/api/research/saved', { timeoutMs: 5000 })
   }
 
   async saveProject(payload: {
@@ -113,67 +230,59 @@ export class ResearchApi {
     content_type: ContentType
     time_range: TimeRange
   }): Promise<SavedResearchProject> {
-    const res = await fetch(`${this.baseUrl}/api/research/saved`, {
+    return this.request('/api/research/saved', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      timeoutMs: 8000
     })
-    if (!res.ok) throw new Error('Failed to save research project')
-    return res.json()
   }
 
   async renameSavedProject(id: string, name: string): Promise<SavedResearchProject> {
-    const res = await fetch(`${this.baseUrl}/api/research/saved/${id}`, {
+    return this.request(`/api/research/saved/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name })
+      body: JSON.stringify({ name }),
+      timeoutMs: 5000
     })
-    if (!res.ok) throw new Error('Failed to rename project')
-    return res.json()
   }
 
   async deleteSavedProject(id: string): Promise<{ success: boolean }> {
-    const res = await fetch(`${this.baseUrl}/api/research/saved/${id}`, {
-      method: 'DELETE'
+    return this.request(`/api/research/saved/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      timeoutMs: 5000
     })
-    if (!res.ok) throw new Error('Failed to delete project')
-    return res.json()
   }
 
   async getSettings(): Promise<ResearchSettings> {
-    const res = await fetch(`${this.baseUrl}/api/research/settings`)
-    if (!res.ok) throw new Error('Failed to get research settings')
-    return res.json()
+    return this.request('/api/research/settings', { timeoutMs: 5000 })
   }
 
   async updateSettings(settings: Partial<ResearchSettings>): Promise<ResearchSettings> {
-    const res = await fetch(`${this.baseUrl}/api/research/settings`, {
+    return this.request('/api/research/settings', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(settings)
+      body: JSON.stringify(settings),
+      timeoutMs: 8000
     })
-    if (!res.ok) throw new Error('Failed to update research settings')
-    return res.json()
   }
 
   async testYouTubeApiKey(apiKey: string): Promise<{ valid: boolean; quota_remaining?: number; error?: string }> {
-    const res = await fetch(`${this.baseUrl}/api/research/test-api-key`, {
+    return this.request('/api/research/test-api-key', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ api_key: apiKey })
+      body: JSON.stringify({ api_key: apiKey }),
+      timeoutMs: 10000
     })
-    if (!res.ok) throw new Error('Failed to test API key')
-    return res.json()
   }
 
   async testOllama(url: string, model: string): Promise<{ available: boolean; error?: string }> {
-    const res = await fetch(`${this.baseUrl}/api/research/test-ollama`, {
+    return this.request('/api/research/test-ollama', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ url, model })
+      body: JSON.stringify({ url, model }),
+      timeoutMs: 10000
     })
-    if (!res.ok) throw new Error('Failed to test Ollama connection')
-    return res.json()
   }
 
   subscribeProgress(
@@ -182,31 +291,77 @@ export class ResearchApi {
     onError: (err: Error) => void,
     onComplete: (state: ResearchProgressState) => void
   ): () => void {
-    const sseUrl = `${this.baseUrl}/api/research/stream/${runId}`
-    const eventSource = new EventSource(sseUrl)
+    let closed = false
+    let eventSource: EventSource | null = null
+    let pollInterval: NodeJS.Timeout | null = null
 
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as ResearchProgressState
-        onProgress(data)
-        if (data.stage === 'COMPLETED' || data.stage === 'FAILED' || data.stage === 'CANCELLED') {
-          eventSource.close()
-          onComplete(data)
-        }
-      } catch (err) {
-        console.error('[Research SSE] Parse error', err)
+    const cleanup = () => {
+      closed = true
+      if (eventSource) {
+        eventSource.close()
+        eventSource = null
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval)
+        pollInterval = null
       }
     }
 
-    eventSource.onerror = (err) => {
-      console.warn('[Research SSE] Connection error', err)
-      onError(new Error('Connection to research progress stream interrupted'))
-      eventSource.close()
+    const startPollingFallback = () => {
+      if (closed || pollInterval) return
+      pollInterval = setInterval(async () => {
+        if (closed) return
+        try {
+          const status = await this.getRunStatus(runId)
+          onProgress(status)
+          if (['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(status.stage)) {
+            cleanup()
+            onComplete(status)
+          }
+        } catch (pollErr) {
+          // ignore transient poll error
+        }
+      }, 1500)
     }
 
-    return () => {
-      eventSource.close()
+    try {
+      const sseUrl = `${this.baseUrl}/api/research/stream/${encodeURIComponent(runId)}`
+      eventSource = new EventSource(sseUrl)
+
+      eventSource.onmessage = (event) => {
+        if (closed) return
+        try {
+          if (!event.data || event.data.trim() === '{}' || event.data.startsWith(':')) {
+            // Heartbeat or comment
+            return
+          }
+          const data = JSON.parse(event.data) as ResearchProgressState
+          onProgress(data)
+          if (['COMPLETED', 'FAILED', 'CANCELLED', 'INTERRUPTED'].includes(data.stage)) {
+            cleanup()
+            onComplete(data)
+          }
+        } catch (err) {
+          console.warn('[Research SSE] Parse warning', err)
+        }
+      }
+
+      eventSource.onerror = (err) => {
+        if (closed) return
+        console.warn('[Research SSE] SSE stream connection dropped. Switching to status polling fallback.', err)
+        if (eventSource) {
+          eventSource.close()
+          eventSource = null
+        }
+        // Activate fallback polling without failing the run
+        startPollingFallback()
+      }
+    } catch (err) {
+      console.warn('[Research SSE] Failed to instantiate EventSource, using status polling fallback', err)
+      startPollingFallback()
     }
+
+    return cleanup
   }
 }
 

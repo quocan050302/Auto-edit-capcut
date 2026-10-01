@@ -21,6 +21,7 @@ from workers.task_manager import task_manager
 from schemas.research_schemas import (
     DiscoverRequest,
     DiscoverResponse,
+    ProgressStateSchema,
     KeywordExpandRequest,
     KeywordExpandResponse,
     CompetitorRequest,
@@ -67,13 +68,21 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Local Electron CORS
+# Local Electron CORS: allow local loopback origins and packaged null origin
+LOCAL_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "null",
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=LOCAL_ALLOWED_ORIGINS,
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    expose_headers=["Content-Type"],
 )
 
 @app.get("/health")
@@ -89,13 +98,17 @@ async def health_check():
 
 @app.post("/api/research/discover", response_model=DiscoverResponse)
 async def start_discovery(req: DiscoverRequest, db: Session = Depends(get_db)):
+    topic = req.topic.strip()
+    if not topic:
+        raise HTTPException(status_code=422, detail="Topic keyword cannot be empty")
+
     run_id = task_manager.create_run_id()
     repo = ResearchRepository(db)
 
     # Create run record
     run = ResearchRun(
         id=run_id,
-        topic=req.topic,
+        topic=topic,
         market=req.market,
         content_type=req.content_type,
         time_range=req.time_range,
@@ -110,7 +123,7 @@ async def start_discovery(req: DiscoverRequest, db: Session = Depends(get_db)):
     task = asyncio.create_task(
         discovery_service.execute_discovery_run(
             run_id=run_id,
-            topic=req.topic,
+            topic=topic,
             market=req.market,
             content_type=req.content_type,
             time_range=req.time_range,
@@ -144,16 +157,36 @@ async def stream_progress(run_id: str, db: Session = Depends(get_db)):
 
     q = task_manager.subscribe(run_id)
 
+    # If run already finished in DB and not in task manager memory, emit state immediately
+    if run.stage in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"):
+        if run_id not in task_manager.latest_progress:
+            initial_state = ProgressStateSchema(
+                run_id=run.id,
+                stage=run.stage,
+                progress_percent=run.progress_percent,
+                message=run.message or "",
+                videos_collected=run.videos_collected or 0,
+                channels_analyzed=run.channels_analyzed or 0,
+                keywords_expanded=run.keywords_expanded or 0,
+                elapsed_seconds=0,
+                can_cancel=False
+            )
+            q.put_nowait(initial_state)
+
     async def event_generator():
         try:
             while True:
-                # Wait for state update
-                state = await q.get()
-                payload = json.dumps(state.model_dump())
-                yield f"data: {payload}\n\n"
+                try:
+                    # Wait for state update with heartbeat timeout (10s)
+                    state = await asyncio.wait_for(q.get(), timeout=10.0)
+                    payload = json.dumps(state.model_dump())
+                    yield f"data: {payload}\n\n"
 
-                if state.stage in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"):
-                    break
+                    if state.stage in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"):
+                        break
+                except asyncio.TimeoutError:
+                    # Send standard SSE keep-alive heartbeat comment
+                    yield ": keep-alive\n\n"
         except asyncio.CancelledError:
             pass
         finally:
@@ -167,6 +200,28 @@ async def stream_progress(run_id: str, db: Session = Depends(get_db)):
             "Connection": "keep-alive",
             "X-Accel-Buffering": "no"
         }
+    )
+
+@app.get("/api/research/runs/{run_id}/status", response_model=ProgressStateSchema)
+async def get_run_status(run_id: str, db: Session = Depends(get_db)):
+    if run_id in task_manager.latest_progress:
+        return task_manager.latest_progress[run_id]
+
+    repo = ResearchRepository(db)
+    run = repo.get_run(run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    return ProgressStateSchema(
+        run_id=run.id,
+        stage=run.stage,
+        progress_percent=run.progress_percent,
+        message=run.message or "",
+        videos_collected=run.videos_collected or 0,
+        channels_analyzed=run.channels_analyzed or 0,
+        keywords_expanded=run.keywords_expanded or 0,
+        elapsed_seconds=0,
+        can_cancel=run.stage not in ("COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED")
     )
 
 @app.post("/api/research/cancel/{run_id}")
