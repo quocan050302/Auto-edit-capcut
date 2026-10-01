@@ -16,6 +16,7 @@ export class ResearchSidecarManager {
   private lastError?: string
   private healthCheckInterval: NodeJS.Timeout | null = null
   private pidFilePath: string
+  private lastSuccessfulHealthCheck: string | null = null
 
   private constructor() {
     this.pidFilePath = join(
@@ -40,7 +41,7 @@ export class ResearchSidecarManager {
       version: '1.0.0',
       status: this.status,
       error: this.lastError,
-      lastHealthCheck: new Date().toISOString()
+      lastHealthCheck: this.lastSuccessfulHealthCheck || undefined
     }
   }
 
@@ -48,7 +49,21 @@ export class ResearchSidecarManager {
     return new Promise<boolean>((resolve) => {
       const req = http.get(`http://${this.host}:${this.port}/health`, { timeout: 2000 }, (res) => {
         if (res.statusCode === 200) {
-          resolve(true)
+          let body = ''
+          res.on('data', (chunk) => { body += chunk })
+          res.on('end', () => {
+            try {
+              const data = JSON.parse(body)
+              if (data.service === 'YouTube Foreign Market Researcher' && data.status === 'online') {
+                this.lastSuccessfulHealthCheck = new Date().toISOString()
+                resolve(true)
+              } else {
+                resolve(false)
+              }
+            } catch {
+              resolve(false)
+            }
+          })
         } else {
           resolve(false)
         }
@@ -115,7 +130,13 @@ export class ResearchSidecarManager {
       })
 
       if (this.process.pid) {
-        fs.writeFileSync(this.pidFilePath, String(this.process.pid), 'utf-8')
+        const metadata = {
+          pid: this.process.pid,
+          port: this.port,
+          startedAt: new Date().toISOString(),
+          service: 'YouTube Foreign Market Researcher'
+        }
+        fs.writeFileSync(this.pidFilePath, JSON.stringify(metadata, null, 2), 'utf-8')
       }
 
       this.process.stdout?.on('data', (data) => {
@@ -218,11 +239,28 @@ export class ResearchSidecarManager {
   private cleanupStaleProcess(): void {
     try {
       if (fs.existsSync(this.pidFilePath)) {
-        const oldPid = parseInt(fs.readFileSync(this.pidFilePath, 'utf-8').trim(), 10)
+        const content = fs.readFileSync(this.pidFilePath, 'utf-8').trim()
+        let oldPid: number | null = null
+        try {
+          const parsed = JSON.parse(content)
+          if (parsed && parsed.service === 'YouTube Foreign Market Researcher' && typeof parsed.pid === 'number') {
+            oldPid = parsed.pid
+          }
+        } catch {
+          const numeric = parseInt(content, 10)
+          if (!isNaN(numeric)) oldPid = numeric
+        }
+
         if (oldPid && !isNaN(oldPid)) {
           if (process.platform === 'win32') {
             try {
               execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: 'ignore' })
+            } catch {
+              /* ignore if process already terminated */
+            }
+          } else {
+            try {
+              process.kill(oldPid, 'SIGTERM')
             } catch {
               /* ignore */
             }

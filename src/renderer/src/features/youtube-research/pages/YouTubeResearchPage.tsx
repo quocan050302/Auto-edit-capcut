@@ -9,9 +9,10 @@ import type {
   KeywordMetricRecord,
   ProviderSource,
   ResearchSidecarStatus,
-  ResearchProjectHandoffPayload
+  ResearchProjectHandoffPayload,
+  ApiConnectionStatus
 } from '../types/research.types'
-import { researchApi } from '../api/researchApi'
+import { researchApi, ResearchApiError } from '../api/researchApi'
 import { ResearchErrorBoundary } from '../components/ResearchErrorBoundary'
 import { ResearchHeader } from '../components/ResearchHeader'
 import { DiscoverTab } from '../components/DiscoverTab'
@@ -38,8 +39,11 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
 
   // Service & Provider Status
   const [sidecarStatus, setSidecarStatus] = useState<ResearchSidecarStatus | null>(null)
+  const [apiReachabilityStatus, setApiReachabilityStatus] = useState<ApiConnectionStatus>('checking')
   const [providerSource, setProviderSource] = useState<ProviderSource>('SCRAPER')
   const [debugMode, setDebugMode] = useState<boolean>(false)
+  const [discoverError, setDiscoverError] = useState<string | null>(null)
+  const [discoverErrorDetails, setDiscoverErrorDetails] = useState<unknown>(null)
 
   // Active Research State
   const [activeProgress, setActiveProgress] = useState<ResearchProgressState | null>(null)
@@ -61,34 +65,62 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
 
   // 1. Initial Load: Check sidecar & fetch saved projects
   const refreshStatusAndProjects = async () => {
+    setApiReachabilityStatus('checking')
+    let isSidecarOnline = false
+
     try {
       if (window.api?.research) {
         const sStatus = await window.api.research.getStatus()
         setSidecarStatus(sStatus)
+        isSidecarOnline = Boolean(sStatus?.online)
+        if (sStatus?.url) {
+          researchApi.setBaseUrl(sStatus.url)
+        }
       }
-      const health = await researchApi.checkHealth().catch(() => null)
-      if (health) {
+
+      // Check health from renderer with limited retry
+      let health = null
+      let attempts = 0
+      while (attempts < 3) {
+        try {
+          health = await researchApi.checkHealth()
+          if (health) break
+        } catch {
+          attempts++
+          if (attempts < 3) {
+            await new Promise((r) => setTimeout(r, attempts === 1 ? 400 : 1000))
+          }
+        }
+      }
+
+      if (health && health.status === 'online') {
+        setApiReachabilityStatus('reachable')
         const prov = (health.providers?.last_provenance as ProviderSource) || 'SCRAPER'
         setProviderSource(prov)
-      }
-      const saved = await researchApi.getSavedProjects().catch(() => [])
-      setSavedProjects(saved)
+        setDiscoverError(null)
 
-      const settings = await researchApi.getSettings().catch(() => null)
-      if (settings) {
-        setDebugMode(settings.debug_mode)
-      }
+        const saved = await researchApi.getSavedProjects().catch(() => [])
+        setSavedProjects(saved)
 
-      // Load latest completed run if no run active
-      if (!activeResult) {
-        const latest = await researchApi.getLatestRun().catch(() => null)
-        if (latest) {
-          setActiveResult(latest)
-          setActiveRunId(latest.run_id)
+        const settings = await researchApi.getSettings().catch(() => null)
+        if (settings) {
+          setDebugMode(settings.debug_mode)
         }
+
+        // Load latest completed run if no run active
+        if (!activeResult) {
+          const latest = await researchApi.getLatestRun().catch(() => null)
+          if (latest) {
+            setActiveResult(latest)
+            setActiveRunId(latest.run_id)
+          }
+        }
+      } else {
+        setApiReachabilityStatus(isSidecarOnline ? 'blocked' : 'offline')
       }
     } catch (err) {
       console.warn('[YouTubeResearch] Initial status check failed:', err)
+      setApiReachabilityStatus(isSidecarOnline ? 'blocked' : 'offline')
     }
   }
 
@@ -110,6 +142,20 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
     limit: number
     filters: Record<string, unknown>
   }) => {
+    setDiscoverError(null)
+    setDiscoverErrorDetails(null)
+
+    if (apiReachabilityStatus === 'blocked') {
+      try {
+        const health = await researchApi.checkHealth()
+        if (health) setApiReachabilityStatus('reachable')
+      } catch (err) {
+        setDiscoverError('The local research service is running, but this window cannot connect to its API (connection blocked).')
+        setDiscoverErrorDetails(err)
+        return
+      }
+    }
+
     try {
       const { run_id } = await researchApi.startDiscover(params)
       setActiveRunId(run_id)
@@ -135,7 +181,7 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
           setActiveProgress(progress)
         },
         (error) => {
-          console.warn('[Research] SSE error:', error)
+          console.warn('[Research] SSE warning:', error)
           setSseConnected(false)
         },
         async (completedState) => {
@@ -154,7 +200,10 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
 
       sseCleanupRef.current = cleanup
     } catch (err: unknown) {
-      alert(`Could not start research: ${err instanceof Error ? err.message : String(err)}`)
+      console.error('[YouTubeResearch] Start discover failed:', err)
+      const msg = err instanceof Error ? err.message : String(err)
+      setDiscoverError(msg)
+      setDiscoverErrorDetails(err)
     }
   }
 
@@ -260,7 +309,10 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
           onToggleView={() => setIsAdvancedView(!isAdvancedView)}
           onOpenSettings={() => setSettingsModalOpen(true)}
           sidecarStatus={sidecarStatus?.status || 'running'}
+          apiReachabilityStatus={apiReachabilityStatus}
           onRestartSidecar={handleRestartSidecar}
+          onRetryConnection={refreshStatusAndProjects}
+          hasExecutedRun={activeResult !== null}
           lastResearchTopic={activeResult?.topic}
         />
 
@@ -338,6 +390,13 @@ export function YouTubeResearchPage({ onNavigate }: Props): React.ReactElement {
                 setHandoffAngle(angle)
               }}
               onNavigateTab={(tab) => setActiveTab(tab as InternalTab)}
+              apiReachabilityStatus={apiReachabilityStatus}
+              errorMessage={discoverError}
+              errorDetails={discoverErrorDetails}
+              onDismissError={() => setDiscoverError(null)}
+              onRetryConnection={refreshStatusAndProjects}
+              onRestartSidecar={handleRestartSidecar}
+              isAdvancedView={isAdvancedView}
             />
           )}
 

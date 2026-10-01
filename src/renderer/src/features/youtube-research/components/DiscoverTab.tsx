@@ -4,7 +4,8 @@ import type {
   ContentType,
   TimeRange,
   ResearchRunResult,
-  ResearchProgressState
+  ResearchProgressState,
+  ApiConnectionStatus
 } from '../types/research.types'
 import { SUPPORTED_MARKETS } from '../types/research.types'
 import { ResearchProgressPanel } from './ResearchProgressPanel'
@@ -27,6 +28,13 @@ interface Props {
   onSelectKeyword: (kw: string) => void
   onCreateProject: (kw: string, angle?: string) => void
   onNavigateTab: (tab: string) => void
+  apiReachabilityStatus?: ApiConnectionStatus
+  errorMessage?: string | null
+  errorDetails?: unknown
+  onDismissError?: () => void
+  onRetryConnection?: () => void
+  onRestartSidecar?: () => void
+  isAdvancedView?: boolean
 }
 
 export function DiscoverTab({
@@ -38,7 +46,14 @@ export function DiscoverTab({
   isCancelling,
   onSelectKeyword,
   onCreateProject,
-  onNavigateTab
+  onNavigateTab,
+  apiReachabilityStatus = 'reachable',
+  errorMessage,
+  errorDetails,
+  onDismissError,
+  onRetryConnection,
+  onRestartSidecar,
+  isAdvancedView = false
 }: Props): React.ReactElement {
   const [topic, setTopic] = useState('grocery prices')
   const [market, setMarket] = useState<MarketCode>('US')
@@ -59,11 +74,13 @@ export function DiscoverTab({
   const [expandedSuggestions, setExpandedSuggestions] = useState<string[]>([])
   const [isExpanding, setIsExpanding] = useState(false)
 
+  const [showDetails, setShowDetails] = useState(false)
+
   const isRunning = activeProgress !== null && !['COMPLETED', 'FAILED', 'CANCELLED'].includes(activeProgress.stage)
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!topic.trim() || isRunning) return
+    if (!topic.trim() || isRunning || apiReachabilityStatus === 'blocked' || apiReachabilityStatus === 'offline') return
 
     const filters: Record<string, unknown> = {}
     if (minViews) filters.min_views = parseInt(minViews, 10)
@@ -105,6 +122,86 @@ export function DiscoverTab({
         boxShadow: '0 4px 15px rgba(0, 0, 0, 0.2)'
       }}>
         <form onSubmit={handleSubmit}>
+          {errorMessage && (
+            <div style={{
+              background: 'rgba(239, 68, 68, 0.1)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              borderRadius: '8px',
+              padding: '14px 16px',
+              marginBottom: '20px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '8px'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ fontWeight: 600, color: '#f87171', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                  <span>⚠️</span>
+                  <span>Research could not start</span>
+                </div>
+                {onDismissError && (
+                  <button
+                    type="button"
+                    onClick={onDismissError}
+                    style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', fontSize: '16px' }}
+                    title="Dismiss notice"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <div style={{ color: 'var(--text-secondary)', fontSize: '12px', lineHeight: 1.5 }}>
+                {errorMessage}
+              </div>
+              {isAdvancedView && errorDetails && (
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setShowDetails(!showDetails)}
+                    style={{ background: 'none', border: 'none', color: 'var(--text-brand, #818cf8)', fontSize: '11px', cursor: 'pointer', padding: 0 }}
+                  >
+                    {showDetails ? 'Hide Technical Details ▲' : 'View Details ▼'}
+                  </button>
+                  {showDetails && (
+                    <pre style={{
+                      marginTop: '6px',
+                      padding: '8px 12px',
+                      background: 'rgba(0, 0, 0, 0.3)',
+                      borderRadius: '4px',
+                      fontSize: '11px',
+                      color: '#e2e8f0',
+                      overflowX: 'auto',
+                      whiteSpace: 'pre-wrap'
+                    }}>
+                      {typeof errorDetails === 'string' ? errorDetails : JSON.stringify(errorDetails, null, 2)}
+                    </pre>
+                  )}
+                </div>
+              )}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                {onRetryConnection && (
+                  <button
+                    type="button"
+                    onClick={onRetryConnection}
+                    className="btn btn-secondary"
+                    style={{ fontSize: '11px', padding: '4px 12px' }}
+                  >
+                    Retry Connection
+                  </button>
+                )}
+                {onRestartSidecar && (
+                  <button
+                    type="button"
+                    onClick={onRestartSidecar}
+                    className="btn btn-secondary"
+                    style={{ fontSize: '11px', padding: '4px 12px' }}
+                  >
+                    Restart Service
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
           <div style={{ marginBottom: '20px' }}>
             <label style={{
               display: 'block',
@@ -136,7 +233,14 @@ export function DiscoverTab({
               <button
                 type="submit"
                 className="btn btn-primary"
-                disabled={!topic.trim() || isRunning}
+                disabled={!topic.trim() || isRunning || apiReachabilityStatus === 'blocked' || apiReachabilityStatus === 'offline'}
+                title={
+                  apiReachabilityStatus === 'blocked'
+                    ? 'Cannot connect to local research API'
+                    : apiReachabilityStatus === 'offline'
+                    ? 'Research service is offline'
+                    : undefined
+                }
                 style={{
                   padding: '0 24px',
                   fontSize: '13px',

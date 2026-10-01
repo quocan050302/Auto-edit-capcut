@@ -24,6 +24,7 @@ export type ProviderSource = 'OFFICIAL' | 'SCRAPER' | 'MIXED'
 export type ConfidenceLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 export type CompetitionLevel = 'LOW' | 'MEDIUM' | 'HIGH'
 export type TrendState = 'Emerging' | 'Rising' | 'Stable' | 'Cooling'
+export type ApiConnectionStatus = 'checking' | 'reachable' | 'blocked' | 'offline'
 
 export type ResearchStage =
   | 'QUEUED'

@@ -1,5 +1,5 @@
 import React from 'react'
-import type { ProviderSource } from '../types/research.types'
+import type { ProviderSource, ApiConnectionStatus } from '../types/research.types'
 
 interface Props {
   providerSource: ProviderSource
@@ -7,7 +7,10 @@ interface Props {
   onToggleView: () => void
   onOpenSettings: () => void
   sidecarStatus: 'running' | 'stopped' | 'starting' | 'error' | 'degraded'
+  apiReachabilityStatus: ApiConnectionStatus
   onRestartSidecar: () => void
+  onRetryConnection?: () => void
+  hasExecutedRun?: boolean
   lastResearchTopic?: string
 }
 
@@ -17,7 +20,10 @@ export function ResearchHeader({
   onToggleView,
   onOpenSettings,
   sidecarStatus,
+  apiReachabilityStatus,
   onRestartSidecar,
+  onRetryConnection,
+  hasExecutedRun = false,
   lastResearchTopic
 }: Props): React.ReactElement {
   const getProviderColor = (p: ProviderSource) => {
@@ -27,7 +33,26 @@ export function ResearchHeader({
   }
 
   const getSidecarBadge = () => {
-    if (sidecarStatus === 'running') {
+    if (apiReachabilityStatus === 'checking') {
+      return (
+        <span style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '5px',
+          fontSize: '11px',
+          color: '#60a5fa',
+          background: 'rgba(96, 165, 250, 0.12)',
+          border: '1px solid rgba(96, 165, 250, 0.3)',
+          borderRadius: '999px',
+          padding: '2px 8px'
+        }}>
+          <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#60a5fa' }} />
+          Connecting…
+        </span>
+      )
+    }
+
+    if (sidecarStatus === 'running' && apiReachabilityStatus === 'reachable') {
       return (
         <span style={{
           display: 'inline-flex',
@@ -45,6 +70,26 @@ export function ResearchHeader({
         </span>
       )
     }
+
+    if (sidecarStatus === 'running' && apiReachabilityStatus === 'blocked') {
+      return (
+        <button
+          onClick={onRetryConnection}
+          className="btn btn-secondary"
+          style={{
+            fontSize: '10px',
+            padding: '2px 8px',
+            color: '#f87171',
+            background: 'rgba(248, 113, 113, 0.12)',
+            border: '1px solid rgba(248, 113, 113, 0.3)'
+          }}
+          title="The Python service is running locally, but Renderer requests are blocked. Click to retry connection."
+        >
+          ● Service Running — API Connection Blocked (Retry ⟳)
+        </button>
+      )
+    }
+
     if (sidecarStatus === 'degraded') {
       return (
         <span style={{
@@ -63,6 +108,7 @@ export function ResearchHeader({
         </span>
       )
     }
+
     return (
       <button
         onClick={onRestartSidecar}
@@ -115,7 +161,7 @@ export function ResearchHeader({
       </div>
 
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-        {/* Sidecar Status */}
+        {/* Sidecar & API Reachability Status */}
         {getSidecarBadge()}
 
         {/* Provider Source */}
@@ -130,9 +176,13 @@ export function ResearchHeader({
           borderRadius: 'var(--radius-sm, 6px)',
           border: '1px solid var(--border-subtle)'
         }}>
-          <span style={{ color: 'var(--text-muted)' }}>Provider:</span>
-          <span style={{ fontWeight: 600, color: getProviderColor(providerSource) }}>
-            {providerSource === 'OFFICIAL' ? 'Official API' : (providerSource === 'MIXED' ? 'Mixed Mode' : 'Free Public Scraper')}
+          <span style={{ color: 'var(--text-muted)' }}>
+            {apiReachabilityStatus === 'checking' ? 'Provider:' : (hasExecutedRun ? 'Provider used:' : 'Provider: ')}
+          </span>
+          <span style={{ fontWeight: 600, color: apiReachabilityStatus === 'checking' ? 'var(--text-muted)' : getProviderColor(providerSource) }}>
+            {apiReachabilityStatus === 'checking'
+              ? 'Checking…'
+              : (providerSource === 'OFFICIAL' ? 'Official API' : (providerSource === 'MIXED' ? 'Mixed Mode' : 'Free Public Scraper')) + (!hasExecutedRun ? ' configured' : '')}
           </span>
         </span>
 
