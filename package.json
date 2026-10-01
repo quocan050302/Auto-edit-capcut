@@ -9,7 +9,7 @@
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit",
     "lint": "eslint . --ext .ts,.tsx",
-    "test": "npx tsx test/production-intelligence.test.ts && npx tsx test/stock-gemini-fixes.test.ts && npx tsx test/model-router-and-batch.test.ts && npx tsx test/auto-production-pipeline.test.ts && npx tsx test/client-friendly-ui.test.ts && npx tsx test/pipeline-inspector.test.ts && npx tsx test/visual-truth-and-claims.test.ts",
+    "test": "npx tsx test/production-intelligence.test.ts && npx tsx test/stock-gemini-fixes.test.ts && npx tsx test/model-router-and-batch.test.ts && npx tsx test/auto-production-pipeline.test.ts && npx tsx test/client-friendly-ui.test.ts && npx tsx test/pipeline-inspector.test.ts && npx tsx test/visual-truth-and-claims.test.ts && npx tsx test/thumbnail-prompt-library.test.ts && npx tsx test/thumbnail-planner.test.ts && npx tsx test/thumbnail-flow-provider.test.ts && npx tsx test/thumbnail-orchestrator.test.ts && npx tsx test/thumbnail-auto-trigger.test.ts && npx tsx test/thumbnail-ui-contract.test.ts",
     "remotion:studio": "npx remotion studio src/remotion/index.ts"
   },
   "keywords": [

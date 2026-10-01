@@ -11,7 +11,10 @@ import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
 import { registerPipelineHandlers } from './ipc/pipeline.ipc'
+import { registerThumbnailHandlers } from './ipc/thumbnail.ipc'
 import { pipelineOrchestrator } from './pipeline/pipeline-orchestrator'
+import { thumbnailOrchestrator } from './thumbnail/thumbnail-orchestrator'
+import { flowkitRuntimeManager } from './thumbnail/flowkit-runtime-manager'
 import { logger } from './logger'
 
 function createWindow(): BrowserWindow {
@@ -69,6 +72,7 @@ app.whenReady().then(() => {
   registerAudioHandlers(ipcMain)
   registerCaptionHandlers(ipcMain)
   registerPipelineHandlers(ipcMain)
+  registerThumbnailHandlers(ipcMain)
 
   const mainWindow = createWindow()
 
@@ -95,12 +99,16 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   pipelineOrchestrator.handleAppQuit()
+  thumbnailOrchestrator.handleAppQuit()
+  flowkitRuntimeManager.handleAppQuit()
 })
 
 process.on('uncaughtException', (error) => {
   logger.error('[App] Uncaught exception:', error)
   try {
     pipelineOrchestrator.handleAppQuit()
+    thumbnailOrchestrator.handleAppQuit()
+    flowkitRuntimeManager.handleAppQuit()
   } catch {
     /* ignore */
   }

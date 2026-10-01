@@ -6,6 +6,7 @@ import { renderVideo } from '../renderer'
 import { logger } from '../logger'
 import { runRenderPreflight } from '../qa/render-preflight'
 import { readJsonSafe } from '../production-intelligence/json-store'
+import { thumbnailAutoTrigger } from '../thumbnail/thumbnail-auto-trigger'
 import type { CaptionPlan, RenderTransitionSettings, RenderQaReport } from '../../../shared/types'
 
 
@@ -56,6 +57,14 @@ export function registerRenderHandlers(ipcMain: IpcMain): void {
           captionPlan,        // truyền vào renderer — undefined = bỏ qua burn step
           onProgress: sendProgress
         })
+
+        if (result && result.outputPath && fs.existsSync(result.outputPath)) {
+          void thumbnailAutoTrigger.startIfEligible({
+            projectDir: params.projectDir,
+            renderOutputPath: result.outputPath
+          })
+        }
+
         return { success: true, result }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)

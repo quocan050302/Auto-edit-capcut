@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react'
 import type { ProjectState, ProjectSettings, VideoType, AspectRatio, Pacing, ApiKeyStatus } from '../../../../shared/types'
 import { normalizeApiKey } from '../../../../shared/api-key'
+import { GoogleFlowSettingsSection } from '../components/thumbnail/GoogleFlowSettingsSection'
 
 interface SettingsPageProps {
   project: ProjectState
@@ -673,6 +674,9 @@ export function SettingsPage({ project, onUpdateSettings }: SettingsPageProps): 
           </div>
         </div>
       </div>
+
+      {/* Google Flow Connector Settings */}
+      <GoogleFlowSettingsSection projectDir={project.projectDir} />
 
       {/* Config summary */}
       <div className="panel" style={{ background: 'var(--bg-elevated)' }}>
