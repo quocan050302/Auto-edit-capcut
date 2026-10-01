@@ -8,6 +8,9 @@ class ResearchFilters(BaseModel):
     min_outlier_ratio: Optional[float] = Field(default=None, ge=0)
     min_opportunity: Optional[float] = Field(default=None, ge=0, le=100)
     max_competition: Optional[float] = Field(default=None, ge=0, le=100)
+    # V2 fields
+    search_query_budget: Optional[int] = Field(default=6, ge=1, le=20)
+    include_unverified_channels: Optional[bool] = Field(default=True)
     model_config = ConfigDict(extra="forbid")
 
 class DiscoverRequest(BaseModel):
