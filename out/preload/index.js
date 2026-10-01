@@ -119,7 +119,18 @@ const IPC_CHANNELS = {
   THUMBNAIL_CANDIDATE_EXPORT_4K: "thumbnail:candidate-export-4k",
   THUMBNAIL_CANDIDATE_SELECT: "thumbnail:candidate-select",
   THUMBNAIL_OPEN_FOLDER: "thumbnail:open-folder",
-  THUMBNAIL_PROGRESS: "thumbnail:progress"
+  THUMBNAIL_PROGRESS: "thumbnail:progress",
+  // FlowKit Runtime Manager
+  FLOWKIT_RUNTIME_GET_SETTINGS: "flowkit:runtime-get-settings",
+  FLOWKIT_RUNTIME_SAVE_SETTINGS: "flowkit:runtime-save-settings",
+  FLOWKIT_RUNTIME_START: "flowkit:runtime-start",
+  FLOWKIT_RUNTIME_STOP: "flowkit:runtime-stop",
+  FLOWKIT_RUNTIME_STATUS: "flowkit:runtime-status",
+  FLOWKIT_RUNTIME_LOG: "flowkit:runtime-log",
+  FLOWKIT_RUNTIME_SELECT_FOLDER: "flowkit:runtime-select-folder",
+  FLOWKIT_RUNTIME_SELECT_PYTHON: "flowkit:runtime-select-python",
+  FLOWKIT_RUNTIME_ENSURE_READY: "flowkit:runtime-ensure-ready",
+  FLOWKIT_RUNTIME_DETECT_PYTHON: "flowkit:runtime-detect-python"
 };
 const api = {
   window: {
@@ -325,6 +336,31 @@ const api = {
       return () => {
         electron.ipcRenderer.off(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler);
       };
+    },
+    runtime: {
+      getSettings: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_GET_SETTINGS),
+      saveSettings: (settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SAVE_SETTINGS, settings),
+      start: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_START),
+      stop: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STOP),
+      getStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS),
+      ensureReady: (bridgeUrl) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_ENSURE_READY, bridgeUrl ? { bridgeUrl } : void 0),
+      detectPython: (flowKitPath) => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_DETECT_PYTHON, flowKitPath ? { flowKitPath } : void 0),
+      selectFolder: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_FOLDER),
+      selectPython: () => electron.ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_PYTHON),
+      onStatus: (callback) => {
+        const handler = (_event, status) => {
+          callback(status);
+        };
+        electron.ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler);
+        return () => electron.ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler);
+      },
+      onLog: (callback) => {
+        const handler = (_event, entry) => {
+          callback(entry);
+        };
+        electron.ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler);
+        return () => electron.ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler);
+      }
     }
   }
 };

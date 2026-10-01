@@ -18,7 +18,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as cp from 'child_process'
-import { BrowserWindow } from 'electron'
+import { BrowserWindow, app, shell } from 'electron'
 import { logger } from '../logger'
 import { IPC_CHANNELS } from '../../../shared/types'
 
@@ -33,6 +33,7 @@ export interface FlowKitRuntimeSettings {
   pythonPath?: string
   flowProjectId?: string
   autoStartBridge: boolean
+  autoOpenGoogleFlow: boolean
 }
 
 export interface FlowKitRuntimeStatus {
@@ -83,11 +84,14 @@ export interface FlowReadinessResult {
 const DEFAULT_SETTINGS: FlowKitRuntimeSettings = {
   mode: 'external',
   bridgeUrl: 'http://127.0.0.1:8100',
-  autoStartBridge: false
+  autoStartBridge: false,
+  autoOpenGoogleFlow: false
 }
 
 const HEALTH_POLL_INTERVAL_MS = 2000
 const HEALTH_START_TIMEOUT_MS = 30000
+const GOOGLE_FLOW_URL = 'https://flow.google.com/'
+const CONFIG_FILENAME = 'flowkit-runtime-settings.json'
 
 // ─── Manager ─────────────────────────────────────────────────────────────────
 
@@ -95,6 +99,65 @@ export class FlowKitRuntimeManager {
   private settings: FlowKitRuntimeSettings = { ...DEFAULT_SETTINGS }
   private managedProcess: cp.ChildProcess | null = null
   private isStarting = false
+  /** Guard: only open Google Flow browser tab once per app session */
+  private hasOpenedGoogleFlowThisSession = false
+  /** Reference to GoogleFlowClient for URL sync — set by initialize() */
+  private googleFlowClientRef: { setBridgeUrl(url: string): void } | null = null
+
+  // ─── Initialization ───────────────────────────────────────────────────────
+
+  /**
+   * Must be called once during app startup BEFORE any IPC handlers fire.
+   * Loads persisted settings and optionally links the GoogleFlowClient for URL sync.
+   */
+  public initialize(googleFlowClient?: { setBridgeUrl(url: string): void }): void {
+    if (googleFlowClient) {
+      this.googleFlowClientRef = googleFlowClient
+    }
+    this.loadPersistedSettings()
+    logger.info(`[FlowKitRuntime] Initialized. mode=${this.settings.mode} url=${this.settings.bridgeUrl}`)
+  }
+
+  // ─── Persistence ──────────────────────────────────────────────────────────
+
+  private getConfigPath(): string {
+    try {
+      return path.join(app.getPath('userData'), CONFIG_FILENAME)
+    } catch {
+      // In test environments app.getPath may not work
+      return path.join(process.cwd(), CONFIG_FILENAME)
+    }
+  }
+
+  public loadPersistedSettings(): void {
+    const configPath = this.getConfigPath()
+    try {
+      if (!fs.existsSync(configPath)) {
+        logger.info('[FlowKitRuntime] No persisted settings found. Using defaults.')
+        return
+      }
+      const raw = fs.readFileSync(configPath, 'utf-8')
+      const parsed = JSON.parse(raw) as Partial<FlowKitRuntimeSettings>
+      this.applySettings(parsed)
+      logger.info(`[FlowKitRuntime] Loaded persisted settings from ${configPath}`)
+    } catch (err) {
+      logger.warn(`[FlowKitRuntime] Failed to load persisted settings (using defaults): ${err}`)
+    }
+  }
+
+  public savePersistedSettings(): void {
+    const configPath = this.getConfigPath()
+    const tmpPath = `${configPath}.tmp`
+    try {
+      const data = JSON.stringify(this.settings, null, 2)
+      fs.writeFileSync(tmpPath, data, 'utf-8')
+      fs.renameSync(tmpPath, configPath)
+      logger.info(`[FlowKitRuntime] Settings persisted to ${configPath}`)
+    } catch (err) {
+      logger.error(`[FlowKitRuntime] Failed to persist settings: ${err}`)
+      try { fs.unlinkSync(tmpPath) } catch { /* ignore */ }
+    }
+  }
 
   // ─── Settings ─────────────────────────────────────────────────────────────
 
@@ -103,16 +166,36 @@ export class FlowKitRuntimeManager {
   }
 
   public applySettings(settings: Partial<FlowKitRuntimeSettings>): void {
+    const newUrl = this.normalizeBridgeUrl(settings.bridgeUrl || this.settings.bridgeUrl)
     this.settings = {
       ...this.settings,
       ...settings,
-      bridgeUrl: this.normalizeBridgeUrl(settings.bridgeUrl || this.settings.bridgeUrl)
+      // Normalize and sanitize
+      bridgeUrl: newUrl,
+      flowProjectId: (settings.flowProjectId ?? this.settings.flowProjectId ?? '').trim() || undefined,
+      flowKitPath: settings.flowKitPath ?? this.settings.flowKitPath,
+      pythonPath: settings.pythonPath ?? this.settings.pythonPath
     }
-    logger.info(`[FlowKitRuntime] Settings updated: mode=${this.settings.mode} url=${this.settings.bridgeUrl}`)
+    // Sync bridge URL to GoogleFlowClient so health/generate/export use same URL
+    if (this.googleFlowClientRef) {
+      this.googleFlowClientRef.setBridgeUrl(newUrl)
+    }
+    logger.info(`[FlowKitRuntime] Settings applied: mode=${this.settings.mode} url=${this.settings.bridgeUrl}`)
+  }
+
+  /** Save settings and apply them atomically */
+  public saveSettings(settings: Partial<FlowKitRuntimeSettings>): void {
+    this.applySettings(settings)
+    this.savePersistedSettings()
   }
 
   private normalizeBridgeUrl(url: string): string {
-    return (url || DEFAULT_SETTINGS.bridgeUrl).replace(/\/+$/, '')
+    const raw = (url || DEFAULT_SETTINGS.bridgeUrl).replace(/\/+$/, '')
+    // Only allow http/https
+    if (!raw.startsWith('http://') && !raw.startsWith('https://')) {
+      return DEFAULT_SETTINGS.bridgeUrl
+    }
+    return raw
   }
 
   // ─── Status ───────────────────────────────────────────────────────────────
@@ -261,6 +344,48 @@ export class FlowKitRuntimeManager {
     if (this.settings.mode === 'managed') {
       this.stopBridge()
     }
+  }
+
+  /**
+   * Open Google Flow in the default browser.
+   * Only opens once per app session regardless of how many times called.
+   */
+  public openGoogleFlow(force = false): void {
+    if (!force && this.hasOpenedGoogleFlowThisSession) {
+      logger.info('[FlowKitRuntime] Google Flow already opened this session. Skipping.')
+      return
+    }
+    this.hasOpenedGoogleFlowThisSession = true
+    shell.openExternal(GOOGLE_FLOW_URL).catch((err) => {
+      logger.warn(`[FlowKitRuntime] Failed to open Google Flow: ${err}`)
+    })
+    logger.info(`[FlowKitRuntime] Opened Google Flow in browser: ${GOOGLE_FLOW_URL}`)
+  }
+
+  /**
+   * Auto-start FlowKit in the background (non-blocking).
+   * Called from app startup if mode=managed and autoStartBridge=true.
+   */
+  public autoStartIfConfigured(): void {
+    if (this.settings.mode !== 'managed' || !this.settings.autoStartBridge) {
+      return
+    }
+    logger.info('[FlowKitRuntime] Auto-start configured. Starting FlowKit bridge in background...')
+    // Non-blocking — don't await
+    this.startBridge().then((result) => {
+      if (result.success) {
+        logger.info('[FlowKitRuntime] Auto-start: bridge is healthy.')
+        // If autoOpenGoogleFlow is enabled and extension not yet connected,
+        // open browser automatically (once per session)
+        if (this.settings.autoOpenGoogleFlow) {
+          this.openGoogleFlow()
+        }
+      } else {
+        logger.warn(`[FlowKitRuntime] Auto-start failed: ${result.error}`)
+      }
+    }).catch((err) => {
+      logger.error(`[FlowKitRuntime] Auto-start error: ${err}`)
+    })
   }
 
   // ─── Readiness Preflight ──────────────────────────────────────────────────

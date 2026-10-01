@@ -15,7 +15,12 @@ import { registerThumbnailHandlers } from './ipc/thumbnail.ipc'
 import { pipelineOrchestrator } from './pipeline/pipeline-orchestrator'
 import { thumbnailOrchestrator } from './thumbnail/thumbnail-orchestrator'
 import { flowkitRuntimeManager } from './thumbnail/flowkit-runtime-manager'
+import { googleFlowClient } from './thumbnail/google-flow-client'
 import { logger } from './logger'
+
+// Initialize FlowKit Runtime Manager with persisted settings BEFORE IPC is registered.
+// This ensures any UI startup health checks use the correct saved bridge URL.
+flowkitRuntimeManager.initialize(googleFlowClient)
 
 function createWindow(): BrowserWindow {
   const mainWindow = new BrowserWindow({
@@ -75,6 +80,9 @@ app.whenReady().then(() => {
   registerThumbnailHandlers(ipcMain)
 
   const mainWindow = createWindow()
+
+  // Auto-start FlowKit bridge in background if configured (non-blocking)
+  flowkitRuntimeManager.autoStartIfConfigured()
 
   // Window control IPC
   ipcMain.on('window:minimize', () => mainWindow.minimize())

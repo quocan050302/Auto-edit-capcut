@@ -36,7 +36,7 @@ import type {
   ThumbnailPlan,
   ThumbnailProgressPayload
 } from '../../shared/types'
-
+import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
 const api = {
   window: {
@@ -554,6 +554,51 @@ const api = {
       ipcRenderer.on(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler)
       return () => {
         ipcRenderer.off(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler)
+      }
+    },
+
+    runtime: {
+      getSettings: (): Promise<{ success: boolean; settings?: FlowKitRuntimeSettings; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_GET_SETTINGS),
+
+      saveSettings: (settings: Partial<FlowKitRuntimeSettings>): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SAVE_SETTINGS, settings),
+
+      start: (): Promise<{ success: boolean; error?: string; errorCode?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_START),
+
+      stop: (): Promise<{ success: boolean }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STOP),
+
+      getStatus: (): Promise<FlowKitRuntimeStatus> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS),
+
+      ensureReady: (bridgeUrl?: string): Promise<FlowReadinessResult> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_ENSURE_READY, bridgeUrl ? { bridgeUrl } : undefined),
+
+      detectPython: (flowKitPath?: string): Promise<{ success: boolean; pythonPath?: string; version?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_DETECT_PYTHON, flowKitPath ? { flowKitPath } : undefined),
+
+      selectFolder: (): Promise<{ success: boolean; folderPath?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_FOLDER),
+
+      selectPython: (): Promise<{ success: boolean; pythonPath?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_PYTHON),
+
+      onStatus: (callback: (status: FlowKitRuntimeStatus) => void): (() => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, status: FlowKitRuntimeStatus): void => {
+          callback(status)
+        }
+        ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler)
+        return () => ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler)
+      },
+
+      onLog: (callback: (entry: { message: string; timestamp: string }) => void): (() => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, entry: { message: string; timestamp: string }): void => {
+          callback(entry)
+        }
+        ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler)
+        return () => ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler)
       }
     }
   }
