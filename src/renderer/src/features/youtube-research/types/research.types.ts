@@ -580,6 +580,17 @@ export interface ResearchFilterSummary {
   funnel?: Record<string, number>
 }
 
+export interface ThumbnailGenerationRequest {
+  title: string
+  script_summary?: string
+  blueprint: ThumbnailBlueprint
+}
+
+export interface ThumbnailGenerationResponse {
+  image_base64: string
+  prompt_used: string
+}
+
 export interface ResearchRunResult {
   run_id: string
   project_id?: string

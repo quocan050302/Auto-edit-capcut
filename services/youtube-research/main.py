@@ -34,7 +34,9 @@ from schemas.research_schemas import (
     SavedProjectSchema,
     SettingsUpdateSchema,
     SettingsResponseSchema,
-    ResearchRunResultSchema
+    ResearchRunResultSchema,
+    ThumbnailGenerationRequest,
+    ThumbnailGenerationResponse
 )
 import httpx
 
@@ -330,6 +332,43 @@ async def analyze_thumbnail_intelligence_endpoint(req: ThumbnailIntelligenceRequ
     except Exception as e:
         research_logger.error(f"[ThumbnailIntel] Error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Thumbnail intelligence failed: {str(e)}")
+
+@app.post("/api/research/competitor/thumbnail-generate", response_model=ThumbnailGenerationResponse)
+async def generate_thumbnail_endpoint(req: ThumbnailGenerationRequest):
+    """V2: Generate a thumbnail from title and blueprint."""
+    from providers.image_generator import ThumbnailGeneratorProvider
+    from services.thumbnail_compositor import ThumbnailCompositor
+    import base64
+
+    # Build prompt from blueprint
+    prompt = f"YouTube thumbnail. {req.blueprint.background_recipe}. {req.blueprint.subject_recipe}. {req.blueprint.lighting_recipe}."
+    if req.title:
+        prompt += f" Concept relates to: {req.title}."
+    if req.script_summary:
+        prompt += f" Context: {req.script_summary}."
+
+    # Use a real provider if configured. For local demo without key, we use dummy/disabled.
+    generator = ThumbnailGeneratorProvider(provider="disabled")
+    
+    try:
+        base_img_bytes = await generator.generate(prompt)
+        
+        # Composite text
+        compositor = ThumbnailCompositor()
+        text_overlay = req.blueprint.overlay_text_formula or []
+        if not text_overlay and req.title:
+            # simple fallback
+            words = req.title.split()
+            text_overlay = [" ".join(words[:3])]
+            
+        final_img_bytes = compositor.compose(base_img_bytes, text_overlay)
+        
+        b64 = base64.b64encode(final_img_bytes).decode('utf-8')
+        return ThumbnailGenerationResponse(image_base64=b64, prompt_used=prompt)
+    except Exception as e:
+        research_logger.error(f"Thumbnail generation error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 # ─── Saved Projects ───────────────────────────────────────────────────────────
 

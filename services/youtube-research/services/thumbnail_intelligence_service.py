@@ -146,6 +146,12 @@ class ThumbnailPattern:
     evidence_video_ids: List[str] = field(default_factory=list)
     is_winning: bool = False
     is_avoid: bool = False
+    outlier_rate: float = 0.0
+    control_rate: float = 0.0
+    uplift: float = 0.0
+    relative_lift: float = 0.0
+    category: str = "neutral"
+    reason: str = ""
 
 
 def _compute_group_stats(
@@ -258,19 +264,52 @@ def detect_patterns(analyses: List[ThumbnailAnalysis]) -> List[ThumbnailPattern]
             conf_label = "high"
 
         o_ratio = o_cnt / max(o_tot, 1)
+        b_ratio = b_cnt / max(b_tot, 1)
         l_ratio = l_cnt / max(l_tot, 1)
 
+        # Weighted control rate (baseline + low)
+        control_cnt = b_cnt + l_cnt
+        control_tot = b_tot + l_tot
+        control_ratio = control_cnt / max(control_tot, 1)
+
+        uplift = o_ratio - control_ratio
+        relative_lift = o_ratio / max(control_ratio, 0.01)
+
         is_winning = (
-            o_cnt >= MIN_COUNT_FOR_WINNING
-            and o_ratio >= WINNING_PATTERN_OUTLIER_RATIO
-            and conf_label not in ("insufficient",)
+            o_cnt >= 2
+            and o_ratio >= 0.50
+            and uplift >= 0.20
+            and relative_lift >= 1.25
+            and conf_label != "insufficient"
         )
+        
+        # Avoid pattern when control rate is high, outlier rate is low
         is_avoid = (
-            l_cnt >= MIN_COUNT_FOR_WINNING
-            and l_ratio >= AVOID_PATTERN_LOW_RATIO
+            l_cnt >= 2
+            and l_ratio >= 0.50
             and o_ratio < 0.3
-            and conf_label not in ("insufficient",)
+            and (control_ratio - o_ratio) >= 0.20
+            and conf_label != "insufficient"
         )
+
+        # Category and reason logic
+        category = "neutral"
+        reason = ""
+        
+        if conf_label == "insufficient":
+            category = "insufficient"
+            reason = "Sample size is too small to draw reliable conclusions."
+        elif is_winning:
+            category = "winning"
+            reason = f"Appears significantly more in outliers ({o_ratio:.0%}) than in control group ({control_ratio:.0%})."
+        elif is_avoid:
+            category = "avoid"
+            reason = f"Appears mostly in low performers ({l_ratio:.0%}) compared to outliers ({o_ratio:.0%})."
+        elif o_ratio >= 0.6 and b_ratio >= 0.6 and l_ratio >= 0.6 and uplift < 0.2:
+            category = "channel_wide"
+            reason = f"Appears consistently across all groups ({o_ratio:.0%} outliers, {control_ratio:.0%} control). It's a channel style, not a differentiator."
+        else:
+            reason = f"Found in {o_ratio:.0%} of outliers and {control_ratio:.0%} of control. Not a strong differentiator."
 
         patterns.append(ThumbnailPattern(
             pattern_id=pid,
@@ -287,6 +326,12 @@ def detect_patterns(analyses: List[ThumbnailAnalysis]) -> List[ThumbnailPattern]
             evidence_video_ids=evidence_ids[:6],
             is_winning=is_winning,
             is_avoid=is_avoid,
+            outlier_rate=round(o_ratio, 3),
+            control_rate=round(control_ratio, 3),
+            uplift=round(uplift, 3),
+            relative_lift=round(relative_lift, 3),
+            category=category,
+            reason=reason,
         ))
 
     # Pattern: Has text overlay
@@ -387,6 +432,48 @@ def detect_patterns(analyses: List[ThumbnailAnalysis]) -> List[ThumbnailPattern]
         _pct(baselines, lambda a: a.colors.warm_cool_balance == "warm"),
         _pct(lows, lambda a: a.colors.warm_cool_balance == "warm"),
         [a.video_id for a in outliers if a.colors.warm_cool_balance == "warm"][:6],
+    )
+
+    # ── Combination Patterns ─────────────────────────────────────────────────
+    
+    # Face + Short Text
+    _add_pattern(
+        "face_and_short_text", "Face + Short Text",
+        "Thumbnail combines a visible face with concise text (≤5 words)",
+        _pct(outliers, lambda a: a.subjects.has_person and 0 < a.ocr.word_count <= 5),
+        _pct(baselines, lambda a: a.subjects.has_person and 0 < a.ocr.word_count <= 5),
+        _pct(lows, lambda a: a.subjects.has_person and 0 < a.ocr.word_count <= 5),
+        [a.video_id for a in outliers if a.subjects.has_person and 0 < a.ocr.word_count <= 5][:6],
+    )
+
+    # Face + Yellow Accent
+    _add_pattern(
+        "face_and_yellow", "Face + Yellow Accent",
+        "Combines human subject with highly visible yellow accent elements",
+        _pct(outliers, lambda a: a.subjects.has_person and a.colors.has_yellow),
+        _pct(baselines, lambda a: a.subjects.has_person and a.colors.has_yellow),
+        _pct(lows, lambda a: a.subjects.has_person and a.colors.has_yellow),
+        [a.video_id for a in outliers if a.subjects.has_person and a.colors.has_yellow][:6],
+    )
+
+    # Proof Object + No Face
+    _add_pattern(
+        "proof_no_face", "Proof Object (No Face)",
+        "Features a physical proof element without competing human faces",
+        _pct(outliers, lambda a: a.subjects.has_proof_object and not a.subjects.has_person),
+        _pct(baselines, lambda a: a.subjects.has_proof_object and not a.subjects.has_person),
+        _pct(lows, lambda a: a.subjects.has_proof_object and not a.subjects.has_person),
+        [a.video_id for a in outliers if a.subjects.has_proof_object and not a.subjects.has_person][:6],
+    )
+
+    # High Contrast + Short Text
+    _add_pattern(
+        "contrast_and_short_text", "High Contrast + Short Text",
+        "Punchy visual contrast paired with very concise text",
+        _pct(outliers, lambda a: a.colors.contrast > 0.4 and 0 < a.ocr.word_count <= 5),
+        _pct(baselines, lambda a: a.colors.contrast > 0.4 and 0 < a.ocr.word_count <= 5),
+        _pct(lows, lambda a: a.colors.contrast > 0.4 and 0 < a.ocr.word_count <= 5),
+        [a.video_id for a in outliers if a.colors.contrast > 0.4 and 0 < a.ocr.word_count <= 5][:6],
     )
 
     return patterns
@@ -663,6 +750,10 @@ class ThumbnailIntelligenceService:
 
     def __init__(self, ai_engine=None):
         self.ai_engine = ai_engine  # Optional AiInsightsEngine
+        
+        from providers.ocr_provider import ThumbnailOcrProvider
+        self.ocr_provider = ThumbnailOcrProvider()
+        
         # Simple in-memory cache: thumbnail_hash → ThumbnailAnalysis dict
         self._cache: Dict[str, ThumbnailAnalysis] = {}
 
@@ -754,6 +845,14 @@ class ThumbnailIntelligenceService:
                         })
                         return
 
+                    # Run OCR
+                    ocr_result = None
+                    if self.ocr_provider:
+                        try:
+                            ocr_result = await self.ocr_provider.analyze(image_data)
+                        except Exception as e:
+                            research_logger.warning(f"[ThumbnailIntel] OCR failed for {sv.video_id}: {e}")
+
                     # Analyze
                     await _progress("Analyzing thumbnail", idx + 1, n_total)
                     analysis = await analyze_thumbnail(
@@ -768,6 +867,7 @@ class ThumbnailIntelligenceService:
                         outlier_ratio=sv.outlier_ratio,
                         video_age_days=sv.age_days,
                         ai_engine=self.ai_engine,
+                        ocr_result=ocr_result,
                     )
 
                     self._cache[cache_key] = analysis

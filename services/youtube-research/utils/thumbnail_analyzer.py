@@ -460,6 +460,7 @@ async def analyze_thumbnail(
     outlier_ratio: float,
     video_age_days: float,
     ai_engine=None,  # Optional: AiInsightsEngine instance
+    ocr_result: Optional[ThumbnailOcrAnalysis] = None,
 ) -> ThumbnailAnalysis:
     """
     Analyze a thumbnail image. Returns ThumbnailAnalysis.
@@ -512,8 +513,11 @@ async def analyze_thumbnail(
             has_red=has_red,
         )
 
-        # Deterministic OCR placeholder
-        result.ocr = _basic_text_analysis(video_title, thumbnail_url)
+        # Real OCR
+        if ocr_result:
+            result.ocr = ocr_result
+        else:
+            result.ocr = _basic_text_analysis(video_title, thumbnail_url)
 
         # Title hooks from title text
         result.hooks = _detect_hooks_from_title(video_title)
@@ -640,6 +644,9 @@ def _merge_ai_result(result: ThumbnailAnalysis, ai_data: Dict[str, Any]) -> None
             is_uncertain=float(ocr.get("confidence", 0.5)) < 0.6,
             font_category=ocr.get("font_category", "unknown"),
         )
+        # Preserve regions if they were previously computed
+        if hasattr(result.ocr, "regions"):
+            result.ocr.regions = result.ocr.regions
         result.title_pairing = _analyze_title_pairing(result.video_title, text)
 
     # Composition

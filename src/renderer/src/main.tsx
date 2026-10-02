@@ -10,6 +10,6 @@ const isPreviewMode =
 
 ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
   <React.StrictMode>
-    {isPreviewMode ? <PreviewApp /> : <App />}
+    <App />
   </React.StrictMode>
 )

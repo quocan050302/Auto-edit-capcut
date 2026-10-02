@@ -252,6 +252,15 @@ export class ResearchApi {
     })
   }
 
+  async generateThumbnail(payload: ThumbnailGenerationRequest): Promise<ThumbnailGenerationResponse> {
+    return this.request('/api/research/competitor/thumbnail-generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      timeoutMs: 120000
+    })
+  }
+
   async getSavedProjects(): Promise<SavedResearchProject[]> {
     return this.request('/api/research/saved', { timeoutMs: 5000 })
   }

@@ -217,6 +217,15 @@ class ThumbnailIntelligenceRequest(BaseModel):
     p75_views: float
     max_videos: int = 30
 
+class ThumbnailGenerationRequest(BaseModel):
+    title: str
+    script_summary: Optional[str] = None
+    blueprint: ThumbnailBlueprintSchema
+
+class ThumbnailGenerationResponse(BaseModel):
+    image_base64: str
+    prompt_used: str
+
 class TopOpportunitySchema(BaseModel):
     keyword: str
     opportunity_score: float

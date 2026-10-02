@@ -9,6 +9,7 @@ import type {
   VideoForThumbnail,
   ThumbnailGroupStats,
 } from '../types/research.types'
+import { ThumbnailGeneratorSection } from './ThumbnailGeneratorSection'
 
 interface Props {
   onAnalyzeCompetitor: (url: string, market: MarketCode) => Promise<CompetitorAnalysisResult>
@@ -1343,6 +1344,11 @@ ${bp.evidence.join('\n')}
                             ))}
                           </div>
                         </div>
+                      )}
+
+                      {/* Title-to-Thumbnail Generator Section */}
+                      {thumbData.blueprints.length > 0 && (
+                        <ThumbnailGeneratorSection blueprints={thumbData.blueprints} />
                       )}
 
                       {/* Failure details */}

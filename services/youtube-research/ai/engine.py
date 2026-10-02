@@ -149,4 +149,118 @@ Respond ONLY with valid JSON matching this exact schema:
 
         return self.generate_deterministic_fallback(topic, market, top_keyword, breakouts, clusters)
 
+    async def analyze_thumbnail_vision(self, image_data: bytes, context: dict) -> dict:
+        if self.provider == "disabled" or not self.provider:
+            return {"confidence": 0.0}
+
+        import base64
+        b64_img = base64.b64encode(image_data).decode('utf-8')
+        
+        prompt = f"""You are analyzing a YouTube thumbnail image for intelligence research.
+Context:
+- Video title: "{context.get('video_title', '')}"
+- Performance group: {context.get('performance_group', 'unknown')}
+- Views: {context.get('views', 0):,}
+- Views/day: {context.get('views_per_day', 0):.1f}
+- Outlier ratio: {context.get('outlier_ratio', 0):.2f}x
+
+Analyze the thumbnail and return ONLY valid JSON with this exact schema. Do not use markdown blocks, just raw JSON:
+{{
+  "confidence": 0.8,
+  "ocr": {{
+    "text": "exact text on thumbnail",
+    "line_count": 1,
+    "text_coverage_pct": 0.1,
+    "text_alignment": "center",
+    "confidence": 0.9,
+    "font_category": "bold_condensed_sans"
+  }},
+  "composition": {{
+    "layout_type": "centered",
+    "main_focal_point": "face",
+    "has_negative_space": true,
+    "background_complexity": "low",
+    "subject_size_pct": 0.4,
+    "face_size_pct": 0.2,
+    "main_subject_box": {{"x": 0.3, "y": 0.2, "width": 0.4, "height": 0.6}},
+    "text_region_box": {{"x": 0.1, "y": 0.8, "width": 0.8, "height": 0.15}},
+    "duration_badge_risk": true
+  }},
+  "subjects": {{
+    "has_person": true,
+    "person_count": 1,
+    "face_count": 1,
+    "shot_type": "close_up",
+    "facial_expression": "surprised",
+    "gaze_direction": "camera",
+    "has_proof_object": false,
+    "has_arrow_circle": false,
+    "has_comparison": false,
+    "has_contradiction": false
+  }},
+  "hooks": [
+    {{
+      "hook_type": "curiosity_gap",
+      "confidence": 0.9,
+      "visual_evidence": "surprised face looking at camera",
+      "text_evidence": "text says 'why'",
+      "title_evidence": "title asks question"
+    }}
+  ],
+  "mobile_readability": {{
+    "score": 85,
+    "text_readable": true,
+    "face_recognizable": true,
+    "main_object_clear": true,
+    "duration_badge_overlap_risk": false,
+    "breakdown": {{}}
+  }}
+}}
+"""
+        try:
+            if self.provider == "ollama":
+                # Some Ollama models support vision (e.g. llava). 
+                # We assume self.ollama_model supports vision if this is called.
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(
+                        f"{self.ollama_url}/api/generate",
+                        json={
+                            "model": self.ollama_model,
+                            "prompt": prompt,
+                            "images": [b64_img],
+                            "stream": False,
+                            "format": "json"
+                        }
+                    )
+                    if resp.status_code == 200:
+                        raw_text = resp.json().get("response", "")
+                        return json.loads(raw_text)
+            
+            elif self.provider == "gemini":
+                if not self.cloud_api_key:
+                    return {"confidence": 0.0}
+                # Use Gemini Pro Vision / Flash via REST API
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={self.cloud_api_key}"
+                payload = {
+                    "contents": [{
+                        "parts": [
+                            {"text": prompt},
+                            {"inline_data": {"mime_type": "image/jpeg", "data": b64_img}}
+                        ]
+                    }],
+                    "generationConfig": {
+                        "response_mime_type": "application/json"
+                    }
+                }
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        text_content = data["candidates"][0]["content"]["parts"][0]["text"]
+                        return json.loads(text_content)
+        except Exception as e:
+            research_logger.warning(f"[AI] analyze_thumbnail_vision error: {e}")
+        
+        return {"confidence": 0.0}
+
 ai_engine = AiInsightsEngine()
