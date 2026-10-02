@@ -11,6 +11,7 @@ import type {
 } from '../types/research.types'
 import { ThumbnailGeneratorSection } from './ThumbnailGeneratorSection'
 import ThumbnailPromptStudio from './ThumbnailPromptStudio'
+import { SimilarChannelsPanel } from './SimilarChannelsPanel'
 
 interface Props {
   onAnalyzeCompetitor: (url: string, market: MarketCode) => Promise<CompetitorAnalysisResult>
@@ -1421,6 +1422,13 @@ ${bp.evidence.join('\n')}
                         blueprint={primaryBlueprint}
                         thumbnailIntelligence={thumbData}
                         market={market}
+                      />
+
+                      {/* Similar Channel Discovery */}
+                      <SimilarChannelsPanel
+                        competitor={data}
+                        market={market}
+                        language="en"
                       />
 
                       {/* Failure details */}

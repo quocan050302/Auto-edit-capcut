@@ -12,6 +12,9 @@ import type {
   ApiKeyTestResult,
   ThumbnailPromptGenerationRequest,
   ThumbnailPromptGenerationResponse,
+  SimilarChannelDiscoverRequest,
+  SimilarChannelRunProgress,
+  SimilarChannelResult,
 } from '../types/research.types'
 import { isResearchStageTerminal } from '../types/research.types'
 
@@ -460,6 +463,63 @@ export class ResearchApi {
       }
     )
   }
+
+  // ── Similar Channel Discovery ─────────────────────────────────────────────
+
+  async discoverSimilarChannels(
+    payload: SimilarChannelDiscoverRequest
+  ): Promise<{ run_id: string; status: string }> {
+    return this.request<{ run_id: string; status: string }>(
+      '/api/research/competitor/similar-channels/discover',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        timeoutMs: 15000,
+      }
+    )
+  }
+
+  async getSimilarChannelsProgress(runId: string): Promise<SimilarChannelRunProgress> {
+    return this.request<SimilarChannelRunProgress>(
+      `/api/research/competitor/similar-channels/${runId}/progress`,
+      { timeoutMs: 8000 }
+    )
+  }
+
+  async getSimilarChannelsResult(runId: string): Promise<SimilarChannelResult> {
+    return this.request<SimilarChannelResult>(
+      `/api/research/competitor/similar-channels/${runId}/result`,
+      { timeoutMs: 20000 }
+    )
+  }
+
+  async cancelSimilarChannels(runId: string): Promise<{ cancelled: boolean }> {
+    return this.request<{ cancelled: boolean }>(
+      `/api/research/competitor/similar-channels/${runId}/cancel`,
+      { method: 'POST', timeoutMs: 5000 }
+    )
+  }
+
+  async retrySimilarChannels(
+    runId: string,
+    sourceVideos: SimilarChannelDiscoverRequest['source_videos']
+  ): Promise<{ run_id: string; previous_run_id: string; status: string }> {
+    return this.request<{ run_id: string; previous_run_id: string; status: string }>(
+      `/api/research/competitor/similar-channels/${runId}/retry`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source_videos: sourceVideos }),
+        timeoutMs: 15000,
+      }
+    )
+  }
+
+  getSimilarChannelsExcelUrl(runId: string, baseUrl: string = SIDECAR_DEFAULT_URL): string {
+    return `${baseUrl}/api/research/competitor/similar-channels/${runId}/export.xlsx`
+  }
 }
 
 export const researchApi = new ResearchApi()
+

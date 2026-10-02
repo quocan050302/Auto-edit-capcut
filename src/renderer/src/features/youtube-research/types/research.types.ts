@@ -895,3 +895,185 @@ export interface ThumbnailPromptGenerationResponse {
   variants: ThumbnailPromptVariant[]
   generated_at: string
 }
+
+// ─── Similar Channel Discovery Types ────────────────────────────────────────
+
+export type SimilarChannelRunStatus =
+  | 'QUEUED'
+  | 'RUNNING'
+  | 'COMPLETED'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'INTERRUPTED'
+
+export type SimilarChannelCandidateStatus =
+  | 'QUALIFIED'
+  | 'GROWING'
+  | 'WATCHLIST'
+  | 'REJECTED'
+
+export type SimilarSubscriberStatus =
+  | 'VERIFIED_UNDER_LIMIT'
+  | 'HIDDEN_UNVERIFIED'
+  | 'REJECTED_OVER_LIMIT'
+
+export type SimilarVideoEvaluationStatus =
+  | 'PASS_VIEWS'
+  | 'PASS_GROWTH_CONFIRMED'
+  | 'PASS_GROWTH_PROVISIONAL'
+  | 'PENDING_TOO_NEW'
+  | 'FAIL'
+  | 'EXCLUDED'
+
+export type SimilarDataConfidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'INSUFFICIENT'
+
+export type SimilarMonetizationViability = 'STRONG' | 'MODERATE' | 'RISKY' | 'UNKNOWN'
+
+export interface SimilarChannelScores {
+  niche_match_score: number
+  recent_consistency_score: number
+  growth_quality_score: number
+  durability_score: number
+  monetization_viability_score: number
+  data_confidence_score: number
+  final_score: number
+}
+
+export interface SimilarChannelVideo {
+  video_id: string
+  video_url: string
+  title: string
+  published_at: string
+  age_days: number
+  duration_seconds: number | null
+  views: number
+  likes: number | null
+  comments: number | null
+  lifetime_views_per_day: number
+  observed_views_per_day: number | null
+  projected_day_90_views: number | null
+  growth_status: SimilarVideoEvaluationStatus | string
+  evaluation_status: SimilarVideoEvaluationStatus
+  evaluation_reason: string
+  niche_similarity: number
+  snapshot_count: number
+}
+
+export interface SimilarChannelCandidate {
+  rank: number
+  channel_id: string
+  channel_title: string
+  channel_url: string
+  country: string | null
+  subscriber_count: number | null
+  subscriber_status: SimilarSubscriberStatus
+  public_video_count: number | null
+  status: SimilarChannelCandidateStatus
+  is_most_promising: boolean
+  most_promising_label: string | null
+  window_start: string
+  window_end: string
+  // Video counts
+  recent_video_count: number
+  evaluable_video_count: number
+  pending_video_count: number
+  passed_views_count: number
+  passed_growth_confirmed_count: number
+  passed_growth_provisional_count: number
+  failed_video_count: number
+  strict_success_ratio: number
+  provisional_success_ratio: number
+  // View stats
+  minimum_recent_views: number | null
+  median_recent_views: number | null
+  mean_recent_views: number | null
+  p25_recent_views: number | null
+  p75_recent_views: number | null
+  maximum_recent_views: number | null
+  total_recent_views: number
+  single_hit_dependency: number
+  // Niche
+  niche_match_reason: string
+  matched_topics: string[]
+  matched_video_ids: string[]
+  // Durability
+  active_months_last_12: number
+  median_upload_cadence_days: number | null
+  maximum_upload_gap_days: number | null
+  evergreen_ratio: number | null
+  topic_cluster_count: number
+  future_title_angle_count: number
+  // Monetization
+  monetization_viability: SimilarMonetizationViability
+  monetization_evidence: string[]
+  policy_risk_flags: string[]
+  // Confidence
+  data_confidence: SimilarDataConfidence
+  confidence_limitations: string[]
+  // Reasons
+  qualification_reasons: string[]
+  rejection_reasons: string[]
+  // Scores
+  scores: SimilarChannelScores
+  // Videos
+  recent_videos: SimilarChannelVideo[]
+}
+
+export interface SimilarChannelRunProgress {
+  run_id: string
+  stage: string
+  status: SimilarChannelRunStatus
+  progress_percent: number
+  message: string
+  candidate_videos_found: number
+  candidate_channels_found: number
+  channels_enriched: number
+  channels_qualified: number
+  can_cancel: boolean
+  elapsed_seconds: number
+  error: string | null
+}
+
+export interface SimilarChannelResult {
+  run_id: string
+  status: SimilarChannelRunStatus
+  stage: string
+  source_channel_id: string
+  source_channel_title: string
+  market: string
+  language: string
+  window_days: number
+  min_views: number
+  max_subscribers: number
+  candidate_videos_found: number
+  candidate_channels_found: number
+  channels_enriched: number
+  qualified_count: number
+  growing_count: number
+  watchlist_count: number
+  rejected_count: number
+  most_promising_channel_id: string | null
+  most_promising_status: string | null
+  most_promising_reason: string[]
+  niche_fingerprint: Record<string, unknown>
+  limitations: string[]
+  created_at: string
+  completed_at: string | null
+  candidates: SimilarChannelCandidate[]
+}
+
+export interface SimilarChannelDiscoverRequest {
+  source_channel_id: string
+  source_channel_title: string
+  source_videos: Array<{ video_id: string; title: string; published_at: string; views: number }>
+  market?: string
+  language?: string
+  content_type?: string
+  window_days?: number
+  min_views?: number
+  max_subscribers?: number
+  min_evaluable_videos?: number
+  candidate_channel_limit?: number
+  search_query_budget?: number
+}
+

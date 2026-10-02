@@ -209,3 +209,180 @@ class SearchCache(Base):
     data_json = Column(Text, nullable=False)
     expires_at = Column(String(50), nullable=False)
     created_at = Column(String(50), default=utcnow_str)
+
+
+# ─── Similar Channel Discovery Tables ────────────────────────────────────────
+
+class SimilarChannelRun(Base):
+    """Persists a similar-channel discovery run so it survives app restarts."""
+    __tablename__ = "similar_channel_runs"
+
+    run_id           = Column(String(64),  primary_key=True, index=True)
+    source_channel_id    = Column(String(128), nullable=False, index=True)
+    source_channel_title = Column(String(255), nullable=False)
+    market           = Column(String(10),  default="US")
+    language         = Column(String(10),  default="en")
+    content_type     = Column(String(20),  default="LONG")
+    window_days      = Column(Integer,     default=90)
+    min_views        = Column(Integer,     default=10_000)
+    max_subscribers  = Column(Integer,     default=50_000)
+    min_evaluable_videos = Column(Integer, default=3)
+
+    status           = Column(String(30),  default="QUEUED", index=True)  # QUEUED/RUNNING/COMPLETED/FAILED/CANCELLED/INTERRUPTED
+    stage            = Column(String(50),  default="STARTING")
+    progress_percent = Column(Integer,     default=0)
+    message          = Column(String(500), default="")
+    error            = Column(Text,        nullable=True)
+
+    candidate_videos_found   = Column(Integer, default=0)
+    candidate_channels_found = Column(Integer, default=0)
+    channels_enriched        = Column(Integer, default=0)
+    qualified_count          = Column(Integer, default=0)
+    growing_count            = Column(Integer, default=0)
+    watchlist_count          = Column(Integer, default=0)
+    rejected_count           = Column(Integer, default=0)
+
+    most_promising_channel_id = Column(String(128), nullable=True)
+    most_promising_status     = Column(String(30),  nullable=True)
+    most_promising_reason_json = Column(Text,       nullable=True)  # JSON list
+
+    niche_fingerprint_json = Column(Text, nullable=True)   # JSON
+    limitations_json       = Column(Text, nullable=True)   # JSON list
+    provider_summary_json  = Column(Text, nullable=True)   # JSON dict
+
+    created_at   = Column(String(50), default=utcnow_str, index=True)
+    updated_at   = Column(String(50), default=utcnow_str, onupdate=utcnow_str)
+    completed_at = Column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("idx_similar_run_source", "source_channel_id"),
+        Index("idx_similar_run_status", "status"),
+    )
+
+
+class SimilarChannelCandidate(Base):
+    """One candidate channel found in a similar-channel run."""
+    __tablename__ = "similar_channel_candidates"
+
+    id           = Column(Integer, primary_key=True, autoincrement=True)
+    run_id       = Column(String(64), ForeignKey("similar_channel_runs.run_id"), nullable=False, index=True)
+    rank         = Column(Integer, default=0)
+    channel_id   = Column(String(128), nullable=False)
+    channel_title = Column(String(255), nullable=False)
+    channel_url  = Column(String(500), nullable=False)
+    country      = Column(String(10), nullable=True)
+    subscriber_count = Column(Integer, nullable=True)
+    subscriber_status = Column(String(30), default="HIDDEN_UNVERIFIED")
+    public_video_count = Column(Integer, nullable=True)
+
+    status = Column(String(20), default="WATCHLIST", index=True)  # QUALIFIED/GROWING/WATCHLIST/REJECTED
+    is_most_promising = Column(Boolean, default=False)
+    most_promising_label = Column(String(50), nullable=True)
+
+    # Window
+    window_start = Column(String(50), nullable=False)
+    window_end   = Column(String(50), nullable=False)
+
+    # Video counts
+    recent_video_count  = Column(Integer, default=0)
+    evaluable_video_count = Column(Integer, default=0)
+    pending_video_count = Column(Integer, default=0)
+    passed_views_count  = Column(Integer, default=0)
+    passed_growth_confirmed_count  = Column(Integer, default=0)
+    passed_growth_provisional_count = Column(Integer, default=0)
+    failed_video_count  = Column(Integer, default=0)
+
+    strict_success_ratio      = Column(Float, default=0.0)
+    provisional_success_ratio = Column(Float, default=0.0)
+
+    # View stats
+    minimum_recent_views = Column(Integer, nullable=True)
+    median_recent_views  = Column(Float, nullable=True)
+    mean_recent_views    = Column(Float, nullable=True)
+    p25_recent_views     = Column(Float, nullable=True)
+    p75_recent_views     = Column(Float, nullable=True)
+    maximum_recent_views = Column(Integer, nullable=True)
+    total_recent_views   = Column(Integer, default=0)
+    single_hit_dependency = Column(Float, default=0.0)
+
+    # Niche match
+    niche_match_reason  = Column(Text, nullable=True)
+    matched_topics_json = Column(Text, nullable=True)    # JSON list
+    matched_video_ids_json = Column(Text, nullable=True) # JSON list
+
+    # Durability
+    active_months_last_12       = Column(Integer, default=0)
+    median_upload_cadence_days  = Column(Float, nullable=True)
+    maximum_upload_gap_days     = Column(Float, nullable=True)
+    evergreen_ratio             = Column(Float, nullable=True)
+    topic_cluster_count         = Column(Integer, default=0)
+    future_title_angle_count    = Column(Integer, default=0)
+
+    # Monetization
+    monetization_viability      = Column(String(20), default="UNKNOWN")
+    monetization_evidence_json  = Column(Text, nullable=True)  # JSON list
+    policy_risk_flags_json      = Column(Text, nullable=True)  # JSON list
+
+    # Confidence
+    data_confidence             = Column(String(20), default="INSUFFICIENT")
+    confidence_limitations_json = Column(Text, nullable=True)  # JSON list
+
+    # Reasons
+    qualification_reasons_json  = Column(Text, nullable=True)  # JSON list
+    rejection_reasons_json      = Column(Text, nullable=True)  # JSON list
+
+    # Scores
+    niche_match_score            = Column(Float, default=0.0)
+    recent_consistency_score     = Column(Float, default=0.0)
+    growth_quality_score         = Column(Float, default=0.0)
+    durability_score             = Column(Float, default=0.0)
+    monetization_viability_score = Column(Float, default=0.0)
+    data_confidence_score        = Column(Float, default=0.0)
+    final_score                  = Column(Float, default=0.0)
+
+    created_at = Column(String(50), default=utcnow_str)
+
+    __table_args__ = (
+        Index("idx_scand_run_rank", "run_id", "rank"),
+        Index("idx_scand_run_channel", "run_id", "channel_id", unique=True),
+        Index("idx_scand_status", "status"),
+        Index("idx_scand_score", "final_score"),
+    )
+
+
+class SimilarChannelVideo(Base):
+    """Video evidence for a similar-channel candidate."""
+    __tablename__ = "similar_channel_videos"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    run_id        = Column(String(64), ForeignKey("similar_channel_runs.run_id"), nullable=False, index=True)
+    channel_id    = Column(String(128), nullable=False, index=True)
+
+    video_id      = Column(String(64), nullable=False)
+    video_url     = Column(String(500), nullable=False)
+    title         = Column(String(500), nullable=False)
+    published_at  = Column(String(50), nullable=False)
+    age_days      = Column(Float, default=0.0)
+    duration_seconds = Column(Integer, nullable=True)
+
+    views    = Column(Integer, default=0)
+    likes    = Column(Integer, nullable=True)
+    comments = Column(Integer, nullable=True)
+
+    lifetime_views_per_day  = Column(Float, default=0.0)
+    observed_views_per_day  = Column(Float, nullable=True)
+    projected_day_90_views  = Column(Float, nullable=True)
+
+    growth_status      = Column(String(30), default="UNKNOWN")   # PASS_VIEWS/PASS_GROWTH_CONFIRMED/...
+    evaluation_status  = Column(String(30), default="PENDING")   # PASS_VIEWS/FAIL/PENDING_TOO_NEW/EXCLUDED
+    evaluation_reason  = Column(Text, nullable=True)
+    niche_similarity   = Column(Float, default=0.0)
+    snapshot_count     = Column(Integer, default=0)
+
+    created_at = Column(String(50), default=utcnow_str)
+
+    __table_args__ = (
+        Index("idx_scvid_run_channel", "run_id", "channel_id"),
+        Index("idx_scvid_run_video", "run_id", "video_id"),
+    )
+

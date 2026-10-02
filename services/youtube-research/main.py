@@ -1,9 +1,11 @@
 import asyncio
+import io
 import json
 import time
 import uuid
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional, List
 
 from fastapi import FastAPI, Depends, HTTPException, Query
@@ -673,6 +675,309 @@ async def test_ollama_endpoint(payload: Dict[str, str]):
         return {"available": False, "error": str(e)}
     return {"available": False, "error": "Ollama service unreachable"}
 
+
+# ─── Similar Channel Discovery ────────────────────────────────────────────────
+
+from services.similar_channel_discovery_service import SimilarChannelDiscoveryService
+
+_similar_discovery_svc = SimilarChannelDiscoveryService(provider_manager)
+
+
+@app.post("/api/research/competitor/similar-channels/discover")
+async def discover_similar_channels(req: dict):
+    """
+    Start a background similar-channel discovery run.
+    Returns {run_id} immediately.
+    req body: {
+      source_channel_id, source_channel_title, source_videos,
+      market?, language?, window_days?, min_views?,
+      max_subscribers?, min_evaluable_videos?,
+      candidate_channel_limit?, search_query_budget?
+    }
+    """
+    try:
+        run_id = await _similar_discovery_svc.start(
+            source_channel_id=req.get("source_channel_id", ""),
+            source_channel_title=req.get("source_channel_title", ""),
+            source_videos=req.get("source_videos", []),
+            market=req.get("market", "US"),
+            language=req.get("language", "en"),
+            content_type=req.get("content_type", "LONG"),
+            window_days=int(req.get("window_days", 90)),
+            min_views=int(req.get("min_views", 10_000)),
+            max_subscribers=int(req.get("max_subscribers", 50_000)),
+            min_evaluable_videos=int(req.get("min_evaluable_videos", 3)),
+            candidate_channel_limit=int(req.get("candidate_channel_limit", 40)),
+            search_query_budget=int(req.get("search_query_budget", 10)),
+        )
+        return {"run_id": run_id, "status": "QUEUED"}
+    except Exception as e:
+        research_logger.error(f"[SimilarDisc] Start error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/research/competitor/similar-channels/{run_id}/progress")
+async def similar_channels_progress(run_id: str):
+    """Poll for progress of a similar-channel discovery run."""
+    from models.entities import SimilarChannelRun
+    db = next(get_db())
+    try:
+        obj = db.get(SimilarChannelRun, run_id)
+        if not obj:
+            raise HTTPException(status_code=404, detail="Run not found")
+        # Also include latest in-memory progress
+        latest = task_manager.latest_progress.get(run_id)
+        return {
+            "run_id": run_id,
+            "stage": obj.stage,
+            "status": obj.status,
+            "progress_percent": obj.progress_percent,
+            "message": obj.message or "",
+            "candidate_videos_found": obj.candidate_videos_found,
+            "candidate_channels_found": obj.candidate_channels_found,
+            "channels_enriched": obj.channels_enriched,
+            "channels_qualified": obj.qualified_count,
+            "can_cancel": obj.status == "RUNNING",
+            "elapsed_seconds": latest.elapsed_seconds if latest else 0,
+            "error": obj.error,
+        }
+    finally:
+        db.close()
+
+
+@app.get("/api/research/competitor/similar-channels/{run_id}/result")
+async def similar_channels_result(run_id: str):
+    """Return full result of a completed run from DB."""
+    from models.entities import SimilarChannelRun, SimilarChannelCandidate, SimilarChannelVideo
+    db = next(get_db())
+    try:
+        obj = db.get(SimilarChannelRun, run_id)
+        if not obj:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if obj.status not in ("COMPLETED",):
+            return {"run_id": run_id, "status": obj.status, "stage": obj.stage,
+                    "progress_percent": obj.progress_percent, "candidates": []}
+
+        cands = (db.query(SimilarChannelCandidate)
+                 .filter(SimilarChannelCandidate.run_id == run_id)
+                 .order_by(SimilarChannelCandidate.rank)
+                 .all())
+
+        videos_q = (db.query(SimilarChannelVideo)
+                    .filter(SimilarChannelVideo.run_id == run_id)
+                    .all())
+        vids_by_ch: Dict[str, List] = {}
+        for v in videos_q:
+            vids_by_ch.setdefault(v.channel_id, []).append(v)
+
+        def _cand_dict(c):
+            vids = vids_by_ch.get(c.channel_id, [])
+            return {
+                "rank": c.rank,
+                "channel_id": c.channel_id,
+                "channel_title": c.channel_title,
+                "channel_url": c.channel_url,
+                "country": c.country,
+                "subscriber_count": c.subscriber_count,
+                "subscriber_status": c.subscriber_status,
+                "public_video_count": c.public_video_count,
+                "status": c.status,
+                "is_most_promising": c.is_most_promising,
+                "most_promising_label": c.most_promising_label,
+                "window_start": c.window_start,
+                "window_end": c.window_end,
+                "recent_video_count": c.recent_video_count,
+                "evaluable_video_count": c.evaluable_video_count,
+                "pending_video_count": c.pending_video_count,
+                "passed_views_count": c.passed_views_count,
+                "passed_growth_confirmed_count": c.passed_growth_confirmed_count,
+                "passed_growth_provisional_count": c.passed_growth_provisional_count,
+                "failed_video_count": c.failed_video_count,
+                "strict_success_ratio": c.strict_success_ratio,
+                "provisional_success_ratio": c.provisional_success_ratio,
+                "minimum_recent_views": c.minimum_recent_views,
+                "median_recent_views": c.median_recent_views,
+                "mean_recent_views": c.mean_recent_views,
+                "p25_recent_views": c.p25_recent_views,
+                "p75_recent_views": c.p75_recent_views,
+                "maximum_recent_views": c.maximum_recent_views,
+                "total_recent_views": c.total_recent_views,
+                "single_hit_dependency": c.single_hit_dependency,
+                "niche_match_reason": c.niche_match_reason,
+                "matched_topics": json.loads(c.matched_topics_json or "[]"),
+                "matched_video_ids": json.loads(c.matched_video_ids_json or "[]"),
+                "active_months_last_12": c.active_months_last_12,
+                "median_upload_cadence_days": c.median_upload_cadence_days,
+                "maximum_upload_gap_days": c.maximum_upload_gap_days,
+                "evergreen_ratio": c.evergreen_ratio,
+                "topic_cluster_count": c.topic_cluster_count,
+                "future_title_angle_count": c.future_title_angle_count,
+                "monetization_viability": c.monetization_viability,
+                "monetization_evidence": json.loads(c.monetization_evidence_json or "[]"),
+                "policy_risk_flags": json.loads(c.policy_risk_flags_json or "[]"),
+                "data_confidence": c.data_confidence,
+                "confidence_limitations": json.loads(c.confidence_limitations_json or "[]"),
+                "qualification_reasons": json.loads(c.qualification_reasons_json or "[]"),
+                "rejection_reasons": json.loads(c.rejection_reasons_json or "[]"),
+                "scores": {
+                    "niche_match_score": c.niche_match_score,
+                    "recent_consistency_score": c.recent_consistency_score,
+                    "growth_quality_score": c.growth_quality_score,
+                    "durability_score": c.durability_score,
+                    "monetization_viability_score": c.monetization_viability_score,
+                    "data_confidence_score": c.data_confidence_score,
+                    "final_score": c.final_score,
+                },
+                "recent_videos": [
+                    {
+                        "video_id": v.video_id,
+                        "video_url": v.video_url,
+                        "title": v.title,
+                        "published_at": v.published_at,
+                        "age_days": v.age_days,
+                        "duration_seconds": v.duration_seconds,
+                        "views": v.views,
+                        "likes": v.likes,
+                        "comments": v.comments,
+                        "lifetime_views_per_day": v.lifetime_views_per_day,
+                        "observed_views_per_day": v.observed_views_per_day,
+                        "projected_day_90_views": v.projected_day_90_views,
+                        "growth_status": v.growth_status,
+                        "evaluation_status": v.evaluation_status,
+                        "evaluation_reason": v.evaluation_reason,
+                        "niche_similarity": v.niche_similarity,
+                        "snapshot_count": v.snapshot_count,
+                    }
+                    for v in sorted(vids, key=lambda x: x.views, reverse=True)
+                ],
+            }
+
+        return {
+            "run_id": run_id,
+            "status": obj.status,
+            "stage": obj.stage,
+            "source_channel_id": obj.source_channel_id,
+            "source_channel_title": obj.source_channel_title,
+            "market": obj.market,
+            "language": obj.language,
+            "window_days": obj.window_days,
+            "min_views": obj.min_views,
+            "max_subscribers": obj.max_subscribers,
+            "candidate_videos_found": obj.candidate_videos_found,
+            "candidate_channels_found": obj.candidate_channels_found,
+            "channels_enriched": obj.channels_enriched,
+            "qualified_count": obj.qualified_count,
+            "growing_count": obj.growing_count,
+            "watchlist_count": obj.watchlist_count,
+            "rejected_count": obj.rejected_count,
+            "most_promising_channel_id": obj.most_promising_channel_id,
+            "most_promising_status": obj.most_promising_status,
+            "most_promising_reason": json.loads(obj.most_promising_reason_json or "[]"),
+            "niche_fingerprint": json.loads(obj.niche_fingerprint_json or "{}"),
+            "limitations": json.loads(obj.limitations_json or "[]"),
+            "created_at": obj.created_at,
+            "completed_at": obj.completed_at,
+            "candidates": [_cand_dict(c) for c in cands],
+        }
+    finally:
+        db.close()
+
+
+@app.post("/api/research/competitor/similar-channels/{run_id}/cancel")
+async def cancel_similar_channels(run_id: str):
+    """Cancel a running similar-channel discovery."""
+    from models.entities import SimilarChannelRun
+    cancelled = task_manager.cancel_run(run_id)
+    db = next(get_db())
+    try:
+        obj = db.get(SimilarChannelRun, run_id)
+        if obj and obj.status == "RUNNING":
+            obj.status = "CANCELLED"
+            obj.stage = "CANCELLED"
+            obj.updated_at = utcnow_str()
+            db.commit()
+    finally:
+        db.close()
+    return {"cancelled": True, "run_id": run_id}
+
+
+@app.post("/api/research/competitor/similar-channels/{run_id}/retry")
+async def retry_similar_channels(run_id: str, req: dict = {}):
+    """Retry an interrupted/failed/cancelled run with same parameters."""
+    from models.entities import SimilarChannelRun
+    db = next(get_db())
+    try:
+        obj = db.get(SimilarChannelRun, run_id)
+        if not obj:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if obj.status == "RUNNING":
+            raise HTTPException(status_code=409, detail="Run is already running")
+    finally:
+        db.close()
+
+    new_run_id = await _similar_discovery_svc.start(
+        source_channel_id=obj.source_channel_id,
+        source_channel_title=obj.source_channel_title,
+        source_videos=req.get("source_videos", []),
+        market=obj.market,
+        language=obj.language,
+        content_type=obj.content_type,
+        window_days=obj.window_days,
+        min_views=obj.min_views,
+        max_subscribers=obj.max_subscribers,
+        min_evaluable_videos=obj.min_evaluable_videos,
+    )
+    return {"run_id": new_run_id, "previous_run_id": run_id, "status": "QUEUED"}
+
+
+@app.get("/api/research/competitor/similar-channels/{run_id}/export.xlsx")
+async def export_similar_channels_excel(run_id: str):
+    """Export completed run as Excel workbook."""
+    from models.entities import SimilarChannelRun, SimilarChannelCandidate, SimilarChannelVideo
+    from services.similar_channel_excel_service import build_excel_bytes
+    import re as _re
+
+    db = next(get_db())
+    try:
+        obj = db.get(SimilarChannelRun, run_id)
+        if not obj:
+            raise HTTPException(status_code=404, detail="Run not found")
+        if obj.status != "COMPLETED":
+            raise HTTPException(status_code=409, detail=f"Run status is {obj.status}; only COMPLETED runs can be exported")
+
+        cands = (db.query(SimilarChannelCandidate)
+                 .filter(SimilarChannelCandidate.run_id == run_id)
+                 .order_by(SimilarChannelCandidate.rank)
+                 .all())
+        videos = (db.query(SimilarChannelVideo)
+                  .filter(SimilarChannelVideo.run_id == run_id)
+                  .all())
+
+        videos_by_ch: Dict[str, List] = {}
+        for v in videos:
+            videos_by_ch.setdefault(v.channel_id, []).append(v)
+
+        xlsx_bytes = build_excel_bytes(obj, cands, videos_by_ch)
+
+        safe_name = _re.sub(r"[^\w\-]", "_", obj.source_channel_title or "channel")[:30]
+        date_str  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        filename  = f"similar-channel-analysis-{safe_name}-{date_str}.xlsx"
+
+        return StreamingResponse(
+            io.BytesIO(xlsx_bytes),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        research_logger.error(f"[SimilarDisc] Excel export error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Export failed: {str(e)}")
+    finally:
+        db.close()
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host=settings.host, port=settings.port, reload=False)
+
