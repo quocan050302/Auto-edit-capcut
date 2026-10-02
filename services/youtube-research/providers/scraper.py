@@ -282,7 +282,24 @@ class PublicScraperProvider:
             if header:
                 if "title" in header:
                     channel_title = header["title"]
+                elif "pageTitle" in header:
+                    channel_title = header["pageTitle"]
+
                 sub_text = header.get("subscriberCountText", {}).get("simpleText") or ""
+                if not sub_text:
+                    try:
+                        vm = header.get("content", {}).get("pageHeaderViewModel", {})
+                        meta_rows = vm.get("metadata", {}).get("contentMetadataViewModel", {}).get("metadataRows", [])
+                        for row in meta_rows:
+                            for part in row.get("metadataParts", []):
+                                text_content = part.get("text", {}).get("content", "")
+                                if "subscribers" in text_content.lower() or "subscriber" in text_content.lower():
+                                    sub_text = text_content
+                                    break
+                            if sub_text:
+                                break
+                    except Exception:
+                        pass
                 sub_count = parse_subscriber_count(sub_text)
 
             # Extract recent video list from tabs
@@ -297,21 +314,56 @@ class PublicScraperProvider:
                     )
                     for item in grid_contents:
                         rich_item = item.get("richItemRenderer", {}).get("content", {})
+                        
                         v_render = rich_item.get("videoRenderer")
-                        if not v_render:
+                        lockup = rich_item.get("lockupViewModel")
+
+                        if v_render:
+                            vid_id = v_render.get("videoId")
+                            if not vid_id:
+                                continue
+
+                            v_title_runs = v_render.get("title", {}).get("runs", [])
+                            v_title = "".join(r.get("text", "") for r in v_title_runs)
+
+                            v_views_raw = v_render.get("viewCountText", {}).get("simpleText") or ""
+                            
+                            v_dur_raw = v_render.get("lengthText", {}).get("simpleText") or ""
+                            pub_raw = v_render.get("publishedTimeText", {}).get("simpleText") or ""
+                            
+                        elif lockup:
+                            vid_id = lockup.get("contentId")
+                            if not vid_id:
+                                continue
+                            
+                            v_title = lockup.get("metadata", {}).get("lockupMetadataViewModel", {}).get("title", {}).get("content", "")
+                            
+                            v_views_raw = ""
+                            pub_raw = ""
+                            
+                            meta_rows = lockup.get("metadata", {}).get("lockupMetadataViewModel", {}).get("metadata", {}).get("contentMetadataViewModel", {}).get("metadataRows", [])
+                            if meta_rows and len(meta_rows) > 0:
+                                parts = meta_rows[0].get("metadataParts", [])
+                                if len(parts) > 0:
+                                    v_views_raw = parts[0].get("text", {}).get("content", "")
+                                if len(parts) > 1:
+                                    pub_raw = parts[1].get("text", {}).get("content", "")
+                            
+                            # Duration is in overlays -> thumbnailBottomOverlayViewModel
+                            v_dur_raw = ""
+                            overlays = lockup.get("contentImage", {}).get("thumbnailViewModel", {}).get("overlays", [])
+                            for overlay in overlays:
+                                bottom_overlay = overlay.get("thumbnailBottomOverlayViewModel", {})
+                                if bottom_overlay:
+                                    badges = bottom_overlay.get("badges", [])
+                                    if badges:
+                                        v_dur_raw = badges[0].get("thumbnailBadgeViewModel", {}).get("text", "")
+                                        break
+                                        
+                        else:
                             continue
 
-                        vid_id = v_render.get("videoId")
-                        if not vid_id:
-                            continue
-
-                        v_title_runs = v_render.get("title", {}).get("runs", [])
-                        v_title = "".join(r.get("text", "") for r in v_title_runs)
-
-                        v_views_raw = v_render.get("viewCountText", {}).get("simpleText") or ""
                         v_views = parse_view_count(v_views_raw)
-
-                        v_dur_raw = v_render.get("lengthText", {}).get("simpleText") or ""
                         v_dur = parse_duration(v_dur_raw)
                         is_short = v_dur > 0 and v_dur <= 60
 
@@ -321,8 +373,7 @@ class PublicScraperProvider:
                         if content_type == "SHORT" and not is_short:
                             continue
 
-                        v_pub_raw = v_render.get("publishedTimeText", {}).get("simpleText") or ""
-                        v_pub_iso = approximate_published_date(v_pub_raw)
+                        v_pub_iso = approximate_published_date(pub_raw)
 
                         recent_videos.append(
                             RawVideoData(
