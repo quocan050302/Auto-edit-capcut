@@ -137,8 +137,11 @@ class PublicScraperProvider:
                         channel_id = nav.get("browseId", "")
 
                     views_raw = v_render.get("viewCountText", {}).get("simpleText") or ""
-                    if not views_raw and "runs" in v_render.get("viewCountText", {}):
-                        views_raw = "".join(r.get("text", "") for r in v_render["viewCountText"]["runs"])
+                    if not views_raw:
+                        # YouTube sometimes uses "runs" instead of "simpleText"
+                        runs = v_render.get("viewCountText", {}).get("runs", [])
+                        if runs:
+                            views_raw = "".join(r.get("text", "") for r in runs)
                     views = parse_view_count(views_raw)
 
                     duration_raw = v_render.get("lengthText", {}).get("simpleText") or ""
@@ -327,6 +330,17 @@ class PublicScraperProvider:
                             v_title = "".join(r.get("text", "") for r in v_title_runs)
 
                             v_views_raw = v_render.get("viewCountText", {}).get("simpleText") or ""
+                            if not v_views_raw:
+                                runs = v_render.get("viewCountText", {}).get("runs", [])
+                                if runs:
+                                    v_views_raw = "".join(r.get("text", "") for r in runs)
+                            # Fallback to shortViewCountText (e.g. "88K views")
+                            if not v_views_raw:
+                                v_views_raw = v_render.get("shortViewCountText", {}).get("simpleText") or ""
+                            if not v_views_raw:
+                                short_runs = v_render.get("shortViewCountText", {}).get("runs", [])
+                                if short_runs:
+                                    v_views_raw = "".join(r.get("text", "") for r in short_runs)
                             
                             v_dur_raw = v_render.get("lengthText", {}).get("simpleText") or ""
                             pub_raw = v_render.get("publishedTimeText", {}).get("simpleText") or ""
