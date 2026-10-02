@@ -9,7 +9,9 @@ import type {
   ContentType,
   TimeRange,
   ResearchFilters,
-  ApiKeyTestResult
+  ApiKeyTestResult,
+  ThumbnailPromptGenerationRequest,
+  ThumbnailPromptGenerationResponse,
 } from '../types/research.types'
 import { isResearchStageTerminal } from '../types/research.types'
 
@@ -444,6 +446,19 @@ export class ResearchApi {
     }
 
     return cleanup
+  }
+  async generateThumbnailPrompts(
+    payload: ThumbnailPromptGenerationRequest
+  ): Promise<ThumbnailPromptGenerationResponse> {
+    return this.request<ThumbnailPromptGenerationResponse>(
+      '/api/research/competitor/thumbnail-prompts',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        timeoutMs: 120000,
+      }
+    )
   }
 }
 

@@ -36,7 +36,9 @@ from schemas.research_schemas import (
     SettingsResponseSchema,
     ResearchRunResultSchema,
     ThumbnailGenerationRequest,
-    ThumbnailGenerationResponse
+    ThumbnailGenerationResponse,
+    ThumbnailPromptGenerationRequest,
+    ThumbnailPromptGenerationResponse,
 )
 import httpx
 
@@ -370,7 +372,34 @@ async def generate_thumbnail_endpoint(req: ThumbnailGenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/research/competitor/thumbnail-prompts", response_model=ThumbnailPromptGenerationResponse)
+async def generate_thumbnail_prompts_endpoint(req: ThumbnailPromptGenerationRequest):
+    """
+    V2 Prompt Studio: Generate 5 competitor-informed thumbnail prompt concepts.
+    Does NOT create images. Returns structured prompts ready for external image tools.
+    """
+    from ai.engine import ai_engine
+    from services.thumbnail_prompt_service import ThumbnailPromptService
+
+    try:
+        svc = ThumbnailPromptService()
+        result = await svc.generate_five_variants(
+            title=req.title,
+            video_context=req.video_context or "",
+            channel_title=req.channel_title,
+            market=req.market,
+            blueprint=req.blueprint.model_dump(),
+            thumbnail_intelligence=req.thumbnail_intelligence,
+            ai_engine=ai_engine,
+        )
+        return result
+    except Exception as e:
+        research_logger.error(f"[PromptStudio] Endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Thumbnail prompt generation failed: {str(e)}")
+
+
 # ─── Saved Projects ───────────────────────────────────────────────────────────
+
 
 @app.get("/api/research/saved", response_model=List[SavedProjectSchema])
 async def list_saved_projects(db: Session = Depends(get_db)):
@@ -566,6 +595,16 @@ async def update_settings_endpoint(req: SettingsUpdateSchema):
         api_key=settings.official_api_key,
         use_official=settings.use_official_api,
         priority=settings.provider_priority
+    )
+
+    # Update AI engine singleton immediately so new settings take effect without restart
+    from ai.engine import ai_engine
+    ai_engine.update_config(
+        provider=settings.ai_provider,
+        ollama_url=settings.ollama_base_url,
+        ollama_model=settings.ollama_model,
+        cloud_api_key=settings.cloud_ai_key,
+        cloud_model="gemini-2.0-flash",
     )
 
     # Persist settings to disk so they survive sidecar restarts

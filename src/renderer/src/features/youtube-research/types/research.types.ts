@@ -786,3 +786,72 @@ export interface ApiKeyTestResult {
   status: ApiKeyStatus
   error?: string
 }
+
+// ── Thumbnail Prompt Studio types (V2 Part B) ─────────────────────────────────
+
+export interface ThumbnailOverlayText {
+  line_1: string
+  line_2?: string
+  combined_text: string
+  total_words: number
+  capitalization: string
+  text_color: string
+  outline_color: string
+  placement: string
+  typography: string
+}
+
+export interface ThumbnailPromptVariant {
+  id: string
+  option_label: 'A' | 'B' | 'C' | 'D' | 'E'
+  concept_name: string
+  strategic_angle: string
+  title_interpretation: string
+  overlay_text: ThumbnailOverlayText
+  visual_concept: string
+  subject_direction: string
+  composition_direction: string
+  background_direction: string
+  color_direction: string
+  lighting_direction: string
+  mobile_readability_direction: string
+  title_thumbnail_relationship: string
+  full_image_prompt: string
+  negative_prompt: string
+  competitor_traits_used: string[]
+  evidence: string[]
+  originality_changes: string[]
+  why_it_works: string
+  warnings: string[]
+}
+
+export interface ThumbnailPromptAnalysisSummary {
+  title_subject: string
+  title_promise: string
+  viewer_tension: string
+  recommended_hook: string
+  competitor_style_summary: string
+  overlay_style_summary: string
+}
+
+export interface ThumbnailPromptGenerationRequest {
+  title: string
+  video_context?: string
+  channel_title: string
+  market?: string
+  blueprint: ThumbnailBlueprint
+  thumbnail_intelligence: ThumbnailIntelligenceResult
+}
+
+export interface ThumbnailPromptGenerationResponse {
+  title: string
+  channel_title: string
+  provider: string
+  model: string
+  used_ai: boolean
+  fallback_used: boolean
+  fallback_reason?: string
+  analysis_summary: ThumbnailPromptAnalysisSummary
+  variants: ThumbnailPromptVariant[]
+  generated_at: string
+}

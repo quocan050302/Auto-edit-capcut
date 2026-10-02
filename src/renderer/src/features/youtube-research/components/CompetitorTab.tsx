@@ -10,6 +10,7 @@ import type {
   ThumbnailGroupStats,
 } from '../types/research.types'
 import { ThumbnailGeneratorSection } from './ThumbnailGeneratorSection'
+import ThumbnailPromptStudio from './ThumbnailPromptStudio'
 
 interface Props {
   onAnalyzeCompetitor: (url: string, market: MarketCode) => Promise<CompetitorAnalysisResult>
@@ -1309,6 +1310,14 @@ ${bp.evidence.join('\n')}
                           onCopyBlueprint={() => copyBlueprint(primaryBlueprint)}
                         />
                       </div>
+
+                      {/* Prompt Studio — Basic View */}
+                      <ThumbnailPromptStudio
+                        channelTitle={data.channel_title}
+                        blueprint={primaryBlueprint}
+                        thumbnailIntelligence={thumbData}
+                        market={market}
+                      />
                     </div>
                   ) : (
                     /* Advanced View */
@@ -1405,6 +1414,14 @@ ${bp.evidence.join('\n')}
 
                       {/* Title-to-Thumbnail Generator Section (ALWAYS RENDERED) */}
                       <ThumbnailGeneratorSection blueprints={safeBlueprints} />
+
+                      {/* Prompt Studio — Advanced View */}
+                      <ThumbnailPromptStudio
+                        channelTitle={data.channel_title}
+                        blueprint={primaryBlueprint}
+                        thumbnailIntelligence={thumbData}
+                        market={market}
+                      />
 
                       {/* Failure details */}
                       {thumbData.failure_details.length > 0 && (

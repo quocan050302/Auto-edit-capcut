@@ -263,4 +263,116 @@ Analyze the thumbnail and return ONLY valid JSON with this exact schema. Do not 
         
         return {"confidence": 0.0}
 
+    async def generate_thumbnail_prompt_variants(
+        self,
+        system_prompt: str,
+        payload: dict
+    ) -> dict:
+        """
+        Generate exactly 5 thumbnail prompt variants using competitor intelligence.
+        Returns raw parsed dict from AI. Caller must validate.
+        """
+        import json as _json
+
+        if self.provider == "disabled" or not self.provider:
+            return {}
+
+        user_message = _json.dumps(payload, ensure_ascii=False)
+
+        try:
+            if self.provider == "gemini":
+                if not self.cloud_api_key:
+                    research_logger.warning("[AI] Gemini key not configured for thumbnail prompts")
+                    return {}
+
+                # Use configurable model, fallback to gemini-2.0-flash
+                model = getattr(self, "_cloud_model", "gemini-2.0-flash")
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model}:generateContent?key={self.cloud_api_key}"
+                )
+                gemini_payload = {
+                    "system_instruction": {"parts": [{"text": system_prompt}]},
+                    "contents": [{"parts": [{"text": user_message}]}],
+                    "generationConfig": {
+                        "response_mime_type": "application/json",
+                        "temperature": 0.7,
+                        "maxOutputTokens": 8192,
+                    }
+                }
+
+                last_err = None
+                for attempt in range(3):
+                    try:
+                        async with httpx.AsyncClient(timeout=110.0) as client:
+                            resp = await client.post(url, json=gemini_payload)
+                            if resp.status_code == 429:
+                                research_logger.warning(f"[AI] Gemini rate limited (attempt {attempt+1})")
+                                if attempt < 2:
+                                    import asyncio
+                                    await asyncio.sleep(2 ** attempt)
+                                    continue
+                                raise RuntimeError("AI_RATE_LIMITED")
+                            if resp.status_code == 400:
+                                raise RuntimeError("AI_INVALID_RESPONSE")
+                            if resp.status_code != 200:
+                                raise RuntimeError(f"AI_HTTP_{resp.status_code}")
+
+                            data = resp.json()
+                            text = data["candidates"][0]["content"]["parts"][0]["text"]
+                            # Strip markdown fences if present
+                            text = text.strip()
+                            if text.startswith("```"):
+                                text = text.split("```")[1]
+                                if text.startswith("json"):
+                                    text = text[4:]
+                            return _json.loads(text)
+                    except (_json.JSONDecodeError, KeyError) as e:
+                        last_err = e
+                        research_logger.warning(f"[AI] Gemini parse error (attempt {attempt+1}): {e}")
+                        break
+                    except RuntimeError:
+                        raise
+                    except Exception as e:
+                        last_err = e
+                        research_logger.warning(f"[AI] Gemini error (attempt {attempt+1}): {e}")
+                        if attempt < 2:
+                            import asyncio
+                            await asyncio.sleep(2 ** attempt)
+
+                if last_err:
+                    research_logger.warning(f"[AI] Gemini exhausted retries: {last_err}")
+                return {}
+
+            elif self.provider == "ollama":
+                combined = f"{system_prompt}\n\nUser data:\n{user_message}"
+                async with httpx.AsyncClient(timeout=110.0) as client:
+                    resp = await client.post(
+                        f"{self.ollama_url}/api/generate",
+                        json={"model": self.ollama_model, "prompt": combined, "stream": False, "format": "json"}
+                    )
+                    if resp.status_code == 200:
+                        raw = resp.json().get("response", "")
+                        return _json.loads(raw)
+
+        except Exception as e:
+            research_logger.warning(f"[AI] generate_thumbnail_prompt_variants error: {e}")
+
+        return {}
+
+    def update_config(
+        self,
+        provider: str,
+        ollama_url: str,
+        ollama_model: str,
+        cloud_api_key: str,
+        cloud_model: str = "gemini-2.0-flash"
+    ):
+        self.provider = provider.lower()
+        self.ollama_url = ollama_url
+        self.ollama_model = ollama_model
+        self.cloud_api_key = cloud_api_key
+        self._cloud_model = cloud_model
+
+
 ai_engine = AiInsightsEngine()

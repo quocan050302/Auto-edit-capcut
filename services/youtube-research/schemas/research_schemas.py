@@ -235,6 +235,77 @@ class ThumbnailGenerationResponse(BaseModel):
     image_base64: str
     prompt_used: str
 
+# ── Thumbnail Prompt Studio Schemas (V2 Part B) ────────────────────────────────
+
+class ThumbnailOverlayTextSchema(BaseModel):
+    line_1: str
+    line_2: Optional[str] = None
+    combined_text: str
+    total_words: int
+    capitalization: str = "ALL_CAPS"
+    text_color: str = "#FFFFFF"
+    outline_color: str = "#000000"
+    placement: str = "upper_left"
+    typography: str = "bold_condensed_sans"
+
+    @classmethod
+    def validate_not_empty(cls, v):
+        if not v or not v.strip():
+            raise ValueError("combined_text cannot be empty")
+        return v
+
+class ThumbnailPromptVariantSchema(BaseModel):
+    id: str
+    option_label: str  # A B C D E
+    concept_name: str
+    strategic_angle: str
+    title_interpretation: str
+    overlay_text: ThumbnailOverlayTextSchema
+    visual_concept: str
+    subject_direction: str
+    composition_direction: str
+    background_direction: str
+    color_direction: str
+    lighting_direction: str
+    mobile_readability_direction: str
+    title_thumbnail_relationship: str
+    full_image_prompt: str
+    negative_prompt: str
+    competitor_traits_used: List[str] = []
+    evidence: List[str] = []
+    originality_changes: List[str] = []
+    why_it_works: str
+    warnings: List[str] = []
+
+class ThumbnailPromptAnalysisSummarySchema(BaseModel):
+    title_subject: str
+    title_promise: str
+    viewer_tension: str
+    recommended_hook: str
+    competitor_style_summary: str
+    overlay_style_summary: str
+
+class ThumbnailPromptGenerationRequest(BaseModel):
+    title: str = Field(..., min_length=3, max_length=200)
+    video_context: Optional[str] = Field(default=None, max_length=2000)
+    channel_title: str
+    market: str = "US"
+    blueprint: ThumbnailBlueprintSchema
+    thumbnail_intelligence: Dict[str, Any]
+
+class ThumbnailPromptGenerationResponse(BaseModel):
+    title: str
+    channel_title: str
+    provider: str
+    model: str
+    used_ai: bool
+    fallback_used: bool
+    fallback_reason: Optional[str] = None
+    analysis_summary: ThumbnailPromptAnalysisSummarySchema
+    variants: List[ThumbnailPromptVariantSchema]
+    generated_at: str
+
+
 class TopOpportunitySchema(BaseModel):
     keyword: str
     opportunity_score: float
