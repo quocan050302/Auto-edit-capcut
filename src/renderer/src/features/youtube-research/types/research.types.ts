@@ -787,24 +787,56 @@ export interface ApiKeyTestResult {
   error?: string
 }
 
-// ── Thumbnail Prompt Studio types (V2 Part B) ─────────────────────────────────
+// ── Thumbnail Prompt Studio types (V2 Part B — Hook Intelligence) ─────────────
+
+export type HookFamily =
+  | 'visual_contradiction'
+  | 'hidden_mechanism'
+  | 'proof_object_anomaly'
+  | 'expectation_vs_reality'
+  | 'moment_before_discovery'
+  | 'personal_consequence'
+  | 'scale_difference'
+  | 'missing_information'
+  | 'social_reaction'
+  | 'forbidden_or_overlooked_detail'
 
 export interface ThumbnailOverlayText {
   line_1: string
+  line_1_color: string   // #FFE600 (yellow)
   line_2?: string
+  line_2_color: string   // #FFFFFF (white)
   combined_text: string
   total_words: number
   capitalization: string
-  text_color: string
-  outline_color: string
+  outline_color: string  // #050505
   placement: string
   typography: string
+}
+
+/** Hook quality scoring. No CTR or "guaranteed" claims. */
+export interface ThumbnailHookQuality {
+  curiosity_gap: number           // /20
+  one_second_clarity: number      // /15
+  title_complementarity: number   // /15
+  visual_tension: number          // /15
+  specificity_and_proof: number   // /10
+  mobile_readability: number      // /10
+  promise_integrity: number       // /10
+  competitor_fit: number          // /5
+  penalties: number               // negative
+  total_score: number             // 0-100 clamped
+  rejection_reasons: string[]
 }
 
 export interface ThumbnailPromptVariant {
   id: string
   option_label: 'A' | 'B' | 'C' | 'D' | 'E'
   concept_name: string
+  hook_family: HookFamily
+  visual_question: string
+  hidden_information: string
+  test_hypothesis: string
   strategic_angle: string
   title_interpretation: string
   overlay_text: ThumbnailOverlayText
@@ -822,6 +854,9 @@ export interface ThumbnailPromptVariant {
   evidence: string[]
   originality_changes: string[]
   why_it_works: string
+  hook_quality: ThumbnailHookQuality
+  recommended_test_rank: number   // 1 = best
+  recommended_for_ab_test: boolean
   warnings: string[]
 }
 
@@ -829,7 +864,12 @@ export interface ThumbnailPromptAnalysisSummary {
   title_subject: string
   title_promise: string
   viewer_tension: string
+  viewer_expectation?: string
+  hidden_variable?: string
+  strongest_proof_object?: string
+  visual_contradiction?: string
   recommended_hook: string
+  hook_source?: string            // ai_analysis | deterministic_semantic | safe_fallback
   competitor_style_summary: string
   overlay_style_summary: string
 }

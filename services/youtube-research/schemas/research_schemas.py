@@ -235,29 +235,42 @@ class ThumbnailGenerationResponse(BaseModel):
     image_base64: str
     prompt_used: str
 
-# ── Thumbnail Prompt Studio Schemas (V2 Part B) ────────────────────────────────
+# ── Thumbnail Prompt Studio Schemas (V2 Part B — Hook Intelligence) ────────────
 
 class ThumbnailOverlayTextSchema(BaseModel):
     line_1: str
+    line_1_color: str = "#FFE600"   # yellow by default
     line_2: Optional[str] = None
+    line_2_color: str = "#FFFFFF"   # white by default
     combined_text: str
     total_words: int
     capitalization: str = "ALL_CAPS"
-    text_color: str = "#FFFFFF"
-    outline_color: str = "#000000"
+    outline_color: str = "#050505"
     placement: str = "upper_left"
     typography: str = "bold_condensed_sans"
 
-    @classmethod
-    def validate_not_empty(cls, v):
-        if not v or not v.strip():
-            raise ValueError("combined_text cannot be empty")
-        return v
+class HookQualityScoreSchema(BaseModel):
+    """Scores thumbnail hook quality. No CTR claims allowed."""
+    curiosity_gap: int = 0           # /20
+    one_second_clarity: int = 0      # /15
+    title_complementarity: int = 0   # /15
+    visual_tension: int = 0          # /15
+    specificity_and_proof: int = 0   # /10
+    mobile_readability: int = 0      # /10
+    promise_integrity: int = 0       # /10
+    competitor_fit: int = 0          # /5
+    penalties: int = 0               # negative
+    total_score: int = 0             # clamped 0-100
+    rejection_reasons: List[str] = []
 
 class ThumbnailPromptVariantSchema(BaseModel):
     id: str
     option_label: str  # A B C D E
     concept_name: str
+    hook_family: str   # from HOOK_FAMILIES
+    visual_question: str
+    hidden_information: str
+    test_hypothesis: str
     strategic_angle: str
     title_interpretation: str
     overlay_text: ThumbnailOverlayTextSchema
@@ -275,13 +288,21 @@ class ThumbnailPromptVariantSchema(BaseModel):
     evidence: List[str] = []
     originality_changes: List[str] = []
     why_it_works: str
+    hook_quality: HookQualityScoreSchema = Field(default_factory=HookQualityScoreSchema)
+    recommended_test_rank: int = 0   # 1=top, 5=lowest
+    recommended_for_ab_test: bool = False
     warnings: List[str] = []
 
 class ThumbnailPromptAnalysisSummarySchema(BaseModel):
     title_subject: str
     title_promise: str
     viewer_tension: str
+    viewer_expectation: str = ""
+    hidden_variable: str = ""
+    strongest_proof_object: str = ""
+    visual_contradiction: str = ""
     recommended_hook: str
+    hook_source: str = "ai_analysis"  # ai_analysis | deterministic_semantic | safe_fallback
     competitor_style_summary: str
     overlay_style_summary: str
 
@@ -304,6 +325,7 @@ class ThumbnailPromptGenerationResponse(BaseModel):
     analysis_summary: ThumbnailPromptAnalysisSummarySchema
     variants: List[ThumbnailPromptVariantSchema]
     generated_at: str
+
 
 
 class TopOpportunitySchema(BaseModel):
