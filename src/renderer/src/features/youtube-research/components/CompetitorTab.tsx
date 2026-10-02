@@ -1424,13 +1424,6 @@ ${bp.evidence.join('\n')}
                         market={market}
                       />
 
-                      {/* Similar Channel Discovery */}
-                      <SimilarChannelsPanel
-                        competitor={data}
-                        market={market}
-                        language="en"
-                      />
-
                       {/* Failure details */}
                       {thumbData.failure_details.length > 0 && (
                         <div style={{ background: 'var(--bg-base)', padding: '12px', borderRadius: '6px', border: '1px solid var(--border-subtle)' }}>
@@ -1449,6 +1442,15 @@ ${bp.evidence.join('\n')}
                 </div>
                 )
               })()}
+
+              {/* Similar Channel Discovery — shown as soon as channel data is available */}
+              {data && (
+                <SimilarChannelsPanel
+                  competitor={data}
+                  market={market}
+                  language="en"
+                />
+              )}
             </div>
           </div>
         </div>
