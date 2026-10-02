@@ -138,43 +138,62 @@ def build_excel_bytes(
     ws_sum.cell(row=row, column=1).value = "Discovery Metrics"
     ws_sum.cell(row=row, column=1).font = Font(bold=True, size=12, color="1E2D5A")
     row += 1
+    diag = {}
+    try:
+        diag = json.loads(getattr(run, "discovery_diagnostics_json", "{}") or "{}")
+    except Exception:
+        pass
+    best_avail_count = sum(1 for c in candidates if getattr(c, "is_best_available", False))
+
+    row = _write_kv(ws_sum, row, "Total Candidate Pool", run.candidate_channels_found, "#,##0")
     row = _write_kv(ws_sum, row, "Candidate Videos Found", run.candidate_videos_found, "#,##0")
-    row = _write_kv(ws_sum, row, "Candidate Channels Found", run.candidate_channels_found, "#,##0")
     row = _write_kv(ws_sum, row, "Channels Enriched", run.channels_enriched, "#,##0")
-    row = _write_kv(ws_sum, row, "Qualified", run.qualified_count)
-    row = _write_kv(ws_sum, row, "Growing", run.growing_count)
-    row = _write_kv(ws_sum, row, "Watchlist", run.watchlist_count)
-    row = _write_kv(ws_sum, row, "Rejected", run.rejected_count)
+    row = _write_kv(ws_sum, row, "Strict Qualified Count", run.qualified_count)
+    row = _write_kv(ws_sum, row, "Growing Count", run.growing_count)
+    row = _write_kv(ws_sum, row, "Best Available Count", best_avail_count)
+    row = _write_kv(ws_sum, row, "Watchlist Count", run.watchlist_count)
+    row = _write_kv(ws_sum, row, "Rejected Count", run.rejected_count)
+    row = _write_kv(ws_sum, row, "Discovery Passes Used", ", ".join(diag.get("discovery_passes_run", [])) or "N/A")
+    row = _write_kv(ws_sum, row, "Search Calls Used", diag.get("search_calls_used", 0))
+    row = _write_kv(ws_sum, row, "Stop Reason", diag.get("stop_reason", "N/A"))
+    row = _write_kv(ws_sum, row, "Provider Breakdown", str(run.provider_summary_json or "{}"))
     row += 1
 
     # Most promising
     mp_reasons = _json_list(run.most_promising_reason_json)
     mp_cand = next((c for c in candidates if c.is_most_promising), None)
     if mp_cand:
-        ws_sum.cell(row=row, column=1).value = "Most Promising Competitor"
+        label = getattr(mp_cand, "most_promising_label", None) or "Most Promising Competitor"
+        ws_sum.cell(row=row, column=1).value = label
         ws_sum.cell(row=row, column=1).font = Font(bold=True, size=12, color="1E2D5A")
         row += 1
         row = _write_kv(ws_sum, row, "Channel", mp_cand.channel_title)
         row = _write_kv(ws_sum, row, "Channel URL", mp_cand.channel_url)
         row = _write_kv(ws_sum, row, "Status", mp_cand.status)
+        row = _write_kv(ws_sum, row, "Recommendation Tier", getattr(mp_cand, "recommendation_tier", "N/A"))
         subs = mp_cand.subscriber_count
         row = _write_kv(ws_sum, row, "Subscriber Count",
                         subs if subs is not None else "Hidden / Unverified",
                         "#,##0" if isinstance(subs, int) else "")
         row = _write_kv(ws_sum, row, "Final Score", mp_cand.final_score, "0.0")
+        row = _write_kv(ws_sum, row, "Qualification Gap Score", getattr(mp_cand, "qualification_gap_score", 0.0), "0.0")
         row = _write_kv(ws_sum, row, "Niche Match", mp_cand.niche_match_score, "0.0")
         row = _write_kv(ws_sum, row, "Strict Success Ratio", mp_cand.strict_success_ratio, "0.0%")
         row = _write_kv(ws_sum, row, "Median 90-Day Views", mp_cand.median_recent_views, "#,##0")
         row = _write_kv(ws_sum, row, "Durability Score", mp_cand.durability_score, "0.0")
+        row = _write_kv(ws_sum, row, "Window Coverage", getattr(mp_cand, "window_coverage", "N/A"))
         row = _write_kv(ws_sum, row, "Monetization Viability", mp_cand.monetization_viability)
         row = _write_kv(ws_sum, row, "Data Confidence", mp_cand.data_confidence)
         for i, reason in enumerate(mp_reasons, 1):
             row = _write_kv(ws_sum, row, f"Selection Reason {i}", reason)
+        unmet = _json_list(getattr(mp_cand, "unmet_criteria_json", "[]"))
+        for i, u in enumerate(unmet[:3], 1):
+            row = _write_kv(ws_sum, row, f"Unmet Criteria {i}", u)
     else:
         ws_sum.cell(row=row, column=1).value = "Most Promising Competitor"
         ws_sum.cell(row=row, column=1).font = Font(bold=True, size=12, color="1E2D5A")
         row += 1
-        ws_sum.cell(row=row, column=1).value = "No fully qualified competitor found"
+        ws_sum.cell(row=row, column=1).value = "No recommended candidate found"
         ws_sum.cell(row=row, column=1).font = Font(italic=True, color="888888")
         row += 1
 
@@ -203,8 +222,9 @@ def build_excel_bytes(
     # ── Sheet 2: Channels ─────────────────────────────────────────────────────
     ws_ch = wb.create_sheet("Channels")
     ch_headers = [
-        "Rank", "Most Promising", "Status", "Channel ID", "Channel Title",
-        "Channel URL", "Country", "Subscriber Count", "Subscriber Status",
+        "Rank", "Most Promising", "Recommendation Tier", "Best Available Rank", "Status",
+        "Channel ID", "Channel Title", "Channel URL", "Country", "Subscriber Count", "Subscriber Status",
+        "Qualification Gap Score", "Window Coverage", "History Coverage", "Date Quality",
         "Public Video Count", "Window Start", "Window End",
         "Recent Videos", "Evaluable Videos", "Pending Videos",
         "Videos Above 10K", "Confirmed Growth", "Provisional Growth", "Failed",
@@ -212,13 +232,15 @@ def build_excel_bytes(
         "Min Recent Views", "Median Recent Views", "Mean Recent Views",
         "P25 Views", "P75 Views", "Max Recent Views", "Total Recent Views",
         "Single-Hit Dependency",
-        "Niche Match", "Recent Consistency", "Growth Quality",
+        "Niche Match", "Source Coverage", "Candidate Precision", "Median Title Similarity",
+        "Recent Consistency", "Growth Quality",
         "Durability", "Monetization Viability Score", "Data Confidence Score", "Final Score",
         "Active Months (12mo)", "Median Upload Cadence (days)", "Max Upload Gap (days)",
         "Evergreen Ratio", "Topic Clusters", "Future Title Angles",
         "Monetization Viability", "Data Confidence",
-        "Matched Topics", "Policy Risk Flags",
-        "Qualification Reasons", "Rejection Reasons", "Limitations",
+        "Matched Terms", "Matched Entities", "Matched Topic Clusters",
+        "Unmet Criteria",
+        "Policy Risk Flags", "Qualification Reasons", "Rejection Reasons", "Limitations",
     ]
 
     # Header row
@@ -231,7 +253,6 @@ def build_excel_bytes(
     ws_ch.freeze_panes = "A2"
     ws_ch.auto_filter.ref = f"A1:{get_column_letter(len(ch_headers))}1"
 
-    mp_row = None
     for row_idx, cand in enumerate(candidates, 2):
         subs = cand.subscriber_count
         fill = _status_fill(cand.status)
@@ -239,6 +260,8 @@ def build_excel_bytes(
         vals = [
             _safe_int(cand.rank),
             "Yes" if is_mp else "",
+            getattr(cand, "recommendation_tier", "MONITOR") or "MONITOR",
+            _safe_int(getattr(cand, "best_available_rank", None)),
             cand.status,
             cand.channel_id,
             cand.channel_title,
@@ -246,6 +269,10 @@ def build_excel_bytes(
             cand.country or "",
             _safe_int(subs),
             cand.subscriber_status,
+            _safe_float(getattr(cand, "qualification_gap_score", 0.0)),
+            getattr(cand, "window_coverage", "UNKNOWN") or "UNKNOWN",
+            getattr(cand, "history_coverage", "UNKNOWN") or "UNKNOWN",
+            getattr(cand, "date_quality", "APPROXIMATED") or "APPROXIMATED",
             _safe_int(cand.public_video_count),
             _parse_dt(cand.window_start),
             _parse_dt(cand.window_end),
@@ -267,6 +294,9 @@ def build_excel_bytes(
             _safe_int(cand.total_recent_views),
             _safe_float(cand.single_hit_dependency),
             _safe_float(cand.niche_match_score),
+            _safe_float(getattr(cand, "source_coverage", 0.0)),
+            _safe_float(getattr(cand, "candidate_precision", 0.0)),
+            _safe_float(getattr(cand, "median_title_similarity", 0.0)),
             _safe_float(cand.recent_consistency_score),
             _safe_float(cand.growth_quality_score),
             _safe_float(cand.durability_score),
@@ -281,7 +311,10 @@ def build_excel_bytes(
             _safe_int(cand.future_title_angle_count),
             cand.monetization_viability or "",
             cand.data_confidence or "",
-            "; ".join(_json_list(cand.matched_topics_json)),
+            "; ".join(_json_list(getattr(cand, "matched_terms_json", "[]"))),
+            "; ".join(_json_list(getattr(cand, "matched_entities_json", "[]"))),
+            "; ".join(_json_list(getattr(cand, "matched_clusters_json", "[]"))),
+            "; ".join(_json_list(getattr(cand, "unmet_criteria_json", "[]"))),
             "; ".join(_json_list(cand.policy_risk_flags_json)),
             "; ".join(_json_list(cand.qualification_reasons_json)),
             "; ".join(_json_list(cand.rejection_reasons_json)),
@@ -289,15 +322,16 @@ def build_excel_bytes(
         ]
 
         FMT_MAP = {
-            8: "#,##0",   # Subscriber Count
-            12: "mm/dd/yyyy", 13: "mm/dd/yyyy",  # Window dates
-            20: "0.0%", 21: "0.0%",  # ratios
-            22: "#,##0", 23: "#,##0.0", 24: "#,##0.0",
-            25: "#,##0.0", 26: "#,##0.0", 27: "#,##0", 28: "#,##0",
-            29: "0.00%",  # single-hit
-            30: "0.0", 31: "0.0", 32: "0.0", 33: "0.0",
-            34: "0.0", 35: "0.0", 36: "0.0",
-            40: "0.0%",  # evergreen
+            10: "#,##0",   # Subscriber Count
+            12: "0.0",     # Gap score
+            17: "mm/dd/yyyy", 18: "mm/dd/yyyy",  # Window dates
+            26: "0.0%", 27: "0.0%",  # ratios
+            28: "#,##0", 29: "#,##0.0", 30: "#,##0.0",
+            31: "#,##0.0", 32: "#,##0.0", 33: "#,##0", 34: "#,##0",
+            35: "0.00%",  # single-hit
+            36: "0.0", 37: "0.0%", 38: "0.0%", 39: "0.0",
+            40: "0.0", 41: "0.0", 42: "0.0", 43: "0.0", 44: "0.0", 45: "0.0",
+            49: "0.0%",   # evergreen
         }
 
         for col_idx, val in enumerate(vals, 1):
@@ -309,22 +343,22 @@ def build_excel_bytes(
             if is_mp:
                 cell.fill = _hfill(MP_FILL)
                 cell.font = Font(bold=True)
-            cell.alignment = Alignment(wrap_text=(col_idx >= 44), vertical="top")
+            cell.alignment = Alignment(wrap_text=(col_idx >= 50), vertical="top")
 
         # Hyperlink for channel URL
-        url_cell = ws_ch.cell(row=row_idx, column=6)
+        url_cell = ws_ch.cell(row=row_idx, column=8)
         try:
             url_cell.hyperlink = cand.channel_url
             url_cell.style = "Hyperlink"
         except Exception:
             pass
 
-    col_widths_ch = [6, 12, 14, 28, 32, 40, 10, 16, 22, 14, 14, 14,
-                     10, 10, 10, 12, 14, 16, 10, 16, 18, 14, 16, 14,
-                     14, 14, 14, 14, 14, 10, 18, 14, 12, 20, 18, 12,
-                     14, 20, 16, 12, 14, 16, 20, 18, 30, 30, 40, 40, 40]
-    for i, w in enumerate(col_widths_ch, 1):
-        ws_ch.column_dimensions[get_column_letter(i)].width = min(w, 60)
+    for i in range(1, len(ch_headers) + 1):
+        ws_ch.column_dimensions[get_column_letter(i)].width = 18
+    ws_ch.column_dimensions["G"].width = 28 # Channel Title
+    ws_ch.column_dimensions["H"].width = 36 # Channel URL
+    ws_ch.column_dimensions["BA"].width = 30 # Matched terms
+    ws_ch.column_dimensions["BD"].width = 35 # Unmet criteria
     ws_ch.row_dimensions[1].height = 36
 
     # ── Sheet 3: Recent Videos ────────────────────────────────────────────────

@@ -246,6 +246,14 @@ class SimilarChannelRun(Base):
     most_promising_status     = Column(String(30),  nullable=True)
     most_promising_reason_json = Column(Text,       nullable=True)  # JSON list
 
+    # V2 enhancements: Best Available fallback & Diagnostics
+    best_available_channel_id   = Column(String(128), nullable=True)
+    best_available_status       = Column(String(30),  nullable=True)
+    best_available_reason_json  = Column(Text,        nullable=True)  # JSON list
+    best_available_candidates_json = Column(Text,     nullable=True)  # JSON list
+    recommendation_tier         = Column(String(30),  nullable=True)  # STRICT_MATCH | BEST_AVAILABLE | MONITOR
+    discovery_diagnostics_json  = Column(Text,        nullable=True)  # JSON dict
+
     niche_fingerprint_json = Column(Text, nullable=True)   # JSON
     limitations_json       = Column(Text, nullable=True)   # JSON list
     provider_summary_json  = Column(Text, nullable=True)   # JSON dict
@@ -278,6 +286,24 @@ class SimilarChannelCandidate(Base):
     status = Column(String(20), default="WATCHLIST", index=True)  # QUALIFIED/GROWING/WATCHLIST/REJECTED
     is_most_promising = Column(Boolean, default=False)
     most_promising_label = Column(String(50), nullable=True)
+
+    # V2 Recommendation & Fallback fields
+    recommendation_tier      = Column(String(30), default="MONITOR") # STRICT_MATCH | BEST_AVAILABLE | MONITOR | NOT_RECOMMENDED
+    best_available_rank      = Column(Integer,    nullable=True)
+    is_best_available        = Column(Boolean,    default=False)
+    qualification_gap_score  = Column(Float,      default=0.0)
+    unmet_criteria_json      = Column(Text,       nullable=True)  # JSON list
+    window_coverage          = Column(String(30), default="UNKNOWN")  # COMPLETE | PARTIAL | UNKNOWN
+    history_coverage         = Column(String(30), default="UNKNOWN")  # COMPLETE | PARTIAL | UNKNOWN
+    date_quality             = Column(String(30), default="APPROXIMATED") # VERIFIED | APPROXIMATED | UNKNOWN
+
+    # V2 Niche Matching Evidence
+    source_coverage          = Column(Float, default=0.0)
+    candidate_precision      = Column(Float, default=0.0)
+    median_title_similarity  = Column(Float, default=0.0)
+    matched_terms_json       = Column(Text,  nullable=True)  # JSON list
+    matched_entities_json    = Column(Text,  nullable=True)  # JSON list
+    matched_clusters_json    = Column(Text,  nullable=True)  # JSON list
 
     # Window
     window_start = Column(String(50), nullable=False)
@@ -362,6 +388,7 @@ class SimilarChannelVideo(Base):
     video_url     = Column(String(500), nullable=False)
     title         = Column(String(500), nullable=False)
     published_at  = Column(String(50), nullable=False)
+    date_quality  = Column(String(30), default="APPROXIMATED") # VERIFIED | APPROXIMATED | UNKNOWN
     age_days      = Column(Float, default=0.0)
     duration_seconds = Column(Integer, nullable=True)
 

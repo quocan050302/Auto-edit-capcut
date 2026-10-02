@@ -1,7 +1,11 @@
-﻿"""
+"""
 similar_channel_scoring.py — Deterministic scoring for similar-channel candidates.
+Overhauled with Channel-Level Niche Matching, Exact 90-Day Evaluation,
+Snapshot Growth Confirmation, Strict Qualification, and Best Available Fallback.
 """
 from __future__ import annotations
+from collections import Counter
+import difflib
 import re
 from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any, Tuple
@@ -10,6 +14,11 @@ CANDIDATE_STATUS_QUALIFIED = "QUALIFIED"
 CANDIDATE_STATUS_GROWING   = "GROWING"
 CANDIDATE_STATUS_WATCHLIST = "WATCHLIST"
 CANDIDATE_STATUS_REJECTED  = "REJECTED"
+
+TIER_STRICT_MATCH    = "STRICT_MATCH"
+TIER_BEST_AVAILABLE   = "BEST_AVAILABLE"
+TIER_MONITOR          = "MONITOR"
+TIER_NOT_RECOMMENDED  = "NOT_RECOMMENDED"
 
 SUBSCRIBER_VERIFIED_UNDER   = "VERIFIED_UNDER_LIMIT"
 SUBSCRIBER_HIDDEN           = "HIDDEN_UNVERIFIED"
@@ -37,17 +46,29 @@ STOP_WORDS = {
     "all","get","vs","video","youtube",
 }
 
-EVERGREEN_KEYWORDS = {"how","why","what","best","top","guide","tutorial","tips","learn",
+GENERIC_TERMS = {
+    "video", "videos", "youtube", "watch", "channel", "new", "best", "top",
+    "part", "episode", "full", "latest", "today", "official", "update",
+    "2023", "2024", "2025", "2026", "review", "free", "viral",
+}
+
+EVERGREEN_KEYWORDS = {
+    "how","why","what","best","top","guide","tutorial","tips","learn",
     "truth","secret","never","always","history","science","explained","works","does",
-    "should","really","actually","proven"}
+    "should","really","actually","proven"
+}
 
-NEWS_KEYWORDS = {"today","breaking","just","now","2024","2025","2026","latest","update",
+NEWS_KEYWORDS = {
+    "today","breaking","just","now","2024","2025","2026","latest","update",
     "news","reaction","responds","announces","official","season","episode","vs","match",
-    "game","live"}
+    "game","live"
+}
 
-REUSE_SIGNALS = {"compilation","react","reacts","reaction","watch","watching","story time",
+REUSE_SIGNALS = {
+    "compilation","react","reacts","reaction","watch","watching","story time",
     "storytime","shorts compilation","clips","moments","funny moments","best moments",
-    "top moments","tries","attempts"}
+    "top moments","tries","attempts"
+}
 
 STATUS_PRIORITY = {
     CANDIDATE_STATUS_QUALIFIED: 4,
@@ -70,6 +91,8 @@ def _parse_utc(iso_str: str) -> Optional[datetime]:
         dt = datetime.fromisoformat(clean)
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
         return dt
     except Exception:
         return None
@@ -89,53 +112,90 @@ def _percentile(sorted_vals: List[float], p: float) -> Optional[float]:
     return sorted_vals[lo] + frac * (sorted_vals[hi] - sorted_vals[lo])
 
 
+def _snap_field(s: Any, field: str, default: Any = None) -> Any:
+    if isinstance(s, dict):
+        val = s.get(field, default)
+        if val is None and field == "view_count":
+            val = s.get("views", default)
+        return val
+    val = getattr(s, field, default)
+    if val is None and field == "view_count":
+        val = getattr(s, "views", default)
+    return val
+
+
 def evaluate_video(
     video: Dict[str, Any],
     window_end: datetime,
     min_views: int = 10_000,
-    snapshots: Optional[List[Dict[str, Any]]] = None,
+    snapshots: Optional[List[Any]] = None,
 ) -> Dict[str, Any]:
+    """
+    Evaluate a candidate video for 90-day performance.
+    Statuses:
+      - PASS_VIEWS: views >= min_views
+      - PASS_GROWTH_CONFIRMED: confirmed by >= 2 snapshots meeting velocity criteria
+      - PASS_GROWTH_PROVISIONAL: <= 30d old with strong lifetime velocity, awaiting 2nd snapshot
+      - PENDING_TOO_NEW: age < 3 days (not counted in denominator)
+      - FAIL: evaluable video failing threshold
+      - EXCLUDED: missing/future date
+    """
     published_at = _parse_utc(video.get("published_at", ""))
     if published_at is None:
-        return {"evaluation_status": VIDEO_EXCLUDED, "growth_status": "UNKNOWN",
-                "evaluation_reason": "Missing or invalid published_at",
-                "lifetime_vpd": 0.0, "observed_vpd": None,
-                "projected_day_90": None, "snapshot_count": 0}
+        return {
+            "evaluation_status": VIDEO_EXCLUDED, "growth_status": "UNKNOWN",
+            "evaluation_reason": "Missing or invalid published_at",
+            "lifetime_vpd": 0.0, "observed_vpd": None,
+            "projected_day_90": None, "snapshot_count": 0
+        }
 
     now = window_end
     age_days = (now - published_at).total_seconds() / 86400.0
     if age_days < 0:
-        return {"evaluation_status": VIDEO_EXCLUDED, "growth_status": "UNKNOWN",
-                "evaluation_reason": "Published date is in the future (data anomaly)",
-                "lifetime_vpd": 0.0, "observed_vpd": None,
-                "projected_day_90": None, "snapshot_count": 0}
+        return {
+            "evaluation_status": VIDEO_EXCLUDED, "growth_status": "UNKNOWN",
+            "evaluation_reason": "Published date is in the future (data anomaly)",
+            "lifetime_vpd": 0.0, "observed_vpd": None,
+            "projected_day_90": None, "snapshot_count": 0
+        }
 
     views = int(video.get("views", 0) or 0)
     lifetime_vpd = views / max(age_days, 1.0)
     snap_count = len(snapshots) if snapshots else 0
 
+    # Under 3 days: PENDING_TOO_NEW, not counted in evaluable denominator
     if age_days < 3:
-        return {"evaluation_status": VIDEO_PENDING_TOO_NEW, "growth_status": VIDEO_PENDING_TOO_NEW,
-                "evaluation_reason": f"Video is only {age_days:.1f} days old; awaiting data maturity",
-                "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
-                "projected_day_90": None, "snapshot_count": snap_count}
+        return {
+            "evaluation_status": VIDEO_PENDING_TOO_NEW, "growth_status": VIDEO_PENDING_TOO_NEW,
+            "evaluation_reason": f"Video is only {age_days:.1f} days old; awaiting data maturity",
+            "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
+            "projected_day_90": None, "snapshot_count": snap_count
+        }
 
+    # Reached view threshold: PASS_VIEWS
     if views >= min_views:
-        return {"evaluation_status": VIDEO_PASS_VIEWS, "growth_status": VIDEO_PASS_VIEWS,
-                "evaluation_reason": f"{views:,} views >= {min_views:,} threshold",
-                "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
-                "projected_day_90": None, "snapshot_count": snap_count}
+        return {
+            "evaluation_status": VIDEO_PASS_VIEWS, "growth_status": VIDEO_PASS_VIEWS,
+            "evaluation_reason": f"{views:,} views >= {min_views:,} threshold",
+            "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
+            "projected_day_90": None, "snapshot_count": snap_count
+        }
 
     remaining_days = max(90.0 - age_days, 7.0)
     required_vpd = max(100.0, (min_views - views) / remaining_days)
     projected_day_90 = None
     observed_vpd = None
-    valid_snaps = []
 
+    # Check snapshots for confirmed growth
     if snapshots and len(snapshots) >= 2:
-        valid_snaps = sorted(
-            [s for s in snapshots if s.get("view_count") is not None and s.get("captured_at")],
-            key=lambda s: s["captured_at"])
+        valid_snaps = []
+        for s in snapshots:
+            vc = _snap_field(s, "view_count")
+            ca = _snap_field(s, "captured_at")
+            if vc is not None and ca:
+                valid_snaps.append({"view_count": int(vc), "captured_at": str(ca)})
+
+        valid_snaps.sort(key=lambda x: x["captured_at"])
         if len(valid_snaps) >= 2:
             oldest = valid_snaps[0]
             newest = valid_snaps[-1]
@@ -144,125 +204,281 @@ def evaluate_video(
             if dt_old and dt_new:
                 elapsed = (dt_new - dt_old).total_seconds() / 86400.0
                 delta_views = newest["view_count"] - oldest["view_count"]
-                if elapsed >= 0.25 and delta_views >= 0:
+                if elapsed >= 0.20 and delta_views >= 0:
                     observed_vpd = delta_views / elapsed
                     projected_day_90 = views + observed_vpd * remaining_days
 
     projected_lifetime = views + lifetime_vpd * remaining_days
 
+    # Evaluation with snapshots: confirmed growth
     if observed_vpd is not None and projected_day_90 is not None:
         velocity_retention = observed_vpd / max(lifetime_vpd, 1.0)
-        delta_views_recent = valid_snaps[-1]["view_count"] - valid_snaps[0]["view_count"] if valid_snaps else 0
+        delta_views_recent = (
+            valid_snaps[-1]["view_count"] - valid_snaps[0]["view_count"] if len(valid_snaps) >= 2 else 0
+        )
         growth_confirmed = (
             projected_day_90 >= min_views
-            and observed_vpd >= required_vpd * 1.20
-            and observed_vpd >= 100.0
-            and velocity_retention >= 0.80
-            and delta_views_recent >= max(500, views * 0.05)
+            and observed_vpd >= required_vpd * 1.15
+            and observed_vpd >= 80.0
+            and velocity_retention >= 0.75
+            and delta_views_recent >= max(300, views * 0.03)
         )
         if growth_confirmed:
-            return {"evaluation_status": VIDEO_PASS_GROWTH_CONFIRMED,
-                    "growth_status": VIDEO_PASS_GROWTH_CONFIRMED,
-                    "evaluation_reason": f"Observed VPD {observed_vpd:.0f} >= required {required_vpd:.0f}; projected day-90: {projected_day_90:,.0f} views",
-                    "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": round(observed_vpd, 2),
-                    "projected_day_90": round(projected_day_90, 1), "snapshot_count": snap_count}
+            return {
+                "evaluation_status": VIDEO_PASS_GROWTH_CONFIRMED,
+                "growth_status": VIDEO_PASS_GROWTH_CONFIRMED,
+                "evaluation_reason": f"Observed VPD {observed_vpd:.0f} >= required {required_vpd:.0f}; projected day-90: {projected_day_90:,.0f} views",
+                "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": round(observed_vpd, 2),
+                "projected_day_90": round(projected_day_90, 1), "snapshot_count": snap_count
+            }
         else:
-            return {"evaluation_status": VIDEO_FAIL, "growth_status": VIDEO_FAIL,
-                    "evaluation_reason": f"Observed VPD {observed_vpd:.0f} < required {required_vpd:.0f}",
-                    "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": round(observed_vpd, 2),
-                    "projected_day_90": round(projected_day_90, 1) if projected_day_90 else None,
-                    "snapshot_count": snap_count}
+            return {
+                "evaluation_status": VIDEO_FAIL, "growth_status": VIDEO_FAIL,
+                "evaluation_reason": f"Observed VPD {observed_vpd:.0f} < required {required_vpd:.0f}",
+                "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": round(observed_vpd, 2),
+                "projected_day_90": round(projected_day_90, 1) if projected_day_90 else None,
+                "snapshot_count": snap_count
+            }
 
-    if age_days <= 30 and projected_lifetime >= min_views and lifetime_vpd >= required_vpd * 1.50:
-        return {"evaluation_status": VIDEO_PASS_GROWTH_PROVISIONAL,
-                "growth_status": VIDEO_PASS_GROWTH_PROVISIONAL,
-                "evaluation_reason": f"Provisional: lifetime VPD {lifetime_vpd:.0f}, projected {projected_lifetime:,.0f} views by day-90",
-                "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
-                "projected_day_90": round(projected_lifetime, 1), "snapshot_count": snap_count}
-
-    return {"evaluation_status": VIDEO_FAIL, "growth_status": VIDEO_FAIL,
-            "evaluation_reason": f"{views:,} views; projected {projected_lifetime:,.0f} < {min_views:,} threshold",
+    # No multi-snapshot: provisional growth if video is <= 30d and pacing strongly
+    if age_days <= 30 and projected_lifetime >= min_views and lifetime_vpd >= required_vpd * 1.40:
+        return {
+            "evaluation_status": VIDEO_PASS_GROWTH_PROVISIONAL,
+            "growth_status": VIDEO_PASS_GROWTH_PROVISIONAL,
+            "evaluation_reason": f"Provisional: lifetime VPD {lifetime_vpd:.0f}, projected {projected_lifetime:,.0f} views by day-90",
             "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
-            "projected_day_90": round(projected_lifetime, 1), "snapshot_count": snap_count}
+            "projected_day_90": round(projected_lifetime, 1), "snapshot_count": snap_count
+        }
+
+    return {
+        "evaluation_status": VIDEO_FAIL, "growth_status": VIDEO_FAIL,
+        "evaluation_reason": f"{views:,} views; projected {projected_lifetime:,.0f} < {min_views:,} threshold",
+        "lifetime_vpd": round(lifetime_vpd, 2), "observed_vpd": None,
+        "projected_day_90": round(projected_lifetime, 1), "snapshot_count": snap_count
+    }
+
+
+class NicheMatchResult(tuple):
+    """
+    Subclasses tuple to return (score, reason, matched_topics, matched_video_ids)
+    for 100% backward-compatibility, while exposing .evidence dictionary.
+    """
+    def __new__(cls, score: float, reason: str, matched_topics: List[str], matched_video_ids: List[str], evidence: Optional[Dict[str, Any]] = None):
+        return super().__new__(cls, (score, reason, matched_topics, matched_video_ids))
+
+    def __init__(self, score: float, reason: str, matched_topics: List[str], matched_video_ids: List[str], evidence: Optional[Dict[str, Any]] = None):
+        self.score = score
+        self.reason = reason
+        self.matched_topics = matched_topics
+        self.matched_video_ids = matched_video_ids
+        self.evidence = evidence or {}
 
 
 def compute_niche_match_score(
     source_fingerprint: Dict[str, Any],
     candidate_videos: List[Dict[str, Any]],
-) -> Tuple[float, str, List[str], List[str]]:
+    candidate_country: Optional[str] = None,
+) -> NicheMatchResult:
+    """
+    Channel-level Niche Match Score (0 - 100):
+      - 30% Semantic / Title similarity (median of top-k best title matches against source titles)
+      - 20% Weighted source fingerprint coverage (Lexical F1 on weighted terms)
+      - 15% Entity overlap
+      - 15% Topic-cluster coverage
+      - 10% Audience-problem similarity
+      - 5% Format compatibility
+      - 5% Market/language compatibility
+    """
+    empty_evidence = {
+        "source_coverage": 0.0, "candidate_precision": 0.0,
+        "median_title_similarity": 0.0, "matched_terms": [],
+        "matched_entities": [], "matched_clusters": [],
+        "niche_match_reason": "Insufficient data for niche comparison",
+    }
     if not source_fingerprint or not candidate_videos:
-        return 0.0, "Insufficient data for niche comparison", [], []
+        return NicheMatchResult(0.0, "Insufficient data for niche comparison", [], [], empty_evidence)
 
-    source_terms = set(source_fingerprint.get("recurring_phrases", []))
-    source_entities = set(e.lower() for e in source_fingerprint.get("recurring_entities", []))
-    source_clusters = set(c.lower() for c in source_fingerprint.get("topic_clusters", []))
-    source_format = set(f.lower() for f in source_fingerprint.get("dominant_formats", []))
+    cand_titles = [v.get("title", "") for v in candidate_videos if v.get("title")]
+    if not cand_titles:
+        return NicheMatchResult(0.0, "No valid titles for niche comparison", [], [], empty_evidence)
+
+    source_titles = source_fingerprint.get("source_video_titles") or source_fingerprint.get("source_titles") or []
     core_subject = (source_fingerprint.get("core_subject") or "").lower()
     audience_problem = (source_fingerprint.get("audience_problem") or "").lower()
+    source_entities = [e.lower() for e in source_fingerprint.get("recurring_entities", [])]
+    source_clusters = [c.lower() for c in source_fingerprint.get("topic_clusters", [])]
+    source_formats = [f.lower() for f in source_fingerprint.get("dominant_formats", [])]
 
-    candidate_tokens: List[set] = []
-    matched_video_ids: List[str] = []
-    matched_topics: List[str] = []
-    per_video_sim: List[float] = []
+    # ── 1. Semantic / Title Similarity (30%) ─────────────────────────────────
+    # For each candidate title, find its best matching source title
+    best_sims: List[float] = []
+    comparison_targets = source_titles if source_titles else (
+        source_clusters + [core_subject, audience_problem] + source_entities
+    )
+    comparison_targets = [t for t in comparison_targets if t and len(t) >= 3]
 
-    for v in candidate_videos:
-        title_tokens = set(_tokenize(v.get("title", "")))
-        candidate_tokens.append(title_tokens)
-        if source_terms:
-            hit = len(title_tokens & source_terms) / len(source_terms) * 100
+    for ct in cand_titles:
+        ct_toks = set(_tokenize(ct))
+        best_for_ct = 0.0
+        for st in comparison_targets:
+            st_toks = set(_tokenize(st))
+            jaccard = len(ct_toks & st_toks) / max(len(ct_toks | st_toks), 1)
+            seq = difflib.SequenceMatcher(None, ct.lower(), st.lower()).ratio()
+            sim = (0.55 * jaccard + 0.45 * seq) * 100.0
+            if sim > best_for_ct:
+                best_for_ct = sim
+        best_sims.append(best_for_ct)
+
+    k = min(len(best_sims), 8)
+    top_k_sims = sorted(best_sims, reverse=True)[:k]
+    median_title_sim = _percentile(sorted(top_k_sims), 50) if top_k_sims else 0.0
+
+    # ── 2. Weighted Fingerprint Coverage & Lexical F1 (20%) ──────────────────
+    weighted_terms = source_fingerprint.get("weighted_terms")
+    if not weighted_terms:
+        # Construct fallback weighted terms from phrases, entities, clusters
+        weighted_terms = []
+        if core_subject:
+            weighted_terms.append({"term": core_subject, "weight": 1.0, "type": "core"})
+        for p in source_fingerprint.get("recurring_phrases", [])[:8]:
+            w = 0.85 if p not in GENERIC_TERMS else 0.3
+            weighted_terms.append({"term": p, "weight": w, "type": "phrase"})
+        for e in source_entities[:6]:
+            w = 0.90 if e not in GENERIC_TERMS else 0.3
+            weighted_terms.append({"term": e, "weight": w, "type": "entity"})
+        for cl in source_clusters[:4]:
+            weighted_terms.append({"term": cl, "weight": 0.75, "type": "cluster"})
+
+    matched_terms: List[str] = []
+    matched_src_wt = 0.0
+    total_src_wt = 0.0
+
+    all_cand_text = " ".join(cand_titles).lower()
+    all_cand_tokens = set()
+    for ct in cand_titles:
+        all_cand_tokens.update(_tokenize(ct))
+
+    for item in weighted_terms:
+        term = str(item.get("term", "")).lower().strip()
+        weight = float(item.get("weight", 0.5))
+        total_src_wt += weight
+
+        is_match = False
+        if " " in term:
+            if term in all_cand_text:
+                is_match = True
+            else:
+                toks = set(_tokenize(term))
+                if toks and len(toks & all_cand_tokens) >= max(1, len(toks) - 1):
+                    is_match = True
         else:
-            hit = 0.0
-        per_video_sim.append(hit)
+            if term in all_cand_tokens or term in all_cand_text:
+                is_match = True
 
-    s_score = sum(per_video_sim) / len(per_video_sim) if per_video_sim else 0.0
+        if is_match:
+            matched_src_wt += weight
+            matched_terms.append(term)
 
-    all_cand_tokens = set().union(*candidate_tokens) if candidate_tokens else set()
-    e_score = (len(all_cand_tokens & source_entities) / len(source_entities) * 100
-               if source_entities else 50.0)
+    source_cov = matched_src_wt / max(total_src_wt, 0.001)
 
-    cluster_hits = 0
-    for tokens in candidate_tokens:
-        for cluster in source_clusters:
-            if any(w in tokens for w in cluster.split()):
-                cluster_hits += 1
-                matched_topics.append(cluster)
-                break
-    t_score = (min(cluster_hits / len(source_clusters) * 100, 100.0)
-               if source_clusters else 50.0)
+    cand_tok_count = Counter()
+    for ct in cand_titles:
+        for t in _tokenize(ct):
+            cand_tok_count[t] += 1
+    freq_cand_tokens = [t for t, c in cand_tok_count.items() if c >= 2]
+    matched_cand_count = sum(1 for t in freq_cand_tokens if any(t in str(item.get("term","")).lower() for item in weighted_terms))
+    cand_prec = matched_cand_count / max(len(freq_cand_tokens), 1)
 
-    core_terms = set(_tokenize(core_subject + " " + audience_problem))
-    if core_terms:
-        a_hits = sum(1 for tokens in candidate_tokens if tokens & core_terms)
-        a_score = a_hits / len(candidate_tokens) * 100
+    lexical_f1 = (2.0 * source_cov * cand_prec) / max(source_cov + cand_prec, 0.001)
+    lexical_f1_score = _clamp(lexical_f1 * 100.0)
+
+    # ── 3. Entity Overlap (15%) ──────────────────────────────────────────────
+    matched_entities = []
+    if source_entities:
+        for ent in source_entities:
+            if ent in all_cand_text or ent in all_cand_tokens:
+                matched_entities.append(ent)
+        entity_score = (len(matched_entities) / max(len(source_entities), 1)) * 100.0
     else:
-        a_score = 50.0
+        entity_score = 65.0
 
-    format_signal_words = {"tutorial", "guide", "how", "what", "why", "vs", "review", "explained"}
-    if source_format:
-        format_tokens = set().union(*(set(f.split()) for f in source_format))
-        f_hits = sum(1 for tokens in candidate_tokens if tokens & format_tokens)
+    # ── 4. Topic Cluster Coverage (15%) ──────────────────────────────────────
+    matched_clusters = []
+    if source_clusters:
+        for cl in source_clusters:
+            cl_words = set(_tokenize(cl))
+            if any(bool(set(_tokenize(ct)) & cl_words) for ct in cand_titles):
+                matched_clusters.append(cl)
+        cluster_score = (len(matched_clusters) / max(len(source_clusters), 1)) * 100.0
     else:
-        f_hits = sum(1 for tokens in candidate_tokens if tokens & format_signal_words)
-    f_score = f_hits / max(len(candidate_tokens), 1) * 100
+        cluster_score = 65.0
 
-    m_score = 80.0
-    raw = (0.35*s_score + 0.20*e_score + 0.15*t_score + 0.10*a_score + 0.10*f_score + 0.10*m_score)
-    score = _clamp(raw)
+    # ── 5. Audience Problem Similarity (10%) ─────────────────────────────────
+    core_prob_terms = set(_tokenize(core_subject + " " + audience_problem))
+    if core_prob_terms:
+        prob_hits = sum(1 for ct in cand_titles if bool(set(_tokenize(ct)) & core_prob_terms))
+        prob_score = min(100.0, (prob_hits / max(len(cand_titles), 1)) * 135.0)
+    else:
+        prob_score = 65.0
 
+    # ── 6. Format Compatibility (5%) ─────────────────────────────────────────
+    fmt_signals = {"how", "why", "what", "tutorial", "guide", "vs", "review", "explained", "case study", "deep dive"}
+    target_fmts = set(source_formats) if source_formats else fmt_signals
+    cand_fmt_matches = sum(1 for ct in cand_titles if any(f in ct.lower() for f in target_fmts))
+    fmt_score = min(100.0, (cand_fmt_matches / max(len(cand_titles), 1)) * 140.0)
+
+    # ── 7. Market / Language Compatibility (5%) ──────────────────────────────
+    src_market = str(source_fingerprint.get("target_market", "US")).upper()
+    if candidate_country:
+        market_score = 100.0 if candidate_country.upper() == src_market else 55.0
+    else:
+        market_score = 80.0
+
+    # ── Overall Formula ──────────────────────────────────────────────────────
+    raw_niche = (
+        0.30 * median_title_sim
+        + 0.20 * lexical_f1_score
+        + 0.15 * entity_score
+        + 0.15 * cluster_score
+        + 0.10 * prob_score
+        + 0.05 * fmt_score
+        + 0.05 * market_score
+    )
+    final_niche = round(_clamp(raw_niche), 2)
+
+    # Matched Video IDs
+    matched_video_ids = []
+    for v in candidate_videos:
+        t = v.get("title", "")
+        toks = set(_tokenize(t))
+        if (toks & core_prob_terms) or any(c in t.lower() for c in matched_clusters):
+            vid = v.get("video_id")
+            if vid and vid not in matched_video_ids:
+                matched_video_ids.append(vid)
+
+    # Explainable Reason
     reason_parts = []
-    if s_score >= 60:
-        reason_parts.append(f"Keyword similarity {s_score:.0f}/100")
-    if cluster_hits >= 3:
-        reason_parts.append(f"{cluster_hits} topic cluster matches")
+    if median_title_sim >= 40:
+        reason_parts.append(f"Title alignment {median_title_sim:.0f}/100")
+    if matched_terms:
+        reason_parts.append(f"{len(matched_terms)} key term matches ({', '.join(matched_terms[:3])})")
+    if matched_clusters:
+        reason_parts.append(f"{len(matched_clusters)} topic cluster matches")
     if not reason_parts:
-        reason_parts.append(f"Partial keyword overlap; niche score {score:.0f}/100")
-    reason = "; ".join(reason_parts[:3])
+        reason_parts.append(f"Broad niche affinity; score {final_niche:.0f}/100")
+    reason_str = "; ".join(reason_parts[:3])
 
-    for v, sim in zip(candidate_videos, per_video_sim):
-        if sim >= 30 or (set(_tokenize(v.get("title", ""))) & core_terms):
-            matched_video_ids.append(v.get("video_id", ""))
+    evidence_dict = {
+        "source_coverage": round(source_cov, 4),
+        "candidate_precision": round(cand_prec, 4),
+        "median_title_similarity": round(median_title_sim, 2),
+        "matched_terms": matched_terms[:10],
+        "matched_entities": matched_entities[:8],
+        "matched_clusters": matched_clusters[:6],
+        "niche_match_reason": reason_str,
+    }
 
-    return round(score, 2), reason, list(dict.fromkeys(matched_topics))[:8], matched_video_ids[:10]
+    return NicheMatchResult(final_niche, reason_str, matched_clusters[:8], matched_video_ids[:10], evidence_dict)
 
 
 def compute_recent_consistency_score(
@@ -277,11 +493,13 @@ def compute_recent_consistency_score(
         return 0.0
     strict_pass = passed_views + passed_growth_confirmed
     strict_ratio = strict_pass / evaluable
-    base = strict_ratio * 85.0
-    if passed_growth_confirmed > 0 and evaluable > 0:
-        base += (passed_growth_confirmed / evaluable) * 10.0
+    base = strict_ratio * 80.0
+    if passed_growth_confirmed > 0:
+        base += min(10.0, (passed_growth_confirmed / evaluable) * 10.0)
+    if passed_growth_provisional > 0:
+        base += min(5.0, (passed_growth_provisional / evaluable) * 5.0)
     if single_hit_dep > 0.45:
-        base -= (single_hit_dep - 0.45) / 0.55 * 20.0
+        base -= (single_hit_dep - 0.45) / 0.55 * 18.0
     if evaluable >= 6:
         base += 5.0
     return _clamp(base)
@@ -296,8 +514,8 @@ def compute_growth_quality_score(
 ) -> float:
     if evaluable == 0:
         return 30.0
-    base = (passed_growth_confirmed / evaluable) * 60.0
-    base += (passed_growth_provisional / evaluable) * 10.0
+    base = (passed_growth_confirmed / evaluable) * 55.0
+    base += (passed_growth_provisional / evaluable) * 15.0
     base += (passed_views / evaluable) * 20.0
     if avg_lifetime_vpd >= 500:
         base += 10.0
@@ -428,7 +646,7 @@ def compute_monetization_viability_score(
         evidence.append("Assessment based on public title/metadata analysis only.")
     evidence.append(
         "Monetization Viability Estimate — not a YPP status declaration. "
-        "Watch hours, RPM, and revenue data are not publicly accessible."
+        "Watch hours, RPM, CPM, and revenue data are not publicly accessible."
     )
     if flags:
         evidence.append(f"Policy risk indicators: {', '.join(flags)}")
@@ -442,6 +660,7 @@ def compute_data_confidence(
     has_snapshots: bool,
     has_12mo_history: bool,
     enrichment_errors: int,
+    window_coverage: str = "COMPLETE",
 ) -> Tuple[str, float, List[str]]:
     limitations: List[str] = []
 
@@ -463,13 +682,17 @@ def compute_data_confidence(
         score += 15.0
         limitations.append(f"Only {evaluable_count} evaluable videos; confidence is moderate.")
 
-    score += 25.0 if has_snapshots else 5.0
+    score += 20.0 if has_snapshots else 5.0
     if not has_snapshots:
-        limitations.append("No velocity snapshots available.")
+        limitations.append("No multi-point velocity snapshots available.")
 
-    score += 20.0 if has_12mo_history else 5.0
+    score += 15.0 if has_12mo_history else 5.0
     if not has_12mo_history:
         limitations.append("12-month upload history not fully available.")
+
+    if window_coverage != "COMPLETE":
+        score = max(0.0, score - 10.0)
+        limitations.append("90-day window coverage is partial or unconfirmed.")
 
     if enrichment_errors >= 2:
         score = max(0.0, score - 15.0)
@@ -496,8 +719,14 @@ def compute_final_score(
     monetization_viability: float,
     data_confidence: float,
 ) -> float:
-    raw = (0.25*niche_match + 0.25*recent_consistency + 0.15*growth_quality
-           + 0.20*durability + 0.10*monetization_viability + 0.05*data_confidence)
+    raw = (
+        0.25 * niche_match
+        + 0.25 * recent_consistency
+        + 0.15 * growth_quality
+        + 0.20 * durability
+        + 0.10 * monetization_viability
+        + 0.05 * data_confidence
+    )
     return round(_clamp(raw), 2)
 
 
@@ -510,51 +739,85 @@ def determine_candidate_status(
     has_growth_provisional: bool,
     final_score: float,
     data_confidence: str,
+    window_coverage: str = "COMPLETE",
 ) -> Tuple[str, List[str], List[str]]:
+    """
+    Classify candidate into QUALIFIED, GROWING, WATCHLIST, or REJECTED.
+    Keeps QUALIFIED standard strictly high per Section IX.
+    Never throws an eligible <50K channel with ~70% pass rate into REJECTED.
+    """
     qual: List[str] = []
     rej: List[str] = []
 
+    # Disqualification Rule 1: Verified subscribers exceed 50,000
     if subscriber_status == SUBSCRIBER_REJECTED_OVER:
         rej.append("Subscriber count exceeds 50,000 verified limit.")
         return CANDIDATE_STATUS_REJECTED, qual, rej
 
-    if niche_match_score < 65:
-        rej.append(f"Niche Match Score {niche_match_score:.0f} is below minimum 65.")
+    # Disqualification Rule 2: Niche Match is too low
+    if niche_match_score < 50.0:
+        rej.append(f"Niche Match Score {niche_match_score:.0f} is below minimum 50.")
         return CANDIDATE_STATUS_REJECTED, qual, rej
 
-    if evaluable_count < 3:
-        rej.append(f"Only {evaluable_count} evaluable video(s); minimum 3 required.")
-        return CANDIDATE_STATUS_WATCHLIST, qual, rej
+    # Disqualification Rule 3: Zero evaluable videos
+    if evaluable_count == 0:
+        rej.append("No evaluable videos in the 90-day window.")
+        return CANDIDATE_STATUS_REJECTED, qual, rej
 
-    if (subscriber_status == SUBSCRIBER_VERIFIED_UNDER
-            and niche_match_score >= 75
-            and strict_success_ratio >= 1.0
-            and final_score >= 78
-            and data_confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM)):
-        qual.append(f"All {evaluable_count} evaluable videos passed the 90-day threshold.")
+    # QUALIFIED: Strict qualification criteria
+    is_qualified = (
+        subscriber_status == SUBSCRIBER_VERIFIED_UNDER
+        and niche_match_score >= 75.0
+        and evaluable_count >= 3
+        and strict_success_ratio >= 1.0
+        and final_score >= 78.0
+        and data_confidence in (CONFIDENCE_HIGH, CONFIDENCE_MEDIUM)
+        and window_coverage == "COMPLETE"
+    )
+    if is_qualified:
+        qual.append(f"All {evaluable_count} evaluable videos passed the 90-day performance threshold.")
         qual.append(f"Niche Match Score {niche_match_score:.0f} >= 75 with verified subscriber count.")
         qual.append(f"Final Score {final_score:.1f} meets QUALIFIED threshold (>=78).")
         return CANDIDATE_STATUS_QUALIFIED, qual, rej
 
-    if (subscriber_status == SUBSCRIBER_VERIFIED_UNDER
-            and niche_match_score >= 75
-            and provisional_success_ratio >= 1.0
-            and has_growth_provisional
-            and final_score >= 70):
+    # GROWING: Provisional growth qualification
+    is_growing = (
+        subscriber_status == SUBSCRIBER_VERIFIED_UNDER
+        and niche_match_score >= 75.0
+        and evaluable_count >= 3
+        and provisional_success_ratio >= 1.0
+        and has_growth_provisional
+        and final_score >= 70.0
+    )
+    if is_growing:
         qual.append("All evaluable videos pass with at least provisional growth confirmation.")
         qual.append(f"Niche Match Score {niche_match_score:.0f} >= 75.")
         rej.append("Growth confirmation is provisional; awaiting snapshot verification.")
         return CANDIDATE_STATUS_GROWING, qual, rej
 
-    if niche_match_score >= 65:
+    # WATCHLIST: Candidates worth monitoring (Section IX)
+    # Channel under 50K with ~70% pass rate, good median views, or reasonable niche match
+    is_watchlist = (
+        niche_match_score >= 60.0
+        or strict_success_ratio >= 0.65
+        or final_score >= 48.0
+    )
+    if is_watchlist:
         if subscriber_status == SUBSCRIBER_HIDDEN:
-            rej.append("Subscriber count is hidden; cannot verify the 50K limit.")
-        if strict_success_ratio < 0.80:
-            rej.append(f"Strict success ratio {strict_success_ratio:.0%} is below 80%.")
-        qual.append(f"Partial niche match (score {niche_match_score:.0f}) warrants monitoring.")
+            rej.append("Subscriber count is hidden / unverified; cannot confirm the 50K limit.")
+        if strict_success_ratio < 1.0:
+            rej.append(f"Strict pass rate is {strict_success_ratio:.0%}; 100% required for Qualified.")
+        if niche_match_score < 75.0:
+            rej.append(f"Niche Match Score is {niche_match_score:.0f}; 75 required for Qualified.")
+        if evaluable_count < 3:
+            rej.append(f"Only {evaluable_count} evaluable video(s); minimum 3 required for Qualified.")
+        if window_coverage != "COMPLETE":
+            rej.append(f"90-day window coverage is {window_coverage}; complete coverage required for Qualified.")
+        qual.append(f"Candidate has Niche Match {niche_match_score:.0f} and Pass Rate {strict_success_ratio:.0%}.")
         return CANDIDATE_STATUS_WATCHLIST, qual, rej
 
-    rej.append(f"Success ratio {strict_success_ratio:.0%} is below 80% minimum.")
+    # Otherwise REJECTED with specific reason
+    rej.append(f"Candidate does not meet minimum thresholds (Niche {niche_match_score:.0f}, Pass Rate {strict_success_ratio:.0%}).")
     return CANDIDATE_STATUS_REJECTED, qual, rej
 
 
@@ -610,7 +873,58 @@ def compute_topic_clusters(titles: List[str], min_freq: int = 2) -> Tuple[int, i
     return max(1, len(common) // 3), len(common) * 2
 
 
+def compute_qualification_gap_score(candidate: Dict[str, Any]) -> float:
+    """
+    Computes a distance/gap score to Qualified status.
+    Lower score = closer to Qualified.
+    Candidates with verified subscribers > 50K receive maximum gap penalty (999.0).
+    """
+    sub_status = candidate.get("subscriber_status", "")
+    if sub_status == SUBSCRIBER_REJECTED_OVER:
+        return 999.0
+
+    gap = 0.0
+    scores = candidate.get("scores", {})
+    final_s = scores.get("final_score", candidate.get("final_score", 0.0))
+    niche_s = scores.get("niche_match_score", candidate.get("niche_match_score", 0.0))
+    strict_r = candidate.get("strict_success_ratio", 0.0)
+    evaluable = candidate.get("evaluable_video_count", 0)
+
+    if sub_status == SUBSCRIBER_HIDDEN:
+        gap += 12.0
+
+    if strict_r < 1.0:
+        gap += (1.0 - strict_r) * 45.0
+
+    if niche_s < 75.0:
+        gap += (75.0 - niche_s) * 0.40
+
+    if final_s < 78.0:
+        gap += (78.0 - final_s) * 0.25
+
+    if evaluable < 3:
+        gap += (3 - evaluable) * 12.0
+
+    cov = candidate.get("window_coverage", "UNKNOWN")
+    if cov != "COMPLETE":
+        gap += 4.0
+
+    return round(max(0.0, gap), 2)
+
+
 def rank_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Sort candidates per Section XI tie-break rules:
+      1. Status priority
+      2. Final score
+      3. Strict success ratio
+      4. Data confidence score
+      5. Durability score
+      6. Niche Match score
+      7. Lower single-hit dependency
+      8. Higher median recent views
+      9. Channel ID for deterministic tie-break
+    """
     def sort_key(c: Dict[str, Any]):
         scores = c.get("scores", {})
         return (
@@ -630,14 +944,119 @@ def rank_candidates(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return sorted_c
 
 
-def select_most_promising(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def select_best_available_and_recommendations(
+    candidates: List[Dict[str, Any]]
+) -> Tuple[Optional[Dict[str, Any]], List[Dict[str, Any]], str]:
+    """
+    Section X: Best Available Fallback.
+    Assigns:
+      - recommendation_tier: STRICT_MATCH | BEST_AVAILABLE | MONITOR | NOT_RECOMMENDED
+      - unmet_criteria: List[str]
+      - is_best_available: bool
+      - best_available_rank: Optional[int]
+      - qualification_gap_score: float
+
+    Selection hierarchy:
+      1. Qualified -> Highlight #1 Qualified (STRICT_MATCH)
+      2. Growing -> Highlight #1 Growing (STRICT_MATCH)
+      3. Watchlist -> Highlight closest available candidate (BEST_AVAILABLE)
+    """
+    # 1. Compute unmet criteria and gap score for each candidate
+    for c in candidates:
+        unmet: List[str] = []
+        strict_r = c.get("strict_success_ratio", 0.0)
+        if strict_r < 1.0:
+            unmet.append(f"Pass rate is {strict_r:.0%}; strict requirement is 100%")
+
+        niche_s = c.get("scores", {}).get("niche_match_score", c.get("niche_match_score", 0.0))
+        if niche_s < 75.0:
+            unmet.append(f"Niche Match is {niche_s:.0f}; Qualified requirement is 75")
+
+        eval_v = c.get("evaluable_video_count", 0)
+        if eval_v < 3:
+            unmet.append(f"Only {eval_v} evaluable video(s); minimum 3 required")
+
+        sub_s = c.get("subscriber_status", "")
+        if sub_s == SUBSCRIBER_HIDDEN:
+            unmet.append("Subscriber count is hidden; cannot verify the 50K limit")
+        elif sub_s == SUBSCRIBER_REJECTED_OVER:
+            unmet.append("Subscriber count exceeds 50,000 verified limit")
+
+        cov = c.get("window_coverage", "UNKNOWN")
+        if cov != "COMPLETE":
+            unmet.append(f"Window coverage is {cov.lower()}; complete window required")
+
+        has_multi_snap = any(v.get("snapshot_count", 0) >= 2 for v in c.get("recent_videos", []))
+        if not has_multi_snap and c.get("status") != CANDIDATE_STATUS_QUALIFIED:
+            unmet.append("Only single data snapshot available; growth unconfirmed")
+
+        final_s = c.get("scores", {}).get("final_score", c.get("final_score", 0.0))
+        if final_s < 78.0:
+            unmet.append(f"Final score is {final_s:.1f}; Qualified requirement is 78.0")
+
+        c["unmet_criteria"] = unmet
+        c["qualification_gap_score"] = compute_qualification_gap_score(c)
+        c["is_best_available"] = False
+        c["best_available_rank"] = None
+        c["recommendation_tier"] = TIER_MONITOR if c.get("status") != CANDIDATE_STATUS_REJECTED else TIER_NOT_RECOMMENDED
+
+    # 2. Check for Qualified
     qualified = [c for c in candidates if c.get("status") == CANDIDATE_STATUS_QUALIFIED]
     if qualified:
-        return qualified[0]
+        for q in qualified:
+            q["recommendation_tier"] = TIER_STRICT_MATCH
+        for g in candidates:
+            if g.get("status") == CANDIDATE_STATUS_GROWING:
+                g["recommendation_tier"] = TIER_STRICT_MATCH
+        top_qual = qualified[0]
+        top_qual["is_most_promising"] = True
+        top_qual["most_promising_label"] = "#1 MOST PROMISING COMPETITOR"
+        return top_qual, qualified[:5], TIER_STRICT_MATCH
+
+    # 3. Check for Growing
     growing = [c for c in candidates if c.get("status") == CANDIDATE_STATUS_GROWING]
     if growing:
-        return growing[0]
-    return None
+        for g in growing:
+            g["recommendation_tier"] = TIER_STRICT_MATCH
+        top_grow = growing[0]
+        top_grow["is_most_promising"] = True
+        top_grow["most_promising_label"] = "BEST GROWING CANDIDATE"
+        return top_grow, growing[:5], TIER_STRICT_MATCH
+
+    # 4. Fallback to Best Available (from Watchlist / eligible candidates)
+    # Must NOT have verified subscribers > 50K, must have evaluable >= 1, niche match >= 50
+    eligible = [
+        c for c in candidates
+        if c.get("subscriber_status") != SUBSCRIBER_REJECTED_OVER
+        and c.get("evaluable_video_count", 0) >= 1
+        and (c.get("scores", {}).get("niche_match_score", c.get("niche_match_score", 0.0))) >= 50.0
+    ]
+    # Sort eligible by qualification_gap_score ascending, then final_score descending
+    eligible.sort(key=lambda c: (
+        c.get("qualification_gap_score", 999.0),
+        -(c.get("scores", {}).get("final_score") or 0),
+        -(c.get("strict_success_ratio") or 0),
+    ))
+
+    if eligible:
+        best_cands = eligible[:5]
+        for idx, bc in enumerate(best_cands):
+            bc["is_best_available"] = True
+            bc["best_available_rank"] = idx + 1
+            bc["recommendation_tier"] = TIER_BEST_AVAILABLE
+
+        top_best = best_cands[0]
+        top_best["is_most_promising"] = True
+        top_best["most_promising_label"] = "BEST AVAILABLE CANDIDATE"
+        return top_best, best_cands, "BEST_AVAILABLE"
+
+    return None, [], "NONE"
+
+
+def select_most_promising(candidates: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Legacy helper maintained for backward compatibility."""
+    top, _, _ = select_best_available_and_recommendations(candidates)
+    return top
 
 
 def build_most_promising_reasons(candidate: Dict[str, Any]) -> List[str]:
@@ -647,6 +1066,8 @@ def build_most_promising_reasons(candidate: Dict[str, Any]) -> List[str]:
               + candidate.get("passed_growth_confirmed_count", 0))
     if passed >= ev and ev > 0:
         reasons.append(f"All {ev} evaluable video(s) passed the 90-day performance threshold.")
+    elif ev > 0:
+        reasons.append(f"{passed}/{ev} evaluable video(s) passed 10K+ view threshold ({candidate.get('strict_success_ratio', 0.0):.0%} pass rate).")
 
     median_v = candidate.get("median_recent_views")
     subs = candidate.get("subscriber_count")
@@ -655,19 +1076,20 @@ def build_most_promising_reasons(candidate: Dict[str, Any]) -> List[str]:
     elif median_v:
         reasons.append(f"Median 90-day views: {int(median_v):,} across evaluable uploads.")
 
+    niche_s = candidate.get("scores", {}).get("niche_match_score", candidate.get("niche_match_score", 0))
     months = candidate.get("active_months_last_12", 0)
-    shd = candidate.get("single_hit_dependency", 1.0)
     if months >= 6:
+        shd = candidate.get("single_hit_dependency", 1.0)
         dep_note = "with low single-hit dependency" if shd < 0.40 else ""
         reasons.append(f"Active {months}/12 months in the past year {dep_note}.")
-    elif candidate.get("niche_match_score", 0) >= 80:
-        reasons.append(f"Niche Match Score {candidate.get('niche_match_score', 0):.0f}/100 indicates strong topic alignment.")
+    elif niche_s >= 65:
+        reasons.append(f"Niche Match Score {niche_s:.0f}/100 indicates strong topic alignment.")
 
     fallbacks = [
         f"Final Score: {candidate.get('scores', {}).get('final_score', 0):.1f}/100.",
-        f"Status: {candidate.get('status', 'N/A')}.",
-        f"Growth Quality: {candidate.get('scores', {}).get('growth_quality_score', 0):.1f}/100.",
+        f"Durability Score: {candidate.get('scores', {}).get('durability_score', 0):.1f}/100.",
+        f"Recommendation Tier: {candidate.get('recommendation_tier', candidate.get('status', 'N/A'))}.",
     ]
     while len(reasons) < 3:
-        reasons.append(fallbacks.pop(0) if fallbacks else "See detailed score breakdown.")
+        reasons.append(fallbacks.pop(0) if fallbacks else "See score breakdown for details.")
     return reasons[:3]

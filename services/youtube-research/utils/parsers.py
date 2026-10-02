@@ -1,6 +1,6 @@
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 
 def parse_view_count(raw: Optional[str]) -> int:
     if not raw:
@@ -174,3 +174,61 @@ def calculate_age_days(published_at_str: str) -> float:
         return max(diff, 0.04)
     except Exception:
         return 1.0
+
+
+def parse_published_date_with_quality(raw_value: Optional[str]) -> Dict[str, Any]:
+    """
+    Parse published date and classify date quality.
+    Does NOT default empty values to current time.
+    Returns:
+        {
+            "published_at": datetime | None (in UTC),
+            "date_quality": "VERIFIED" | "APPROXIMATED" | "UNKNOWN"
+        }
+    """
+    if not raw_value or not str(raw_value).strip():
+        return {"published_at": None, "date_quality": "UNKNOWN"}
+
+    clean = str(raw_value).strip()
+
+    # 1. Try ISO format (Official YouTube API returns RFC3339 / ISO format like 2024-05-12T10:30:00Z)
+    if "T" in clean:
+        try:
+            iso_clean = clean.replace("Z", "+00:00")
+            dt = datetime.fromisoformat(iso_clean)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return {"published_at": dt, "date_quality": "VERIFIED"}
+        except Exception:
+            pass
+
+    # 2. Try Relative Date approximation (e.g. "2 weeks ago", "3 days ago", "1 month ago")
+    relative_keywords = [
+        "ago", "second", "minute", "hour", "day", "week", "month", "year",
+        "giây", "phút", "giờ", "ngày", "tuần", "tháng", "năm", "trước",
+    ]
+    low = clean.lower()
+    if any(k in low for k in relative_keywords):
+        try:
+            approx_iso = approximate_published_date(clean)
+            dt = datetime.fromisoformat(approx_iso.replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            else:
+                dt = dt.astimezone(timezone.utc)
+            return {"published_at": dt, "date_quality": "APPROXIMATED"}
+        except Exception:
+            pass
+
+    # 3. Try standard date patterns like YYYY-MM-DD
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%m/%d/%Y", "%Y/%m/%d"):
+        try:
+            dt = datetime.strptime(clean, fmt).replace(tzinfo=timezone.utc)
+            return {"published_at": dt, "date_quality": "VERIFIED"}
+        except Exception:
+            pass
+
+    return {"published_at": None, "date_quality": "UNKNOWN"}
+

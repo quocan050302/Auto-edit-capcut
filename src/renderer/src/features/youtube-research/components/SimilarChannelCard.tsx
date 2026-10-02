@@ -67,33 +67,78 @@ export function SimilarChannelCard({ candidate, defaultExpanded = false }: Props
   const cfg = STATUS_CONFIG[candidate.status] ?? STATUS_CONFIG.WATCHLIST
   const sc = candidate.scores
   const isMP = candidate.is_most_promising
+  const isBestAvailable = Boolean(candidate.is_best_available || candidate.recommendation_tier === 'BEST_AVAILABLE')
 
   return (
     <div id={`similar-channel-card-${candidate.rank}`} style={{
-      background: isMP ? 'linear-gradient(135deg, rgba(200,150,12,0.14) 0%, rgba(30,32,60,0.95) 100%)' : 'rgba(255,255,255,0.03)',
-      border: isMP ? '1.5px solid rgba(200,150,12,0.45)' : `1px solid ${cfg.border}`,
+      background: isMP
+        ? 'linear-gradient(135deg, rgba(200,150,12,0.14) 0%, rgba(30,32,60,0.95) 100%)'
+        : isBestAvailable
+          ? 'linear-gradient(135deg, rgba(168,85,247,0.12) 0%, rgba(20,20,35,0.95) 100%)'
+          : 'rgba(255,255,255,0.03)',
+      border: isMP
+        ? '1.5px solid rgba(200,150,12,0.45)'
+        : isBestAvailable
+          ? '1.5px solid rgba(168,85,247,0.4)'
+          : `1px solid ${cfg.border}`,
       borderRadius: 12, marginBottom: 10, overflow: 'hidden',
-      boxShadow: isMP ? '0 0 16px rgba(200,150,12,0.12)' : 'none',
+      boxShadow: isMP
+        ? '0 0 16px rgba(200,150,12,0.12)'
+        : isBestAvailable
+          ? '0 0 14px rgba(168,85,247,0.1)'
+          : 'none',
     }}>
       {/* Header */}
       <div role="button" tabIndex={0} onClick={() => setExpanded(e => !e)} onKeyDown={e => e.key === 'Enter' && setExpanded(p => !p)}
         style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '12px 16px', cursor: 'pointer', userSelect: 'none' }}>
-        <div style={{ minWidth: 32, height: 32, borderRadius: '50%', background: isMP ? 'rgba(200,150,12,0.3)' : 'rgba(255,255,255,0.07)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700, color: isMP ? '#f5c842' : 'rgba(255,255,255,0.7)' }}>
+        <div style={{
+          minWidth: 32, height: 32, borderRadius: '50%',
+          background: isMP ? 'rgba(200,150,12,0.3)' : isBestAvailable ? 'rgba(168,85,247,0.25)' : 'rgba(255,255,255,0.07)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, fontWeight: 700,
+          color: isMP ? '#f5c842' : isBestAvailable ? '#c084fc' : 'rgba(255,255,255,0.7)',
+        }}>
           #{candidate.rank}
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
             <a href={candidate.channel_url} target="_blank" rel="noopener noreferrer" onClick={e => e.stopPropagation()}
-              style={{ color: isMP ? '#f5c842' : 'rgba(255,255,255,0.9)', textDecoration: 'none', fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              style={{
+                color: isMP ? '#f5c842' : isBestAvailable ? '#e9d5ff' : 'rgba(255,255,255,0.9)',
+                textDecoration: 'none', fontWeight: 600, fontSize: 14, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}>
               {candidate.channel_title}
             </a>
-            {isMP && <span style={{ fontSize: 10, padding: '2px 7px', background: 'rgba(200,150,12,0.3)', color: '#f5c842', borderRadius: 5, fontWeight: 700, whiteSpace: 'nowrap' }}>
-              ★ {candidate.most_promising_label || 'Most Promising'}
-            </span>}
+            {isMP && (
+              <span style={{ fontSize: 10, padding: '2px 7px', background: 'rgba(200,150,12,0.3)', color: '#f5c842', borderRadius: 5, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                ★ {candidate.most_promising_label || 'Most Promising'}
+              </span>
+            )}
+            {!isMP && isBestAvailable && (
+              <span style={{ fontSize: 10, padding: '2px 7px', background: 'rgba(168,85,247,0.25)', color: '#c084fc', borderRadius: 5, fontWeight: 700, whiteSpace: 'nowrap', border: '1px solid rgba(168,85,247,0.4)' }}>
+                ◎ Best Available {candidate.best_available_rank ? `#${candidate.best_available_rank}` : ''}
+              </span>
+            )}
+            {candidate.recommendation_tier === 'STRICT_MATCH' && (
+              <span style={{ fontSize: 10, padding: '2px 7px', background: 'rgba(74,222,128,0.2)', color: '#4ade80', borderRadius: 5, fontWeight: 700, whiteSpace: 'nowrap' }}>
+                ✓ Strict Match
+              </span>
+            )}
           </div>
-          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.42)', marginTop: 2 }}>
-            {candidate.subscriber_count != null ? fmt(candidate.subscriber_count) + ' subs' : candidate.subscriber_status === 'HIDDEN_UNVERIFIED' ? 'Subscribers hidden' : 'Over limit'}
-            {candidate.country && ` · ${candidate.country}`}
+          <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.42)', marginTop: 2, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span>
+              {candidate.subscriber_count != null ? fmt(candidate.subscriber_count) + ' subs' : candidate.subscriber_status === 'HIDDEN_UNVERIFIED' ? 'Subscribers hidden' : 'Over limit'}
+              {candidate.country && ` · ${candidate.country}`}
+            </span>
+            {candidate.window_coverage && candidate.window_coverage !== 'UNKNOWN' && (
+              <span style={{ fontSize: 10, color: candidate.window_coverage === 'COMPLETE' ? '#4ade80' : '#fbbf24' }}>
+                · Window: {candidate.window_coverage}
+              </span>
+            )}
+            {candidate.date_quality && candidate.date_quality !== 'VERIFIED' && (
+              <span style={{ fontSize: 10, color: 'rgba(255,255,255,0.35)' }}>
+                · Dates: {candidate.date_quality}
+              </span>
+            )}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 14, alignItems: 'center', flexShrink: 0 }}>
@@ -161,6 +206,44 @@ export function SimilarChannelCard({ candidate, defaultExpanded = false }: Props
             </div>
           </div>
 
+          {/* Unmet Criteria (if any) */}
+          {candidate.unmet_criteria && candidate.unmet_criteria.length > 0 && (
+            <div style={{ marginTop: 12, background: 'rgba(248,113,113,0.07)', border: '1px solid rgba(248,113,113,0.22)', borderRadius: 8, padding: '8px 12px' }}>
+              <div style={{ fontSize: 10, fontWeight: 700, color: '#f87171', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                ⚠ Unmet Strict Qualification Criteria
+              </div>
+              {candidate.unmet_criteria.map((c, i) => (
+                <div key={i} style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', marginBottom: 2 }}>• {c}</div>
+              ))}
+            </div>
+          )}
+
+          {/* Niche Match Evidence */}
+          <div style={{ marginTop: 12, background: 'rgba(99,102,241,0.05)', border: '1px solid rgba(99,102,241,0.18)', borderRadius: 8, padding: '8px 12px' }}>
+            <div style={{ fontSize: 10, fontWeight: 700, color: '#818cf8', marginBottom: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+              Niche Match Evidence ({candidate.scores.niche_match_score.toFixed(0)}/100)
+            </div>
+            {candidate.niche_match_reason && (
+              <div style={{ fontSize: 11, color: 'rgba(255,255,255,0.7)', marginBottom: 6 }}>
+                {candidate.niche_match_reason}
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 12, fontSize: 10, color: 'rgba(255,255,255,0.5)', flexWrap: 'wrap' }}>
+              {candidate.source_coverage != null && candidate.source_coverage > 0 && (
+                <span>Source Coverage: {fmtPct(candidate.source_coverage)}</span>
+              )}
+              {candidate.candidate_precision != null && candidate.candidate_precision > 0 && (
+                <span>Precision: {fmtPct(candidate.candidate_precision)}</span>
+              )}
+              {candidate.median_title_similarity != null && candidate.median_title_similarity > 0 && (
+                <span>Title Similarity: {fmtPct(candidate.median_title_similarity)}</span>
+              )}
+              {candidate.matched_entities && candidate.matched_entities.length > 0 && (
+                <span>Entities: {candidate.matched_entities.slice(0, 3).join(', ')}</span>
+              )}
+            </div>
+          </div>
+
           {/* Reasons */}
           {(candidate.qualification_reasons.length > 0 || candidate.rejection_reasons.length > 0) && (
             <div style={{ marginTop: 12, display: 'flex', gap: 12 }}>
@@ -172,7 +255,7 @@ export function SimilarChannelCard({ candidate, defaultExpanded = false }: Props
               )}
               {candidate.rejection_reasons.length > 0 && (
                 <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10, fontWeight: 700, color: '#f87171', marginBottom: 4, textTransform: 'uppercase' }}>✗ Limitations</div>
+                  <div style={{ fontSize: 10, fontWeight: 700, color: '#f87171', marginBottom: 4, textTransform: 'uppercase' }}>✗ Rejection / Limitations</div>
                   {candidate.rejection_reasons.map((r, i) => <div key={i} style={{ fontSize: 11, color: 'rgba(255,255,255,0.62)', marginBottom: 2 }}>• {r}</div>)}
                 </div>
               )}

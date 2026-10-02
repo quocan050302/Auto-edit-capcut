@@ -925,6 +925,15 @@ export type SimilarVideoEvaluationStatus =
   | 'FAIL'
   | 'EXCLUDED'
 
+export type SimilarRecommendationTier =
+  | 'STRICT_MATCH'
+  | 'BEST_AVAILABLE'
+  | 'MONITOR'
+  | 'NOT_RECOMMENDED'
+
+export type SimilarDateQuality = 'VERIFIED' | 'APPROXIMATED' | 'UNKNOWN'
+export type SimilarWindowCoverage = 'COMPLETE' | 'PARTIAL' | 'UNKNOWN'
+
 export type SimilarDataConfidence = 'HIGH' | 'MEDIUM' | 'LOW' | 'INSUFFICIENT'
 
 export type SimilarMonetizationViability = 'STRONG' | 'MODERATE' | 'RISKY' | 'UNKNOWN'
@@ -944,6 +953,7 @@ export interface SimilarChannelVideo {
   video_url: string
   title: string
   published_at: string
+  date_quality?: SimilarDateQuality
   age_days: number
   duration_seconds: number | null
   views: number
@@ -969,6 +979,20 @@ export interface SimilarChannelCandidate {
   subscriber_status: SimilarSubscriberStatus
   public_video_count: number | null
   status: SimilarChannelCandidateStatus
+  recommendation_tier?: SimilarRecommendationTier
+  best_available_rank?: number | null
+  is_best_available?: boolean
+  qualification_gap_score?: number
+  unmet_criteria?: string[]
+  window_coverage?: SimilarWindowCoverage
+  history_coverage?: SimilarWindowCoverage
+  date_quality?: SimilarDateQuality
+  source_coverage?: number
+  candidate_precision?: number
+  median_title_similarity?: number
+  matched_terms?: Array<{ term: string; weight: number; type: string }> | string[]
+  matched_entities?: string[]
+  matched_clusters?: string[]
   is_most_promising: boolean
   most_promising_label: string | null
   window_start: string
@@ -1029,6 +1053,9 @@ export interface SimilarChannelRunProgress {
   candidate_channels_found: number
   channels_enriched: number
   channels_qualified: number
+  channels_growing?: number
+  channels_watchlist?: number
+  channels_rejected?: number
   can_cancel: boolean
   elapsed_seconds: number
   error: string | null
@@ -1055,6 +1082,31 @@ export interface SimilarChannelResult {
   most_promising_channel_id: string | null
   most_promising_status: string | null
   most_promising_reason: string[]
+  best_available_channel_id?: string | null
+  best_available_status?: string | null
+  best_available_reason?: string[]
+  best_available_candidates?: Array<any>
+  recommendation_tier?: SimilarRecommendationTier | null
+  discovery_diagnostics?: {
+    discovery_passes_run?: string[]
+    queries_generated?: number
+    queries_executed?: number
+    search_calls_used?: number
+    raw_videos_found?: number
+    unique_videos_found?: number
+    videos_with_verified_dates?: number
+    videos_with_approximate_dates?: number
+    videos_with_unknown_dates?: number
+    unique_channels_found?: number
+    synthetic_channel_ids_found?: number
+    resolved_channel_ids?: number
+    unresolved_channel_ids?: number
+    channels_enriched?: number
+    channels_under_subscriber_limit?: number
+    channels_matching_niche?: number
+    provider_breakdown?: Record<string, number>
+    stop_reason?: string
+  }
   niche_fingerprint: Record<string, unknown>
   limitations: string[]
   created_at: string

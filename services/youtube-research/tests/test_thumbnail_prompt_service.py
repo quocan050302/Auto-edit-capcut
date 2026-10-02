@@ -135,7 +135,7 @@ def _make_ai_engine(return_dict=None, provider="gemini"):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 # ── Test 1: TitleHookBrief semantic analysis ──────────────────────────────────

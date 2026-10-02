@@ -3,7 +3,8 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import httpx
 from providers.protocol import RawVideoData, RawChannelData
-from utils.parsers import parse_duration, calculate_age_days
+from providers.scraper import is_synthetic_channel_id
+from utils.parsers import parse_duration, calculate_age_days, parse_published_date_with_quality
 from utils.time_window import resolve_time_window, TimeWindow
 from core.logger import research_logger
 
@@ -59,6 +60,7 @@ class OfficialYouTubeProvider:
         # V2: explicit bucket bounds (override time_range when set)
         published_after: Optional[str] = None,
         published_before: Optional[str] = None,
+        order: str = "relevance",
     ) -> Tuple[List[RawVideoData], Optional[str]]:
         """
         Search videos via YouTube Data API.
@@ -81,7 +83,7 @@ class OfficialYouTubeProvider:
             "regionCode": market,
             "relevanceLanguage": language,
             "maxResults": min(limit, 50),
-            "order": "relevance",
+            "order": order,
         }
 
         if pa:
@@ -353,6 +355,143 @@ class OfficialYouTubeProvider:
             recent_videos=recent_videos,
             provider=self.name,
         )
+
+    async def resolve_channel_id(self, video_id: str) -> Optional[str]:
+        """Resolve true channel ID for video using videos.list snippet."""
+        if not self.api_key or not video_id:
+            return None
+        url = "https://www.googleapis.com/youtube/v3/videos"
+        params = {"key": self.api_key, "part": "snippet", "id": video_id}
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                res = await client.get(url, params=params)
+                if res.status_code == 200:
+                    items = res.json().get("items", [])
+                    if items:
+                        cid = items[0].get("snippet", {}).get("channelId")
+                        if cid and not is_synthetic_channel_id(cid):
+                            return cid
+        except Exception as e:
+            research_logger.warning(f"[OfficialAPI] resolve_channel_id error for {video_id}: {e}")
+        return None
+
+    async def get_channel_videos_in_window(
+        self,
+        channel_id: str,
+        content_type: str,
+        published_after: datetime,
+        published_before: datetime,
+        max_videos: int = 100,
+    ) -> Tuple[List[RawVideoData], str]:
+        """
+        Fetch uploads playlist and paginate until passing published_after or reaching max_videos.
+        Returns:
+            (videos_in_window, coverage: "COMPLETE" | "PARTIAL" | "UNKNOWN")
+        """
+        if not self.api_key or self.quota_exceeded:
+            return [], "UNKNOWN"
+
+        # 1. Get uploads playlist id
+        uploads_playlist_id: Optional[str] = None
+        try:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                res = await client.get(
+                    "https://www.googleapis.com/youtube/v3/channels",
+                    params={
+                        "key": self.api_key,
+                        "part": "contentDetails",
+                        "id": channel_id,
+                    },
+                )
+                if res.status_code == 200:
+                    items = res.json().get("items", [])
+                    if items:
+                        uploads_playlist_id = (
+                            items[0].get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+                        )
+        except Exception as e:
+            research_logger.warning(f"[OfficialAPI] get_channel_videos_in_window channels error for {channel_id}: {e}")
+            return [], "UNKNOWN"
+
+        if not uploads_playlist_id:
+            return [], "UNKNOWN"
+
+        # 2. Paginate playlistItems.list
+        next_page: Optional[str] = None
+        collected_video_ids: List[str] = []
+        reached_past_window = False
+        total_examined = 0
+
+        while total_examined < max_videos and not reached_past_window:
+            params = {
+                "key": self.api_key,
+                "part": "snippet,contentDetails",
+                "playlistId": uploads_playlist_id,
+                "maxResults": min(50, max_videos - total_examined),
+            }
+            if next_page:
+                params["pageToken"] = next_page
+
+            try:
+                async with httpx.AsyncClient(timeout=8.0) as client:
+                    res = await client.get("https://www.googleapis.com/youtube/v3/playlistItems", params=params)
+                    if res.status_code == 403:
+                        self.quota_exceeded = True
+                        break
+                    if res.status_code != 200:
+                        break
+                    data = res.json()
+                    items = data.get("items", [])
+                    if not items:
+                        break
+
+                    for item in items:
+                        v_id = item.get("contentDetails", {}).get("videoId")
+                        pub_str = (
+                            item.get("contentDetails", {}).get("videoPublishedAt")
+                            or item.get("snippet", {}).get("publishedAt")
+                        )
+                        if v_id:
+                            collected_video_ids.append(v_id)
+                        total_examined += 1
+
+                        if pub_str:
+                            parsed = parse_published_date_with_quality(pub_str)
+                            dt = parsed.get("published_at")
+                            if dt and dt < published_after:
+                                reached_past_window = True
+
+                    next_page = data.get("nextPageToken")
+                    if not next_page:
+                        break
+            except Exception as e:
+                research_logger.warning(f"[OfficialAPI] playlistItems error for {channel_id}: {e}")
+                break
+
+        if not collected_video_ids:
+            return [], "COMPLETE" if not next_page else "UNKNOWN"
+
+        # 3. Batch fetch details via get_videos (up to 50 per batch)
+        all_videos: List[RawVideoData] = []
+        for i in range(0, len(collected_video_ids), 50):
+            chunk = collected_video_ids[i : i + 50]
+            vids = await self.get_videos(chunk, target_content_type=content_type)
+            all_videos.extend(vids)
+
+        # 4. Filter exact window: published_after <= published_at <= published_before
+        window_vids: List[RawVideoData] = []
+        for v in all_videos:
+            p = parse_published_date_with_quality(v.published_at)
+            dt = p.get("published_at")
+            if dt and published_after <= dt <= published_before:
+                window_vids.append(v)
+
+        if reached_past_window or not next_page:
+            coverage = "COMPLETE"
+        else:
+            coverage = "PARTIAL"
+
+        return window_vids, coverage
 
     async def get_autocomplete(self, query: str, market: str = "US", language: str = "en") -> List[str]:
         q_enc = urllib.parse.quote(query)
