@@ -478,7 +478,7 @@ function ThumbnailCard({
         <button
           onClick={onInspect}
           className="btn btn-secondary"
-          style={{ marginTop: 'auto', fontSize: '10px', padding: '4px 8px', marginTop: '8px' }}
+          style={{ marginTop: '8px', fontSize: '10px', padding: '4px 8px' }}
         >
           🔍 Inspect Thumbnail
         </button>
@@ -544,7 +544,23 @@ function BlueprintCard({ blueprint, onCopyPrompt, onCopyBlueprint }: {
           <div style={{ fontSize: '13px', fontWeight: 700, color: 'var(--text-primary)', marginBottom: '2px' }}>
             📐 {blueprint.name}
           </div>
-          <ConfidenceBadge level={blueprint.confidence} />
+          <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+            <ConfidenceBadge level={blueprint.confidence} />
+            <span style={{ 
+              fontSize: '9px', padding: '2px 6px', borderRadius: '4px',
+              background: blueprint.is_statistically_validated ? 'rgba(52,211,153,0.1)' : 'rgba(245,158,11,0.1)',
+              color: blueprint.is_statistically_validated ? '#34d399' : '#f59e0b',
+              border: `1px solid ${blueprint.is_statistically_validated ? 'rgba(52,211,153,0.2)' : 'rgba(245,158,11,0.2)'}`
+            }}>
+              {blueprint.is_statistically_validated ? 'Validated' : 'Not Validated'}
+            </span>
+            <span style={{
+              fontSize: '9px', padding: '2px 6px', borderRadius: '4px',
+              background: 'rgba(255,255,255,0.05)', color: 'var(--text-muted)'
+            }}>
+              Mode: {blueprint.blueprint_mode.replace(/_/g, ' ')}
+            </span>
+          </div>
         </div>
         <button
           onClick={() => setExpanded(v => !v)}
@@ -564,6 +580,18 @@ function BlueprintCard({ blueprint, onCopyPrompt, onCopyBlueprint }: {
 
       {expanded && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '12px' }}>
+          
+          {/* Sample & Fallback Info */}
+          {!blueprint.is_statistically_validated && (
+            <div style={{ background: 'rgba(245,158,11,0.08)', padding: '10px', borderRadius: '6px', border: '1px solid rgba(245,158,11,0.2)' }}>
+              <div style={{ fontSize: '10px', fontWeight: 700, color: '#f59e0b', marginBottom: '4px' }}>⚠ Not Statistically Validated</div>
+              <div style={{ fontSize: '11px', color: '#d97706', marginBottom: '4px' }}>{blueprint.fallback_reason}</div>
+              {blueprint.evidence.length > 0 && (
+                <div style={{ fontSize: '11px', color: '#d97706', fontStyle: 'italic' }}>Evidence: {blueprint.evidence.join(' ')}</div>
+              )}
+            </div>
+          )}
+
           {[
             { label: '📐 Layout', content: blueprint.layout_description },
             { label: '👤 Subject Recipe', content: blueprint.subject_recipe },
@@ -679,6 +707,44 @@ function GroupStatsSection({ stats }: { stats: { outlier?: ThumbnailGroupStats; 
       </div>
     </div>
   )
+}
+
+// ── Client Fallback ─────────────────────────────────────────────────────────────
+
+function createClientSafeFallbackBlueprint(data: ThumbnailIntelligenceResult): ThumbnailBlueprint {
+  return {
+    id: `client_fallback_${Date.now()}`,
+    name: 'Mobile-First Safe Blueprint (Client Fallback)',
+    use_when: 'Fallback when no competitor data is available.',
+    target_hook: 'curiosity_gap',
+    blueprint_mode: 'safe_default',
+    is_statistically_validated: false,
+    fallback_reason: 'Legacy data or missing server blueprints. A safe mobile-first default blueprint is provided.',
+    source_group: 'default',
+    sample_summary: {
+      total_analyzed: data.analyzed_count,
+      outlier_count: data.outlier_count,
+      baseline_count: data.baseline_count,
+      low_count: data.low_count,
+      has_valid_control_group: false
+    },
+    limitations: ['Not based on specific competitor data.'],
+    based_on_pattern_ids: [],
+    layout_description: 'Single dominant subject filling 45–60% of frame. Leave clear space for text.',
+    subject_recipe: 'One primary subject.',
+    background_recipe: 'Simple, uncluttered background with depth.',
+    text_recipe: 'Maximum 2 lines, 3-6 words. High contrast.',
+    color_recipe: 'High contrast palette.',
+    lighting_recipe: 'Bright and clear.',
+    hierarchy_recipe: 'Subject -> Text -> Background',
+    title_pairing_recipe: 'Curiosity gap',
+    overlay_text_formula: ['Short hook'],
+    image_prompt_template: 'YouTube thumbnail 16:9. Simple background with depth. Single dominant subject (45-60% of frame). High contrast. Concept relates to: {title}.',
+    negative_prompt: 'unreadable text, distorted face, malformed hands, excessive objects',
+    evidence: [],
+    confidence: 'insufficient',
+    originality_rules: ['Keep: abstract composition', 'Do NOT use competitor logos or branding.']
+  }
 }
 
 // ── Main CompetitorTab Component ──────────────────────────────────────────────
@@ -1137,7 +1203,10 @@ ${bp.evidence.join('\n')}
               )}
 
               {/* Results */}
-              {thumbData && !thumbLoading && (
+              {thumbData && !thumbLoading && (() => {
+                const safeBlueprints = thumbData.blueprints.length > 0 ? thumbData.blueprints : [createClientSafeFallbackBlueprint(thumbData)];
+                const primaryBlueprint = safeBlueprints[0];
+                return (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
                   {/* Summary Header */}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px' }}>
@@ -1229,27 +1298,17 @@ ${bp.evidence.join('\n')}
                         </div>
                       )}
 
-                      {/* Primary blueprint */}
-                      {thumbData.blueprints.length > 0 && (
-                        <div>
-                          <h4 style={{ fontSize: '13px', fontWeight: 700, color: '#a5b4fc', margin: '0 0 10px 0' }}>
-                            📐 Recommended Blueprint
-                          </h4>
-                          <BlueprintCard
-                            blueprint={thumbData.blueprints[0]}
-                            onCopyPrompt={() => copyText(thumbData.blueprints[0].image_prompt_template, 'Image Prompt')}
-                            onCopyBlueprint={() => copyBlueprint(thumbData.blueprints[0])}
-                          />
-                        </div>
-                      )}
-
-                      {thumbData.blueprints.length === 0 && thumbData.analyzed_count > 0 && (
-                        <div style={{ fontSize: '12px', color: 'var(--text-muted)', padding: '12px', background: 'var(--bg-base)', borderRadius: '6px' }}>
-                          📐 Insufficient data to generate a reliable blueprint.
-                          Need at least 2 outlier thumbnails with distinguishing patterns.
-                          {thumbData.limitations.length > 0 && ` ${thumbData.limitations[0]}`}
-                        </div>
-                      )}
+                      {/* Primary blueprint (ALWAYS RENDERED) */}
+                      <div>
+                        <h4 style={{ fontSize: '13px', fontWeight: 700, color: '#a5b4fc', margin: '0 0 10px 0' }}>
+                          📐 Recommended Blueprint
+                        </h4>
+                        <BlueprintCard
+                          blueprint={primaryBlueprint}
+                          onCopyPrompt={() => copyText(primaryBlueprint.image_prompt_template, 'Image Prompt')}
+                          onCopyBlueprint={() => copyBlueprint(primaryBlueprint)}
+                        />
+                      </div>
                     </div>
                   ) : (
                     /* Advanced View */
@@ -1327,29 +1386,25 @@ ${bp.evidence.join('\n')}
                         <GroupStatsSection stats={thumbData.group_stats} />
                       </div>
 
-                      {/* All blueprints */}
-                      {thumbData.blueprints.length > 0 && (
-                        <div>
-                          <h4 style={{ fontSize: '13px', fontWeight: 700, color: '#a5b4fc', margin: '0 0 10px 0' }}>
-                            📐 Reusable Thumbnail Blueprints ({thumbData.blueprints.length})
-                          </h4>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
-                            {thumbData.blueprints.map(bp => (
-                              <BlueprintCard
-                                key={bp.id}
-                                blueprint={bp}
-                                onCopyPrompt={() => copyText(bp.image_prompt_template, 'Image Prompt')}
-                                onCopyBlueprint={() => copyBlueprint(bp)}
-                              />
-                            ))}
-                          </div>
+                      {/* All blueprints (ALWAYS RENDERED) */}
+                      <div>
+                        <h4 style={{ fontSize: '13px', fontWeight: 700, color: '#a5b4fc', margin: '0 0 10px 0' }}>
+                          📐 Reusable Thumbnail Blueprints ({safeBlueprints.length})
+                        </h4>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                          {safeBlueprints.map(bp => (
+                            <BlueprintCard
+                              key={bp.id}
+                              blueprint={bp}
+                              onCopyPrompt={() => copyText(bp.image_prompt_template, 'Image Prompt')}
+                              onCopyBlueprint={() => copyBlueprint(bp)}
+                            />
+                          ))}
                         </div>
-                      )}
+                      </div>
 
-                      {/* Title-to-Thumbnail Generator Section */}
-                      {thumbData.blueprints.length > 0 && (
-                        <ThumbnailGeneratorSection blueprints={thumbData.blueprints} />
-                      )}
+                      {/* Title-to-Thumbnail Generator Section (ALWAYS RENDERED) */}
+                      <ThumbnailGeneratorSection blueprints={safeBlueprints} />
 
                       {/* Failure details */}
                       {thumbData.failure_details.length > 0 && (
@@ -1367,7 +1422,8 @@ ${bp.evidence.join('\n')}
                     </div>
                   )}
                 </div>
-              )}
+                )
+              })()}
             </div>
           </div>
         </div>

@@ -175,12 +175,21 @@ class ThumbnailPatternSchema(BaseModel):
     evidence_video_ids: List[str] = []
     is_winning: bool = False
     is_avoid: bool = False
+    control_ratio: Optional[float] = None
+    uplift: Optional[float] = None
+    relative_lift: Optional[float] = None
 
 class ThumbnailBlueprintSchema(BaseModel):
     id: str
     name: str
     use_when: str
     target_hook: str
+    blueprint_mode: str = "validated_winning"
+    is_statistically_validated: bool = False
+    fallback_reason: str = ""
+    source_group: str = "all"
+    sample_summary: Dict[str, Any] = Field(default_factory=dict)
+    limitations: List[str] = Field(default_factory=list)
     based_on_pattern_ids: List[str] = []
     layout_description: str = ""
     subject_recipe: str = ""

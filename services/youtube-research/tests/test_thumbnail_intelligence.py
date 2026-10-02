@@ -409,7 +409,8 @@ class TestBlueprintGeneration:
 
     def test_no_blueprint_when_no_winning_patterns(self):
         blueprints = generate_blueprints([], {}, [], "Test Channel")
-        assert blueprints == []
+        assert len(blueprints) == 1
+        assert blueprints[0].blueprint_mode == "safe_default"
 
     def test_blueprint_has_originality_rules(self):
         patterns = self._winning_patterns()
@@ -436,7 +437,7 @@ class TestBlueprintGeneration:
 
     def test_blueprint_not_generated_for_insufficient_patterns(self):
         from services.thumbnail_intelligence_service import ThumbnailPattern
-        # Pattern with confidence=insufficient → should not generate blueprint
+        # Pattern with confidence=insufficient → fallback to safe default
         insufficient_pattern = ThumbnailPattern(
             pattern_id="has_face", name="Face Present", description="",
             outlier_count=1, outlier_total=3, baseline_count=0, baseline_total=3,
@@ -444,7 +445,8 @@ class TestBlueprintGeneration:
             is_winning=False, is_avoid=False
         )
         blueprints = generate_blueprints([insufficient_pattern], {}, [], "Test Channel")
-        assert blueprints == []
+        assert len(blueprints) == 1
+        assert blueprints[0].blueprint_mode == "safe_default"
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

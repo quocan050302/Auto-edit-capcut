@@ -147,9 +147,9 @@ class ThumbnailPattern:
     is_winning: bool = False
     is_avoid: bool = False
     outlier_rate: float = 0.0
-    control_rate: float = 0.0
-    uplift: float = 0.0
-    relative_lift: float = 0.0
+    control_rate: Optional[float] = None
+    uplift: Optional[float] = None
+    relative_lift: Optional[float] = None
     category: str = "neutral"
     reason: str = ""
 
@@ -270,25 +270,36 @@ def detect_patterns(analyses: List[ThumbnailAnalysis]) -> List[ThumbnailPattern]
         # Weighted control rate (baseline + low)
         control_cnt = b_cnt + l_cnt
         control_tot = b_tot + l_tot
-        control_ratio = control_cnt / max(control_tot, 1)
-
-        uplift = o_ratio - control_ratio
-        relative_lift = o_ratio / max(control_ratio, 0.01)
+        
+        has_valid_outlier_group = o_tot >= 2
+        has_valid_control_group = control_tot >= 2
+        
+        if control_tot > 0:
+            control_ratio = control_cnt / control_tot
+            uplift = o_ratio - control_ratio
+            relative_lift = o_ratio / max(control_ratio, 0.01)
+        else:
+            control_ratio = None
+            uplift = None
+            relative_lift = None
 
         is_winning = (
-            o_cnt >= 2
+            has_valid_outlier_group
+            and has_valid_control_group
+            and o_cnt >= 2
             and o_ratio >= 0.50
-            and uplift >= 0.20
-            and relative_lift >= 1.25
+            and uplift is not None and uplift >= 0.20
+            and relative_lift is not None and relative_lift >= 1.25
             and conf_label != "insufficient"
         )
         
         # Avoid pattern when control rate is high, outlier rate is low
         is_avoid = (
-            l_cnt >= 2
+            has_valid_control_group
+            and l_cnt >= 2
             and l_ratio >= 0.50
             and o_ratio < 0.3
-            and (control_ratio - o_ratio) >= 0.20
+            and control_ratio is not None and (control_ratio - o_ratio) >= 0.20
             and conf_label != "insufficient"
         )
 
@@ -299,17 +310,21 @@ def detect_patterns(analyses: List[ThumbnailAnalysis]) -> List[ThumbnailPattern]
         if conf_label == "insufficient":
             category = "insufficient"
             reason = "Sample size is too small to draw reliable conclusions."
+        elif not has_valid_control_group:
+            category = "insufficient_comparison"
+            reason = "No baseline or low-performing control thumbnails were available."
+            is_winning = False
         elif is_winning:
             category = "winning"
             reason = f"Appears significantly more in outliers ({o_ratio:.0%}) than in control group ({control_ratio:.0%})."
         elif is_avoid:
             category = "avoid"
             reason = f"Appears mostly in low performers ({l_ratio:.0%}) compared to outliers ({o_ratio:.0%})."
-        elif o_ratio >= 0.6 and b_ratio >= 0.6 and l_ratio >= 0.6 and uplift < 0.2:
+        elif o_ratio >= 0.6 and b_ratio >= 0.6 and l_ratio >= 0.6 and uplift is not None and uplift < 0.2:
             category = "channel_wide"
-            reason = f"Appears consistently across all groups ({o_ratio:.0%} outliers, {control_ratio:.0%} control). It's a channel style, not a differentiator."
+            reason = f"Appears consistently across all groups ({o_ratio:.0%} outliers, {(control_ratio or 0):.0%} control). It's a channel style, not a differentiator."
         else:
-            reason = f"Found in {o_ratio:.0%} of outliers and {control_ratio:.0%} of control. Not a strong differentiator."
+            reason = f"Found in {o_ratio:.0%} of outliers and {(control_ratio or 0):.0%} of control. Not a strong differentiator."
 
         patterns.append(ThumbnailPattern(
             pattern_id=pid,
@@ -327,9 +342,9 @@ def detect_patterns(analyses: List[ThumbnailAnalysis]) -> List[ThumbnailPattern]
             is_winning=is_winning,
             is_avoid=is_avoid,
             outlier_rate=round(o_ratio, 3),
-            control_rate=round(control_ratio, 3),
-            uplift=round(uplift, 3),
-            relative_lift=round(relative_lift, 3),
+            control_rate=round(control_ratio, 3) if control_ratio is not None else None,
+            uplift=round(uplift, 3) if uplift is not None else None,
+            relative_lift=round(relative_lift, 3) if relative_lift is not None else None,
             category=category,
             reason=reason,
         ))
@@ -487,6 +502,12 @@ class ThumbnailBlueprint:
     name: str
     use_when: str
     target_hook: str
+    blueprint_mode: str = "validated_winning"
+    is_statistically_validated: bool = False
+    fallback_reason: str = ""
+    source_group: str = "all"
+    sample_summary: Dict[str, Any] = field(default_factory=dict)
+    limitations: List[str] = field(default_factory=list)
     based_on_pattern_ids: List[str] = field(default_factory=list)
     layout_description: str = ""
     subject_recipe: str = ""
@@ -519,198 +540,263 @@ ORIGINALITY_RULES = [
 ]
 
 
+def _build_observed_stats(analyses: List[ThumbnailAnalysis]) -> Dict[str, Any]:
+    if not analyses:
+        return {}
+        
+    def _mode(lst: List[Any], fallback: Any) -> Any:
+        lst = [x for x in lst if x is not None and x not in ("unknown", "", 0, False)]
+        if not lst:
+            return fallback
+        return max(set(lst), key=lst.count)
+
+    def _median(lst: List[float], fallback: float) -> float:
+        lst = [x for x in lst if x is not None]
+        if not lst:
+            return fallback
+        s = sorted(lst)
+        n = len(s)
+        return s[n//2] if n % 2 else (s[n//2 - 1] + s[n//2]) / 2.0
+        
+    def _top_hook(a: ThumbnailAnalysis) -> str:
+        if a.hooks:
+            return a.hooks[0].hook_type
+        return "unknown"
+
+    stats = {
+        "hook": _mode([_top_hook(a) for a in analyses], "curiosity_gap"),
+        "layout": _mode([a.composition.layout_type for a in analyses], "right_subject_left_text"),
+        "has_face": sum(1 for a in analyses if a.subjects.has_person) > len(analyses) / 2,
+        "has_proof": sum(1 for a in analyses if a.subjects.has_proof_object) > len(analyses) / 2,
+        "has_text": sum(1 for a in analyses if a.ocr.word_count > 0) > len(analyses) / 2,
+        "median_words": int(_median([a.ocr.word_count for a in analyses if a.ocr.word_count > 0], 4)),
+        "uses_yellow": sum(1 for a in analyses if a.colors.has_yellow) > len(analyses) / 2,
+        "high_contrast": _median([a.colors.contrast for a in analyses], 0.5) > 0.6,
+        "mobile_score": _median([a.mobile_readability.score for a in analyses], 50),
+    }
+    return stats
+
+def _build_blueprint_from_stats(
+    stats: Dict[str, Any],
+    mode: str,
+    channel_title: str,
+    evidence_text: str,
+    limitations: List[str],
+    fallback_reason: str,
+    source_group: str,
+    validated: bool = False,
+    confidence: str = "low",
+    based_on_pattern_ids: List[str] = None
+) -> ThumbnailBlueprint:
+    # Basic logic
+    layout = stats.get("layout", "right_subject_left_text")
+    has_face = stats.get("has_face", True)
+    has_proof = stats.get("has_proof", False)
+    has_text = stats.get("has_text", True)
+    median_words = stats.get("median_words", 4)
+    uses_yellow = stats.get("uses_yellow", False)
+    high_contrast = stats.get("high_contrast", True)
+    hook = stats.get("hook", "curiosity_gap")
+    if hook == "unknown":
+        hook = "curiosity_gap"
+        
+    # Build layout
+    if layout in ("left_subject_right_text", "right_subject_left_text"):
+        layout_desc = "Split layout: Subject on one side, text block on opposite side. Leave margin on edges."
+    elif layout == "centered":
+        layout_desc = "Centered composition: Subject fills center 60% of frame, text above or below subject."
+    else:
+        layout_desc = "Mobile-first composition: Dominant subject filling 50–65% of frame."
+
+    # Subject recipe
+    if has_face:
+        subject_recipe = "One primary subject with visible face. Expression should match the hook type. Do NOT copy specific individuals."
+    elif has_proof:
+        subject_recipe = "Primary visual should be a proof element (document, data, product close-up). Replace with your own content."
+    else:
+        subject_recipe = "One clear primary visual subject relevant to the topic. Do NOT copy competitor's specific subject."
+
+    background_recipe = "Simple, uncluttered background with high contrast to subject."
+    if high_contrast:
+        background_recipe += " Use very dark or very bright background to make subject pop."
+
+    text_recipe = f"{median_words} words max. Short, punchy text." if has_text else "No text, or absolute minimum (1-2 words). Rely completely on visual storytelling."
+    color_recipe = "Warm dominant palette (yellow/orange/red)." if uses_yellow else "Balanced palette with strong contrast."
+    lighting_recipe = "High contrast lighting with clear separation between foreground and background."
+
+    overlay_formula = []
+    if has_text:
+        overlay_formula.append("Short phrase reflecting topic")
+        if median_words > 4:
+            overlay_formula.append("Optional secondary context word")
+
+    prompt = (
+        f"YouTube thumbnail. {background_recipe} {subject_recipe} "
+        f"{color_recipe} {lighting_recipe} Concept relates to: {{title}}."
+    )
+
+    return ThumbnailBlueprint(
+        id=f"blueprint_{mode}_{hash(channel_title) % 10000}",
+        name=f"Recommended Style ({mode.replace('_', ' ').title()})",
+        use_when="Default style for this channel/niche.",
+        target_hook=hook,
+        blueprint_mode=mode,
+        is_statistically_validated=validated,
+        fallback_reason=fallback_reason,
+        source_group=source_group,
+        sample_summary={},
+        limitations=limitations,
+        based_on_pattern_ids=based_on_pattern_ids or [],
+        layout_description=layout_desc,
+        subject_recipe=subject_recipe,
+        background_recipe=background_recipe,
+        text_recipe=text_recipe,
+        color_recipe=color_recipe,
+        lighting_recipe=lighting_recipe,
+        hierarchy_recipe="Subject first, then text, then background.",
+        title_pairing_recipe=f"Pair with {hook} titles.",
+        overlay_text_formula=overlay_formula,
+        image_prompt_template=prompt,
+        negative_prompt=STANDARD_NEGATIVE_PROMPT,
+        evidence=[evidence_text] if evidence_text else [],
+        confidence=confidence,
+        originality_rules=ORIGINALITY_RULES
+    )
+
+def generate_validated_blueprint(
+    winning_patterns: List[ThumbnailPattern], 
+    outlier_analyses: List[ThumbnailAnalysis], 
+    channel_title: str
+) -> ThumbnailBlueprint:
+    stats = _build_observed_stats(outlier_analyses)
+    
+    uses_yellow = any(p.pattern_id == "has_yellow" for p in winning_patterns)
+    has_text = any(p.pattern_id == "has_text" for p in winning_patterns)
+    has_face = any(p.pattern_id == "has_face" for p in winning_patterns)
+    high_contrast = any(p.pattern_id == "high_contrast" for p in winning_patterns)
+    
+    stats["uses_yellow"] = uses_yellow or stats.get("uses_yellow")
+    stats["has_text"] = has_text or stats.get("has_text")
+    stats["has_face"] = has_face or stats.get("has_face")
+    stats["high_contrast"] = high_contrast or stats.get("high_contrast")
+    
+    return _build_blueprint_from_stats(
+        stats, mode="validated_winning", channel_title=channel_title,
+        evidence_text="Based on patterns that perform significantly better than baseline.",
+        limitations=[], fallback_reason="", source_group="outlier",
+        validated=True, confidence="high",
+        based_on_pattern_ids=[p.pattern_id for p in winning_patterns[:5]]
+    )
+
+def generate_observed_outlier_blueprint(
+    outlier_analyses: List[ThumbnailAnalysis], channel_title: str
+) -> ThumbnailBlueprint:
+    stats = _build_observed_stats(outlier_analyses)
+    cnt = len(outlier_analyses)
+    return _build_blueprint_from_stats(
+        stats, mode="observed_outlier_style", channel_title=channel_title,
+        evidence_text=f"Observed in {cnt} analyzed outlier thumbnails. Median mobile readability score: {stats.get('mobile_score', 50)}.",
+        limitations=["No control group was available to validate if this style causes higher performance."],
+        fallback_reason="No valid baseline/low control group was available.",
+        source_group="outlier", validated=False, confidence="low"
+    )
+
+def generate_channel_style_blueprint(
+    analyses: List[ThumbnailAnalysis], channel_title: str
+) -> ThumbnailBlueprint:
+    stats = _build_observed_stats(analyses)
+    return _build_blueprint_from_stats(
+        stats, mode="observed_channel_style", channel_title=channel_title,
+        evidence_text=f"Observed across {len(analyses)} channel thumbnails.",
+        limitations=["Pattern does not statistically distinguish high vs low performance."],
+        fallback_reason="No statistically distinguishing pattern was found. Blueprint is based on recurring channel-wide traits.",
+        source_group="all", validated=False, confidence="low"
+    )
+
+def generate_title_derived_blueprint(channel_title: str) -> ThumbnailBlueprint:
+    return _build_blueprint_from_stats(
+        {"hook": "curiosity_gap", "has_text": True, "has_face": True}, 
+        mode="title_derived_fallback", channel_title=channel_title,
+        evidence_text="Synthesized from mobile-first principles.",
+        limitations=["Derived without visual competitor data."],
+        fallback_reason="No valid thumbnail data available.",
+        source_group="title", validated=False, confidence="insufficient"
+    )
+
+def generate_safe_default_blueprint(channel_title: str) -> ThumbnailBlueprint:
+    prompt = "YouTube thumbnail 16:9. Simple background with depth. Single dominant subject (45-60% of frame). High contrast. Concept relates to: {title}."
+    
+    return ThumbnailBlueprint(
+        id=f"blueprint_default_{hash(channel_title) % 10000}",
+        name="Mobile-First Safe Blueprint",
+        use_when="Fallback when no competitor data is available.",
+        target_hook="curiosity_gap",
+        blueprint_mode="safe_default",
+        is_statistically_validated=False,
+        fallback_reason="No competitor thumbnail could be analyzed. A safe mobile-first default blueprint is provided.",
+        source_group="default",
+        sample_summary={},
+        limitations=["Not based on specific competitor data."],
+        based_on_pattern_ids=[],
+        layout_description="Single dominant subject filling 45–60% of frame. Leave clear space for text.",
+        subject_recipe="One primary subject.",
+        background_recipe="Simple, uncluttered background with depth.",
+        text_recipe="Maximum 2 lines, 3-6 words. High contrast.",
+        color_recipe="High contrast palette.",
+        lighting_recipe="Bright and clear.",
+        hierarchy_recipe="Subject -> Text -> Background",
+        title_pairing_recipe="Curiosity gap",
+        overlay_text_formula=["Short hook"],
+        image_prompt_template=prompt,
+        negative_prompt=STANDARD_NEGATIVE_PROMPT,
+        evidence=[],
+        confidence="insufficient",
+        originality_rules=ORIGINALITY_RULES + ["Do NOT use competitor logos or branding."]
+    )
+
 def generate_blueprints(
     patterns: List[ThumbnailPattern],
     group_stats: Dict[str, Dict],
     analyses: List[ThumbnailAnalysis],
     channel_title: str = "",
 ) -> List[ThumbnailBlueprint]:
-    """
-    Generate 1–5 reusable thumbnail blueprints from winning patterns.
-    Only creates blueprint if evidence confidence is not 'insufficient'.
-    """
-    blueprints: List[ThumbnailBlueprint] = []
+    
     winning = [p for p in patterns if p.is_winning and p.confidence != "insufficient"]
-
-    if not winning:
-        return blueprints
-
-    out_stats = group_stats.get("outlier", {})
-    n_out = out_stats.get("n", 0)
-
-    # Blueprint 1: Based on most impactful winning patterns
-    top_patterns = winning[:5]
-    pattern_ids = [p.pattern_id for p in top_patterns]
-
-    # Infer characteristics from winning patterns
-    uses_text = any(p.pattern_id == "has_text" for p in top_patterns)
-    uses_face = any(p.pattern_id == "has_face" for p in top_patterns)
-    uses_yellow = any(p.pattern_id == "has_yellow" for p in top_patterns)
-    uses_proof = any(p.pattern_id == "has_proof" for p in top_patterns)
-    short_text = any(p.pattern_id == "short_text" for p in top_patterns)
-    high_contrast = any(p.pattern_id == "high_contrast" for p in top_patterns)
-
-    hook = out_stats.get("top_hook", "curiosity_gap")
-    layout = out_stats.get("top_layout", "unknown")
-    median_words = out_stats.get("median_word_count", 4)
-    mobile_score = out_stats.get("median_mobile_score", 50)
-    brightness = out_stats.get("median_brightness", 0.5)
-
-    # Build layout description
-    if layout in ("left_subject_right_text", "right_subject_left_text"):
-        layout_desc = (
-            "Split layout: Subject on one side (48%), text block on opposite side (42%). "
-            "Leave 10% margin on all edges."
-        )
-    elif layout == "centered":
-        layout_desc = "Centered composition: Subject fills center 60% of frame, text above or below subject."
+    outliers = [a for a in analyses if a.performance_group == "outlier"]
+    
+    if winning:
+        blueprints = [generate_validated_blueprint(winning, outliers or analyses, channel_title)]
+    elif outliers:
+        blueprints = [generate_observed_outlier_blueprint(outliers, channel_title)]
+    elif analyses:
+        blueprints = [generate_channel_style_blueprint(analyses, channel_title)]
+    elif channel_title:
+        blueprints = [generate_safe_default_blueprint(channel_title)]
     else:
-        layout_desc = (
-            "Mobile-first composition: Single dominant subject filling 50–65% of frame. "
-            "Text in upper-left or lower-center region."
-        )
-
-    # Subject recipe
-    if uses_face:
-        subject_recipe = (
-            "One primary subject with visible face. Expression should match the hook type. "
-            "Face area should occupy 20–35% of total frame. "
-            "Avoid more than 2 faces competing for attention. "
-            "Do NOT copy specific individuals — use a subject appropriate to your topic."
-        )
-    elif uses_proof:
-        subject_recipe = (
-            "Primary visual should be a proof element (document, data, product close-up). "
-            "Keep proof object clean and readable at thumbnail scale. "
-            "Replace with your own content — do NOT copy competitor's proof object."
-        )
-    else:
-        subject_recipe = (
-            "Clear primary subject occupying 40–60% of frame. "
-            "Minimize competing focal points. "
-            "Subject should visually represent the video's core promise."
-        )
-
-    # Text recipe
-    if uses_text:
-        if short_text:
-            text_recipe = (
-                f"2 lines maximum. 3–5 words total. All uppercase preferred. "
-                f"Heavy condensed sans-serif. "
-                f"Line 1: [TOPIC/ACTION] in bright accent color (yellow or white). "
-                f"Line 2: [CONSEQUENCE/QUESTION] in contrasting color. "
-                f"Black stroke outline minimum 3px. No shadow clutter."
-            )
-        else:
-            text_recipe = (
-                f"Keep under 8 words. Two distinct text sizes (headline + subline). "
-                f"Contrasting colors for each line. "
-                f"Avoid replicating the video title verbatim."
-            )
-        overlay_formula = [
-            "Line 1: [CORE TOPIC] — bright (yellow/white) — largest",
-            "Line 2: [HOOK PHRASE / CONSEQUENCE] — secondary color — smaller",
-        ]
-    else:
-        text_recipe = "No text overlay — let the visual tell the story. Strong subject required."
-        overlay_formula = ["No text overlay — visual hook only"]
-
-    # Color recipe
-    bg_color = out_stats.get("top_layout", "varied")
-    color_recipe = (
-        f"{'Warm dominant palette — red/orange/yellow for urgency.' if uses_yellow else 'Balanced palette.'} "
-        f"{'Use yellow as primary accent — high visibility at small scale.' if uses_yellow else ''} "
-        f"{'High contrast between subject and background (contrast ratio > 0.4).' if high_contrast else 'Medium contrast.'} "
-        f"Background should complement but not compete with subject. "
-        f"Adjust colors to match your brand — do NOT replicate competitor's exact palette."
-    )
-
-    # Image prompt
-    prompt_parts = [
-        "YouTube thumbnail, 16:9 aspect ratio, high contrast, vibrant colors",
-        f"[MAIN SUBJECT] — {'large face, {EXPRESSION} expression' if uses_face else 'primary object/scene'}",
-        f"{'Overlay text: [LINE 1 TEXT] in yellow bold font, [LINE 2 TEXT] in white' if uses_text else 'No text overlay'}",
-        "['Proof element: [PROOF OBJECT] visible' if uses_proof else 'Clean background with depth']",
-        "Sharp focus on subject, slightly blurred background, professional lighting",
-        f"Color palette: {'warm' if uses_yellow else 'vivid'}, high saturation",
-        "Mobile-friendly composition, important elements away from bottom-right corner",
-    ]
-    image_prompt = "\n".join(f"- {p}" for p in prompt_parts if "['" not in p)
-    image_prompt = (
-        f"Create a YouTube thumbnail for a video titled [YOUR VIDEO TITLE].\n\n"
-        f"Subject: [MAIN SUBJECT DESCRIPTION]\n"
-        f"Setting: [BACKGROUND/LOCATION]\n"
-        f"{'Expression: [EMOTION/EXPRESSION]' if uses_face else ''}\n\n"
-        f"Visual style:\n{image_prompt}\n\n"
-        f"Overlay text:\n"
-        + ("\n".join(f"  {f}" for f in overlay_formula) if uses_text else "  None")
-        + "\n\nDo NOT include: competitor logos, specific brand colors, copied branding"
-    )
-
-    # Hook display name
-    hook_labels = {
-        "curiosity_gap": "Curiosity Gap", "shock_surprise": "Shock / Surprise",
-        "hidden_truth": "Hidden Truth", "proof_evidence": "Proof / Evidence",
-        "money_value": "Money / Value", "before_after": "Before / After",
-        "fear_danger": "Fear / Danger", "authority_expert": "Authority / Expert",
-        "unknown": "General Interest",
-    }
-    hook_label = hook_labels.get(hook, hook.replace("_", " ").title())
-
-    evidence_list = [
-        f"Pattern '{p.name}': observed in {p.outlier_count}/{p.outlier_total} outlier thumbnails"
-        for p in top_patterns
-    ]
-
-    bp = ThumbnailBlueprint(
-        id="bp_001",
-        name=f"High-Performance Blueprint ({channel_title or 'Channel'})",
-        use_when=(
-            f"Use when creating videos that need to break out above channel baseline. "
-            f"Based on patterns observed in top-performing videos. "
-            f"Hook type: {hook_label}."
-        ),
-        target_hook=hook,
-        based_on_pattern_ids=pattern_ids,
-        layout_description=layout_desc,
-        subject_recipe=subject_recipe,
-        background_recipe=(
-            "Background should provide context without competing with subject. "
-            f"{'Dark/desaturated background to make subject pop.' if brightness < 0.5 else 'Bright, clean background.'} "
-            "Apply subtle depth or blur. Avoid busy patterns."
-        ),
-        text_recipe=text_recipe,
-        color_recipe=color_recipe,
-        lighting_recipe=(
-            "Rim lighting on subject for edge separation from background. "
-            "Face/subject well-lit — avoid harsh shadows on key elements. "
-            "Vignette optional. Avoid overexposure."
-        ),
-        hierarchy_recipe=(
-            "Visual hierarchy (eyes should follow this order):\n"
-            f"1. {'Face / Main subject' if uses_face else 'Primary object'}\n"
-            f"2. {'Headline text' if uses_text else 'Secondary visual element'}\n"
-            f"3. {'Subline / Hook text' if uses_text else 'Background context'}\n"
-            "4. Background context"
-        ),
-        title_pairing_recipe=(
-            "Thumbnail creates curiosity or tension — title resolves it. "
-            "Avoid repeating the exact title text on the thumbnail. "
-            "Thumbnail should make viewer wonder; title should deliver the promise."
-        ),
-        overlay_text_formula=overlay_formula,
-        image_prompt_template=image_prompt,
-        negative_prompt=STANDARD_NEGATIVE_PROMPT,
-        evidence=evidence_list,
-        confidence=winning[0].confidence if winning else "low",
-        originality_rules=ORIGINALITY_RULES,
-    )
-    blueprints.append(bp)
-
+        blueprints = [generate_safe_default_blueprint("Competitor")]
+        
+    assert len(blueprints) >= 1
+    if not blueprints:
+        blueprints = [generate_safe_default_blueprint(channel_title)]
+        
+    outlier_count = sum(1 for a in analyses if a.performance_group == "outlier")
+    baseline_count = sum(1 for a in analyses if a.performance_group == "baseline")
+    low_count = sum(1 for a in analyses if a.performance_group == "low")
+    has_valid_control_group = (baseline_count + low_count) >= 2
+    
+    for b in blueprints:
+        b.sample_summary = {
+            "total_analyzed": len(analyses),
+            "outlier_count": outlier_count,
+            "baseline_count": baseline_count,
+            "low_count": low_count,
+            "has_valid_control_group": has_valid_control_group,
+            "blueprint_mode": b.blueprint_mode,
+        }
+        
     return blueprints
 
 
-# ── Main Orchestrator ─────────────────────────────────────────────────────────
 
 @dataclass
 class ThumbnailIntelligenceResult:
@@ -952,21 +1038,60 @@ def _balance_sample(
 ) -> List[ThumbnailSampleVideo]:
     """
     Return balanced sample of max_total videos across groups.
-    Priority: all outliers first, then even split of baseline/low.
+    Quota: 40% Outlier, 35% Baseline, 25% Low.
     """
-    outliers = [v for v in videos if v.performance_group == "outlier"]
-    baselines = [v for v in videos if v.performance_group == "baseline"]
-    lows = [v for v in videos if v.performance_group == "low"]
+    # Remove duplicates and empty thumbnails
+    seen = set()
+    unique_videos = []
+    for v in videos:
+        if v.video_id not in seen and v.thumbnail_url:
+            seen.add(v.video_id)
+            unique_videos.append(v)
+            
+    outliers = [v for v in unique_videos if v.performance_group == "outlier"]
+    baselines = [v for v in unique_videos if v.performance_group == "baseline"]
+    lows = [v for v in unique_videos if v.performance_group == "low"]
 
-    # Sort each group by outlier_ratio descending
+    # Sort each group
     outliers.sort(key=lambda v: -v.outlier_ratio)
-    baselines.sort(key=lambda v: -v.outlier_ratio)
+    baselines.sort(key=lambda v: abs(1.0 - v.outlier_ratio))  # closest to median first
     lows.sort(key=lambda v: v.outlier_ratio)  # worst performers first for low
 
-    # Allocate: all outliers + split remainder
-    result = list(outliers[:max_total])
-    remaining = max_total - len(result)
-    half = remaining // 2
-    result.extend(baselines[:half + (remaining % 2)])
-    result.extend(lows[:half])
-    return result[:max_total]
+    # Target quotas
+    o_target = int(max_total * 0.40)
+    b_target = int(max_total * 0.35)
+    l_target = max_total - o_target - b_target
+
+    # Actual lengths
+    o_len = len(outliers)
+    b_len = len(baselines)
+    l_len = len(lows)
+
+    # First pass: take what we can up to target
+    o_take = min(o_target, o_len)
+    b_take = min(b_target, b_len)
+    l_take = min(l_target, l_len)
+
+    # Redistribute shortfall
+    shortfall = max_total - (o_take + b_take + l_take)
+    
+    # Give remaining slots to groups that have extra capacity
+    while shortfall > 0:
+        allocated = False
+        if o_take < o_len and shortfall > 0:
+            o_take += 1
+            shortfall -= 1
+            allocated = True
+        if b_take < b_len and shortfall > 0:
+            b_take += 1
+            shortfall -= 1
+            allocated = True
+        if l_take < l_len and shortfall > 0:
+            l_take += 1
+            shortfall -= 1
+            allocated = True
+        if not allocated:
+            break # No group has extra capacity
+
+    result = outliers[:o_take] + baselines[:b_take] + lows[:l_take]
+    return result

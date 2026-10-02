@@ -474,11 +474,30 @@ export interface ThumbnailPattern {
   is_avoid: boolean
 }
 
+export type ThumbnailBlueprintMode =
+  | 'validated_winning'
+  | 'observed_outlier_style'
+  | 'observed_channel_style'
+  | 'title_derived_fallback'
+  | 'safe_default'
+
 export interface ThumbnailBlueprint {
   id: string
   name: string
   use_when: string
   target_hook: string
+  blueprint_mode: ThumbnailBlueprintMode
+  is_statistically_validated: boolean
+  fallback_reason: string
+  source_group: 'outlier' | 'all' | 'title' | 'default'
+  sample_summary: {
+    total_analyzed: number
+    outlier_count: number
+    baseline_count: number
+    low_count: number
+    has_valid_control_group: boolean
+  }
+  limitations: string[]
   based_on_pattern_ids: string[]
   layout_description: string
   subject_recipe: string
