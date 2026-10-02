@@ -213,11 +213,12 @@ function VariantCard({
 }) {
   const [expanded, setExpanded] = useState(false)
   const color = LABEL_COLORS[variant.option_label] || '#6b7280'
-  const score = variant.hook_quality.total_score
+  const hq = variant.hook_quality ?? { total_score: 0, promise_integrity: 0, one_second_clarity: 0, curiosity_gap: 0, title_complementarity: 0, visual_tension: 0, specificity_and_proof: 0, mobile_readability: 0, competitor_fit: 0, penalties: 0, rejection_reasons: [] }
+  const score = hq.total_score ?? 0
   const sColor = scoreColor(score)
   const sBadge = scoreBadge(score)
-  const isAB = variant.recommended_for_ab_test
-  const rank = variant.recommended_test_rank
+  const isAB = variant.recommended_for_ab_test ?? false
+  const rank = variant.recommended_test_rank ?? 5
 
   const copyFull = () => onCopy(`full_${variant.id}`, variant.full_image_prompt)
   const copyOverlay = () => onCopy(`overlay_${variant.id}`, variant.overlay_text.combined_text)
@@ -408,7 +409,7 @@ function VariantCard({
                 📊 Hook Quality Score: {score}/100 — {sBadge}
               </span>
             </div>
-            <HookScoreBreakdown hq={variant.hook_quality} />
+            <HookScoreBreakdown hq={hq} />
           </div>
 
           <TagRow label="✓ Competitor Traits Used" items={variant.competitor_traits_used} color="#4ade80" />
