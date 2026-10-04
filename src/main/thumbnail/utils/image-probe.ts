@@ -106,3 +106,5 @@ export function probeImageFile(filePath: string): ImageDimensions | null {
     fs.closeSync(fd)
   }
 }
+
+export const probeImageFileDimensions = probeImageFile

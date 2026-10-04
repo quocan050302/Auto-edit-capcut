@@ -273,7 +273,8 @@ export async function runContextAwareStockEngine(
     preferredAspectRatio = "16:9",
     apiKey,
     model,
-    forceReanalysis = false
+    forceReanalysis = false,
+    targetSceneIndices
   } = params
 
   // Set project dir for persistent Pixabay cache
@@ -316,6 +317,9 @@ export async function runContextAwareStockEngine(
 
   // Identify locked/approved scenes that must NOT be overwritten
   const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
+      return false
+    }
     const existing = existingMap.get(scene.sceneIndex)
     if (scene.locked || existing?.locked) return false
     if (existing?.manualOverride) return false
@@ -380,11 +384,12 @@ export async function runContextAwareStockEngine(
   let assignedCount = 0
   let failedCount = 0
 
-  // Preserve locked/approved assignments first
+  // Preserve locked/approved/unprocessed assignments first
   for (const entry of flattenedEntries) {
     const existing = existingMap.get(entry.sceneIndex)
     const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved"
-    if (isLocked && existing) {
+    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex)
+    if ((isLocked || isExcluded) && existing) {
       assignments.push(existing)
       if (existing.status === "assigned") assignedCount++
     }

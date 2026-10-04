@@ -13,6 +13,7 @@ import { runStockEngine } from '../stock/stock-engine'
 import { runAudioDirector, loadAudioPlan } from '../audio/audio-director'
 import { runRenderPreflight } from '../qa/render-preflight'
 import { renderVideo } from '../renderer'
+import { runHealthVisualEngine } from '../health/health-visual-engine'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
 import {
   isTranscriptionValid,
@@ -407,6 +408,10 @@ export async function runStockSearchStage(
   signal?: AbortSignal
 ): Promise<StageRunResult> {
   checkAborted(signal)
+
+  if (options.contentType === 'health') {
+    return runHealthVisualEngine(options, onProgress, signal)
+  }
 
   // Đảm bảo Global Context đã tồn tại trước khi chạy stock
   if (!isGlobalContextValid(options.projectDir)) {

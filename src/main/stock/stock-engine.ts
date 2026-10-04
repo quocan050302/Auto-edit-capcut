@@ -189,7 +189,7 @@ export async function runStockEngine(
   params: StockRunParams,
   onProgress: ProgressCallback = () => {}
 ): Promise<StockRunResult> {
-  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = '16:9' } = params
+  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = '16:9', targetSceneIndices } = params
 
   // Set project dir for persistent Pixabay cache
   setPixabayProjectDir(projectDir)
@@ -230,6 +230,9 @@ export async function runStockEngine(
 
   // Identify locked/approved scenes that must NOT be overwritten
   const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
+      return false
+    }
     const existing = existingMap.get(scene.sceneIndex)
     if (scene.locked || existing?.locked) return false
     if (existing?.manualOverride) return false
@@ -242,11 +245,12 @@ export async function runStockEngine(
   let failedCount = 0
   const orientation = toOrientation(preferredAspectRatio)
 
-  // Preserve locked/approved assignments first
+  // Preserve locked/approved/unprocessed assignments first
   for (const entry of flattenedEntries) {
     const existing = existingMap.get(entry.sceneIndex)
     const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === 'approved'
-    if (isLocked && existing) {
+    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex)
+    if ((isLocked || isExcluded) && existing) {
       assignments.push(existing)
       if (existing.status === 'assigned') assignedCount++
     }

@@ -91,6 +91,8 @@ export interface ProjectSettings {
   pacing: Pacing
 }
 
+export type ContentType = 'default' | 'health'
+
 export interface ProjectInputs {
   scriptPath: string | null
   voiceoverPath: string | null
@@ -98,6 +100,7 @@ export interface ProjectInputs {
   videosFolder: string | null
   musicFolder: string | null
   sfxFolder: string | null
+  contentType?: ContentType
 }
 
 export type MediaItemType = 'image' | 'video' | 'audio'
@@ -322,7 +325,7 @@ export interface ContextScoreBreakdown {
 
 // ─── Stock Media Types ────────────────────────────────────────────────────────
 
-export type StockProvider = 'pexels' | 'pixabay'
+export type StockProvider = 'pexels' | 'pixabay' | 'google-flow'
 export type StockMediaType = 'video' | 'photo'
 
 /** A single candidate returned from a stock media API search */
@@ -732,6 +735,7 @@ export interface StockRunParams {
   pexelsApiKey: string
   pixabayApiKey?: string
   preferredAspectRatio?: string  // e.g. '16:9'
+  targetSceneIndices?: number[]
 }
 
 /** Result from a completed stock engine run */
@@ -1241,6 +1245,8 @@ export interface AutoPipelineOptions {
   fps?: 24 | 25 | 30 | 60
   transitionSettings?: RenderTransitionSettings
   autoStartOnReady?: boolean
+  contentType?: ContentType
+  healthVisualConfig?: HealthVisualConfig
 }
 
 export type PipelineOverallStatus =
@@ -1599,4 +1605,90 @@ export interface ThumbnailProgressPayload {
   message: string
   candidate?: ThumbnailCandidate
   jobState?: ThumbnailJobState
+}
+
+// ─── Health Visual Mode Types ─────────────────────────────────────────────────
+
+export type HealthVisualStrategy = 'ai-still' | 'stock'
+
+export type HealthVisualCategory =
+  | 'lifestyle'
+  | 'anatomy'
+  | 'mechanism'
+  | 'food'
+  | 'exercise'
+  | 'evidence'
+  | 'conceptual'
+
+export type HealthScientificAccuracy =
+  | 'conceptual'
+  | 'anatomical'
+  | 'mechanistic'
+
+export type HealthMotionPreset =
+  | 'slow-push-in'
+  | 'slow-push-out'
+  | 'pan-left'
+  | 'pan-right'
+  | 'micro-drift'
+  | 'none'
+
+export interface HealthVisualConfig {
+  aiRatio?: number
+  stockRatio?: number
+  width?: number
+  height?: number
+  motionEnabled?: boolean
+}
+
+export interface HealthVisualScenePlan {
+  sceneIndex: number
+  narration: string
+  visualIntent: string
+  strategy: HealthVisualStrategy
+  category: HealthVisualCategory
+  reasoning: string
+  scientificAccuracy: HealthScientificAccuracy
+  imagePrompt?: string
+  stockQueries?: string[]
+  motionPreset: HealthMotionPreset
+  generationHash?: string
+  generatedAssetPath?: string
+  startTime: number
+  endTime: number
+  duration: number
+}
+
+export interface HealthVisualPlan {
+  schemaVersion: number
+  generatedAt: string
+  targetAiRatio: number
+  targetStockRatio: number
+  totalScenes: number
+  targetAiScenes: number
+  targetStockScenes: number
+  scenes: HealthVisualScenePlan[]
+}
+
+export interface HealthGeneratedAssetRecord {
+  sceneIndex: number
+  strategy: HealthVisualStrategy
+  promptHash: string
+  prompt?: string
+  status: 'pending' | 'generating' | 'exporting' | 'completed' | 'failed' | 'fallback-stock'
+  mediaId?: string
+  flowProjectId?: string
+  outputPath?: string
+  width?: number
+  height?: number
+  motionPreset?: HealthMotionPreset
+  generatedAt?: string
+  error?: string
+}
+
+export interface HealthGeneratedAssetsManifest {
+  schemaVersion: number
+  updatedAt: string
+  configHash: string
+  scenes: Record<string, HealthGeneratedAssetRecord>
 }

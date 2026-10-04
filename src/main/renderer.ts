@@ -29,6 +29,8 @@ import {
 
 import { runRenderPreflight } from './qa/render-preflight'
 import { runRenderPostflight } from './qa/render-postflight'
+import { buildHealthMotionFilter } from './health/health-motion'
+import type { HealthVisualScenePlan, HealthMotionPreset } from './health/health-visual-types'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -597,6 +599,20 @@ export async function renderVideo(params: {
     const totalScenes = scenes.length
     progress(`Processing ${totalScenes} scenes...`, 0.06)
 
+    // Load Health visual plan if available to detect Health AI images and motion presets
+    const healthPlanMap = new Map<number, HealthVisualScenePlan>()
+    const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
+    if (fs.existsSync(healthPlanPath)) {
+      try {
+        const hp = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+        for (const sc of hp.scenes || []) {
+          if (sc && typeof sc.sceneIndex === 'number') {
+            healthPlanMap.set(sc.sceneIndex, sc)
+          }
+        }
+      } catch { /* ignore */ }
+    }
+
     // ── 3a. Production Intelligence: Preflight QA ────────────────────────────
     progress('Running preflight QA checks...', 0.07)
     const preflightReport = await runRenderPreflight({
@@ -809,13 +825,32 @@ export async function renderVideo(params: {
           // Apply crop if single beat has semantic crop
           const singleBeat = beats[0]
           let vfFilter = scaleFilt
+          let hasSemanticMotion = false
           if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
             const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps)
             if (zf) {
               // Apply scale first then zoompan
               vfFilter = `${scaleFilt},${zf}`
+              hasSemanticMotion = true
               logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`)
             }
+          }
+
+          // If no intentional Retention crop was applied and this is an image scene:
+          // Check if this is a Health AI still scene or Health generated image
+          const healthScene = healthPlanMap.get(scene.sceneIndex)
+          const isHealthAiImage =
+            isImage &&
+            !hasSemanticMotion &&
+            (healthScene?.strategy === 'ai-still' ||
+              mediaPath.includes(path.join('assets', 'generated', 'health')) ||
+              mediaPath.includes('/assets/generated/health/'))
+
+          if (isHealthAiImage) {
+            const preset: HealthMotionPreset = healthScene?.motionPreset || 'slow-push-in'
+            const motionFilter = buildHealthMotionFilter(preset, width, height, scene.duration, fps)
+            vfFilter = motionFilter
+            logger.info(`[HealthMotion] Scene ${scene.sceneIndex}: applying subtle motion preset '${preset}'`)
           }
 
           if (isImage) {

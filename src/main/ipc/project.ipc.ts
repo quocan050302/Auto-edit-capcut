@@ -118,6 +118,7 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
           videosFolder: null,
           musicFolder: null,
           sfxFolder: null,
+          contentType: "default",
         },
         stats: {
           totalImages: 0,
@@ -156,6 +157,9 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
         const state: ProjectState = JSON.parse(
           fs.readFileSync(statePath, "utf-8"),
         );
+        if (state.inputs && !state.inputs.contentType) {
+          state.inputs.contentType = 'default';
+        }
         logger.info(`Project opened: ${state.name}`, { projectDir });
         return { success: true, state };
       } catch (err: unknown) {

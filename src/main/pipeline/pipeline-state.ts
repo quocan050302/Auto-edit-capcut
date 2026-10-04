@@ -438,6 +438,29 @@ export function determineInvalidatedStages(
     invalidated.add('postflight')
   }
 
+  // Content type (default vs health) thay đổi
+  const oldContentType = oldState.options.contentType ?? 'default'
+  const newContentType = newOptions.contentType ?? 'default'
+  if (oldContentType !== newContentType) {
+    invalidated.add('stock-search')
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
+  // Health visual config thay đổi
+  if (
+    oldContentType === 'health' &&
+    newContentType === 'health' &&
+    JSON.stringify(oldState.options.healthVisualConfig) !==
+      JSON.stringify(newOptions.healthVisualConfig)
+  ) {
+    invalidated.add('stock-search')
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
   // Audio settings thay đổi
   if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
     invalidated.add('audio-search')

@@ -40,9 +40,12 @@ function fmt(secs: number): string {
 function providerBadge(provider: string): React.ReactElement {
   const colors: Record<string, { bg: string; fg: string }> = {
     pexels: { bg: 'rgba(5, 193, 112, 0.15)', fg: '#05C170' },
-    pixabay: { bg: 'rgba(43, 135, 217, 0.15)', fg: '#2B87D9' }
+    pixabay: { bg: 'rgba(43, 135, 217, 0.15)', fg: '#2B87D9' },
+    'google-flow': { bg: 'rgba(139, 92, 246, 0.18)', fg: '#a78bfa' },
+    flow: { bg: 'rgba(139, 92, 246, 0.18)', fg: '#a78bfa' }
   }
   const c = colors[provider.toLowerCase()] ?? { bg: 'rgba(255,255,255,0.08)', fg: '#a0a0c0' }
+  const label = provider.toLowerCase() === 'google-flow' ? 'AI Still (Flow)' : provider
   return (
     <span
       style={{
@@ -56,7 +59,7 @@ function providerBadge(provider: string): React.ReactElement {
         textTransform: 'uppercase'
       }}
     >
-      {provider}
+      {label}
     </span>
   )
 }
@@ -689,18 +692,56 @@ function StoryboardSceneCard({
           </div>
 
           {sceneCandidates.length === 0 ? (
-            <div
-              style={{
-                padding: '12px',
-                textAlign: 'center',
-                background: 'var(--bg-void)',
-                borderRadius: 'var(--radius-sm)',
-                fontSize: '11px',
-                color: 'var(--text-muted)'
-              }}
-            >
-              No candidate filmstrip available for this scene yet. Run Stock Search to generate ranked candidates.
-            </div>
+            asset?.provider === 'google-flow' && asset.localPath ? (
+              <div
+                style={{
+                  display: 'flex',
+                  gap: '14px',
+                  alignItems: 'center',
+                  background: 'var(--bg-void)',
+                  border: '1px solid rgba(139, 92, 246, 0.25)',
+                  borderRadius: 'var(--radius-sm)',
+                  padding: '10px 14px'
+                }}
+              >
+                <img
+                  src={`file://${asset.localPath}`}
+                  alt="AI Still Preview"
+                  style={{
+                    width: '160px',
+                    height: '90px',
+                    objectFit: 'cover',
+                    borderRadius: '4px',
+                    border: '1px solid var(--border-subtle)',
+                    background: '#090a0f'
+                  }}
+                  onError={(e) => {
+                    ;(e.target as HTMLElement).style.display = 'none'
+                  }}
+                />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                  <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                    ✨ AI Still · Google Flow (1920×1080)
+                  </div>
+                  <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                    {asset.localPath}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div
+                style={{
+                  padding: '12px',
+                  textAlign: 'center',
+                  background: 'var(--bg-void)',
+                  borderRadius: 'var(--radius-sm)',
+                  fontSize: '11px',
+                  color: 'var(--text-muted)'
+                }}
+              >
+                No candidate filmstrip available for this scene yet. Run Stock Search to generate ranked candidates.
+              </div>
+            )
           ) : (
             <div
               style={{
