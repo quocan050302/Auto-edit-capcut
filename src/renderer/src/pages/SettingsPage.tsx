@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react'
 import type { ProjectState, ProjectSettings, VideoType, AspectRatio, Pacing, ApiKeyStatus } from '../../../../shared/types'
 import { normalizeApiKey } from '../../../../shared/api-key'
 import { ResearchSettingsModal } from '../features/youtube-research/components/ResearchSettingsModal'
+import { GoogleFlowSettingsSection } from '../components/thumbnail/GoogleFlowSettingsSection'
 
 interface SettingsPageProps {
   project: ProjectState
@@ -708,6 +709,9 @@ export function SettingsPage({ project, onUpdateSettings }: SettingsPageProps): 
           onSettingsUpdated={() => setResearchSettingsOpen(false)}
         />
       )}
+
+      {/* Google Flow Connector Settings */}
+      <GoogleFlowSettingsSection projectDir={project.projectDir} />
 
       {/* Config summary */}
       <div className="panel" style={{ background: 'var(--bg-elevated)' }}>

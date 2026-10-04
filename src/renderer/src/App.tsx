@@ -15,6 +15,8 @@ import { QAPage } from './pages/PlaceholderPages'
 import { StockPage } from './pages/StockPage'
 import { AudioDirectorPage } from './pages/AudioDirectorPage'
 import { CaptionsPage } from './pages/CaptionsPage'
+import { ThumbnailStudioPage } from './pages/ThumbnailStudioPage'
+import { ThumbnailPromptLibraryPage } from './pages/ThumbnailPromptLibraryPage'
 import { useProject } from './hooks/useProject'
 import { useTranscribe } from './hooks/useTranscribe'
 import { useStock } from './hooks/useStock'
@@ -36,6 +38,8 @@ export type Page =
   | 'render'
   | 'qa'
   | 'youtube-research'
+  | 'thumbnails'
+  | 'thumbnail-library'
 
 export default function App(): React.ReactElement {
   const [currentPage, setCurrentPage] = useState<Page>('home')
@@ -286,7 +290,12 @@ export default function App(): React.ReactElement {
             <AnalysisPage project={project} scanResult={scanResult} />
           )}
 
-          {currentPage === 'render' && project && <RenderPage project={project} />}
+          {currentPage === 'render' && project && (
+            <RenderPage
+              project={project}
+              onNavigate={(p) => navigate(p as Page)}
+            />
+          )}
 
           {currentPage === 'qa' && <QAPage />}
 
@@ -294,6 +303,19 @@ export default function App(): React.ReactElement {
             <YouTubeResearchPage
               project={project}
               onNavigate={(p) => navigate(p as Page)}
+            />
+          )}
+
+          {currentPage === 'thumbnails' && project && (
+            <ThumbnailStudioPage
+              project={project}
+              onNavigate={(p) => navigate(p as Page)}
+            />
+          )}
+
+          {currentPage === 'thumbnail-library' && (
+            <ThumbnailPromptLibraryPage
+              onBack={() => navigate(project ? 'thumbnails' : 'home')}
             />
           )}
         </div>

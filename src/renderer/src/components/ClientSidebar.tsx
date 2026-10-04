@@ -78,6 +78,16 @@ export function ClientSidebar({
           <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z" clipRule="evenodd" />
         </svg>
       )
+    },
+    {
+      id: 'thumbnails',
+      label: '6. Thumbnails',
+      requiresProject: true,
+      icon: (
+        <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
+          <path fillRule="evenodd" d="M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z" clipRule="evenodd" />
+        </svg>
+      )
     }
   ]
 
@@ -89,6 +99,7 @@ export function ClientSidebar({
     if (page === 'stock') return 'stock'
     if (page === 'render' || page === 'qa') return 'render'
     if (page === 'youtube-research') return 'youtube-research'
+    if (page === 'thumbnails') return 'thumbnails'
     // Deep technical stages opened in simple mode map to nearest step
     if (page === 'transcribe' || page === 'planning' || page === 'captions' || page === 'audio') {
       return 'production'

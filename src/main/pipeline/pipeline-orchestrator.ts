@@ -1,6 +1,7 @@
 import { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { logger } from '../logger'
+import { thumbnailAutoTrigger } from '../thumbnail/thumbnail-auto-trigger'
 import { IPC_CHANNELS } from '../../../shared/types'
 import type {
   PipelineRecoveryResult,
@@ -903,6 +904,13 @@ class PipelineOrchestrator {
         savePipelineStateAtomic(norm, state)
         this.broadcastProgress(state)
         logger.info(`[Pipeline] Pipeline ${state.runId} completed successfully!`)
+
+        // Trigger companion thumbnail generation (non-blocking, never fails video)
+        void thumbnailAutoTrigger.startIfEligible({
+          projectDir: norm,
+          renderOutputPath: state.renderOutputPath,
+          scriptPath: state.options?.scriptPath
+        })
       }
     } finally {
       this.stopHeartbeat(norm)

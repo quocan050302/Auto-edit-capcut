@@ -29,9 +29,16 @@ import type {
   EvidenceSource,
   ClaimVerificationStatus,
   ResearchSidecarStatus,
-  ResearchProjectHandoffPayload
+  ResearchProjectHandoffPayload,
+  ThumbnailPromptTemplate,
+  ProjectThumbnailSettings,
+  ThumbnailProviderHealth,
+  ThumbnailJobState,
+  ThumbnailCandidate,
+  ThumbnailPlan,
+  ThumbnailProgressPayload
 } from '../../shared/types'
-
+import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
 const api = {
   window: {
@@ -422,6 +429,196 @@ const api = {
       payload: ResearchProjectHandoffPayload
     ): Promise<{ success: boolean; projectDir?: string; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF, payload)
+  },
+
+  thumbnail: {
+    templates: {
+      list: (): Promise<{ success: boolean; templates?: ThumbnailPromptTemplate[]; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_LIST),
+
+      create: (data: {
+        name: string
+        description?: string
+        category: string
+        promptText: string
+        isDefault?: boolean
+      }): Promise<{ success: boolean; template?: ThumbnailPromptTemplate; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_CREATE, data),
+
+      update: (
+        id: string,
+        updates: {
+          name?: string
+          description?: string
+          category?: string
+          promptText?: string
+          isDefault?: boolean
+        }
+      ): Promise<{ success: boolean; template?: ThumbnailPromptTemplate; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_UPDATE, { id, updates }),
+
+      duplicate: (
+        id: string,
+        newName?: string
+      ): Promise<{ success: boolean; template?: ThumbnailPromptTemplate; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_DUPLICATE, { id, newName }),
+
+      delete: (id: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_DELETE, { id }),
+
+      import: (jsonContent?: string): Promise<{ success: boolean; importedCount?: number; importedTemplates?: ThumbnailPromptTemplate[]; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_IMPORT, { jsonContent }),
+
+      export: (ids?: string[], saveToFile?: boolean): Promise<{ success: boolean; json?: string; filePath?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_EXPORT, { ids, saveToFile })
+    },
+
+    settings: {
+      get: (projectDir: string): Promise<{ success: boolean; settings?: ProjectThumbnailSettings; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_SETTINGS_GET, { projectDir }),
+
+      save: (
+        projectDir: string,
+        settings: ProjectThumbnailSettings
+      ): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_SETTINGS_SAVE, { projectDir, settings })
+    },
+
+    flow: {
+      checkHealth: (bridgeUrl?: string): Promise<ThumbnailProviderHealth> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_FLOW_HEALTH, { bridgeUrl }),
+
+      openFlow: (): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_FLOW_OPEN)
+    },
+
+    jobs: {
+      generatePlan: (params: {
+        projectDir: string
+        templateId?: string
+        templateSnapshot?: string
+        generationRound?: number
+        preferredModel?: string
+      }): Promise<{ success: boolean; plan?: ThumbnailPlan; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_PLAN_GENERATE, params),
+
+      start: (params: {
+        projectDir: string
+        templateId?: string
+        templateSnapshot?: string
+        preferredModel?: string
+        generationRound?: number
+        forceRestart?: boolean
+      }): Promise<{ success: boolean; jobId?: string; state?: ThumbnailJobState; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_START, params),
+
+      get: (projectDir: string): Promise<{ success: boolean; state?: ThumbnailJobState | null; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_GET, { projectDir }),
+
+      resume: (projectDir: string): Promise<{ success: boolean; state?: ThumbnailJobState; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_RESUME, { projectDir }),
+
+      cancel: (projectDir: string): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_CANCEL, { projectDir }),
+
+      generateMore: (params: {
+        projectDir: string
+        templateId?: string
+        templateSnapshot?: string
+      }): Promise<{ success: boolean; jobId?: string; state?: ThumbnailJobState; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_JOB_GENERATE_MORE, params)
+    },
+
+    candidates: {
+      retry: (params: {
+        projectDir: string
+        candidateId: string
+      }): Promise<{ success: boolean; candidate?: ThumbnailCandidate; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_RETRY, params),
+
+      regenerate: (params: {
+        projectDir: string
+        candidateId: string
+        customPrompt?: string
+      }): Promise<{ success: boolean; candidate?: ThumbnailCandidate; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_REGENERATE, params),
+
+      export4k: (params: {
+        projectDir: string
+        candidateId: string
+      }): Promise<{ success: boolean; candidate?: ThumbnailCandidate; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_EXPORT_4K, params),
+
+      select: (params: {
+        projectDir: string
+        candidateId: string
+      }): Promise<{ success: boolean; selectedPath?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_SELECT, params)
+    },
+
+    openFolder: (params: {
+      projectDir: string
+      folderPath?: string
+    }): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_OPEN_FOLDER, params),
+
+    readImage: (filePath: string): Promise<{ dataUrl: string } | { error: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_READ_IMAGE, filePath),
+
+    onProgress: (callback: (payload: ThumbnailProgressPayload) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: ThumbnailProgressPayload): void => {
+        callback(payload)
+      }
+      ipcRenderer.on(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler)
+      return () => {
+        ipcRenderer.off(IPC_CHANNELS.THUMBNAIL_PROGRESS, handler)
+      }
+    },
+
+    runtime: {
+      getSettings: (): Promise<{ success: boolean; settings?: FlowKitRuntimeSettings; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_GET_SETTINGS),
+
+      saveSettings: (settings: Partial<FlowKitRuntimeSettings>): Promise<{ success: boolean; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SAVE_SETTINGS, settings),
+
+      start: (): Promise<{ success: boolean; error?: string; errorCode?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_START),
+
+      stop: (): Promise<{ success: boolean }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STOP),
+
+      getStatus: (): Promise<FlowKitRuntimeStatus> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS),
+
+      ensureReady: (bridgeUrl?: string): Promise<FlowReadinessResult> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_ENSURE_READY, bridgeUrl ? { bridgeUrl } : undefined),
+
+      detectPython: (flowKitPath?: string): Promise<{ success: boolean; pythonPath?: string; version?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_DETECT_PYTHON, flowKitPath ? { flowKitPath } : undefined),
+
+      selectFolder: (): Promise<{ success: boolean; folderPath?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_FOLDER),
+
+      selectPython: (): Promise<{ success: boolean; pythonPath?: string; error?: string }> =>
+        ipcRenderer.invoke(IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_PYTHON),
+
+      onStatus: (callback: (status: FlowKitRuntimeStatus) => void): (() => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, status: FlowKitRuntimeStatus): void => {
+          callback(status)
+        }
+        ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler)
+        return () => ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, handler)
+      },
+
+      onLog: (callback: (entry: { message: string; timestamp: string }) => void): (() => void) => {
+        const handler = (_event: Electron.IpcRendererEvent, entry: { message: string; timestamp: string }): void => {
+          callback(entry)
+        }
+        ipcRenderer.on(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler)
+        return () => ipcRenderer.off(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, handler)
+      }
+    }
   }
 }
 

@@ -6,6 +6,7 @@ import type {
   RenderQaReport
 } from '../../../../shared/types'
 import { CollapsibleSection } from '../components/CollapsibleSection'
+import { RenderThumbnailCompanionCard } from '../components/thumbnail/RenderThumbnailCompanionCard'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ interface RenderResult {
 
 interface RenderPageProps {
   project: ProjectState
+  onNavigate?: (page: string) => void
 }
 
 function fmt(secs: number): string {
@@ -42,7 +44,7 @@ function fmtBytes(bytes: number): string {
 
 // ─── Render Page ──────────────────────────────────────────────────────────────
 
-export function RenderPage({ project }: RenderPageProps): React.ReactElement {
+export function RenderPage({ project, onNavigate }: RenderPageProps): React.ReactElement {
   const [isRendering, setIsRendering] = useState(false)
   const [isPreflightRunning, setIsPreflightRunning] = useState(false)
   const [preflightReport, setPreflightReport] = useState<RenderQaReport | null>(null)
@@ -737,6 +739,13 @@ export function RenderPage({ project }: RenderPageProps): React.ReactElement {
             </div>
           </div>
         </div>
+      )}
+
+      {result && (
+        <RenderThumbnailCompanionCard
+          projectDir={project.projectDir}
+          onOpenStudio={() => onNavigate?.('thumbnails')}
+        />
       )}
     </div>
   )

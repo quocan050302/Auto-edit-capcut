@@ -7079,6 +7079,12 @@ const NAV_ITEMS = [
     label: "YouTube Research",
     requiresProject: false,
     icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M12 7a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0V8.414l-4.293 4.293a1 1 0 01-1.414 0L8 10.414l-4.293 4.293a1 1 0 01-1.414-1.414l5-5a1 1 0 011.414 0L11 10.586 14.586 7H12z", clipRule: "evenodd" }) })
+  },
+  {
+    id: "thumbnails",
+    label: "Thumbnail Studio",
+    requiresProject: true,
+    icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z", clipRule: "evenodd" }) })
   }
 ];
 function Sidebar({
@@ -7211,6 +7217,12 @@ function ClientSidebar({
       label: "5. Export",
       requiresProject: true,
       icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M10 18a8 8 0 100-16 8 8 0 000 16zM9.555 7.168A1 1 0 008 8v4a1 1 0 001.555.832l3-2a1 1 0 000-1.664l-3-2z", clipRule: "evenodd" }) })
+    },
+    {
+      id: "thumbnails",
+      label: "6. Thumbnails",
+      requiresProject: true,
+      icon: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { viewBox: "0 0 20 20", fill: "currentColor", className: "nav-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M4 3a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V5a2 2 0 00-2-2H4zm12 12H4l4-8 3 6 2-4 3 6z", clipRule: "evenodd" }) })
     }
   ];
   const getActiveId = (page) => {
@@ -7220,6 +7232,7 @@ function ClientSidebar({
     if (page === "stock") return "stock";
     if (page === "render" || page === "qa") return "render";
     if (page === "youtube-research") return "youtube-research";
+    if (page === "thumbnails") return "thumbnails";
     if (page === "transcribe" || page === "planning" || page === "captions" || page === "audio") {
       return "production";
     }
@@ -8604,6 +8617,427 @@ const STAGE_DESCRIPTIONS = {
     workspacePageTitle: "Render & Export"
   }
 };
+function ThumbnailTemplateSelector({
+  templates,
+  selectedTemplateId,
+  onChange,
+  onManageLibrary,
+  disabled
+}) {
+  const [showPreviewModal, setShowPreviewModal] = reactExports.useState(false);
+  const selectedTemplate = templates.find((t2) => t2.id === selectedTemplateId) || templates.find((t2) => t2.isDefault) || templates[0];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "select",
+        {
+          className: "input-field",
+          value: selectedTemplate?.id || "",
+          onChange: (e) => onChange(e.target.value),
+          disabled,
+          style: { flex: 1, height: "40px" },
+          children: templates.map((tpl) => /* @__PURE__ */ jsxRuntimeExports.jsxs("option", { value: tpl.id, children: [
+            tpl.name,
+            " ",
+            tpl.isDefault ? "★ (Default)" : "",
+            " [",
+            tpl.category,
+            "]"
+          ] }, tpl.id))
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          className: "btn btn-secondary btn-sm",
+          onClick: () => setShowPreviewModal(true),
+          disabled: !selectedTemplate,
+          style: { height: "40px", padding: "0 12px", whiteSpace: "nowrap" },
+          title: "Preview the full prompt text of the selected template",
+          children: "👁 Preview"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          className: "btn btn-secondary btn-sm",
+          onClick: onManageLibrary,
+          style: { height: "40px", padding: "0 12px", whiteSpace: "nowrap" },
+          title: "Open Thumbnail Prompt Library Manager",
+          children: "📚 Manage Library"
+        }
+      )
+    ] }),
+    selectedTemplate && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", display: "flex", alignItems: "center", gap: "8px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "span",
+        {
+          style: {
+            padding: "2px 8px",
+            borderRadius: "12px",
+            background: "rgba(108, 99, 255, 0.15)",
+            color: "var(--brand-primary)",
+            fontWeight: 500
+          },
+          children: selectedTemplate.category
+        }
+      ),
+      selectedTemplate.description && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: selectedTemplate.description })
+    ] }),
+    showPreviewModal && selectedTemplate && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: {
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.8)",
+          backdropFilter: "blur(8px)",
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "24px"
+        },
+        onClick: () => setShowPreviewModal(false),
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              backgroundColor: "var(--bg-surface, #0f0f1a)",
+              border: "1px solid var(--border-strong, rgba(255, 255, 255, 0.15))",
+              borderRadius: "var(--radius-lg, 16px)",
+              width: "100%",
+              maxWidth: "750px",
+              maxHeight: "85vh",
+              display: "flex",
+              flexDirection: "column",
+              boxShadow: "0 20px 50px rgba(0, 0, 0, 0.8)",
+              overflow: "hidden"
+            },
+            onClick: (e) => e.stopPropagation(),
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    padding: "16px 20px",
+                    borderBottom: "1px solid var(--border-default)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { margin: 0, fontSize: "16px", color: "var(--text-primary)" }, children: selectedTemplate.name }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginTop: "2px" }, children: [
+                        "Category: ",
+                        selectedTemplate.category,
+                        " ",
+                        selectedTemplate.isBuiltIn ? "• Built-in" : ""
+                      ] })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary btn-sm",
+                        onClick: () => setShowPreviewModal(false),
+                        children: "✕ Close"
+                      }
+                    )
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "20px", overflowY: "auto", flex: 1 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "pre",
+                {
+                  style: {
+                    margin: 0,
+                    whiteSpace: "pre-wrap",
+                    fontFamily: "var(--font-mono, monospace)",
+                    fontSize: "12px",
+                    lineHeight: "1.6",
+                    color: "var(--text-primary)",
+                    background: "rgba(0, 0, 0, 0.3)",
+                    padding: "16px",
+                    borderRadius: "var(--radius-sm, 6px)",
+                    border: "1px solid var(--border-default)"
+                  },
+                  children: selectedTemplate.promptText
+                }
+              ) })
+            ]
+          }
+        )
+      }
+    )
+  ] });
+}
+function ThumbnailInputAutomationCard({
+  projectDir,
+  onManageLibrary,
+  disabled
+}) {
+  const [settings, setSettings] = reactExports.useState(null);
+  const [templates, setTemplates] = reactExports.useState([]);
+  const [isLoading, setIsLoading] = reactExports.useState(true);
+  reactExports.useEffect(() => {
+    let mounted = true;
+    async function loadData() {
+      try {
+        setIsLoading(true);
+        const [tplRes, setRes] = await Promise.all([
+          window.api.thumbnail.templates.list(),
+          window.api.thumbnail.settings.get(projectDir)
+        ]);
+        if (!mounted) return;
+        const loadedTemplates = tplRes.success && tplRes.templates ? tplRes.templates : [];
+        setTemplates(loadedTemplates);
+        if (setRes.success && setRes.settings) {
+          const loadedSettings = setRes.settings;
+          if (!loadedSettings.selectedTemplateId && loadedTemplates.length > 0) {
+            const def = loadedTemplates.find((t2) => t2.isDefault) || loadedTemplates[0];
+            loadedSettings.selectedTemplateId = def.id;
+            loadedSettings.templateSnapshot = def.promptText;
+            await window.api.thumbnail.settings.save(projectDir, loadedSettings);
+          }
+          setSettings(loadedSettings);
+        }
+      } catch (err) {
+        console.error("Failed to load thumbnail settings for input page:", err);
+      } finally {
+        if (mounted) setIsLoading(false);
+      }
+    }
+    if (projectDir) {
+      loadData();
+    }
+    return () => {
+      mounted = false;
+    };
+  }, [projectDir]);
+  const handleToggleEnabled = async (checked) => {
+    if (!settings) return;
+    const updated = {
+      ...settings,
+      enabled: checked,
+      autoGenerateAfterRender: checked
+    };
+    setSettings(updated);
+    await window.api.thumbnail.settings.save(projectDir, updated);
+  };
+  const handleSelectTemplate = async (templateId) => {
+    if (!settings) return;
+    const target = templates.find((t2) => t2.id === templateId);
+    const updated = {
+      ...settings,
+      selectedTemplateId: templateId,
+      templateSnapshot: target?.promptText || settings.templateSnapshot
+    };
+    setSettings(updated);
+    await window.api.thumbnail.settings.save(projectDir, updated);
+  };
+  const handleTitleChange = async (val) => {
+    if (!settings) return;
+    const updated = {
+      ...settings,
+      existingVideoTitle: val
+    };
+    setSettings(updated);
+    await window.api.thumbnail.settings.save(projectDir, updated);
+  };
+  if (isLoading || !settings) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { padding: "16px", background: "var(--bg-surface, #0f0f1a)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", color: "var(--text-secondary)" }, children: "Loading thumbnail automation settings..." }) });
+  }
+  const hasSelectedTemplate = Boolean(settings.selectedTemplateId);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: "panel",
+      style: {
+        background: "var(--bg-surface, #0f0f1a)",
+        border: "1px solid var(--border-default, rgba(255, 255, 255, 0.08))",
+        borderRadius: "var(--radius-md, 10px)",
+        overflow: "hidden",
+        marginBottom: "16px"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              padding: "14px 20px",
+              borderBottom: "1px solid var(--border-subtle)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              background: "rgba(255, 255, 255, 0.02)"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "18px" }, children: "🎨" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 600, color: "var(--text-primary)" }, children: "Thumbnail Automation" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: "Generate 5 YouTube 4K thumbnails automatically using Google Flow after video render finishes." })
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "11px",
+                    padding: "3px 10px",
+                    borderRadius: "12px",
+                    background: settings.enabled ? "rgba(52, 211, 153, 0.15)" : "rgba(148, 163, 184, 0.15)",
+                    color: settings.enabled ? "var(--color-success, #34d399)" : "var(--text-muted)",
+                    fontWeight: 600
+                  },
+                  children: settings.enabled ? "Enabled" : "Disabled"
+                }
+              )
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "18px 20px", display: "flex", flexDirection: "column", gap: "16px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "checkbox-label", style: { display: "inline-flex", alignItems: "center", gap: "8px", cursor: "pointer" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                type: "checkbox",
+                checked: settings.enabled && settings.autoGenerateAfterRender,
+                onChange: (e) => handleToggleEnabled(e.target.checked),
+                disabled
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 500, color: "var(--text-primary)" }, children: "Automatically create thumbnails after render" })
+          ] }),
+          settings.enabled && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "14px", paddingTop: "4px" }, children: [
+            !hasSelectedTemplate && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  padding: "10px 14px",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  background: "rgba(251, 191, 36, 0.12)",
+                  border: "1px solid rgba(251, 191, 36, 0.3)",
+                  color: "var(--color-warning, #fbbf24)",
+                  fontSize: "12px"
+                },
+                children: "⚠️ No master prompt selected. Thumbnail generation will pause for review after render."
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Prompt template" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                ThumbnailTemplateSelector,
+                {
+                  templates,
+                  selectedTemplateId: settings.selectedTemplateId,
+                  onChange: handleSelectTemplate,
+                  onManageLibrary,
+                  disabled
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Existing video title (Optional)" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: "text",
+                  className: "input-field",
+                  value: settings.existingVideoTitle || "",
+                  onChange: (e) => handleTitleChange(e.target.value),
+                  placeholder: "Optional: current video title to help the prompt align with title hooks...",
+                  disabled,
+                  style: { width: "100%", height: "38px" }
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))",
+                  gap: "12px",
+                  paddingTop: "6px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        background: "rgba(0, 0, 0, 0.25)",
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 6px)",
+                        border: "1px solid var(--border-subtle)"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Variants" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)", marginTop: "2px" }, children: "5 — fixed (A, B, C, D, E)" })
+                      ]
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        background: "rgba(0, 0, 0, 0.25)",
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 6px)",
+                        border: "1px solid var(--border-subtle)"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Provider" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--brand-primary)", marginTop: "2px" }, children: "Google Flow" })
+                      ]
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        background: "rgba(0, 0, 0, 0.25)",
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 6px)",
+                        border: "1px solid var(--border-subtle)"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Target Quality" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--color-warning)", marginTop: "2px" }, children: "4K (3840 × 2160)" })
+                      ]
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        background: "rgba(0, 0, 0, 0.25)",
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 6px)",
+                        border: "1px solid var(--border-subtle)"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Image Model" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)", marginTop: "2px" }, children: "Nano Banana Pro" })
+                      ]
+                    }
+                  )
+                ]
+              }
+            )
+          ] })
+        ] })
+      ]
+    }
+  );
+}
 function getBasename(filePath) {
   if (!filePath) return "";
   return filePath.split(/[/\\]/).pop() || filePath;
@@ -9010,6 +9444,14 @@ function InputPage({
           ] })
         }
       ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "20px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        ThumbnailInputAutomationCard,
+        {
+          projectDir: project.projectDir,
+          onManageLibrary: () => onNavigate?.("thumbnail-library"),
+          disabled: isRunning
+        }
+      ) }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sticky-action-bar", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sticky-action-bar__info", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sticky-action-bar__title", children: isAutoReady ? "Ready to create" : "Select a script and voiceover to continue" }),
@@ -9363,6 +9805,14 @@ function InputPage({
         ]
       }
     ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "20px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ThumbnailInputAutomationCard,
+      {
+        projectDir: project.projectDir,
+        onManageLibrary: () => onNavigate?.("thumbnail-library"),
+        disabled: isRunning
+      }
+    ) }),
     workflowMode === "manual" && /* @__PURE__ */ jsxRuntimeExports.jsx(
       "div",
       {
@@ -10955,6 +11405,45 @@ function isResearchRunActive(progress) {
   if (!progress) return false;
   return isResearchStageActive(progress.stage);
 }
+const RESEARCH_PRESETS = [
+  {
+    id: "small_niche",
+    label: "Small Niche",
+    description: "Focus on small channels with breakout potential",
+    icon: "🔬",
+    minViews: 1e4,
+    maxSubscribers: 1e5,
+    timeRange: "90d",
+    contentType: "LONG",
+    resultLimit: 50,
+    searchBudget: 6,
+    includeUnverified: true
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    description: "Mix of popular and emerging niches",
+    icon: "⚖️",
+    minViews: 5e3,
+    timeRange: "30d",
+    contentType: "LONG",
+    resultLimit: 100,
+    searchBudget: 8,
+    includeUnverified: true
+  },
+  {
+    id: "deep",
+    label: "Deep Research",
+    description: "Exhaustive analysis with max API budget",
+    icon: "🔭",
+    minViews: 1e3,
+    timeRange: "90d",
+    contentType: "LONG",
+    resultLimit: 300,
+    searchBudget: 10,
+    includeUnverified: true
+  }
+];
 const SIDECAR_DEFAULT_URL = "http://127.0.0.1:8765";
 class ResearchProgressConnectionError extends Error {
   code;
@@ -11123,6 +11612,23 @@ class ResearchApi {
       timeoutMs: 3e4
     });
   }
+  async analyzeThumbnailIntelligence(payload) {
+    return this.request("/api/research/competitor/thumbnail-intelligence", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 12e4
+      // 2 min — downloading 30 thumbnails takes time
+    });
+  }
+  async generateThumbnail(payload) {
+    return this.request("/api/research/competitor/thumbnail-generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 12e4
+    });
+  }
   async getSavedProjects() {
     return this.request("/api/research/saved", { timeoutMs: 5e3 });
   }
@@ -11164,7 +11670,7 @@ class ResearchApi {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ api_key: apiKey }),
-      timeoutMs: 1e4
+      timeoutMs: 12e3
     });
   }
   async testOllama(url, model) {
@@ -11278,13 +11784,70 @@ class ResearchApi {
     }
     return cleanup;
   }
+  async generateThumbnailPrompts(payload) {
+    return this.request(
+      "/api/research/competitor/thumbnail-prompts",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        timeoutMs: 12e4
+      }
+    );
+  }
+  // ── Similar Channel Discovery ─────────────────────────────────────────────
+  async discoverSimilarChannels(payload) {
+    return this.request(
+      "/api/research/competitor/similar-channels/discover",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        timeoutMs: 15e3
+      }
+    );
+  }
+  async getSimilarChannelsProgress(runId) {
+    return this.request(
+      `/api/research/competitor/similar-channels/${runId}/progress`,
+      { timeoutMs: 8e3 }
+    );
+  }
+  async getSimilarChannelsResult(runId) {
+    return this.request(
+      `/api/research/competitor/similar-channels/${runId}/result`,
+      { timeoutMs: 2e4 }
+    );
+  }
+  async cancelSimilarChannels(runId) {
+    return this.request(
+      `/api/research/competitor/similar-channels/${runId}/cancel`,
+      { method: "POST", timeoutMs: 5e3 }
+    );
+  }
+  async retrySimilarChannels(runId, sourceVideos) {
+    return this.request(
+      `/api/research/competitor/similar-channels/${runId}/retry`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ source_videos: sourceVideos }),
+        timeoutMs: 15e3
+      }
+    );
+  }
+  getSimilarChannelsExcelUrl(runId, baseUrl = SIDECAR_DEFAULT_URL) {
+    return `${baseUrl}/api/research/competitor/similar-channels/${runId}/export.xlsx`;
+  }
 }
 const researchApi = new ResearchApi();
-function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
+function ResearchSettingsModal({ onClose, onSettingsUpdated, onRestartSidecar }) {
   const [loading, setLoading] = reactExports.useState(true);
   const [saving, setSaving] = reactExports.useState(false);
   const [error, setError] = reactExports.useState(null);
+  const [errorIsOffline, setErrorIsOffline] = reactExports.useState(false);
   const [successMsg, setSuccessMsg] = reactExports.useState(null);
+  const [restartingService, setRestartingService] = reactExports.useState(false);
   const [useOfficialApi, setUseOfficialApi] = reactExports.useState(false);
   const [apiKeyInput, setApiKeyInput] = reactExports.useState("");
   const [hasApiKey, setHasApiKey] = reactExports.useState(false);
@@ -11316,6 +11879,7 @@ function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
   });
   const [testingKey, setTestingKey] = reactExports.useState(false);
   const [keyTestStatus, setKeyTestStatus] = reactExports.useState(null);
+  const [showApiKey, setShowApiKey] = reactExports.useState(false);
   const [testingAi, setTestingAi] = reactExports.useState(false);
   const [aiTestStatus, setAiTestStatus] = reactExports.useState(null);
   reactExports.useEffect(() => {
@@ -11346,18 +11910,33 @@ function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
     });
   }, []);
   const handleTestKey = async () => {
-    if (!apiKeyInput.trim()) return;
+    const key = apiKeyInput.trim();
+    if (!key) {
+      setKeyTestStatus({ type: "error", message: "✗ Please enter an API key first" });
+      return;
+    }
     setTestingKey(true);
     setKeyTestStatus(null);
     try {
-      const res = await researchApi.testYouTubeApiKey(apiKeyInput.trim());
+      const res = await researchApi.testYouTubeApiKey(key);
       if (res.valid) {
-        setKeyTestStatus("✓ YouTube API Key is valid and active");
+        setKeyTestStatus({ type: "success", message: "✓ Connected — YouTube Data API v3 is active" });
       } else {
-        setKeyTestStatus(`✗ Invalid key: ${res.error || "Connection failed"}`);
+        const statusLabels = {
+          invalid_key: "✗ Invalid API key — check the key value and try again",
+          api_not_enabled: "✗ API not enabled — enable YouTube Data API v3 at console.cloud.google.com",
+          quota_exhausted: "⚠ Quota exhausted — key is valid but daily limit reached. Resets at midnight PT.",
+          network_error: "✗ Network error — check your internet connection",
+          server_error: "✗ Google server error — try again in a moment",
+          rate_limited: "⚠ Rate limited — wait a moment and try again",
+          not_configured: "✗ Key is empty"
+        };
+        const isWarning = res.status === "quota_exhausted" || res.status === "rate_limited";
+        const label = statusLabels[res.status || ""] || `✗ ${res.error || "Connection failed"}`;
+        setKeyTestStatus({ type: isWarning ? "warning" : "error", message: label });
       }
     } catch (err) {
-      setKeyTestStatus(`✗ Test error: ${err instanceof Error ? err.message : String(err)}`);
+      setKeyTestStatus({ type: "error", message: `✗ Test error: ${err instanceof Error ? err.message : String(err)}` });
     } finally {
       setTestingKey(false);
     }
@@ -11422,7 +12001,12 @@ function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
       onSettingsUpdated();
       setTimeout(() => setSuccessMsg(null), 3e3);
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      const msg = err instanceof Error ? err.message : String(err);
+      const isOffline = msg.includes("not responding") || msg.includes("blocked") || msg.includes("could not connect") || msg.includes("API_OFFLINE") || msg.includes("timed out");
+      setErrorIsOffline(isOffline);
+      setError(
+        isOffline ? "The research service is not running. Start or restart the service, then try saving again." : msg
+      );
     } finally {
       setSaving(false);
     }
@@ -11482,39 +12066,74 @@ function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
             ),
             /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Enable Official YouTube Data API v3 (Optional)" })
           ] }),
-          useOfficialApi && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { paddingLeft: "22px", display: "flex", flexDirection: "column", gap: "8px" }, children: [
+          useOfficialApi && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "input",
-                {
-                  type: "password",
-                  placeholder: hasApiKey ? "API Key Configured (enter new to update)" : "Paste YouTube Data API Key...",
-                  value: apiKeyInput,
-                  onChange: (e) => setApiKeyInput(e.target.value),
-                  style: {
-                    flex: 1,
-                    background: "var(--bg-elevated)",
-                    border: "1px solid var(--border-subtle)",
-                    borderRadius: "4px",
-                    padding: "6px 10px",
-                    color: "#fff",
-                    fontSize: "12px",
-                    fontFamily: "var(--font-mono)"
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", flex: 1 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "input",
+                  {
+                    type: showApiKey ? "text" : "password",
+                    placeholder: hasApiKey ? "(configured — enter new key to update)" : "Paste YouTube Data API Key...",
+                    value: apiKeyInput,
+                    onChange: (e) => {
+                      setApiKeyInput(e.target.value);
+                      setKeyTestStatus(null);
+                    },
+                    style: {
+                      width: "100%",
+                      background: "var(--bg-elevated)",
+                      border: "1px solid var(--border-subtle)",
+                      borderRadius: "4px",
+                      padding: "6px 36px 6px 10px",
+                      color: "#fff",
+                      fontSize: "12px",
+                      fontFamily: "var(--font-mono)",
+                      boxSizing: "border-box"
+                    }
                   }
-                }
-              ),
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "button",
+                  {
+                    type: "button",
+                    onClick: () => setShowApiKey(!showApiKey),
+                    style: {
+                      position: "absolute",
+                      right: "8px",
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      background: "none",
+                      border: "none",
+                      color: "var(--text-muted)",
+                      cursor: "pointer",
+                      fontSize: "11px",
+                      padding: "2px"
+                    },
+                    title: showApiKey ? "Hide key" : "Show key",
+                    children: showApiKey ? "👁️" : "🙈"
+                  }
+                )
+              ] }),
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "button",
                 {
                   className: "btn btn-secondary",
                   onClick: handleTestKey,
-                  disabled: !apiKeyInput.trim() || testingKey,
-                  style: { fontSize: "11px", padding: "0 12px" },
-                  children: testingKey ? "Testing..." : "Test Key"
+                  disabled: testingKey,
+                  style: { fontSize: "11px", padding: "0 12px", whiteSpace: "nowrap" },
+                  children: testingKey ? "⏳ Testing..." : "Test Connection"
                 }
               )
             ] }),
-            keyTestStatus && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: keyTestStatus.startsWith("✓") ? "#34d399" : "#f87171" }, children: keyTestStatus })
+            hasApiKey && !apiKeyInput && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: "✓ API key is stored (value hidden for security)" }),
+            keyTestStatus && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+              fontSize: "11px",
+              color: keyTestStatus.type === "success" ? "#34d399" : keyTestStatus.type === "warning" ? "#fbbf24" : "#f87171",
+              padding: "6px 8px",
+              background: keyTestStatus.type === "success" ? "rgba(52,211,153,0.08)" : keyTestStatus.type === "warning" ? "rgba(251,191,36,0.08)" : "rgba(248,113,113,0.08)",
+              borderRadius: "4px",
+              border: `1px solid ${keyTestStatus.type === "success" ? "rgba(52,211,153,0.2)" : keyTestStatus.type === "warning" ? "rgba(251,191,36,0.2)" : "rgba(248,113,113,0.2)"}`
+            }, children: keyTestStatus.message })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", color: "var(--text-primary)", cursor: "pointer" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -11682,9 +12301,53 @@ function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Enable Developer Debug Panel (Health, Cache Hits, Quota details)" })
       ] }) })
     ] }),
-    error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "10px", background: "rgba(239, 68, 68, 0.1)", color: "#f87171", border: "1px solid rgba(239, 68, 68, 0.3)", borderRadius: "6px", fontSize: "11px" }, children: [
-      "⚠ ",
-      error
+    error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      padding: "12px 14px",
+      background: "rgba(239, 68, 68, 0.08)",
+      color: "#f87171",
+      border: "1px solid rgba(239, 68, 68, 0.25)",
+      borderRadius: "8px",
+      fontSize: "12px",
+      display: "flex",
+      flexDirection: "column",
+      gap: "8px"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "flex-start", gap: "6px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⚠" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: error })
+      ] }),
+      errorIsOffline && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginTop: "2px" }, children: [
+        onRestartSidecar && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "btn btn-secondary",
+            disabled: restartingService,
+            onClick: async () => {
+              setRestartingService(true);
+              setError(null);
+              try {
+                await onRestartSidecar();
+                setSuccessMsg("Service restarted — please try saving again.");
+              } catch {
+                setError("Failed to restart service. Try manually restarting from the main window.");
+              } finally {
+                setRestartingService(false);
+              }
+            },
+            style: { fontSize: "11px", padding: "4px 12px" },
+            children: restartingService ? "Restarting..." : "⟳ Restart Research Service"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            className: "btn btn-secondary",
+            onClick: () => setError(null),
+            style: { fontSize: "11px", padding: "4px 12px" },
+            children: "Dismiss"
+          }
+        )
+      ] })
     ] }),
     successMsg && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "10px", background: "rgba(52, 211, 153, 0.1)", color: "#34d399", border: "1px solid rgba(52, 211, 153, 0.3)", borderRadius: "6px", fontSize: "11px" }, children: [
       "✓ ",
@@ -11696,6 +12359,429 @@ function ResearchSettingsModal({ onClose, onSettingsUpdated }) {
     ] })
   ] }) });
 }
+const StatusIndicator = ({ label, value, detail }) => {
+  const colors = {
+    ok: { dot: "#22c55e", text: "#22c55e", bg: "rgba(34,197,94,0.12)" },
+    warn: { dot: "#f59e0b", text: "#f59e0b", bg: "rgba(245,158,11,0.12)" },
+    offline: { dot: "#ef4444", text: "#ef4444", bg: "rgba(239,68,68,0.12)" },
+    unknown: { dot: "#6b7280", text: "#9ca3af", bg: "rgba(107,114,128,0.1)" }
+  };
+  const c = colors[value];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 10px",
+    borderRadius: "6px",
+    background: c.bg,
+    fontSize: "12px",
+    lineHeight: "1.3"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      width: "7px",
+      height: "7px",
+      borderRadius: "50%",
+      background: c.dot,
+      flexShrink: 0,
+      boxShadow: value === "ok" ? `0 0 6px ${c.dot}` : void 0
+    } }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#9ca3af", fontWeight: 500 }, children: label }),
+    detail && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: c.text, marginLeft: "auto", fontWeight: 500 }, children: detail })
+  ] });
+};
+const GoogleFlowSettingsSection = () => {
+  const [settings, setSettings] = reactExports.useState({
+    mode: "external",
+    bridgeUrl: "http://127.0.0.1:8100",
+    autoStartBridge: false,
+    autoOpenGoogleFlow: false
+  });
+  const [bridgeStatus, setBridgeStatus] = reactExports.useState(null);
+  const [isChecking, setIsChecking] = reactExports.useState(false);
+  const [isSaving, setIsSaving] = reactExports.useState(false);
+  const [isStarting, setIsStarting] = reactExports.useState(false);
+  const [saveSuccess, setSaveSuccess] = reactExports.useState(false);
+  const [pythonVersion, setPythonVersion] = reactExports.useState("");
+  const [detectingPython, setDetectingPython] = reactExports.useState(false);
+  const [startLog, setStartLog] = reactExports.useState([]);
+  const [runtimeStatus, setRuntimeStatus] = reactExports.useState(null);
+  const logEndRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    window.api.thumbnail.runtime.getSettings().then((res) => {
+      if (res.success && res.settings) {
+        setSettings(res.settings);
+      }
+    }).catch(() => {
+    });
+    window.api.thumbnail.runtime.getStatus().then((status) => {
+      setRuntimeStatus({ bridgeRunning: status.bridgeRunning, managedPid: status.managedPid });
+    }).catch(() => {
+    });
+    const unsubStatus = window.api.thumbnail.runtime.onStatus((status) => {
+      setRuntimeStatus({ bridgeRunning: status.bridgeRunning, managedPid: status.managedPid });
+    });
+    const unsubLog = window.api.thumbnail.runtime.onLog((entry) => {
+      setStartLog((prev) => [...prev.slice(-199), entry.message]);
+    });
+    return () => {
+      unsubStatus();
+      unsubLog();
+    };
+  }, []);
+  reactExports.useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [startLog]);
+  const handleCheckHealth = reactExports.useCallback(async () => {
+    setIsChecking(true);
+    setBridgeStatus(null);
+    try {
+      const health = await window.api.thumbnail.flow.checkHealth(settings.bridgeUrl);
+      setBridgeStatus({
+        ok: health.reachable,
+        extensionConnected: health.extensionConnected,
+        signedIn: health.signedIn,
+        imageGen: health.supportsImageGeneration
+      });
+    } finally {
+      setIsChecking(false);
+    }
+  }, [settings.bridgeUrl]);
+  const handleSave = async () => {
+    setIsSaving(true);
+    try {
+      const res = await window.api.thumbnail.runtime.saveSettings(settings);
+      if (res.success) {
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 2500);
+      }
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  const handleBrowseFolder = async () => {
+    const res = await window.api.thumbnail.runtime.selectFolder();
+    if (res.success && res.folderPath) {
+      setSettings((s) => ({ ...s, flowKitPath: res.folderPath }));
+      setPythonVersion("");
+    } else if (!res.success && res.error && res.error !== "Cancelled") {
+      alert(`❌ ${res.error}`);
+    }
+  };
+  const handleBrowsePython = async () => {
+    const res = await window.api.thumbnail.runtime.selectPython();
+    if (res.success && res.pythonPath) {
+      setSettings((s) => ({ ...s, pythonPath: res.pythonPath }));
+      setPythonVersion("");
+    }
+  };
+  const handleDetectPython = async () => {
+    setDetectingPython(true);
+    setPythonVersion("");
+    try {
+      const res = await window.api.thumbnail.runtime.detectPython(settings.flowKitPath);
+      if (res.success && res.pythonPath) {
+        setSettings((s) => ({ ...s, pythonPath: res.pythonPath }));
+        setPythonVersion(res.version || res.pythonPath);
+      } else {
+        setPythonVersion("Not found (install Python 3.10+)");
+      }
+    } finally {
+      setDetectingPython(false);
+    }
+  };
+  const handleStartBridge = async () => {
+    setIsStarting(true);
+    setStartLog([]);
+    try {
+      const res = await window.api.thumbnail.runtime.start();
+      if (!res.success && res.error) {
+        setStartLog((prev) => [...prev, `❌ ${res.error}`]);
+      }
+    } finally {
+      setIsStarting(false);
+    }
+  };
+  const handleStopBridge = async () => {
+    await window.api.thumbnail.runtime.stop();
+  };
+  const handleOpenGoogleFlow = async () => {
+    await window.api.thumbnail.flow.openFlow();
+  };
+  const isRunning = runtimeStatus?.bridgeRunning ?? false;
+  const isManagedMode = settings.mode === "managed";
+  const canStart = isManagedMode && Boolean(settings.flowKitPath) && !isRunning && !isStarting;
+  const getStatusValue = (v2, checked) => {
+    if (!checked) return "unknown";
+    if (v2) return "ok";
+    return "offline";
+  };
+  const sectionStyle = {
+    background: "rgba(255,255,255,0.03)",
+    border: "1px solid rgba(255,255,255,0.08)",
+    borderRadius: "10px",
+    padding: "16px",
+    marginBottom: "12px"
+  };
+  const labelStyle = {
+    display: "block",
+    fontSize: "11px",
+    fontWeight: 600,
+    color: "#9ca3af",
+    textTransform: "uppercase",
+    letterSpacing: "0.05em",
+    marginBottom: "6px"
+  };
+  const inputStyle = {
+    width: "100%",
+    padding: "8px 10px",
+    background: "rgba(0,0,0,0.3)",
+    border: "1px solid rgba(255,255,255,0.12)",
+    borderRadius: "6px",
+    color: "#e5e7eb",
+    fontSize: "13px",
+    outline: "none",
+    boxSizing: "border-box"
+  };
+  const btnPrimary = {
+    padding: "7px 14px",
+    borderRadius: "6px",
+    border: "none",
+    cursor: "pointer",
+    background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+    color: "#fff",
+    fontSize: "12px",
+    fontWeight: 600,
+    whiteSpace: "nowrap"
+  };
+  const btnSecondary = {
+    padding: "7px 12px",
+    borderRadius: "6px",
+    border: "1px solid rgba(255,255,255,0.15)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#e5e7eb",
+    fontSize: "12px",
+    fontWeight: 500,
+    cursor: "pointer",
+    whiteSpace: "nowrap"
+  };
+  const btnDanger = {
+    ...btnSecondary,
+    border: "1px solid rgba(239,68,68,0.3)",
+    color: "#ef4444",
+    background: "rgba(239,68,68,0.07)"
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "16px" }, children: "🎨" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, fontSize: "15px", color: "#f3f4f6" }, children: "Google Flow Connector" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        padding: "3px 10px",
+        borderRadius: "20px",
+        fontSize: "11px",
+        fontWeight: 600,
+        background: isRunning ? "rgba(34,197,94,0.15)" : "rgba(107,114,128,0.15)",
+        color: isRunning ? "#22c55e" : "#9ca3af"
+      }, children: isRunning ? `● BRIDGE RUNNING (PID ${runtimeStatus?.managedPid ?? "?"})` : "○ BRIDGE OFFLINE" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Runtime Mode" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "8px" }, children: ["external", "managed"].map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setSettings((s) => ({ ...s, mode: m2 })),
+          style: {
+            flex: 1,
+            padding: "8px",
+            borderRadius: "6px",
+            border: "none",
+            cursor: "pointer",
+            fontWeight: 600,
+            fontSize: "13px",
+            transition: "all 0.15s",
+            background: settings.mode === m2 ? "rgba(99,102,241,0.25)" : "rgba(255,255,255,0.04)",
+            color: settings.mode === m2 ? "#a5b4fc" : "#6b7280",
+            outline: settings.mode === m2 ? "1px solid #6366f1" : "1px solid transparent"
+          },
+          children: m2 === "external" ? "🔌 External" : "⚙️ Managed"
+        },
+        m2
+      )) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "11px", color: "#6b7280", margin: "8px 0 0" }, children: settings.mode === "external" ? "Run FlowKit manually. App only polls /health. No process management." : "App spawns FlowKit automatically. Requires Python 3.10+ and FlowKit folder." })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Bridge URL" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          style: inputStyle,
+          value: settings.bridgeUrl,
+          onChange: (e) => setSettings((s) => ({ ...s, bridgeUrl: e.target.value })),
+          placeholder: "http://127.0.0.1:8100"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "11px", color: "#6b7280", margin: "6px 0 0" }, children: "Default: http://127.0.0.1:8100 — must match the port FlowKit is listening on." })
+    ] }),
+    isManagedMode && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "FlowKit Folder" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginBottom: "10px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            style: { ...inputStyle, flex: 1 },
+            value: settings.flowKitPath || "",
+            readOnly: true,
+            placeholder: "Select the folder containing agent/main.py"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleBrowseFolder, children: "Browse…" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Python Executable" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", alignItems: "center" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "input",
+          {
+            style: { ...inputStyle, flex: 1 },
+            value: settings.pythonPath || "",
+            onChange: (e) => setSettings((s) => ({ ...s, pythonPath: e.target.value || void 0 })),
+            placeholder: "Auto-detected (leave blank to auto-detect)"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleDetectPython, disabled: detectingPython, children: detectingPython ? "Detecting…" : "Auto Detect" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleBrowsePython, children: "Browse…" })
+      ] }),
+      pythonVersion && /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: "11px", color: pythonVersion.includes("Not found") ? "#ef4444" : "#22c55e", margin: "6px 0 0" }, children: [
+        pythonVersion.includes("Not found") ? "⚠ " : "✓ ",
+        pythonVersion
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: labelStyle, children: "Google Flow Project ID" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "input",
+        {
+          style: inputStyle,
+          value: settings.flowProjectId || "",
+          onChange: (e) => setSettings((s) => ({ ...s, flowProjectId: e.target.value.trim() || void 0 })),
+          placeholder: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: "11px", color: "#6b7280", margin: "6px 0 0" }, children: [
+        "Get the UUID from the URL when you open a project in Google Flow:",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("code", { style: { color: "#a5b4fc" }, children: [
+          "https://flow.google.com/project/",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "UUID-HERE" }),
+          "/..."
+        ] })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: sectionStyle, children: [
+      { key: "autoStartBridge", label: "Auto Start FlowKit with App", desc: "Launch FlowKit bridge when Electron starts (Managed mode only)" },
+      { key: "autoOpenGoogleFlow", label: "Auto Open Google Flow in Browser", desc: "Open flow.google.com once per session after bridge starts" }
+    ].map(({ key, label, desc }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "#e5e7eb" }, children: label }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#6b7280", marginTop: "2px" }, children: desc })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setSettings((s) => ({ ...s, [key]: !s[key] })),
+          style: {
+            width: "40px",
+            height: "22px",
+            borderRadius: "11px",
+            border: "none",
+            cursor: "pointer",
+            flexShrink: 0,
+            marginLeft: "12px",
+            marginTop: "2px",
+            background: settings[key] ? "#6366f1" : "rgba(107,114,128,0.3)",
+            position: "relative",
+            transition: "background 0.2s"
+          },
+          children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            position: "absolute",
+            top: "3px",
+            left: settings[key] ? "21px" : "3px",
+            width: "16px",
+            height: "16px",
+            borderRadius: "50%",
+            background: "#fff",
+            transition: "left 0.2s"
+          } })
+        }
+      )
+    ] }, key)) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: sectionStyle, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "10px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { ...labelStyle, marginBottom: 0 }, children: "Connection Status" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleCheckHealth, disabled: isChecking, children: isChecking ? "Checking…" : "Test Connection" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "6px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Bridge", value: getStatusValue(bridgeStatus?.ok, bridgeStatus !== null), detail: bridgeStatus?.ok ? "Online" : bridgeStatus !== null ? "Offline" : void 0 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Extension", value: getStatusValue(bridgeStatus?.extensionConnected, bridgeStatus !== null), detail: bridgeStatus?.extensionConnected ? "Connected" : bridgeStatus !== null ? "Disconnected" : void 0 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Google Flow Sign-in", value: getStatusValue(bridgeStatus?.signedIn, bridgeStatus !== null), detail: bridgeStatus?.signedIn ? "Signed In" : bridgeStatus !== null ? "Not Signed In" : void 0 }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(StatusIndicator, { label: "Image Generation", value: getStatusValue(bridgeStatus?.imageGen, bridgeStatus !== null), detail: bridgeStatus?.imageGen ? "Available" : bridgeStatus !== null ? "Unavailable" : void 0 })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          style: { ...btnPrimary, opacity: isSaving ? 0.7 : 1 },
+          onClick: handleSave,
+          disabled: isSaving,
+          children: saveSuccess ? "✓ Saved!" : isSaving ? "Saving…" : "💾 Save Settings"
+        }
+      ),
+      isManagedMode && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            style: { ...btnPrimary, background: canStart ? "linear-gradient(135deg, #10b981, #059669)" : void 0, opacity: canStart ? 1 : 0.5 },
+            onClick: handleStartBridge,
+            disabled: !canStart,
+            children: isStarting ? "⟳ Starting…" : "▶ Start Bridge"
+          }
+        ),
+        isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnDanger, onClick: handleStopBridge, children: "■ Stop Bridge" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: btnSecondary, onClick: handleOpenGoogleFlow, children: "🌐 Open Google Flow ↗" })
+    ] }),
+    isManagedMode && startLog.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      ...sectionStyle,
+      fontFamily: "monospace",
+      fontSize: "11px",
+      color: "#9ca3af",
+      maxHeight: "140px",
+      overflowY: "auto",
+      whiteSpace: "pre-wrap",
+      wordBreak: "break-all"
+    }, children: [
+      startLog.map((line, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: line.includes("❌") ? "#ef4444" : line.includes("✓") ? "#22c55e" : "#9ca3af" }, children: line }, i)),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { ref: logEndRef })
+    ] }),
+    !isManagedMode && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { ...sectionStyle, borderColor: "rgba(99,102,241,0.2)", background: "rgba(99,102,241,0.05)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("p", { style: { fontSize: "12px", color: "#a5b4fc", margin: 0, lineHeight: 1.6 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "External Mode — manual start required:" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "1. ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: "cd <FlowKit folder>" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "2. ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: "set FLOW_PROJECT_ID=<your-uuid>" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "3. ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("code", { children: "python -m agent.main" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+      "Then click ",
+      /* @__PURE__ */ jsxRuntimeExports.jsx("em", { children: "Test Connection" }),
+      " above."
+    ] }) })
+  ] });
+};
 function SegControl({
   options,
   value,
@@ -12331,6 +13417,7 @@ function SettingsPage({ project, onUpdateSettings }) {
         onSettingsUpdated: () => setResearchSettingsOpen(false)
       }
     ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(GoogleFlowSettingsSection, { projectDir: project.projectDir }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel", style: { background: "var(--bg-elevated)" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-label", style: { marginBottom: "10px" }, children: "Current Configuration" }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontFamily: "var(--font-mono)", fontSize: "12px", color: "var(--text-secondary)", lineHeight: 2 }, children: [
@@ -12810,7 +13897,7 @@ function HighlightText({ text, query }) {
     (part, i) => part.toLowerCase() === query.toLowerCase() ? /* @__PURE__ */ jsxRuntimeExports.jsx("mark", { style: { background: "rgba(168,85,247,0.3)", color: "var(--text-primary)", borderRadius: "2px" }, children: part }, i) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: part }, i)
   ) });
 }
-function fmt$2(secs) {
+function fmt$4(secs) {
   const m2 = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${m2}:${String(s).padStart(2, "0")}`;
@@ -12853,9 +13940,9 @@ function SceneRow({ scene, globalIdx, isHighlighted }) {
             color: scene.mediaType === "video" ? "var(--color-info)" : "var(--color-warning)"
           }, children: scene.mediaType === "video" ? "▶ VID" : "🖼 IMG" }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", fontSize: "11px", color: "var(--text-brand)", minWidth: "60px" }, children: [
-            fmt$2(scene.startTime),
+            fmt$4(scene.startTime),
             "–",
-            fmt$2(scene.endTime)
+            fmt$4(scene.endTime)
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)", minWidth: "38px" }, children: [
             scene.duration.toFixed(1),
@@ -12946,9 +14033,9 @@ function ChapterCard({ chapter, sceneOffset, highlightedSceneId }) {
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }, children: [
-              fmt$2(chapter.startTime),
+              fmt$4(chapter.startTime),
               " – ",
-              fmt$2(chapter.endTime)
+              fmt$4(chapter.endTime)
             ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "panel-badge badge-new", children: [
               allScenes.length,
@@ -12992,9 +14079,9 @@ function ChapterCard({ chapter, sceneOffset, highlightedSceneId }) {
           ": ",
           seq.title,
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontWeight: 400, color: "var(--text-muted)", marginLeft: "8px" }, children: [
-            fmt$2(seq.startTime),
+            fmt$4(seq.startTime),
             "–",
-            fmt$2(seq.endTime)
+            fmt$4(seq.endTime)
           ] })
         ] }),
         seq.scenes.map((scene) => /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -13310,7 +14397,7 @@ function PlanningPage({ project }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Scenes" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$2(plan.totalDuration) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$4(plan.totalDuration) }),
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Duration" })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
@@ -13357,7 +14444,116 @@ const GEMINI_MODELS = [
   { id: "gemini-3.5-flash", label: "gemini-3.5-flash" },
   { id: "gemini-3.5-flash-lite", label: "gemini-3.5-flash-lite" }
 ];
-function fmt$1(secs) {
+const RenderThumbnailCompanionCard = ({
+  projectDir,
+  onOpenStudio
+}) => {
+  const [jobState, setJobState] = reactExports.useState(null);
+  const [health, setHealth] = reactExports.useState(null);
+  const [settings, setSettings] = reactExports.useState(null);
+  reactExports.useEffect(() => {
+    if (!projectDir) return;
+    window.api.thumbnail.jobs.get(projectDir).then((res) => {
+      if (res.success && res.state) setJobState(res.state);
+    }).catch(() => {
+    });
+    window.api.thumbnail.settings.get(projectDir).then((res) => {
+      if (res.success && res.settings) setSettings(res.settings);
+    }).catch(() => {
+    });
+    window.api.thumbnail.flow.checkHealth().then((h) => {
+      setHealth(h);
+    }).catch(() => {
+    });
+    const unsubscribe = window.api.thumbnail.onProgress((payload) => {
+      if (payload.projectDir === projectDir) {
+        if (payload.jobState) {
+          setJobState(payload.jobState);
+        } else {
+          window.api.thumbnail.jobs.get(projectDir).then((res) => {
+            if (res.success && res.state) setJobState(res.state);
+          }).catch(() => {
+          });
+        }
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [projectDir]);
+  if (!settings?.enabled) {
+    return null;
+  }
+  const completedCount = jobState?.candidates.filter((c) => c.status === "completed").length || 0;
+  const isCompleted = jobState?.status === "completed" || completedCount === 5;
+  const isFailed = jobState?.status === "failed" || jobState?.status === "needs-attention";
+  const isGenerating = jobState?.status === "generating" || jobState?.status === "planning" || jobState?.status === "exporting";
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        marginTop: "16px",
+        padding: "16px 20px",
+        background: "rgba(255, 255, 255, 0.03)",
+        border: "1px solid rgba(255, 255, 255, 0.1)",
+        borderRadius: "10px"
+      },
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: "12px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "15px" }, children: "🖼️" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, fontSize: "14px", color: "#f3f4f6" }, children: "Thumbnail Generation" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                style: {
+                  fontSize: "11px",
+                  padding: "2px 8px",
+                  borderRadius: "10px",
+                  fontWeight: 600,
+                  background: isCompleted ? "rgba(34, 197, 94, 0.15)" : isFailed ? "rgba(245, 158, 11, 0.15)" : "rgba(59, 130, 246, 0.15)",
+                  color: isCompleted ? "#22c55e" : isFailed ? "#f59e0b" : "#60a5fa"
+                },
+                children: isCompleted ? "5 Thumbnails Ready" : isGenerating ? `Generating ${completedCount}/5` : isFailed ? "Needs Attention" : "Queued"
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "#9ca3af", marginTop: "4px" }, children: "Video render completed successfully. Thumbnail is a separate companion task." }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "16px", fontSize: "12px", color: "#9ca3af", marginTop: "6px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Google Flow: ",
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: health?.reachable ? "#22c55e" : "#ef4444" }, children: health?.reachable ? "Connected" : "Offline" })
+            ] }),
+            settings?.selectedTemplateId && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Template: ",
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: settings.selectedTemplateId })
+            ] })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-primary btn-sm",
+            onClick: onOpenStudio,
+            style: {
+              padding: "8px 16px",
+              fontSize: "13px",
+              fontWeight: 600,
+              background: "#3b82f6",
+              color: "#ffffff",
+              border: "none",
+              borderRadius: "6px",
+              cursor: "pointer"
+            },
+            children: isCompleted ? "Review Thumbnails ↗" : "Open Thumbnail Studio ↗"
+          }
+        ) })
+      ] })
+    }
+  );
+};
+function fmt$3(secs) {
   const m2 = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${m2}:${String(s).padStart(2, "0")}`;
@@ -13367,7 +14563,7 @@ function fmtBytes(bytes) {
   if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024).toFixed(0)} KB`;
 }
-function RenderPage({ project }) {
+function RenderPage({ project, onNavigate }) {
   const [isRendering, setIsRendering] = reactExports.useState(false);
   const [isPreflightRunning, setIsPreflightRunning] = reactExports.useState(false);
   const [preflightReport, setPreflightReport] = reactExports.useState(null);
@@ -13630,7 +14826,7 @@ function RenderPage({ project }) {
           ] }),
           isRendering && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "render-action-bar__right", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "text-sm font-mono text-muted", children: [
             "⏱ Elapsed: ",
-            fmt$1(elapsed)
+            fmt$3(elapsed)
           ] }) })
         ] }),
         preflightReport && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: `preflight-summary-bar ${isPreflightFailed ? "is-failed" : isPreflightWarning ? "is-warning" : "is-passed"}`, children: [
@@ -13657,7 +14853,7 @@ function RenderPage({ project }) {
             { label: "Scenes checked", value: preflightReport.totalScenes, ok: preflightReport.totalScenes > 0 },
             { label: "Media resolved", value: `${preflightReport.resolvedScenes}/${preflightReport.totalScenes}`, ok: preflightReport.resolvedScenes === preflightReport.totalScenes },
             { label: "Missing media", value: preflightReport.missingScenes, ok: preflightReport.missingScenes === 0, isWarn: preflightReport.missingScenes > 0 },
-            { label: "Duration expected", value: fmt$1(preflightReport.expectedDuration), ok: preflightReport.expectedDuration > 0 },
+            { label: "Duration expected", value: fmt$3(preflightReport.expectedDuration), ok: preflightReport.expectedDuration > 0 },
             {
               label: "Caption notices",
               value: preflightReport.issues.filter((i) => i.category === "caption").length,
@@ -13919,7 +15115,7 @@ function RenderPage({ project }) {
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stats-grid mb-4", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$1(result.durationSecs) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$3(result.durationSecs) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Duration" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
@@ -13927,7 +15123,7 @@ function RenderPage({ project }) {
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "File Size" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$1(elapsed) }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-value accent", children: fmt$3(elapsed) }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "stat-label", children: "Render Time" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "stat-card", children: [
@@ -13967,7 +15163,14 @@ function RenderPage({ project }) {
           }
         ) })
       ] })
-    ] })
+    ] }),
+    result && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      RenderThumbnailCompanionCard,
+      {
+        projectDir: project.projectDir,
+        onOpenStudio: () => onNavigate?.("thumbnails")
+      }
+    )
   ] });
 }
 function QAPage() {
@@ -13977,7 +15180,7 @@ function QAPage() {
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", color: "var(--text-secondary)" }, children: "Automated quality assurance, segment validation, and final FFmpeg assembly." })
   ] }) }) });
 }
-function fmt(secs) {
+function fmt$2(secs) {
   const m2 = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${m2}:${String(s).padStart(2, "0")}`;
@@ -14455,9 +15658,9 @@ function StoryboardSceneCard({
                 }
               ),
               /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "var(--font-mono)", fontSize: "10px", color: "var(--text-muted)" }, children: [
-                fmt(assignment.startTime),
+                fmt$2(assignment.startTime),
                 "–",
-                fmt(assignment.endTime),
+                fmt$2(assignment.endTime),
                 " (",
                 duration.toFixed(1),
                 "s)"
@@ -16144,8 +17347,8 @@ function PhraseCard({ phrase, projectDir: _projectDir, onUpdate }) {
           autoFocus: true
         }
       ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleSave, style: { ...btnStyle, background: "#16a34a", padding: "4px 10px" }, children: "✓" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setEditing(false), style: { ...btnStyle, background: "#6b7280", padding: "4px 10px" }, children: "✗" })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleSave, style: { ...btnStyle$1, background: "#16a34a", padding: "4px 10px" }, children: "✓" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: () => setEditing(false), style: { ...btnStyle$1, background: "#6b7280", padding: "4px 10px" }, children: "✗" })
     ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx(
       "div",
       {
@@ -16220,7 +17423,7 @@ function ToggleBadge({ label, active, onChange }) {
     }
   );
 }
-const btnStyle = {
+const btnStyle$1 = {
   padding: "6px 14px",
   borderRadius: 6,
   border: "none",
@@ -16363,7 +17566,7 @@ function CaptionsPage({ projectDir }) {
           {
             onClick: () => handleToggleEnabled(!plan.enabled),
             style: {
-              ...btnStyle,
+              ...btnStyle$1,
               background: plan.enabled ? "#16a34a" : "#374151",
               padding: "8px 16px"
             },
@@ -16407,7 +17610,7 @@ function CaptionsPage({ projectDir }) {
         {
           onClick: handleGenerateFirst,
           disabled: loading,
-          style: { ...btnStyle, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
+          style: { ...btnStyle$1, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
           children: loading ? "⏳ Đang xử lý..." : "✨ Tạo Caption Plan"
         }
       )
@@ -16418,7 +17621,7 @@ function CaptionsPage({ projectDir }) {
           onClick: handleRegenerate,
           disabled: loading,
           title: "Chạy lại planner — bỏ qua cache. Dùng Gemini nếu có API key, fallback nếu không.",
-          style: { ...btnStyle, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
+          style: { ...btnStyle$1, background: loading ? "#374151" : "#7c3aed", opacity: loading ? 0.6 : 1 },
           children: loading ? "⏳ Đang xử lý..." : "🔄 Tạo lại Plan"
         }
       ),
@@ -16427,7 +17630,7 @@ function CaptionsPage({ projectDir }) {
         {
           onClick: handleRegenerateAss,
           disabled: loading,
-          style: { ...btnStyle, background: "#065f46", opacity: loading ? 0.6 : 1 },
+          style: { ...btnStyle$1, background: "#065f46", opacity: loading ? 0.6 : 1 },
           children: "📄 Tạo lại file .ass"
         }
       )
@@ -16562,7 +17765,7 @@ function CaptionsPage({ projectDir }) {
             onClick: () => handlePreview(selectedRange),
             disabled: previewLoading || loading,
             style: {
-              ...btnStyle,
+              ...btnStyle$1,
               background: previewLoading ? "#374151" : "#b45309",
               padding: "6px 14px",
               fontSize: 12,
@@ -16608,7 +17811,7 @@ function CaptionsPage({ projectDir }) {
         "button",
         {
           onClick: () => setPreviewPath(null),
-          style: { ...btnStyle, background: "#374151", fontSize: 12, marginTop: 10 },
+          style: { ...btnStyle$1, background: "#374151", fontSize: 12, marginTop: 10 },
           children: "✕ Đóng"
         }
       )
@@ -16645,6 +17848,2365 @@ function Stat({ label, value, sub, highlight }) {
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 18, fontWeight: 800, color: highlight ? "#86efac" : "#f8fafc" }, children: value }),
     sub && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 1 }, children: sub }),
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#94a3b8", marginTop: 2 }, children: label })
+  ] });
+}
+function useThumbnailStudio(projectDir) {
+  const [jobState, setJobState] = reactExports.useState(null);
+  const [health, setHealth] = reactExports.useState(null);
+  const [settings, setSettings] = reactExports.useState(null);
+  const [templates, setTemplates] = reactExports.useState([]);
+  const [isLoading, setIsLoading] = reactExports.useState(true);
+  const [isCheckingHealth, setIsCheckingHealth] = reactExports.useState(false);
+  const [activeRound, setActiveRound] = reactExports.useState(1);
+  const activeRoundRef = reactExports.useRef(1);
+  activeRoundRef.current = activeRound;
+  const refresh = reactExports.useCallback(async () => {
+    if (!projectDir) {
+      setIsLoading(false);
+      return;
+    }
+    try {
+      const [jobRes, settingsRes, templatesRes] = await Promise.all([
+        window.api.thumbnail.jobs.get(projectDir),
+        window.api.thumbnail.settings.get(projectDir),
+        window.api.thumbnail.templates.list()
+      ]);
+      if (jobRes.success && jobRes.state) {
+        setJobState(jobRes.state);
+        if (jobRes.state.generationRound && jobRes.state.generationRound !== activeRoundRef.current) {
+          setActiveRound(jobRes.state.generationRound);
+        }
+      }
+      if (settingsRes.success && settingsRes.settings) {
+        setSettings(settingsRes.settings);
+      }
+      if (templatesRes.success && templatesRes.templates) {
+        setTemplates(templatesRes.templates);
+      }
+    } catch (err) {
+      console.error("[useThumbnailStudio] Failed to refresh state:", err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [projectDir]);
+  const checkHealth = reactExports.useCallback(async (bridgeUrl) => {
+    setIsCheckingHealth(true);
+    try {
+      const res = await window.api.thumbnail.flow.checkHealth(bridgeUrl);
+      setHealth(res);
+      return res;
+    } finally {
+      setIsCheckingHealth(false);
+    }
+  }, []);
+  reactExports.useEffect(() => {
+    refresh();
+    checkHealth();
+  }, [refresh, checkHealth]);
+  reactExports.useEffect(() => {
+    const unsubscribe = window.api.thumbnail.onProgress((payload) => {
+      if (projectDir && payload.projectDir === projectDir) {
+        if (payload.jobState) {
+          setJobState(payload.jobState);
+          if (payload.jobState.generationRound) {
+            setActiveRound(payload.jobState.generationRound);
+          }
+        } else if (payload.candidate) {
+          setJobState((prev) => {
+            if (!prev) return null;
+            const updatedCandidates = prev.candidates.map(
+              (c) => c.id === payload.candidate.id ? payload.candidate : c
+            );
+            return {
+              ...prev,
+              status: payload.status,
+              candidates: updatedCandidates
+            };
+          });
+        }
+      }
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [projectDir]);
+  const startGeneration = reactExports.useCallback(
+    async (forceRestart = false) => {
+      if (!projectDir) return false;
+      try {
+        const res = await window.api.thumbnail.jobs.start({
+          projectDir,
+          templateId: settings?.selectedTemplateId,
+          templateSnapshot: settings?.templateSnapshot,
+          generationRound: activeRound,
+          forceRestart
+        });
+        if (res.success && res.state) {
+          setJobState(res.state);
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error("[useThumbnailStudio] Start generation failed:", err);
+        return false;
+      }
+    },
+    [projectDir, settings, activeRound]
+  );
+  const resumeJob = reactExports.useCallback(async () => {
+    if (!projectDir) return false;
+    try {
+      const res = await window.api.thumbnail.jobs.resume(projectDir);
+      if (res.success && res.state) {
+        setJobState(res.state);
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error("[useThumbnailStudio] Resume failed:", err);
+      return false;
+    }
+  }, [projectDir]);
+  const cancelJob = reactExports.useCallback(async () => {
+    if (!projectDir) return false;
+    try {
+      const res = await window.api.thumbnail.jobs.cancel(projectDir);
+      if (res.success) {
+        await refresh();
+        return true;
+      }
+      return false;
+    } catch (err) {
+      console.error("[useThumbnailStudio] Cancel failed:", err);
+      return false;
+    }
+  }, [projectDir, refresh]);
+  const generateMore = reactExports.useCallback(
+    async (templateId, templateSnapshot) => {
+      if (!projectDir) return false;
+      try {
+        const res = await window.api.thumbnail.jobs.generateMore({
+          projectDir,
+          templateId: templateId || settings?.selectedTemplateId,
+          templateSnapshot: templateSnapshot || settings?.templateSnapshot
+        });
+        if (res.success && res.state) {
+          setJobState(res.state);
+          setActiveRound(res.state.generationRound);
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error("[useThumbnailStudio] Generate more failed:", err);
+        return false;
+      }
+    },
+    [projectDir, settings]
+  );
+  const retryCandidate = reactExports.useCallback(
+    async (candidateId) => {
+      if (!projectDir) return false;
+      try {
+        const res = await window.api.thumbnail.candidates.retry({ projectDir, candidateId });
+        if (res.success && res.candidate) {
+          setJobState((prev) => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              candidates: prev.candidates.map((c) => c.id === candidateId ? res.candidate : c)
+            };
+          });
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error("[useThumbnailStudio] Retry candidate failed:", err);
+        return false;
+      }
+    },
+    [projectDir]
+  );
+  const regenerateCandidate = reactExports.useCallback(
+    async (candidateId, customPrompt) => {
+      if (!projectDir) return false;
+      try {
+        const res = await window.api.thumbnail.candidates.regenerate({
+          projectDir,
+          candidateId,
+          customPrompt
+        });
+        if (res.success && res.candidate) {
+          setJobState((prev) => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              candidates: prev.candidates.map((c) => c.id === candidateId ? res.candidate : c)
+            };
+          });
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error("[useThumbnailStudio] Regenerate candidate failed:", err);
+        return false;
+      }
+    },
+    [projectDir]
+  );
+  const export4k = reactExports.useCallback(
+    async (candidateId) => {
+      if (!projectDir) return false;
+      try {
+        const res = await window.api.thumbnail.candidates.export4k({ projectDir, candidateId });
+        if (res.success && res.candidate) {
+          setJobState((prev) => {
+            if (!prev) return null;
+            return {
+              ...prev,
+              candidates: prev.candidates.map((c) => c.id === candidateId ? res.candidate : c)
+            };
+          });
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error("[useThumbnailStudio] Export 4k failed:", err);
+        return false;
+      }
+    },
+    [projectDir]
+  );
+  const selectCandidate = reactExports.useCallback(
+    async (candidateId) => {
+      if (!projectDir) return false;
+      try {
+        const res = await window.api.thumbnail.candidates.select({ projectDir, candidateId });
+        if (res.success) {
+          setJobState((prev) => prev ? { ...prev, selectedCandidateId: candidateId } : null);
+          return true;
+        }
+        return false;
+      } catch (err) {
+        console.error("[useThumbnailStudio] Select candidate failed:", err);
+        return false;
+      }
+    },
+    [projectDir]
+  );
+  const openFolder = reactExports.useCallback(
+    async (folderPath) => {
+      if (!projectDir) return;
+      await window.api.thumbnail.openFolder({ projectDir, folderPath });
+    },
+    [projectDir]
+  );
+  const openGoogleFlow = reactExports.useCallback(async () => {
+    await window.api.thumbnail.flow.openFlow();
+  }, []);
+  return {
+    jobState,
+    health,
+    settings,
+    templates,
+    isLoading,
+    isCheckingHealth,
+    activeRound,
+    setActiveRound,
+    checkHealth,
+    startGeneration,
+    resumeJob,
+    cancelJob,
+    generateMore,
+    retryCandidate,
+    regenerateCandidate,
+    export4k,
+    selectCandidate,
+    openFolder,
+    openGoogleFlow,
+    refresh
+  };
+}
+function getCheckState(value, bridgeReachable, requiresBridge = true) {
+  if (requiresBridge && !bridgeReachable) return "unknown";
+  if (value === void 0 || value === null) return "unknown";
+  return value ? "ready" : "not-ready";
+}
+const DOT_COLORS = {
+  ready: "#22c55e",
+  "not-ready": "#ef4444",
+  unknown: "#6b7280"
+};
+function StatusDot({ state }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "span",
+    {
+      style: {
+        color: DOT_COLORS[state],
+        display: "inline-block",
+        width: "8px",
+        textAlign: "center"
+      },
+      children: "●"
+    }
+  );
+}
+const FlowConnectionStatus = ({
+  health,
+  isChecking,
+  onCheck,
+  onOpenFlow,
+  onConfigure
+}) => {
+  const bridgeReachable = Boolean(health?.reachable);
+  const isHealthy = Boolean(
+    health?.reachable && health?.extensionConnected && health?.signedIn && health?.supportsImageGeneration
+  );
+  const bridgeState = health === null ? "unknown" : health.reachable ? "ready" : "not-ready";
+  const extensionState = getCheckState(health?.extensionConnected, bridgeReachable);
+  const signedInState = getCheckState(health?.signedIn, bridgeReachable);
+  const imageModelState = getCheckState(health?.supportsImageGeneration, bridgeReachable);
+  const borderColor = isHealthy ? "rgba(34, 197, 94, 0.25)" : health === null || isChecking ? "rgba(107, 114, 128, 0.3)" : "rgba(239, 68, 68, 0.25)";
+  const dotColor = isHealthy ? "#22c55e" : health === null ? "#6b7280" : "#ef4444";
+  const dotShadow = isHealthy ? "0 0 8px rgba(34,197,94,0.5)" : health === null ? "0 0 8px rgba(107,114,128,0.3)" : "0 0 8px rgba(239,68,68,0.5)";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: "rgba(255, 255, 255, 0.03)",
+        border: `1px solid ${borderColor}`,
+        borderRadius: "10px",
+        padding: "16px 20px",
+        display: "flex",
+        flexWrap: "wrap",
+        alignItems: "center",
+        justifyContent: "space-between",
+        gap: "16px"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "6px", flex: 1 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                style: {
+                  width: "10px",
+                  height: "10px",
+                  borderRadius: "50%",
+                  background: dotColor,
+                  boxShadow: dotShadow,
+                  display: "inline-block",
+                  flexShrink: 0
+                }
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontWeight: 600, color: "#f3f4f6", fontSize: "14px" }, children: [
+              "Google Flow Connector:",
+              " ",
+              isChecking ? "Checking..." : isHealthy ? "Connected & Ready" : "Attention Required"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexWrap: "wrap", gap: "14px", fontSize: "12px", color: "#9ca3af", marginTop: "2px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(StatusDot, { state: bridgeState }),
+              "Bridge ",
+              bridgeState === "unknown" ? "Unknown" : health?.reachable ? "Reachable" : "Offline"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(StatusDot, { state: extensionState }),
+              "Extension ",
+              extensionState === "unknown" ? "Unknown" : health?.extensionConnected ? "Connected" : "Disconnected"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(StatusDot, { state: signedInState }),
+              "Google Flow ",
+              signedInState === "unknown" ? "Status Unknown" : health?.signedIn ? "Signed In" : "Not Signed In"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { display: "inline-flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(StatusDot, { state: imageModelState }),
+              "Image Generation ",
+              imageModelState === "unknown" ? "Unknown" : health?.supportsImageGeneration ? "Ready" : "Unavailable"
+            ] })
+          ] }),
+          health?.message && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: isHealthy ? "#38bdf8" : "#f87171", marginTop: "4px", lineHeight: "1.5" }, children: health.message }),
+          !isChecking && health !== null && !health.reachable && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#9ca3af", marginTop: "4px", lineHeight: "1.5" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#d1d5db" }, children: "To start FlowKit:" }),
+            " ",
+            "run ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { background: "rgba(255,255,255,0.06)", padding: "1px 5px", borderRadius: "3px" }, children: "python -m agent.main" }),
+            " ",
+            "in your FlowKit folder, or use",
+            " ",
+            onConfigure ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onConfigure,
+                style: { background: "none", border: "none", color: "#60a5fa", cursor: "pointer", padding: 0, fontSize: "11px", textDecoration: "underline" },
+                children: "Managed Mode"
+              }
+            ) : "Managed Mode in Settings",
+            "."
+          ] }),
+          !isChecking && health?.reachable && !health.extensionConnected && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#9ca3af", marginTop: "4px", lineHeight: "1.5" }, children: [
+            "FlowKit is running but the Chrome extension is not connected.",
+            " ",
+            "Open ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("code", { style: { background: "rgba(255,255,255,0.06)", padding: "1px 5px", borderRadius: "3px" }, children: "chrome://extensions" }),
+            " ",
+            "and reload the FlowKit extension, then open a Google Flow tab."
+          ] }),
+          !isChecking && health?.reachable && health.extensionConnected && !health.signedIn && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#9ca3af", marginTop: "4px" }, children: [
+            "Sign in at",
+            " ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onOpenFlow,
+                style: { background: "none", border: "none", color: "#60a5fa", cursor: "pointer", padding: 0, fontSize: "11px", textDecoration: "underline" },
+                children: "flow.google.com"
+              }
+            ),
+            " ",
+            "and keep the tab open."
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexShrink: 0 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: onCheck,
+              disabled: isChecking,
+              style: {
+                fontSize: "12px",
+                padding: "6px 14px",
+                borderRadius: "6px",
+                background: "rgba(255, 255, 255, 0.08)",
+                border: "1px solid rgba(255, 255, 255, 0.15)",
+                color: "#f3f4f6",
+                cursor: isChecking ? "not-allowed" : "pointer",
+                opacity: isChecking ? 0.6 : 1
+              },
+              children: isChecking ? "Checking..." : "Test Connection"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: onOpenFlow,
+              style: {
+                fontSize: "12px",
+                padding: "6px 14px",
+                borderRadius: "6px",
+                background: isHealthy ? "#22c55e" : "#3b82f6",
+                color: "#ffffff",
+                border: "none",
+                cursor: "pointer",
+                fontWeight: 500
+              },
+              children: "Open Google Flow ↗"
+            }
+          )
+        ] })
+      ]
+    }
+  );
+};
+const ThumbnailRoundTabs = ({
+  totalRounds,
+  activeRound,
+  onSelectRound
+}) => {
+  const rounds = Array.from({ length: Math.max(1, totalRounds) }, (_, i) => i + 1);
+  if (rounds.length <= 1) {
+    return null;
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", color: "#9ca3af", fontWeight: 500 }, children: "Generation Rounds:" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "6px" }, children: rounds.map((r2) => {
+      const isActive = r2 === activeRound;
+      return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "button",
+        {
+          onClick: () => onSelectRound(r2),
+          style: {
+            padding: "4px 12px",
+            borderRadius: "6px",
+            fontSize: "12px",
+            fontWeight: isActive ? 600 : 400,
+            background: isActive ? "#3b82f6" : "rgba(255, 255, 255, 0.05)",
+            color: isActive ? "#ffffff" : "#d1d5db",
+            border: isActive ? "1px solid #60a5fa" : "1px solid rgba(255, 255, 255, 0.1)",
+            cursor: "pointer",
+            transition: "all 0.2s ease"
+          },
+          children: [
+            "Round ",
+            r2
+          ]
+        },
+        r2
+      );
+    }) })
+  ] });
+};
+const ThumbnailGenerationProgress = ({
+  jobState,
+  onStart,
+  onResume,
+  onCancel,
+  onGenerateMore,
+  onOpenFolder,
+  onManageLibrary
+}) => {
+  const status = jobState?.status || "idle";
+  const isRunning = status === "generating" || status === "planning" || status === "exporting";
+  const completedCount = jobState?.candidates.filter((c) => c.status === "completed").length || 0;
+  const progressPercent = Math.round(completedCount / 5 * 100);
+  const getStatusColor = () => {
+    switch (status) {
+      case "completed":
+        return "#22c55e";
+      case "generating":
+      case "exporting":
+      case "planning":
+        return "#3b82f6";
+      case "partial":
+      case "needs-attention":
+        return "#f59e0b";
+      case "failed":
+        return "#ef4444";
+      case "interrupted":
+        return "#a855f7";
+      default:
+        return "#6b7280";
+    }
+  };
+  const getStatusLabel = () => {
+    switch (status) {
+      case "completed":
+        return "All 5 Thumbnails Ready (4K)";
+      case "generating":
+      case "exporting":
+        return `Generating Thumbnails (${completedCount}/5)...`;
+      case "planning":
+        return "Planning Concepts with Gemini...";
+      case "partial":
+        return `${completedCount}/5 Thumbnails Ready`;
+      case "needs-attention":
+        return "FlowKit Connection Required — Resume when ready";
+      case "failed":
+        return "Generation Failed";
+      case "interrupted":
+        return "Interrupted — Resume to continue";
+      default:
+        return "Ready to Generate";
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: "rgba(255, 255, 255, 0.02)",
+        border: "1px solid rgba(255, 255, 255, 0.08)",
+        borderRadius: "12px",
+        padding: "20px",
+        marginBottom: "24px"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "14px", flexWrap: "wrap", gap: "12px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    width: "10px",
+                    height: "10px",
+                    borderRadius: "50%",
+                    background: getStatusColor(),
+                    boxShadow: `0 0 10px ${getStatusColor()}`
+                  }
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: "16px", fontWeight: 600, color: "#f9fafb" }, children: getStatusLabel() }),
+              jobState?.generationRound && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "span",
+                {
+                  style: {
+                    background: "rgba(59, 130, 246, 0.15)",
+                    color: "#60a5fa",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                    fontSize: "11px",
+                    fontWeight: 600
+                  },
+                  children: [
+                    "Round ",
+                    jobState.generationRound
+                  ]
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "#9ca3af", marginTop: "4px" }, children: jobState?.renderOutputPath ? `Video Output: ${jobState.renderOutputPath}` : "Companion workflow for YouTube thumbnails" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" }, children: [
+            isRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onCancel,
+                style: {
+                  background: "rgba(239, 68, 68, 0.15)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  color: "#f87171",
+                  borderRadius: "6px",
+                  padding: "8px 16px",
+                  fontSize: "13px",
+                  fontWeight: 500,
+                  cursor: "pointer"
+                },
+                children: "Cancel"
+              }
+            ) : status === "interrupted" || status === "partial" || status === "needs-attention" ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onResume,
+                style: {
+                  background: status === "needs-attention" ? "#f59e0b" : "#8b5cf6",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "6px",
+                  padding: "8px 18px",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  cursor: "pointer"
+                },
+                children: "Resume Generation"
+              }
+            ) : null,
+            status === "completed" || status === "partial" ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onGenerateMore,
+                style: {
+                  background: "#3b82f6",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "6px",
+                  padding: "8px 18px",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px"
+                },
+                children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "+ Generate 5 More" })
+              }
+            ) : status === "idle" || status === "failed" ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onStart,
+                style: {
+                  background: "#3b82f6",
+                  color: "#ffffff",
+                  border: "none",
+                  borderRadius: "6px",
+                  padding: "8px 20px",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  cursor: "pointer"
+                },
+                children: "Start Thumbnail Generation"
+              }
+            ) : null,
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onOpenFolder,
+                style: {
+                  background: "rgba(255, 255, 255, 0.05)",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  color: "#d1d5db",
+                  borderRadius: "6px",
+                  padding: "8px 14px",
+                  fontSize: "13px",
+                  cursor: "pointer"
+                },
+                children: "Open Folder ↗"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: onManageLibrary,
+                style: {
+                  background: "transparent",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  color: "#9ca3af",
+                  borderRadius: "6px",
+                  padding: "8px 14px",
+                  fontSize: "13px",
+                  cursor: "pointer"
+                },
+                children: "Prompt Library"
+              }
+            )
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              width: "100%",
+              height: "6px",
+              background: "rgba(255, 255, 255, 0.05)",
+              borderRadius: "3px",
+              overflow: "hidden"
+            },
+            children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "div",
+              {
+                style: {
+                  width: `${progressPercent}%`,
+                  height: "100%",
+                  background: isRunning ? "linear-gradient(90deg, #3b82f6, #60a5fa)" : getStatusColor(),
+                  transition: "width 0.4s ease"
+                }
+              }
+            )
+          }
+        ),
+        jobState?.warnings && jobState.warnings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "10px", fontSize: "12px", color: "#f59e0b" }, children: jobState.warnings.join(" • ") }),
+        (status === "needs-attention" || status === "failed") && jobState?.errors && jobState.errors.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "10px", fontSize: "12px", color: "#f87171", lineHeight: "1.5" }, children: jobState.errors.slice(-2).map((e, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "⚠ ",
+          e.replace(/^\[\w+\]\s*/, "")
+        ] }, i)) })
+      ]
+    }
+  );
+};
+const ThumbnailCandidateCard = ({
+  candidate,
+  isSelected,
+  onSelect,
+  onRetry,
+  onRegenerate,
+  onExport4k,
+  onOpenFolder
+}) => {
+  const [showPromptModal, setShowPromptModal] = reactExports.useState(false);
+  const [showRegenModal, setShowRegenModal] = reactExports.useState(false);
+  const [customPromptText, setCustomPromptText] = reactExports.useState(candidate.imagePrompt);
+  const [copied, setCopied] = reactExports.useState(false);
+  const [imageSrc, setImageSrc] = reactExports.useState("");
+  const isCompleted = candidate.status === "completed";
+  const isGenerating = candidate.status === "generating" || candidate.status === "exporting";
+  const isFailed = candidate.status === "failed";
+  reactExports.useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      if (candidate.exportedImagePath) {
+        try {
+          const result = await window.api.thumbnail.readImage(candidate.exportedImagePath);
+          if (!cancelled) {
+            if ("dataUrl" in result) {
+              setImageSrc(result.dataUrl);
+            } else {
+              setImageSrc(candidate.originalImagePath || "");
+            }
+          }
+        } catch {
+          if (!cancelled) setImageSrc(candidate.originalImagePath || "");
+        }
+      } else {
+        setImageSrc(candidate.originalImagePath || "");
+      }
+    };
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [candidate.exportedImagePath, candidate.originalImagePath]);
+  const handleCopyPrompt = () => {
+    navigator.clipboard.writeText(candidate.imagePrompt);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2e3);
+  };
+  const handleConfirmRegenerate = () => {
+    onRegenerate(candidate.id, customPromptText);
+    setShowRegenModal(false);
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        background: isSelected ? "rgba(59, 130, 246, 0.08)" : "rgba(255, 255, 255, 0.03)",
+        border: isSelected ? "2px solid #3b82f6" : isFailed ? "1px solid rgba(239, 68, 68, 0.3)" : "1px solid rgba(255, 255, 255, 0.1)",
+        borderRadius: "12px",
+        overflow: "hidden",
+        display: "flex",
+        flexDirection: "column",
+        boxShadow: isSelected ? "0 0 20px rgba(59, 130, 246, 0.25)" : "none",
+        transition: "all 0.2s ease",
+        position: "relative"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              position: "absolute",
+              top: "12px",
+              left: "12px",
+              zIndex: 10,
+              background: isSelected ? "#3b82f6" : "rgba(0, 0, 0, 0.75)",
+              color: "#ffffff",
+              padding: "4px 10px",
+              borderRadius: "6px",
+              fontWeight: 700,
+              fontSize: "13px",
+              backdropFilter: "blur(4px)",
+              border: "1px solid rgba(255, 255, 255, 0.2)"
+            },
+            children: [
+              "Option ",
+              candidate.optionId,
+              candidate.revision > 1 && ` (Rev ${candidate.revision})`
+            ]
+          }
+        ),
+        candidate.exportQuality && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              position: "absolute",
+              top: "12px",
+              right: "12px",
+              zIndex: 10,
+              background: candidate.exportQuality === "native-4k" ? "rgba(34, 197, 94, 0.85)" : "rgba(245, 158, 11, 0.85)",
+              color: "#ffffff",
+              padding: "3px 8px",
+              borderRadius: "4px",
+              fontWeight: 700,
+              fontSize: "11px",
+              textTransform: "uppercase",
+              letterSpacing: "0.5px"
+            },
+            children: candidate.exportQuality === "native-4k" ? "Native 4K" : candidate.exportQuality
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              width: "100%",
+              aspectRatio: "16 / 9",
+              background: "#090a10",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              overflow: "hidden",
+              position: "relative",
+              borderBottom: "1px solid rgba(255, 255, 255, 0.08)"
+            },
+            children: isCompleted && candidate.exportedImagePath ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "img",
+              {
+                src: imageSrc,
+                alt: `Option ${candidate.optionId}`,
+                style: { width: "100%", height: "100%", objectFit: "cover" },
+                onError: (e) => {
+                  e.target.style.display = "none";
+                }
+              }
+            ) : isGenerating ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center", padding: "20px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "div",
+                {
+                  style: {
+                    width: "36px",
+                    height: "36px",
+                    border: "3px solid rgba(59, 130, 246, 0.2)",
+                    borderTopColor: "#3b82f6",
+                    borderRadius: "50%",
+                    animation: "spin 1s linear infinite",
+                    margin: "0 auto 12px auto"
+                  }
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "#93c5fd", fontWeight: 500 }, children: candidate.status === "exporting" ? "Exporting 4K Image..." : "Generating Image in Flow..." })
+            ] }) : isFailed ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center", padding: "20px", color: "#f87171" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "24px", marginBottom: "6px" }, children: "⚠️" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 500 }, children: "Generation Failed" }),
+              candidate.error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#fca5a5", marginTop: "4px", maxWidth: "240px" }, children: candidate.error })
+            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#6b7280", fontSize: "13px", textAlign: "center" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: "⏳ Queued for Generation" }) })
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "16px", display: "flex", flexDirection: "column", gap: "12px", flex: 1 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "14px", fontWeight: 600, color: "#f3f4f6", marginBottom: "6px" }, children: candidate.conceptName }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  background: "rgba(0, 0, 0, 0.4)",
+                  border: "1px solid rgba(255, 255, 255, 0.08)",
+                  borderRadius: "6px",
+                  padding: "8px 12px",
+                  fontFamily: "Impact, Arial Black, sans-serif",
+                  textTransform: "uppercase",
+                  letterSpacing: "0.5px",
+                  lineHeight: 1.2
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#facc15", fontSize: "15px", textShadow: "1px 1px 2px #000" }, children: candidate.yellowText }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#ffffff", fontSize: "14px", textShadow: "1px 1px 2px #000" }, children: candidate.whiteText })
+                ]
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "#9ca3af", display: "flex", flexDirection: "column", gap: "4px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#60a5fa", fontWeight: 600 }, children: "Clear: " }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: candidate.titleClear })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#f59e0b", fontWeight: 600 }, children: "Curiosity: " }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db" }, children: candidate.titleCuriosity })
+            ] })
+          ] }),
+          candidate.actualWidth && candidate.actualHeight && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#6b7280" }, children: [
+            "Resolution: ",
+            candidate.actualWidth,
+            " × ",
+            candidate.actualHeight
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "auto", paddingTop: "12px", display: "flex", flexWrap: "wrap", gap: "6px" }, children: [
+            isCompleted ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => onSelect(candidate.id),
+                style: {
+                  flex: 1,
+                  minWidth: "100px",
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  background: isSelected ? "#10b981" : "#3b82f6",
+                  color: "#ffffff",
+                  border: "none",
+                  cursor: "pointer"
+                },
+                children: isSelected ? "✓ Selected Master" : "Select Master"
+              }
+            ) : isFailed ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => onRetry(candidate.id),
+                style: {
+                  flex: 1,
+                  padding: "6px 12px",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  background: "#ef4444",
+                  color: "#ffffff",
+                  border: "none",
+                  cursor: "pointer"
+                },
+                children: "Retry"
+              }
+            ) : null,
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => setShowPromptModal(true),
+                style: {
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  background: "rgba(255, 255, 255, 0.05)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                  color: "#d1d5db",
+                  cursor: "pointer"
+                },
+                title: "View Flow Prompt",
+                children: "Prompt"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => setShowRegenModal(true),
+                style: {
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  background: "rgba(255, 255, 255, 0.05)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                  color: "#d1d5db",
+                  cursor: "pointer"
+                },
+                title: "Regenerate with Custom Prompt",
+                children: "Edit & Regen"
+              }
+            ),
+            isCompleted && candidate.exportQuality !== "native-4k" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => onExport4k(candidate.id),
+                style: {
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  background: "rgba(245, 158, 11, 0.15)",
+                  border: "1px solid rgba(245, 158, 11, 0.3)",
+                  color: "#fbbf24",
+                  cursor: "pointer"
+                },
+                title: "Attempt 4K Export again",
+                children: "Retry 4K"
+              }
+            ),
+            isCompleted && candidate.exportedImagePath && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                onClick: () => onOpenFolder(candidate.exportedImagePath),
+                style: {
+                  padding: "6px 10px",
+                  borderRadius: "6px",
+                  fontSize: "12px",
+                  background: "rgba(255, 255, 255, 0.05)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                  color: "#9ca3af",
+                  cursor: "pointer"
+                },
+                title: "Show in Folder",
+                children: "📁"
+              }
+            )
+          ] })
+        ] }),
+        showPromptModal && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0, 0, 0, 0.75)",
+              zIndex: 1e3,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "20px"
+            },
+            onClick: () => setShowPromptModal(false),
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  background: "#111827",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  borderRadius: "12px",
+                  maxWidth: "650px",
+                  width: "100%",
+                  padding: "24px",
+                  color: "#f3f4f6"
+                },
+                onClick: (e) => e.stopPropagation(),
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { style: { margin: 0, fontSize: "16px", fontWeight: 600 }, children: [
+                      "Option ",
+                      candidate.optionId,
+                      " — Image Prompt"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => setShowPromptModal(false),
+                        style: { background: "none", border: "none", color: "#9ca3af", fontSize: "18px", cursor: "pointer" },
+                        children: "✕"
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "div",
+                    {
+                      style: {
+                        background: "#030712",
+                        padding: "16px",
+                        borderRadius: "8px",
+                        fontSize: "13px",
+                        lineHeight: 1.5,
+                        color: "#e5e7eb",
+                        maxHeight: "300px",
+                        overflowY: "auto",
+                        whiteSpace: "pre-wrap",
+                        fontFamily: "monospace"
+                      },
+                      children: candidate.imagePrompt
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "20px", display: "flex", justifyContent: "flex-end", gap: "10px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: handleCopyPrompt,
+                        style: {
+                          background: "#3b82f6",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "6px",
+                          padding: "8px 16px",
+                          fontSize: "13px",
+                          cursor: "pointer"
+                        },
+                        children: copied ? "✓ Copied" : "Copy Prompt"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => setShowPromptModal(false),
+                        style: {
+                          background: "rgba(255, 255, 255, 0.1)",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "6px",
+                          padding: "8px 16px",
+                          fontSize: "13px",
+                          cursor: "pointer"
+                        },
+                        children: "Close"
+                      }
+                    )
+                  ] })
+                ]
+              }
+            )
+          }
+        ),
+        showRegenModal && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0, 0, 0, 0.75)",
+              zIndex: 1e3,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: "20px"
+            },
+            onClick: () => setShowRegenModal(false),
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  background: "#111827",
+                  border: "1px solid rgba(255, 255, 255, 0.15)",
+                  borderRadius: "12px",
+                  maxWidth: "650px",
+                  width: "100%",
+                  padding: "24px",
+                  color: "#f3f4f6"
+                },
+                onClick: (e) => e.stopPropagation(),
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("h3", { style: { margin: 0, fontSize: "16px", fontWeight: 600 }, children: [
+                      "Regenerate Option ",
+                      candidate.optionId,
+                      " (Creates Revision ",
+                      candidate.revision + 1,
+                      ")"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => setShowRegenModal(false),
+                        style: { background: "none", border: "none", color: "#9ca3af", fontSize: "18px", cursor: "pointer" },
+                        children: "✕"
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "13px", color: "#9ca3af", marginBottom: "12px" }, children: "Modify the English image prompt below to regenerate this specific candidate without affecting the other 4 options:" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "textarea",
+                    {
+                      value: customPromptText,
+                      onChange: (e) => setCustomPromptText(e.target.value),
+                      rows: 8,
+                      style: {
+                        width: "100%",
+                        background: "#030712",
+                        border: "1px solid rgba(255, 255, 255, 0.15)",
+                        borderRadius: "8px",
+                        padding: "12px",
+                        fontSize: "13px",
+                        lineHeight: 1.5,
+                        color: "#e5e7eb",
+                        fontFamily: "monospace",
+                        resize: "vertical"
+                      }
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "20px", display: "flex", justifyContent: "flex-end", gap: "10px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: () => setShowRegenModal(false),
+                        style: {
+                          background: "rgba(255, 255, 255, 0.1)",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "6px",
+                          padding: "8px 16px",
+                          fontSize: "13px",
+                          cursor: "pointer"
+                        },
+                        children: "Cancel"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        onClick: handleConfirmRegenerate,
+                        style: {
+                          background: "#3b82f6",
+                          color: "#ffffff",
+                          border: "none",
+                          borderRadius: "6px",
+                          padding: "8px 16px",
+                          fontSize: "13px",
+                          fontWeight: 600,
+                          cursor: "pointer"
+                        },
+                        children: "Regenerate Candidate"
+                      }
+                    )
+                  ] })
+                ]
+              }
+            )
+          }
+        )
+      ]
+    }
+  );
+};
+const ThumbnailStudioPage = ({
+  project,
+  onNavigate
+}) => {
+  const {
+    jobState,
+    health,
+    settings,
+    templates,
+    isCheckingHealth,
+    activeRound,
+    setActiveRound,
+    checkHealth,
+    startGeneration,
+    resumeJob,
+    cancelJob,
+    generateMore,
+    retryCandidate,
+    regenerateCandidate,
+    export4k,
+    selectCandidate,
+    openFolder,
+    openGoogleFlow
+  } = useThumbnailStudio(project.projectDir);
+  const [selectedTemplateId, setSelectedTemplateId] = reactExports.useState(
+    settings?.selectedTemplateId || ""
+  );
+  const handleTemplateChange = async (templateId) => {
+    setSelectedTemplateId(templateId);
+    const t2 = templates.find((item) => item.id === templateId);
+    if (t2 && settings) {
+      await window.api.thumbnail.settings.save(project.projectDir, {
+        ...settings,
+        selectedTemplateId: t2.id,
+        templateSnapshot: t2.promptText
+      });
+    }
+  };
+  const handleStart = async () => {
+    await startGeneration(false);
+  };
+  const handleGenerate5More = async () => {
+    const t2 = templates.find((item) => item.id === selectedTemplateId);
+    await generateMore(selectedTemplateId, t2?.promptText);
+  };
+  const currentRoundCandidates = (jobState?.candidates || []).filter(
+    (c) => c.round === activeRound
+  );
+  const optionLetters = ["A", "B", "C", "D", "E"];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      style: {
+        padding: "24px 32px",
+        maxWidth: "1440px",
+        margin: "0 auto",
+        height: "100%",
+        overflowY: "auto",
+        color: "#f3f4f6"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "flex-start",
+              marginBottom: "20px",
+              flexWrap: "wrap",
+              gap: "16px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { style: { fontSize: "24px", fontWeight: 700, margin: 0, color: "#ffffff" }, children: "Thumbnail Studio" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "span",
+                    {
+                      style: {
+                        background: "linear-gradient(135deg, #3b82f6, #8b5cf6)",
+                        color: "#ffffff",
+                        padding: "2px 10px",
+                        borderRadius: "12px",
+                        fontSize: "11px",
+                        fontWeight: 700,
+                        textTransform: "uppercase",
+                        letterSpacing: "0.5px"
+                      },
+                      children: "Google Flow 4K"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "13px", color: "#9ca3af", margin: "4px 0 0 0" }, children: "AI-grounded companion thumbnail generator with strictly 5 distinct YouTube options" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "10px", alignItems: "center" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  onClick: () => onNavigate?.("thumbnail-library"),
+                  style: {
+                    background: "rgba(255, 255, 255, 0.06)",
+                    border: "1px solid rgba(255, 255, 255, 0.15)",
+                    color: "#e5e7eb",
+                    borderRadius: "8px",
+                    padding: "8px 16px",
+                    fontSize: "13px",
+                    fontWeight: 500,
+                    cursor: "pointer"
+                  },
+                  children: "📚 Prompt Library"
+                }
+              ) })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: "20px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+          FlowConnectionStatus,
+          {
+            health,
+            isChecking: isCheckingHealth,
+            onCheck: () => checkHealth(),
+            onOpenFlow: openGoogleFlow
+          }
+        ) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          ThumbnailGenerationProgress,
+          {
+            jobState,
+            onStart: handleStart,
+            onResume: resumeJob,
+            onCancel: cancelJob,
+            onGenerateMore: handleGenerate5More,
+            onOpenFolder: () => openFolder(),
+            onManageLibrary: () => onNavigate?.("thumbnail-library")
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              background: "rgba(255, 255, 255, 0.02)",
+              border: "1px solid rgba(255, 255, 255, 0.06)",
+              borderRadius: "10px",
+              padding: "16px 20px",
+              marginBottom: "20px",
+              display: "flex",
+              flexWrap: "wrap",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "16px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: "1", minWidth: "280px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 600, color: "#9ca3af", marginBottom: "6px" }, children: "Master Prompt Template" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  ThumbnailTemplateSelector,
+                  {
+                    templates,
+                    selectedTemplateId: selectedTemplateId || settings?.selectedTemplateId || "",
+                    onSelect: handleTemplateChange
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "20px", alignItems: "center" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "#9ca3af" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db", fontWeight: 600 }, children: "Target: " }),
+                  "5 Photorealistic 4K Options"
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "#9ca3af" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#d1d5db", fontWeight: 600 }, children: "Aspect: " }),
+                  "16:9 Landscape"
+                ] })
+              ] })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          ThumbnailRoundTabs,
+          {
+            currentRound: jobState?.generationRound || 1,
+            totalRounds: jobState?.generationRound || 1,
+            activeRound,
+            onSelectRound: setActiveRound
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            style: {
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, minmax(250px, 1fr))",
+              gap: "18px",
+              marginBottom: "32px"
+            },
+            children: optionLetters.map((letter) => {
+              const candidate = currentRoundCandidates.find((c) => c.optionId === letter);
+              const isSelected = Boolean(
+                candidate && jobState?.selectedCandidateId === candidate.id
+              );
+              if (!candidate) {
+                return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "div",
+                  {
+                    style: {
+                      background: "rgba(255, 255, 255, 0.02)",
+                      border: "1px dashed rgba(255, 255, 255, 0.1)",
+                      borderRadius: "12px",
+                      aspectRatio: "16 / 14",
+                      display: "flex",
+                      flexDirection: "column",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      color: "#6b7280",
+                      gap: "8px"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "18px", fontWeight: 700, color: "#4b5563" }, children: [
+                        "Option ",
+                        letter
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px" }, children: "Awaiting Generation" })
+                    ]
+                  },
+                  letter
+                );
+              }
+              return /* @__PURE__ */ jsxRuntimeExports.jsx(
+                ThumbnailCandidateCard,
+                {
+                  candidate,
+                  isSelected,
+                  onSelect: selectCandidate,
+                  onRetry: retryCandidate,
+                  onRegenerate: regenerateCandidate,
+                  onExport4k: export4k,
+                  onOpenFolder: (p2) => openFolder(p2)
+                },
+                candidate.id
+              );
+            })
+          }
+        )
+      ]
+    }
+  );
+};
+const THUMBNAIL_CATEGORIES = [
+  "US Grocery",
+  "Preparedness",
+  "Hutterite Documentary",
+  "Hidden Cost Documentary",
+  "Streamer Reaction",
+  "Custom"
+];
+const SUPPORTED_VARIABLES = [
+  { tag: "{{SCRIPT}}", label: "Full Script (Required)", required: true },
+  { tag: "{{VIDEO_TITLE}}", label: "Video Title", required: false },
+  { tag: "{{GLOBAL_VISUAL_CONTEXT}}", label: "Visual Context", required: false },
+  { tag: "{{VARIANT_COUNT}}", label: "Variants (5)", required: false },
+  { tag: "{{PREVIOUS_CONCEPTS}}", label: "Prev Concepts", required: false },
+  { tag: "{{OUTPUT_LANGUAGE}}", label: "Output Lang", required: false }
+];
+function ThumbnailTemplateEditor({
+  isOpen,
+  template,
+  onSave,
+  onClose
+}) {
+  const [name, setName] = reactExports.useState("");
+  const [description, setDescription] = reactExports.useState("");
+  const [category, setCategory] = reactExports.useState("US Grocery");
+  const [promptText, setPromptText] = reactExports.useState("");
+  const [isDefault, setIsDefault] = reactExports.useState(false);
+  const [isSaving, setIsSaving] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState(null);
+  reactExports.useEffect(() => {
+    if (template) {
+      setName(template.name);
+      setDescription(template.description || "");
+      setCategory(template.category || "US Grocery");
+      setPromptText(template.promptText);
+      setIsDefault(template.isDefault);
+    } else {
+      setName("");
+      setDescription("");
+      setCategory("Custom");
+      setPromptText("Analyze script: {{SCRIPT}}\nCreate {{VARIANT_COUNT}} distinct YouTube thumbnail prompts.");
+      setIsDefault(false);
+    }
+    setError(null);
+  }, [template, isOpen]);
+  if (!isOpen) return null;
+  const handleInsertVariable = (tag) => {
+    setPromptText((prev) => `${prev} ${tag}`);
+  };
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim()) {
+      setError("Please provide a prompt template name.");
+      return;
+    }
+    if (!promptText.trim()) {
+      setError("Prompt text cannot be empty.");
+      return;
+    }
+    if (!promptText.includes("{{SCRIPT}}")) {
+      setError("Prompt must include {{SCRIPT}} variable so the AI can ground the thumbnails in the script.");
+      return;
+    }
+    try {
+      setIsSaving(true);
+      setError(null);
+      await onSave({
+        name: name.trim(),
+        description: description.trim() || void 0,
+        category,
+        promptText: promptText.trim(),
+        isDefault
+      });
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsSaving(false);
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: "rgba(0, 0, 0, 0.75)",
+        backdropFilter: "blur(8px)",
+        zIndex: 1e3,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "24px"
+      },
+      onClick: onClose,
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            backgroundColor: "var(--bg-surface, #0f0f1a)",
+            border: "1px solid var(--border-strong, rgba(255, 255, 255, 0.15))",
+            borderRadius: "var(--radius-lg, 16px)",
+            width: "100%",
+            maxWidth: "820px",
+            maxHeight: "90vh",
+            display: "flex",
+            flexDirection: "column",
+            boxShadow: "0 20px 50px rgba(0, 0, 0, 0.8)",
+            overflow: "hidden"
+          },
+          onClick: (e) => e.stopPropagation(),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  padding: "18px 24px",
+                  borderBottom: "1px solid var(--border-default, rgba(255, 255, 255, 0.08))",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: "18px", fontWeight: 600, color: "var(--text-primary)" }, children: template ? "Edit Master Prompt Template" : "Create Master Prompt Template" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)", marginTop: "4px" }, children: "Master prompts define the exact creative instructions and 5 visual hooks sent to Google Flow." })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      type: "button",
+                      className: "btn btn-secondary btn-sm",
+                      onClick: onClose,
+                      style: { padding: "4px 10px" },
+                      children: "✕"
+                    }
+                  )
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("form", { onSubmit: handleSubmit, style: { display: "flex", flexDirection: "column", flex: 1, overflow: "hidden" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px 24px", overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: "16px" }, children: [
+                error && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "div",
+                  {
+                    style: {
+                      padding: "10px 14px",
+                      backgroundColor: "rgba(239, 68, 68, 0.12)",
+                      border: "1px solid rgba(239, 68, 68, 0.3)",
+                      borderRadius: "var(--radius-sm, 6px)",
+                      color: "#f87171",
+                      fontSize: "13px"
+                    },
+                    children: [
+                      "⚠️ ",
+                      error
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 200px", gap: "16px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Template Name *" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "input",
+                      {
+                        type: "text",
+                        className: "input-field",
+                        value: name,
+                        onChange: (e) => setName(e.target.value),
+                        placeholder: "e.g. US Grocery & Preparedness — Script Grounded",
+                        required: true,
+                        style: { width: "100%" }
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Niche / Category" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "select",
+                      {
+                        className: "input-field",
+                        value: category,
+                        onChange: (e) => setCategory(e.target.value),
+                        style: { width: "100%", height: "38px" },
+                        children: THUMBNAIL_CATEGORIES.map((cat) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: cat, children: cat }, cat))
+                      }
+                    )
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Description (Optional)" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "text",
+                      className: "input-field",
+                      value: description,
+                      onChange: (e) => setDescription(e.target.value),
+                      placeholder: "Brief summary of when to use this master prompt...",
+                      style: { width: "100%" }
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "8px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { fontSize: "12px", fontWeight: 500, color: "var(--text-secondary)" }, children: "Master Prompt Text *" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Click chips below to insert variables:" })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "6px", marginBottom: "10px" }, children: SUPPORTED_VARIABLES.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "button",
+                    {
+                      type: "button",
+                      className: "btn btn-secondary btn-sm",
+                      onClick: () => handleInsertVariable(v2.tag),
+                      style: {
+                        fontSize: "11px",
+                        padding: "3px 8px",
+                        borderColor: v2.required ? "var(--brand-primary)" : "var(--border-default)",
+                        color: v2.required ? "var(--brand-primary)" : "var(--text-secondary)"
+                      },
+                      title: `Insert ${v2.tag}`,
+                      children: [
+                        "+ ",
+                        v2.tag,
+                        " ",
+                        v2.required && "★"
+                      ]
+                    },
+                    v2.tag
+                  )) }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "textarea",
+                    {
+                      className: "input-field",
+                      value: promptText,
+                      onChange: (e) => setPromptText(e.target.value),
+                      rows: 14,
+                      style: {
+                        width: "100%",
+                        fontFamily: "var(--font-mono, monospace)",
+                        fontSize: "12px",
+                        lineHeight: "1.5",
+                        resize: "vertical"
+                      },
+                      placeholder: "Enter master prompt instructions...",
+                      required: true
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "checkbox-label", style: { display: "inline-flex", alignItems: "center", gap: "8px", cursor: "pointer" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "input",
+                    {
+                      type: "checkbox",
+                      checked: isDefault,
+                      onChange: (e) => setIsDefault(e.target.checked)
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", color: "var(--text-primary)" }, children: "Set as default prompt for new projects" })
+                ] }) })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    padding: "16px 24px",
+                    borderTop: "1px solid var(--border-default, rgba(255, 255, 255, 0.08))",
+                    backgroundColor: "rgba(0, 0, 0, 0.2)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "flex-end",
+                    gap: "12px"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary",
+                        onClick: onClose,
+                        disabled: isSaving,
+                        children: "Cancel"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "submit",
+                        className: "btn btn-primary",
+                        disabled: isSaving,
+                        style: { minWidth: "120px" },
+                        children: isSaving ? "Saving..." : template ? "Save Changes" : "Create Template"
+                      }
+                    )
+                  ]
+                }
+              )
+            ] })
+          ]
+        }
+      )
+    }
+  );
+}
+function ThumbnailPromptLibraryPage({
+  onBack,
+  onSelectForProject
+}) {
+  const [templates, setTemplates] = reactExports.useState([]);
+  const [searchQuery, setSearchQuery] = reactExports.useState("");
+  const [selectedCategory, setSelectedCategory] = reactExports.useState("All");
+  const [isLoading, setIsLoading] = reactExports.useState(true);
+  const [editingTemplate, setEditingTemplate] = reactExports.useState(null);
+  const [isEditorOpen, setIsEditorOpen] = reactExports.useState(false);
+  const [previewTemplate, setPreviewTemplate] = reactExports.useState(null);
+  const [feedback, setFeedback] = reactExports.useState(null);
+  const loadTemplates = async () => {
+    try {
+      setIsLoading(true);
+      const res = await window.api.thumbnail.templates.list();
+      if (res.success && res.templates) {
+        setTemplates(res.templates);
+      } else if (res.error) {
+        setFeedback({ type: "error", message: res.error });
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    } finally {
+      setIsLoading(false);
+    }
+  };
+  reactExports.useEffect(() => {
+    loadTemplates();
+  }, []);
+  const filteredTemplates = reactExports.useMemo(() => {
+    return templates.filter((t2) => {
+      const matchesCategory = selectedCategory === "All" || t2.category === selectedCategory;
+      const query = searchQuery.toLowerCase().trim();
+      const matchesSearch = !query || t2.name.toLowerCase().includes(query) || t2.description && t2.description.toLowerCase().includes(query) || t2.category.toLowerCase().includes(query) || t2.promptText.toLowerCase().includes(query);
+      return matchesCategory && matchesSearch;
+    });
+  }, [templates, selectedCategory, searchQuery]);
+  const handleCreate = () => {
+    setEditingTemplate(null);
+    setIsEditorOpen(true);
+  };
+  const handleEdit = (template) => {
+    setEditingTemplate(template);
+    setIsEditorOpen(true);
+  };
+  const handleDuplicate = async (template) => {
+    try {
+      const res = await window.api.thumbnail.templates.duplicate(template.id, `${template.name} (Copy)`);
+      if (res.success) {
+        setFeedback({ type: "success", message: `Duplicated "${template.name}" successfully.` });
+        await loadTemplates();
+      } else {
+        setFeedback({ type: "error", message: res.error || "Failed to duplicate template" });
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  const handleDelete = async (template) => {
+    if (template.isBuiltIn) {
+      setFeedback({ type: "error", message: "Built-in master templates cannot be deleted." });
+      return;
+    }
+    if (!window.confirm(`Are you sure you want to delete template "${template.name}"?`)) {
+      return;
+    }
+    try {
+      const res = await window.api.thumbnail.templates.delete(template.id);
+      if (res.success) {
+        setFeedback({ type: "success", message: `Deleted "${template.name}".` });
+        await loadTemplates();
+      } else {
+        setFeedback({ type: "error", message: res.error || "Failed to delete template" });
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  const handleSetDefault = async (template) => {
+    try {
+      const res = await window.api.thumbnail.templates.update(template.id, { isDefault: true });
+      if (res.success) {
+        setFeedback({ type: "success", message: `"${template.name}" is now the default template.` });
+        await loadTemplates();
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  const handleSaveTemplate = async (data) => {
+    if (editingTemplate) {
+      const res = await window.api.thumbnail.templates.update(editingTemplate.id, data);
+      if (!res.success) throw new Error(res.error || "Failed to update template");
+      setFeedback({ type: "success", message: `Updated "${data.name}".` });
+    } else {
+      const res = await window.api.thumbnail.templates.create(data);
+      if (!res.success) throw new Error(res.error || "Failed to create template");
+      setFeedback({ type: "success", message: `Created "${data.name}".` });
+    }
+    await loadTemplates();
+  };
+  const handleImport = async () => {
+    try {
+      const res = await window.api.thumbnail.templates.import();
+      if (res.success) {
+        setFeedback({
+          type: "success",
+          message: `Successfully imported ${res.importedCount || 0} template(s).`
+        });
+        await loadTemplates();
+      } else if (res.error && res.error !== "Import cancelled") {
+        setFeedback({ type: "error", message: res.error });
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  const handleExportAll = async () => {
+    try {
+      const res = await window.api.thumbnail.templates.export(void 0, true);
+      if (res.success && res.filePath) {
+        setFeedback({ type: "success", message: `Exported templates to ${res.filePath}` });
+      } else if (res.error && res.error !== "Export cancelled") {
+        setFeedback({ type: "error", message: res.error });
+      }
+    } catch (err) {
+      setFeedback({ type: "error", message: err instanceof Error ? err.message : String(err) });
+    }
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "page-container", style: { padding: "24px", maxWidth: "1300px", margin: "0 auto" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "24px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "14px" }, children: [
+        onBack && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn btn-secondary", onClick: onBack, children: "← Back" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("h1", { style: { margin: 0, fontSize: "24px", fontWeight: 700, color: "var(--text-primary)" }, children: "Thumbnail Prompt Library" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: "4px 0 0 0", fontSize: "13px", color: "var(--text-secondary)" }, children: "Manage master prompt formulas for generating 5 YouTube thumbnails via Google Flow." })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "10px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn btn-secondary", onClick: handleImport, children: "📥 Import JSON" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn btn-secondary", onClick: handleExportAll, children: "📤 Export All" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn btn-primary", onClick: handleCreate, children: "+ Create Master Prompt" })
+      ] })
+    ] }),
+    feedback && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          padding: "12px 16px",
+          marginBottom: "20px",
+          borderRadius: "var(--radius-sm, 6px)",
+          backgroundColor: feedback.type === "success" ? "rgba(52, 211, 153, 0.12)" : "rgba(239, 68, 68, 0.12)",
+          border: `1px solid ${feedback.type === "success" ? "rgba(52, 211, 153, 0.3)" : "rgba(239, 68, 68, 0.3)"}`,
+          color: feedback.type === "success" ? "#34d399" : "#f87171",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          fontSize: "13px"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: feedback.message }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: () => setFeedback(null),
+              style: { background: "transparent", border: "none", color: "inherit", cursor: "pointer" },
+              children: "✕"
+            }
+          )
+        ]
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: "panel",
+        style: {
+          padding: "14px 18px",
+          marginBottom: "20px",
+          display: "flex",
+          flexWrap: "wrap",
+          alignItems: "center",
+          gap: "12px",
+          background: "var(--bg-surface, #0f0f1a)"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1, minWidth: "240px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              type: "text",
+              className: "input-field",
+              value: searchQuery,
+              onChange: (e) => setSearchQuery(e.target.value),
+              placeholder: "Search prompt templates by name, keyword, or prompt...",
+              style: { width: "100%", height: "38px" }
+            }
+          ) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                type: "button",
+                className: `btn btn-sm ${selectedCategory === "All" ? "btn-primary" : "btn-secondary"}`,
+                onClick: () => setSelectedCategory("All"),
+                children: [
+                  "All Categories (",
+                  templates.length,
+                  ")"
+                ]
+              }
+            ),
+            THUMBNAIL_CATEGORIES.map((cat) => {
+              const count = templates.filter((t2) => t2.category === cat).length;
+              return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  type: "button",
+                  className: `btn btn-sm ${selectedCategory === cat ? "btn-primary" : "btn-secondary"}`,
+                  onClick: () => setSelectedCategory(cat),
+                  children: [
+                    cat,
+                    " ",
+                    count > 0 && `(${count})`
+                  ]
+                },
+                cat
+              );
+            })
+          ] })
+        ]
+      }
+    ),
+    isLoading ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { textAlign: "center", padding: "60px 20px", color: "var(--text-secondary)" }, children: "Loading master prompt library..." }) : filteredTemplates.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: "panel",
+        style: {
+          padding: "60px 20px",
+          textAlign: "center",
+          color: "var(--text-secondary)",
+          background: "var(--bg-surface, #0f0f1a)"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "32px", marginBottom: "12px" }, children: "🎨" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: "18px", color: "var(--text-primary)" }, children: "No templates found" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "13px", marginTop: "6px" }, children: searchQuery ? `No templates matching "${searchQuery}" in ${selectedCategory}.` : `No templates found in category ${selectedCategory}.` }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn btn-primary", onClick: handleCreate, style: { marginTop: "12px" }, children: "+ Create Template" })
+        ]
+      }
+    ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(380px, 1fr))", gap: "16px" }, children: filteredTemplates.map((template) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        className: "panel",
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "space-between",
+          padding: "20px",
+          background: "var(--bg-surface, #0f0f1a)",
+          border: template.isDefault ? "1px solid var(--brand-primary, #6c63ff)" : "1px solid var(--border-default, rgba(255, 255, 255, 0.08))",
+          borderRadius: "var(--radius-md, 10px)",
+          position: "relative"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "10px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "11px",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                    background: "rgba(108, 99, 255, 0.15)",
+                    color: "var(--brand-primary)",
+                    fontWeight: 600
+                  },
+                  children: template.category
+                }
+              ),
+              template.isBuiltIn && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "11px",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                    background: "rgba(56, 189, 248, 0.15)",
+                    color: "var(--brand-accent, #38bdf8)",
+                    fontWeight: 500
+                  },
+                  children: "Built-in"
+                }
+              ),
+              template.isDefault && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "11px",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                    background: "rgba(251, 191, 36, 0.15)",
+                    color: "var(--color-warning, #fbbf24)",
+                    fontWeight: 600
+                  },
+                  children: "★ Default"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "h3",
+              {
+                style: {
+                  margin: "0 0 8px 0",
+                  fontSize: "16px",
+                  fontWeight: 600,
+                  color: "var(--text-primary)",
+                  lineHeight: "1.4"
+                },
+                children: template.name
+              }
+            ),
+            template.description && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "p",
+              {
+                style: {
+                  margin: "0 0 12px 0",
+                  fontSize: "13px",
+                  color: "var(--text-secondary)",
+                  lineHeight: "1.5"
+                },
+                children: template.description
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  backgroundColor: "rgba(0, 0, 0, 0.3)",
+                  border: "1px solid var(--border-subtle)",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  padding: "10px 12px",
+                  fontFamily: "var(--font-mono, monospace)",
+                  fontSize: "11px",
+                  color: "var(--text-muted)",
+                  maxHeight: "80px",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  lineHeight: "1.4",
+                  marginBottom: "14px",
+                  whiteSpace: "pre-wrap"
+                },
+                children: [
+                  template.promptText.slice(0, 240),
+                  "..."
+                ]
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  fontSize: "11px",
+                  color: "var(--text-muted)",
+                  marginBottom: "12px",
+                  borderTop: "1px solid var(--border-subtle)",
+                  paddingTop: "10px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                    "Updated: ",
+                    new Date(template.updatedAt).toLocaleDateString()
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                    "ID: ",
+                    template.id.slice(0, 12),
+                    "..."
+                  ] })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm",
+                  onClick: () => setPreviewTemplate(template),
+                  title: "View full prompt",
+                  children: "👁 Preview"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm",
+                  onClick: () => handleDuplicate(template),
+                  title: "Duplicate template",
+                  children: "⎘ Duplicate"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm",
+                  onClick: () => handleEdit(template),
+                  title: "Edit template",
+                  children: "✎ Edit"
+                }
+              ),
+              !template.isDefault && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm",
+                  onClick: () => handleSetDefault(template),
+                  title: "Set as default template for new projects",
+                  children: "★ Set Default"
+                }
+              ),
+              !template.isBuiltIn && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-secondary btn-sm",
+                  onClick: () => handleDelete(template),
+                  style: { color: "#f87171" },
+                  title: "Delete template",
+                  children: "🗑"
+                }
+              ),
+              onSelectForProject && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  className: "btn btn-primary btn-sm",
+                  onClick: () => onSelectForProject(template),
+                  style: { marginLeft: "auto" },
+                  children: "Use for Project"
+                }
+              )
+            ] })
+          ] })
+        ]
+      },
+      template.id
+    )) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ThumbnailTemplateEditor,
+      {
+        isOpen: isEditorOpen,
+        template: editingTemplate,
+        onSave: handleSaveTemplate,
+        onClose: () => setIsEditorOpen(false)
+      }
+    ),
+    previewTemplate && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        style: {
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          backgroundColor: "rgba(0, 0, 0, 0.8)",
+          backdropFilter: "blur(8px)",
+          zIndex: 1100,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "24px"
+        },
+        onClick: () => setPreviewTemplate(null),
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              backgroundColor: "var(--bg-surface, #0f0f1a)",
+              border: "1px solid var(--border-strong, rgba(255, 255, 255, 0.15))",
+              borderRadius: "var(--radius-lg, 16px)",
+              width: "100%",
+              maxWidth: "820px",
+              maxHeight: "85vh",
+              display: "flex",
+              flexDirection: "column",
+              boxShadow: "0 20px 50px rgba(0, 0, 0, 0.8)",
+              overflow: "hidden"
+            },
+            onClick: (e) => e.stopPropagation(),
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    padding: "16px 24px",
+                    borderBottom: "1px solid var(--border-default)",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: "18px", color: "var(--text-primary)" }, children: previewTemplate.name }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)", marginTop: "4px" }, children: [
+                        "Category: ",
+                        previewTemplate.category,
+                        " ",
+                        previewTemplate.isBuiltIn && "• Built-in",
+                        " ",
+                        previewTemplate.isDefault && "• Default"
+                      ] })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary btn-sm",
+                        onClick: () => setPreviewTemplate(null),
+                        children: "✕ Close"
+                      }
+                    )
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "20px 24px", overflowY: "auto", flex: 1 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "pre",
+                {
+                  style: {
+                    margin: 0,
+                    whiteSpace: "pre-wrap",
+                    fontFamily: "var(--font-mono, monospace)",
+                    fontSize: "12px",
+                    lineHeight: "1.6",
+                    color: "var(--text-primary)",
+                    background: "rgba(0, 0, 0, 0.3)",
+                    padding: "16px",
+                    borderRadius: "var(--radius-sm, 6px)",
+                    border: "1px solid var(--border-default)"
+                  },
+                  children: previewTemplate.promptText
+                }
+              ) })
+            ]
+          }
+        )
+      }
+    )
   ] });
 }
 function useProject() {
@@ -17334,6 +20896,14 @@ function ResearchProgressPanel({
   const lastEventElapsedRef = reactExports.useRef(progressState?.elapsed_seconds ?? 0);
   const lastProgressAtRef = reactExports.useRef(Date.now());
   const [isStalled, setIsStalled] = reactExports.useState(false);
+  const [activeStage, setActiveStage] = reactExports.useState(() => {
+    return isTerminal ? "STARTING" : currentStage;
+  });
+  reactExports.useEffect(() => {
+    if (progressState?.stage && !isResearchStageTerminal(progressState.stage)) {
+      setActiveStage(progressState.stage);
+    }
+  }, [progressState?.stage]);
   reactExports.useEffect(() => {
     if (progressState?.elapsed_seconds !== void 0 && progressState.elapsed_seconds > lastEventElapsedRef.current) {
       lastEventElapsedRef.current = progressState.elapsed_seconds;
@@ -17368,9 +20938,10 @@ function ResearchProgressPanel({
       PERSISTING: 8,
       COMPLETED: 9
     };
-    const currentIdx = stageOrder[currentStage] ?? 0;
+    const currentIdx = stageOrder[activeStage] ?? 0;
     const stepIdx = stageOrder[stepStage] ?? 0;
-    if (currentIdx > stepIdx || currentStage === "COMPLETED") return "done";
+    if (currentStage === "COMPLETED") return "done";
+    if (currentIdx > stepIdx) return "done";
     if (currentIdx === stepIdx) return "current";
     return "pending";
   };
@@ -17645,15 +21216,406 @@ function ResearchProgressPanel({
     ] })
   ] });
 }
+function formatNumber(n2) {
+  if (n2 >= 1e6) return `${(n2 / 1e6).toFixed(1)}M`;
+  if (n2 >= 1e3) return `${(n2 / 1e3).toFixed(1)}K`;
+  return String(n2);
+}
+function CandidateCard({ video }) {
+  const isUnverified = video.subscriber_status === "UNVERIFIED_MATCH";
+  const subLabel = isUnverified ? "👁 Subscriber hidden" : video.channel_subscribers != null ? `${formatNumber(video.channel_subscribers)} subs` : "—";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "var(--bg-base, #0a0a0f)",
+    border: "1px solid var(--border-subtle)",
+    borderRadius: "8px",
+    padding: "10px 12px",
+    display: "flex",
+    gap: "10px",
+    alignItems: "flex-start"
+  }, children: [
+    video.thumbnail_url ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "img",
+      {
+        src: video.thumbnail_url,
+        alt: "",
+        style: { width: "72px", height: "40px", borderRadius: "4px", objectFit: "cover", flexShrink: 0 },
+        loading: "lazy"
+      }
+    ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: "72px", height: "40px", background: "var(--bg-elevated)", borderRadius: "4px", flexShrink: 0 } }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "a",
+        {
+          href: video.url,
+          target: "_blank",
+          rel: "noreferrer",
+          style: {
+            fontSize: "12px",
+            fontWeight: 600,
+            color: "var(--text-primary)",
+            textDecoration: "none",
+            display: "-webkit-box",
+            WebkitLineClamp: 2,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+            lineHeight: "1.4"
+          },
+          title: video.title,
+          children: video.title
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginTop: "4px" }, children: video.channel_title }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "12px", marginTop: "5px", flexWrap: "wrap" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+          "👁 ",
+          formatNumber(video.views),
+          " views"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+          "📈 ",
+          video.views_per_day.toFixed(0),
+          "/day"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+          fontSize: "10px",
+          color: isUnverified ? "#fbbf24" : "var(--text-muted)"
+        }, children: [
+          "👥 ",
+          subLabel
+        ] }),
+        video.outlier_ratio != null && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: video.outlier_ratio >= 3 ? "#34d399" : "var(--text-muted)" }, children: [
+          "⚡ ",
+          video.outlier_ratio.toFixed(1),
+          "x outlier"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+          "📅 ",
+          video.age_days.toFixed(0),
+          "d ago"
+        ] })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flexShrink: 0, paddingTop: "2px" }, children: [
+      video.subscriber_status === "VERIFIED_MATCH" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        fontSize: "9px",
+        fontWeight: 700,
+        padding: "2px 6px",
+        borderRadius: "3px",
+        background: "rgba(52,211,153,0.15)",
+        color: "#34d399",
+        border: "1px solid rgba(52,211,153,0.3)"
+      }, children: "EXACT" }),
+      video.subscriber_status === "UNVERIFIED_MATCH" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        fontSize: "9px",
+        fontWeight: 700,
+        padding: "2px 6px",
+        borderRadius: "3px",
+        background: "rgba(251,191,36,0.15)",
+        color: "#fbbf24",
+        border: "1px solid rgba(251,191,36,0.3)"
+      }, children: "UNVERIFIED" }),
+      video.subscriber_status === "REJECTED" && video.filter_distance < 0.5 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+        fontSize: "9px",
+        fontWeight: 700,
+        padding: "2px 6px",
+        borderRadius: "3px",
+        background: "rgba(148,163,184,0.1)",
+        color: "#94a3b8",
+        border: "1px solid rgba(148,163,184,0.2)"
+      }, children: "NEAR" })
+    ] })
+  ] });
+}
+function FunnelBar({ label, value, total, color }) {
+  const pct2 = total > 0 ? Math.max(3, value / total * 100) : 0;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", fontSize: "11px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: "150px", color: "var(--text-muted)", flexShrink: 0 }, children: label }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1, height: "4px", background: "var(--bg-elevated)", borderRadius: "2px", overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: `${pct2}%`, height: "100%", background: color, borderRadius: "2px", transition: "width 0.4s ease" } }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { width: "36px", textAlign: "right", color: "var(--text-primary)", fontWeight: 600 }, children: value })
+  ] });
+}
+function CandidateEvidencePanel({
+  exactMatches,
+  unverifiedMatches,
+  nearMatches,
+  filterFunnel,
+  nearMatchSuggestions = [],
+  appliedFilters = {},
+  onRelaxFilters
+}) {
+  const [activeTab, setActiveTab] = reactExports.useState("exact");
+  const totalEvidence = exactMatches.length + unverifiedMatches.length;
+  const hasAnyFilters = Boolean(
+    appliedFilters.min_views || appliedFilters.max_subscribers || appliedFilters.min_views_per_day || appliedFilters.min_outlier_ratio
+  );
+  const tabStyle = (id2) => ({
+    fontSize: "11px",
+    padding: "5px 12px",
+    borderRadius: "4px",
+    border: "1px solid transparent",
+    cursor: "pointer",
+    background: activeTab === id2 ? "var(--accent-primary, #7c3aed)" : "transparent",
+    color: activeTab === id2 ? "#fff" : "var(--text-muted)",
+    borderColor: activeTab === id2 ? "transparent" : "var(--border-subtle)",
+    fontWeight: activeTab === id2 ? 700 : 400,
+    transition: "all 0.15s ease"
+  });
+  const currentList = activeTab === "exact" ? exactMatches : activeTab === "unverified" ? unverifiedMatches : nearMatches;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "var(--bg-elevated, #13141c)",
+    border: "1px solid var(--border-subtle)",
+    borderRadius: "10px",
+    padding: "16px",
+    marginTop: "16px"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { margin: 0, fontSize: "13px", fontWeight: 700, color: "var(--text-primary)" }, children: "🎯 Candidate Evidence" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: "3px 0 0 0", fontSize: "11px", color: "var(--text-muted)" }, children: "Videos matching your research criteria — sorted by filter closeness" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "6px", alignItems: "center" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+        totalEvidence,
+        " evidence videos found"
+      ] }) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px", marginBottom: "12px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { style: tabStyle("exact"), onClick: () => setActiveTab("exact"), children: [
+        "✅ Exact Match (",
+        exactMatches.length,
+        ")"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { style: tabStyle("unverified"), onClick: () => setActiveTab("unverified"), children: [
+        "👁 Unverified (",
+        unverifiedMatches.length,
+        ")"
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("button", { style: tabStyle("near"), onClick: () => setActiveTab("near"), children: [
+        "〰️ Near Match (",
+        nearMatches.length,
+        ")"
+      ] }),
+      filterFunnel && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { style: tabStyle("funnel"), onClick: () => setActiveTab("funnel"), children: "📊 Filter Funnel" })
+    ] }),
+    activeTab === "exact" && exactMatches.length === 0 && hasAnyFilters && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      padding: "16px",
+      background: "rgba(248,113,113,0.05)",
+      border: "1px solid rgba(248,113,113,0.15)",
+      borderRadius: "8px",
+      marginBottom: "12px"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "#f87171", marginBottom: "8px" }, children: "No Exact Matches Found" }),
+      filterFunnel && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", lineHeight: "1.7" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "Universe collected: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: filterFunnel.raw_collected }),
+          " videos"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "Passed min views: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: filterFunnel.above_min_views })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "Subscriber known: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: filterFunnel.subscriber_known }),
+          " / unknown: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#fbbf24" }, children: filterFunnel.subscriber_unknown })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "Exact matches: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#f87171" }, children: "0" })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "Unverified matches: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#fbbf24" }, children: filterFunnel.unverified_matches })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "Near matches: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: filterFunnel.near_matches })
+        ] })
+      ] }),
+      nearMatchSuggestions.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "10px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-muted)", marginBottom: "6px" }, children: "💡 Suggestions to find more candidates:" }),
+        nearMatchSuggestions.map((s, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          fontSize: "11px",
+          color: "var(--text-muted)",
+          padding: "6px 8px",
+          background: "var(--bg-base)",
+          borderRadius: "4px",
+          marginBottom: "4px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            s.description,
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#34d399", marginLeft: "6px" }, children: [
+              "(+",
+              s.would_add_candidates,
+              " candidates)"
+            ] })
+          ] }),
+          onRelaxFilters && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              className: "btn btn-secondary",
+              onClick: () => onRelaxFilters(s.field, Number(s.suggested_value)),
+              style: { fontSize: "10px", padding: "2px 8px", marginLeft: "8px" },
+              children: "Apply"
+            }
+          )
+        ] }, i))
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "10px", display: "flex", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            className: "btn btn-secondary",
+            onClick: () => setActiveTab("unverified"),
+            style: { fontSize: "11px" },
+            children: [
+              "Show Unverified (",
+              unverifiedMatches.length,
+              ")"
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            className: "btn btn-secondary",
+            onClick: () => setActiveTab("near"),
+            style: { fontSize: "11px" },
+            children: [
+              "Show Near Matches (",
+              nearMatches.length,
+              ")"
+            ]
+          }
+        )
+      ] })
+    ] }),
+    activeTab === "funnel" && filterFunnel && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "6px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Raw collected", value: filterFunnel.raw_collected, total: filterFunnel.raw_collected, color: "#6366f1" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "After dedup", value: filterFunnel.unique_after_dedupe, total: filterFunnel.raw_collected, color: "#818cf8" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Above min views", value: filterFunnel.above_min_views, total: filterFunnel.raw_collected, color: "#a78bfa" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Subscriber known", value: filterFunnel.subscriber_known, total: filterFunnel.raw_collected, color: "#34d399" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Sub unknown", value: filterFunnel.subscriber_unknown, total: filterFunnel.raw_collected, color: "#fbbf24" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Exact matches ✅", value: filterFunnel.exact_matches, total: filterFunnel.raw_collected, color: "#34d399" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Unverified 👁", value: filterFunnel.unverified_matches, total: filterFunnel.raw_collected, color: "#fbbf24" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: "Near matches 〰️", value: filterFunnel.near_matches, total: filterFunnel.raw_collected, color: "#94a3b8" }),
+      filterFunnel.excluded_by_reason && Object.entries(filterFunnel.excluded_by_reason).map(
+        ([reason, count]) => count > 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx(FunnelBar, { label: `Excl. ${reason}`, value: count, total: filterFunnel.raw_collected, color: "#f87171" }, reason) : null
+      )
+    ] }),
+    activeTab !== "funnel" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      activeTab === "unverified" && unverifiedMatches.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        fontSize: "11px",
+        color: "#fbbf24",
+        padding: "8px 10px",
+        background: "rgba(251,191,36,0.06)",
+        border: "1px solid rgba(251,191,36,0.2)",
+        borderRadius: "6px",
+        marginBottom: "10px"
+      }, children: [
+        "👁 ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Subscriber count is hidden" }),
+        " on these channels. They pass all other filters but subscriber count cannot be verified. They are shown separately from confirmed exact matches."
+      ] }),
+      activeTab === "near" && nearMatches.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        fontSize: "11px",
+        color: "#94a3b8",
+        padding: "8px 10px",
+        background: "rgba(148,163,184,0.05)",
+        border: "1px solid rgba(148,163,184,0.15)",
+        borderRadius: "6px",
+        marginBottom: "10px"
+      }, children: "〰️ These videos are close to your filter criteria but don't fully match. They may become exact matches if you slightly relax your filters." }),
+      currentList.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px", textAlign: "center", color: "var(--text-muted)", fontSize: "12px" }, children: [
+        "No ",
+        activeTab === "exact" ? "exact matches" : activeTab === "unverified" ? "unverified candidates" : "near matches",
+        " found.",
+        !hasAnyFilters && activeTab === "exact" && " Enable Advanced Filters to see candidate classification."
+      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
+        currentList.slice(0, 20).map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsx(CandidateCard, { video: v2 }, v2.video_id)),
+        currentList.length > 20 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", textAlign: "center", padding: "8px" }, children: [
+          "+ ",
+          currentList.length - 20,
+          " more candidates not shown"
+        ] })
+      ] })
+    ] })
+  ] });
+}
 function OverviewSection({
   result,
   onSelectKeyword,
-  onCreateProjectFromKeyword
+  onCreateProjectFromKeyword,
+  onRetry
 }) {
   const topOpp = result.top_opportunity;
   const metrics = result.overview_metrics;
   const ai2 = result.ai_insights;
+  const filterSummary = result.filter_summary;
+  if (result.keywords.length === 0) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "24px", alignItems: "center", marginTop: "60px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "48px" }, children: "📭" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { style: { fontSize: "20px", fontWeight: 700, margin: 0 }, children: "No Results Found" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { color: "var(--text-secondary)", textAlign: "center", maxWidth: "400px", lineHeight: 1.6 }, children: "Your search did not yield any keywords that met all the advanced filter criteria. Try adjusting your filters or running the research without filters to see the raw data." }),
+      filterSummary && filterSummary.applied_filters && Object.keys(filterSummary.applied_filters).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px", justifyContent: "center", marginTop: "12px" }, children: Object.entries(filterSummary.applied_filters).map(([key, value]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+        background: "rgba(239, 68, 68, 0.1)",
+        border: "1px solid rgba(239, 68, 68, 0.3)",
+        color: "#f87171",
+        padding: "4px 10px",
+        borderRadius: "999px",
+        fontSize: "11px"
+      }, children: [
+        key.split("_").map((w2) => w2.charAt(0).toUpperCase() + w2.slice(1)).join(" "),
+        ": ",
+        value
+      ] }, key)) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "24px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          className: "btn btn-primary",
+          onClick: onRetry,
+          style: { padding: "8px 24px", fontSize: "13px" },
+          children: "Run Without Filters"
+        }
+      ) })
+    ] });
+  }
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "24px" }, children: [
+    filterSummary && filterSummary.applied_filters && Object.keys(filterSummary.applied_filters).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "rgba(99, 102, 241, 0.05)",
+      border: "1px solid rgba(99, 102, 241, 0.2)",
+      borderRadius: "8px",
+      padding: "12px 16px",
+      display: "flex",
+      alignItems: "center",
+      gap: "12px",
+      flexWrap: "wrap"
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }, children: "Applied Filters:" }),
+      Object.entries(filterSummary.applied_filters).map(([key, value]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+        background: "rgba(99, 102, 241, 0.15)",
+        border: "1px solid rgba(99, 102, 241, 0.3)",
+        color: "#a5b4fc",
+        padding: "2px 8px",
+        borderRadius: "999px",
+        fontSize: "11px"
+      }, children: [
+        key.split("_").map((w2) => w2.charAt(0).toUpperCase() + w2.slice(1)).join(" "),
+        ": ",
+        value
+      ] }, key)),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginLeft: "auto", fontSize: "11px", color: "var(--text-muted)" }, children: [
+        "Excluded ",
+        filterSummary.keywords_before_filters - filterSummary.keywords_after_filters,
+        " keywords / ",
+        filterSummary.raw_videos_collected - filterSummary.videos_after_all_filters,
+        " videos"
+      ] })
+    ] }),
     topOpp && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       background: "linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.08) 100%)",
       border: "1px solid rgba(99, 102, 241, 0.4)",
@@ -17916,8 +21878,26 @@ function OverviewSection({
         " All metrics, outliers, and baseline estimates are computed from public YouTube API and web signals."
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontStyle: "italic", color: "#a5b4fc" }, children: "* This is an estimated public-data signal, not private audience geography." })
-    ] })
+    ] }),
+    (result.exact_matches || result.unverified_matches || result.near_matches) && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      CandidateEvidencePanel,
+      {
+        exactMatches: result.exact_matches || [],
+        unverifiedMatches: result.unverified_matches || [],
+        nearMatches: result.near_matches || [],
+        filterFunnel: result.filter_funnel,
+        nearMatchSuggestions: result.near_match_suggestions || []
+      }
+    )
   ] });
+}
+function parseOptionalNumber(value, options) {
+  if (!value || value.trim() === "") return void 0;
+  const num = options?.integer ? parseInt(value, 10) : parseFloat(value);
+  if (isNaN(num) || !isFinite(num)) return void 0;
+  if (options?.min !== void 0 && num < options.min) return void 0;
+  if (options?.max !== void 0 && num > options.max) return void 0;
+  return num;
 }
 function DiscoverTab({
   onStartDiscover,
@@ -17944,6 +21924,8 @@ function DiscoverTab({
   const [timeRange, setTimeRange] = reactExports.useState("30d");
   const [resultLimit, setResultLimit] = reactExports.useState(50);
   const [showAdvancedFilters, setShowAdvancedFilters] = reactExports.useState(false);
+  const [searchBudget, setSearchBudget] = reactExports.useState(6);
+  const [includeUnverified, setIncludeUnverified] = reactExports.useState(true);
   const [minViews, setMinViews] = reactExports.useState("");
   const [maxSubs, setMaxSubs] = reactExports.useState("");
   const [minVpd, setMinVpd] = reactExports.useState("");
@@ -17954,6 +21936,7 @@ function DiscoverTab({
   const [isExpanding, setIsExpanding] = reactExports.useState(false);
   const [showDetails, setShowDetails] = reactExports.useState(false);
   const [localValidationMessage, setLocalValidationMessage] = reactExports.useState(null);
+  const [activeRunFilters, setActiveRunFilters] = reactExports.useState({});
   const progressPanelRef = reactExports.useRef(null);
   const prevBusyRef = reactExports.useRef(false);
   const isRunning = isResearchRunActive(activeProgress);
@@ -17975,26 +21958,51 @@ function DiscoverTab({
     if (apiReachabilityStatus === "offline") return "Research service is offline. Please start or restart the service.";
     return null;
   };
-  const handleExecuteDiscover = async () => {
+  const handleExecuteDiscover = async (useSnapshot = false) => {
     if (!topic.trim()) {
       setLocalValidationMessage("Please enter a topic keyword to analyze");
       return;
     }
-    setLocalValidationMessage(null);
-    const filters = {};
-    if (minViews) filters.min_views = parseInt(minViews, 10);
-    if (maxSubs) filters.max_subscribers = parseInt(maxSubs, 10);
-    if (minVpd) filters.min_views_per_day = parseFloat(minVpd);
-    if (minOutlier) filters.min_outlier_ratio = parseFloat(minOutlier);
-    if (minOpportunity) filters.min_opportunity = parseFloat(minOpportunity);
-    if (maxCompetition) filters.max_competition = parseFloat(maxCompetition);
+    let filtersToUse;
+    if (useSnapshot) {
+      filtersToUse = activeRunFilters;
+      setLocalValidationMessage(null);
+    } else {
+      const minViewsVal = parseOptionalNumber(minViews, { min: 0, integer: true });
+      const maxSubsVal = parseOptionalNumber(maxSubs, { min: 0, integer: true });
+      const minVpdVal = parseOptionalNumber(minVpd, { min: 0 });
+      const minOutlierVal = parseOptionalNumber(minOutlier, { min: 0 });
+      const minOpportunityVal = parseOptionalNumber(minOpportunity, { min: 0, max: 100 });
+      const maxCompetitionVal = parseOptionalNumber(maxCompetition, { min: 0, max: 100 });
+      if (minViews && minViewsVal === void 0) return setLocalValidationMessage("Minimum Views must be a positive number");
+      if (maxSubs && maxSubsVal === void 0) return setLocalValidationMessage("Maximum Subscribers must be a positive number");
+      if (minVpd && minVpdVal === void 0) return setLocalValidationMessage("Minimum Views/Day must be a positive number");
+      if (minOutlier && minOutlierVal === void 0) return setLocalValidationMessage("Minimum Outlier Ratio must be a positive number");
+      if (minOpportunity && minOpportunityVal === void 0) return setLocalValidationMessage("Minimum Opportunity must be between 0 and 100");
+      if (maxCompetition && maxCompetitionVal === void 0) return setLocalValidationMessage("Maximum Competition must be between 0 and 100");
+      setLocalValidationMessage(null);
+      const filters = {};
+      if (minViewsVal !== void 0) filters.min_views = minViewsVal;
+      if (maxSubsVal !== void 0) filters.max_subscribers = maxSubsVal;
+      if (minVpdVal !== void 0) filters.min_views_per_day = minVpdVal;
+      if (minOutlierVal !== void 0) filters.min_outlier_ratio = minOutlierVal;
+      if (minOpportunityVal !== void 0) filters.min_opportunity = minOpportunityVal;
+      if (maxCompetitionVal !== void 0) filters.max_competition = maxCompetitionVal;
+      filtersToUse = filters;
+      setActiveRunFilters(filters);
+    }
     await onStartDiscover({
       topic: topic.trim(),
       market,
       content_type: contentType,
       time_range: timeRange,
       limit: resultLimit,
-      filters
+      filters: {
+        ...filtersToUse,
+        // V2 fields forwarded as filter extensions (backend reads these)
+        search_query_budget: searchBudget,
+        include_unverified_channels: includeUnverified
+      }
     });
   };
   const handleSubmit = async (e) => {
@@ -18003,7 +22011,7 @@ function DiscoverTab({
       setLocalValidationMessage(getDisabledReason());
       return;
     }
-    await handleExecuteDiscover();
+    await handleExecuteDiscover(false);
   };
   const handleExpandOnly = async () => {
     if (!topic.trim() || isExpanding) return;
@@ -18241,6 +22249,45 @@ function DiscoverTab({
           }
         )
       ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "16px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "11px", color: "var(--text-muted)", marginBottom: "8px" }, children: "Quick Preset" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" }, children: RESEARCH_PRESETS.map((preset) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            disabled: isBusy,
+            onClick: () => {
+              if (preset.minViews !== void 0) setMinViews(String(preset.minViews));
+              if (preset.maxSubscribers !== void 0) setMaxSubs(String(preset.maxSubscribers));
+              setTimeRange(preset.timeRange);
+              setContentType(preset.contentType);
+              setResultLimit(preset.resultLimit);
+              setSearchBudget(preset.searchBudget);
+              setIncludeUnverified(preset.includeUnverified);
+              if (preset.minViews || preset.maxSubscribers) setShowAdvancedFilters(true);
+            },
+            style: {
+              fontSize: "11px",
+              padding: "5px 14px",
+              borderRadius: "6px",
+              border: "1px solid var(--border-subtle)",
+              background: "var(--bg-base)",
+              color: "var(--text-muted)",
+              cursor: isBusy ? "not-allowed" : "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: "5px",
+              transition: "all 0.15s ease"
+            },
+            title: preset.description,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: preset.icon }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: preset.label })
+            ]
+          },
+          preset.id
+        )) })
+      ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
         display: "grid",
         gridTemplateColumns: "repeat(4, 1fr)",
@@ -18319,6 +22366,9 @@ function DiscoverTab({
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "7d", children: "Last 7 Days" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "30d", children: "Last 30 Days (Recommended)" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "90d", children: "Last 90 Days" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "4m", children: "Last 4 Months" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "5m", children: "Last 5 Months" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "6m", children: "Last 6 Months" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "1y", children: "Past Year" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: "All Time" })
               ]
@@ -18345,32 +22395,74 @@ function DiscoverTab({
               children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 50, children: "50 Videos (Fast)" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 100, children: "100 Videos (Balanced)" }),
-                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 200, children: "200 Videos (Deep Research)" })
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 200, children: "200 Videos (Deep Research)" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 300, children: "300 Videos (Max)" })
+              ]
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "11px", color: "var(--text-muted)", marginBottom: "6px" }, children: "Search Budget" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "select",
+            {
+              value: searchBudget,
+              onChange: (e) => setSearchBudget(parseInt(e.target.value, 10)),
+              disabled: isBusy,
+              style: {
+                width: "100%",
+                background: "var(--bg-base)",
+                border: "1px solid var(--border-subtle)",
+                color: "var(--text-primary)",
+                borderRadius: "6px",
+                padding: "8px 10px",
+                fontSize: "12px"
+              },
+              title: "Number of search queries sent to YouTube API per run",
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 3, children: "3 queries (Quick)" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 6, children: "6 queries (Recommended)" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 8, children: "8 queries (Thorough)" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: 10, children: "10 queries (Maximum)" })
               ]
             }
           )
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "12px" }, children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "button",
-          {
-            type: "button",
-            onClick: () => setShowAdvancedFilters(!showAdvancedFilters),
-            style: {
-              background: "none",
-              border: "none",
-              color: "var(--text-brand, #818cf8)",
-              fontSize: "12px",
-              cursor: "pointer",
-              display: "flex",
-              alignItems: "center",
-              gap: "6px",
-              padding: "4px 0"
-            },
-            children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: showAdvancedFilters ? "▲ Hide Advanced Filters" : "▼ Show Advanced Filters (Views, Subs, Outlier, Competition)" })
-          }
-        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              onClick: () => setShowAdvancedFilters(!showAdvancedFilters),
+              style: {
+                background: "none",
+                border: "none",
+                color: "var(--text-brand, #818cf8)",
+                fontSize: "12px",
+                cursor: "pointer",
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                padding: "4px 0"
+              },
+              children: /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: showAdvancedFilters ? "▲ Hide Advanced Filters" : "▼ Show Advanced Filters (Views, Subs, Outlier, Competition)" })
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", alignItems: "center", gap: "6px", fontSize: "11px", color: "var(--text-muted)", cursor: "pointer" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "input",
+              {
+                type: "checkbox",
+                checked: includeUnverified,
+                onChange: (e) => setIncludeUnverified(e.target.checked),
+                disabled: isBusy
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { title: "Show channels where subscriber count is hidden/unknown", children: "Include unverified channels 👁" })
+          ] })
+        ] }),
         showAdvancedFilters && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
           marginTop: "12px",
           padding: "16px",
@@ -18497,7 +22589,7 @@ function DiscoverTab({
         progressState: activeProgress,
         onCancel: onCancelResearch,
         isCancelling,
-        onRetry: canSubmit ? handleExecuteDiscover : void 0,
+        onRetry: canSubmit ? () => handleExecuteDiscover(true) : void 0,
         onRestartService: onRestartSidecar,
         onDismiss: onDismissError
       }
@@ -18507,7 +22599,24 @@ function DiscoverTab({
       {
         result: activeResult,
         onSelectKeyword,
-        onCreateProjectFromKeyword: onCreateProject
+        onCreateProjectFromKeyword: onCreateProject,
+        onRetry: () => {
+          setMinViews("");
+          setMaxSubs("");
+          setMinVpd("");
+          setMinOutlier("");
+          setMinOpportunity("");
+          setMaxCompetition("");
+          setActiveRunFilters({});
+          onStartDiscover({
+            topic: activeResult.topic,
+            market: activeResult.market,
+            content_type: activeResult.content_type,
+            time_range: activeResult.time_range,
+            limit: resultLimit,
+            filters: {}
+          });
+        }
       }
     )
   ] });
@@ -19451,30 +23560,2548 @@ function TrendRadarTab({
     ] }) })
   ] });
 }
+function ThumbnailGeneratorSection({ blueprints }) {
+  const [selectedBlueprintId, setSelectedBlueprintId] = reactExports.useState(blueprints[0]?.id || "");
+  const [title, setTitle] = reactExports.useState("");
+  const [scriptSummary, setScriptSummary] = reactExports.useState("");
+  const [isGenerating, setIsGenerating] = reactExports.useState(false);
+  const [result, setResult] = reactExports.useState(null);
+  const [error, setError] = reactExports.useState("");
+  const handleGenerate = async () => {
+    if (!title.trim()) {
+      setError("Please enter a video title");
+      return;
+    }
+    const blueprint = blueprints.find((b) => b.id === selectedBlueprintId);
+    if (!blueprint) {
+      setError("Please select a blueprint");
+      return;
+    }
+    setError("");
+    setIsGenerating(true);
+    setResult(null);
+    try {
+      const res = await researchApi.generateThumbnail({
+        title: title.trim(),
+        script_summary: scriptSummary.trim(),
+        blueprint
+      });
+      setResult(res);
+    } catch (err) {
+      setError(err.message || "Generation failed");
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+  const handleDownload = () => {
+    if (!result?.image_base64) return;
+    const link = document.createElement("a");
+    link.href = `data:image/jpeg;base64,${result.image_base64}`;
+    link.download = `thumbnail-${Date.now()}.jpg`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+  if (blueprints.length === 0) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "20px", borderRadius: "12px", border: "1px solid var(--border-subtle)", marginTop: "24px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", marginBottom: "16px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "20px" }, children: "🖼️" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", margin: 0 }, children: "Title-to-Thumbnail Generator" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "24px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "16px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Video Title *" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              value: title,
+              onChange: (e) => setTitle(e.target.value),
+              placeholder: "e.g. I Investigated the Dark Web",
+              style: { width: "100%", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--border-subtle)", background: "var(--bg-surface)", color: "var(--text-primary)" }
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Script Summary / Context (Optional)" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "textarea",
+            {
+              value: scriptSummary,
+              onChange: (e) => setScriptSummary(e.target.value),
+              placeholder: "Briefly describe the video content to guide the AI...",
+              rows: 3,
+              style: { width: "100%", padding: "8px 12px", borderRadius: "6px", border: "1px solid var(--border-subtle)", background: "var(--bg-surface)", color: "var(--text-primary)", resize: "vertical" }
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("label", { style: { display: "block", fontSize: "12px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }, children: "Target Blueprint" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "select",
+            {
+              value: selectedBlueprintId,
+              onChange: (e) => setSelectedBlueprintId(e.target.value),
+              style: {
+                width: "100%",
+                padding: "8px 12px",
+                borderRadius: "6px",
+                border: "1px solid var(--border-subtle)",
+                background: "var(--bg-surface)",
+                color: "var(--text-primary)",
+                fontSize: "13px"
+              },
+              children: blueprints.map((bp) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: bp.id, children: bp.name }, bp.id))
+            }
+          )
+        ] }),
+        error && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#ef4444", fontSize: "12px" }, children: error }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: handleGenerate,
+            disabled: isGenerating || !title.trim(),
+            style: {
+              background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+              color: "white",
+              cursor: isGenerating ? "wait" : "pointer",
+              border: "none",
+              padding: "10px 16px",
+              borderRadius: "6px",
+              fontWeight: 600
+            },
+            children: isGenerating ? "Generating..." : "Generate Thumbnail"
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        background: "var(--bg-surface)",
+        borderRadius: "8px",
+        border: "1px dashed var(--border-subtle)",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        minHeight: "220px",
+        overflow: "hidden",
+        position: "relative"
+      }, children: result ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "img",
+          {
+            src: `data:image/jpeg;base64,${result.image_base64}`,
+            alt: "Generated Thumbnail",
+            style: { width: "100%", height: "100%", objectFit: "cover" }
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { position: "absolute", top: 8, right: 8 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleDownload, style: { background: "rgba(0,0,0,0.6)", color: "white", border: "none", borderRadius: "4px", padding: "6px", cursor: "pointer" }, children: "Download" }) })
+      ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "var(--text-muted)", fontSize: "13px", textAlign: "center", padding: "20px" }, children: isGenerating ? "Generating image via AI... (may take 10-30s)" : "16:9 Thumbnail will appear here" }) })
+    ] })
+  ] });
+}
+function useCopyState() {
+  const [copiedKey, setCopiedKey] = reactExports.useState(null);
+  const timerRef = reactExports.useRef(null);
+  const copy = reactExports.useCallback((key, text) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopiedKey(key);
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => setCopiedKey(null), 2e3);
+    });
+  }, []);
+  return { copiedKey, copy };
+}
+function scoreColor(score) {
+  if (score >= 80) return "#4ade80";
+  if (score >= 70) return "#fbbf24";
+  return "#f87171";
+}
+function scoreBadge(score) {
+  if (score >= 80) return "Strong Hook";
+  if (score >= 70) return "Usable";
+  return "Needs Improvement";
+}
+const HOOK_FAMILY_LABELS = {
+  visual_contradiction: "Visual Contradiction",
+  hidden_mechanism: "Hidden Mechanism",
+  proof_object_anomaly: "Proof Object Anomaly",
+  expectation_vs_reality: "Expectation vs Reality",
+  moment_before_discovery: "Moment Before Discovery",
+  personal_consequence: "Personal Consequence",
+  scale_difference: "Scale Difference",
+  missing_information: "Missing Information",
+  social_reaction: "Social Reaction",
+  forbidden_or_overlooked_detail: "Overlooked Detail"
+};
+const LABEL_COLORS = {
+  A: "#7c3aed",
+  B: "#0891b2",
+  C: "#059669",
+  D: "#d97706",
+  E: "#e11d48"
+};
+function HookScoreBreakdown({ hq }) {
+  const rows = [
+    { label: "Curiosity Gap", val: hq.curiosity_gap, max: 20 },
+    { label: "1-Second Clarity", val: hq.one_second_clarity, max: 15 },
+    { label: "Title Complementarity", val: hq.title_complementarity, max: 15 },
+    { label: "Visual Tension", val: hq.visual_tension, max: 15 },
+    { label: "Specificity & Proof", val: hq.specificity_and_proof, max: 10 },
+    { label: "Mobile Readability", val: hq.mobile_readability, max: 10 },
+    { label: "Promise Integrity", val: hq.promise_integrity, max: 10 },
+    { label: "Competitor Fit", val: hq.competitor_fit, max: 5 }
+  ];
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, display: "flex", flexDirection: "column", gap: 3 }, children: [
+    rows.map((r2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 6 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#94a3b8", minWidth: 130, flexShrink: 0 }, children: r2.label }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1, background: "rgba(255,255,255,0.06)", borderRadius: 4, height: 5, overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        width: `${r2.val / r2.max * 100}%`,
+        height: "100%",
+        background: r2.val >= r2.max * 0.8 ? "#4ade80" : r2.val >= r2.max * 0.6 ? "#fbbf24" : "#f87171",
+        borderRadius: 4
+      } }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#e2e8f0", minWidth: 32, textAlign: "right" }, children: [
+        r2.val,
+        "/",
+        r2.max
+      ] })
+    ] }, r2.label)),
+    hq.penalties < 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#f87171", marginTop: 2 }, children: [
+      "Penalties: ",
+      hq.penalties
+    ] }),
+    hq.rejection_reasons.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: 4 }, children: hq.rejection_reasons.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#fbbf24", fontSize: 9 }, children: [
+      "⚠ ",
+      r2
+    ] }, i)) })
+  ] });
+}
+function OverlayPreview({ variant }) {
+  const ot = variant.overlay_text;
+  const isTop = ot.placement?.includes("upper") || ot.placement?.includes("top");
+  const isCenterH = ot.placement?.includes("center");
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+    aspectRatio: "16/9",
+    background: "linear-gradient(135deg, #1a1a2e 0%, #16213e 60%, #0f3460 100%)",
+    borderRadius: 6,
+    position: "relative",
+    overflow: "hidden",
+    display: "flex",
+    alignItems: isTop ? "flex-start" : "flex-end",
+    justifyContent: isCenterH ? "center" : ot.placement?.includes("right") ? "flex-end" : "flex-start",
+    padding: "7%",
+    border: "1px solid rgba(255,255,255,0.08)"
+  }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    fontFamily: 'Impact, "Arial Narrow", Arial Black, sans-serif',
+    fontWeight: 900,
+    lineHeight: 1,
+    display: "flex",
+    flexDirection: "column",
+    gap: 1
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+      fontSize: "clamp(10px, 2.8vw, 22px)",
+      color: ot.line_1_color || "#FFE600",
+      textShadow: `2px 2px 0 ${ot.outline_color || "#050505"}, -2px -2px 0 ${ot.outline_color}, 2px -2px 0 ${ot.outline_color}, -2px 2px 0 ${ot.outline_color}`,
+      letterSpacing: "0.02em"
+    }, children: ot.line_1 }),
+    ot.line_2 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+      fontSize: "clamp(9px, 2.5vw, 19px)",
+      color: ot.line_2_color || "#FFFFFF",
+      textShadow: `2px 2px 0 ${ot.outline_color || "#050505"}, -2px -2px 0 ${ot.outline_color}, 2px -2px 0 ${ot.outline_color}, -2px 2px 0 ${ot.outline_color}`,
+      letterSpacing: "0.02em"
+    }, children: ot.line_2 })
+  ] }) });
+}
+function DetailRow({ label, value }) {
+  if (!value) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, marginTop: 7, fontSize: 11 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#a5b4fc", flexShrink: 0, minWidth: 110, fontWeight: 600 }, children: [
+      label,
+      ":"
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#cbd5e1", lineHeight: 1.5 }, children: value })
+  ] });
+}
+function TagRow({ label, items, color }) {
+  if (!items.length) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 8 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, fontWeight: 600, color, marginBottom: 4 }, children: label }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 4 }, children: items.map((it, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+      fontSize: 10,
+      background: `${color}18`,
+      color,
+      padding: "2px 8px",
+      borderRadius: 20,
+      border: `1px solid ${color}33`
+    }, children: it }, i)) })
+  ] });
+}
+function btnStyle(active, secondary = false, danger = false) {
+  return {
+    padding: "5px 12px",
+    fontSize: 11,
+    fontWeight: 600,
+    borderRadius: 6,
+    border: "none",
+    cursor: "pointer",
+    background: active ? "#4ade80" : danger ? "rgba(239,68,68,0.15)" : secondary ? "rgba(165,180,252,0.12)" : "#6d28d9",
+    color: active ? "#000" : danger ? "#f87171" : "#e2e8f0",
+    transition: "all 0.15s"
+  };
+}
+function VariantCard({
+  variant,
+  copiedKey,
+  onCopy
+}) {
+  const [expanded, setExpanded] = reactExports.useState(false);
+  const color = LABEL_COLORS[variant.option_label] || "#6b7280";
+  const hq = variant.hook_quality ?? { total_score: 0, promise_integrity: 0, one_second_clarity: 0, curiosity_gap: 0, title_complementarity: 0, visual_tension: 0, specificity_and_proof: 0, mobile_readability: 0, competitor_fit: 0, penalties: 0, rejection_reasons: [] };
+  const score = hq.total_score ?? 0;
+  const sColor = scoreColor(score);
+  const sBadge = scoreBadge(score);
+  const isAB = variant.recommended_for_ab_test ?? false;
+  const rank = variant.recommended_test_rank ?? 5;
+  const copyFull = () => onCopy(`full_${variant.id}`, variant.full_image_prompt);
+  const copyOverlay = () => onCopy(`overlay_${variant.id}`, variant.overlay_text.combined_text);
+  const copyAll = () => {
+    const text = [
+      `=== OPTION ${variant.option_label}: ${variant.concept_name} ===`,
+      `Hook Family: ${HOOK_FAMILY_LABELS[variant.hook_family] || variant.hook_family}`,
+      `Visual Question: ${variant.visual_question}`,
+      `Test Hypothesis: ${variant.test_hypothesis}`,
+      `Hook Quality Score: ${score}/100 (${sBadge})`,
+      ``,
+      `OVERLAY TEXT:`,
+      `Line 1 (Yellow): "${variant.overlay_text.line_1}"`,
+      variant.overlay_text.line_2 ? `Line 2 (White): "${variant.overlay_text.line_2}"` : "",
+      ``,
+      `FULL IMAGE PROMPT:`,
+      variant.full_image_prompt,
+      ``,
+      `NEGATIVE PROMPT:`,
+      variant.negative_prompt
+    ].filter((v2) => v2 !== void 0 && v2 !== null).join("\n");
+    onCopy(`all_${variant.id}`, text);
+  };
+  const isCopiedFull = copiedKey === `full_${variant.id}`;
+  const isCopiedOverlay = copiedKey === `overlay_${variant.id}`;
+  const isCopiedAll = copiedKey === `all_${variant.id}`;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "rgba(15,18,26,0.8)",
+    border: `1px solid ${isAB ? color + "66" : color + "33"}`,
+    borderRadius: 10,
+    overflow: "hidden",
+    boxShadow: isAB ? `0 0 0 1px ${color}22` : "none"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        onClick: () => setExpanded((e) => !e),
+        style: {
+          background: `${color}14`,
+          padding: "11px 14px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          cursor: "pointer",
+          userSelect: "none",
+          borderBottom: expanded ? `1px solid ${color}22` : "none"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+            width: 30,
+            height: 30,
+            borderRadius: 7,
+            background: color,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 13,
+            fontWeight: 900,
+            color: "#fff",
+            flexShrink: 0
+          }, children: variant.option_label }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flexShrink: 0 }, children: isAB ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+            fontSize: 9,
+            fontWeight: 700,
+            background: `${color}33`,
+            color,
+            padding: "2px 6px",
+            borderRadius: 4,
+            border: `1px solid ${color}44`
+          }, children: [
+            "🏆 Rank #",
+            rank,
+            " · A/B Test"
+          ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+            fontSize: 9,
+            color: "#64748b",
+            background: "rgba(100,116,139,0.1)",
+            padding: "2px 6px",
+            borderRadius: 4
+          }, children: [
+            "Rank #",
+            rank,
+            " · Alternative"
+          ] }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 700, color: "var(--text-primary, #f1f5f9)", marginBottom: 1 }, children: variant.concept_name }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#94a3b8" }, children: HOOK_FAMILY_LABELS[variant.hook_family] || variant.hook_family })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flexShrink: 0, textAlign: "center" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 16, fontWeight: 900, color: sColor }, children: score }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: sColor }, children: sBadge }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: "#475569" }, children: "Hook Quality" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flexShrink: 0, maxWidth: 130, textAlign: "right" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+              fontSize: 11,
+              fontWeight: 900,
+              fontFamily: "Impact, sans-serif",
+              color: variant.overlay_text.line_1_color || "#FFE600",
+              textShadow: `1px 1px 0 #050505, -1px -1px 0 #050505`,
+              lineHeight: 1.1
+            }, children: variant.overlay_text.line_1 }),
+            variant.overlay_text.line_2 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+              fontSize: 10,
+              fontWeight: 900,
+              fontFamily: "Impact, sans-serif",
+              color: variant.overlay_text.line_2_color || "#fff",
+              textShadow: `1px 1px 0 #050505, -1px -1px 0 #050505`
+            }, children: variant.overlay_text.line_2 })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#64748b", fontSize: 10 }, children: expanded ? "▲" : "▼" })
+        ]
+      }
+    ),
+    !expanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "8px 14px", display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, fontSize: 11, color: "#64748b" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#93c5fd" }, children: "❓" }),
+        " ",
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#cbd5e1" }, children: variant.visual_question })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 5 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: (e) => {
+          e.stopPropagation();
+          copyFull();
+        }, style: btnStyle(isCopiedFull), children: isCopiedFull ? "✓ Copied" : "Copy Prompt" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: (e) => {
+          e.stopPropagation();
+          setExpanded(true);
+        }, style: btnStyle(false, true), children: "Expand ↓" })
+      ] })
+    ] }),
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "14px 16px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 14 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginBottom: 5 }, children: "📐 Overlay Text Preview (16:9)" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(OverlayPreview, { variant })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(139,92,246,0.06)",
+        borderRadius: 8,
+        padding: "10px 12px",
+        marginBottom: 14,
+        border: "1px solid rgba(139,92,246,0.15)"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, fontWeight: 700, color: "#a5b4fc", marginBottom: 6 }, children: "🎯 Hook Intelligence" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Visual Question", value: variant.visual_question }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Hidden Info", value: variant.hidden_information }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Test Hypothesis", value: variant.test_hypothesis }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Title Complement", value: variant.title_thumbnail_relationship }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Title Interpretation", value: variant.title_interpretation })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(8,145,178,0.06)",
+        borderRadius: 8,
+        padding: "10px 12px",
+        marginBottom: 14,
+        border: "1px solid rgba(8,145,178,0.15)"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, fontWeight: 700, color: "#67e8f9", marginBottom: 6 }, children: "🎬 Visual Directions" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Subject", value: variant.subject_direction }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Composition", value: variant.composition_direction }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Background", value: variant.background_direction }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Colors", value: variant.color_direction }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Lighting", value: variant.lighting_direction }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Mobile", value: variant.mobile_readability_direction }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Strategic Angle", value: variant.strategic_angle }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(DetailRow, { label: "Why It Works", value: variant.why_it_works })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(0,0,0,0.3)",
+        borderRadius: 8,
+        padding: "10px 12px",
+        marginBottom: 14,
+        border: "1px solid rgba(255,255,255,0.06)"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 11, fontWeight: 700, color: sColor }, children: [
+          "📊 Hook Quality Score: ",
+          score,
+          "/100 — ",
+          sBadge
+        ] }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(HookScoreBreakdown, { hq })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(TagRow, { label: "✓ Competitor Traits Used", items: variant.competitor_traits_used, color: "#4ade80" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(TagRow, { label: "📊 Evidence", items: variant.evidence, color: "#93c5fd" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(TagRow, { label: "🔄 Originality Changes", items: variant.originality_changes, color: "#fbbf24" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 14 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, fontWeight: 700, color: "#a5b4fc" }, children: "📝 Full Image Prompt" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: copyFull, style: btnStyle(isCopiedFull), children: isCopiedFull ? "✓ Copied" : "Copy Prompt" })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          background: "rgba(0,0,0,0.4)",
+          borderRadius: 6,
+          padding: 10,
+          fontSize: 11,
+          color: "#e2e8f0",
+          lineHeight: 1.7,
+          whiteSpace: "pre-wrap",
+          maxHeight: 280,
+          overflowY: "auto",
+          fontFamily: "monospace"
+        }, children: variant.full_image_prompt })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, fontWeight: 700, color: "#f87171", marginBottom: 4 }, children: "🚫 Negative Prompt" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          background: "rgba(239,68,68,0.06)",
+          borderRadius: 6,
+          padding: 8,
+          fontSize: 10,
+          color: "#fca5a5",
+          lineHeight: 1.5,
+          fontFamily: "monospace"
+        }, children: variant.negative_prompt })
+      ] }),
+      variant.warnings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: 8, padding: "6px 10px", background: "rgba(251,191,36,0.07)", borderRadius: 6, border: "1px solid rgba(251,191,36,0.2)" }, children: variant.warnings.map((w2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, color: "#fbbf24" }, children: [
+        "⚠ ",
+        w2
+      ] }, i)) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 6, marginTop: 14, flexWrap: "wrap" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: copyFull, style: btnStyle(isCopiedFull), children: isCopiedFull ? "✓ Copied" : "Copy Full Prompt" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: copyOverlay, style: btnStyle(isCopiedOverlay, true), children: isCopiedOverlay ? "✓ Copied" : "Copy Overlay Text" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: copyAll, style: btnStyle(isCopiedAll, true), children: isCopiedAll ? "✓ Copied" : "Copy Full Option" })
+      ] })
+    ] })
+  ] });
+}
+function AiProviderBanner({ onOpenSettings }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "rgba(251,191,36,0.07)",
+    border: "1px solid rgba(251,191,36,0.25)",
+    borderRadius: 8,
+    padding: "10px 14px",
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    flexWrap: "wrap"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 18 }, children: "⚙️" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, fontSize: 11, color: "#fbbf24", lineHeight: 1.5 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "AI provider is not configured." }),
+      " ",
+      "The current variants use deterministic semantic fallback based on title signals. Configure Gemini or Ollama in Settings for deeper title reasoning and richer prompts."
+    ] }),
+    onOpenSettings && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "button",
+      {
+        onClick: onOpenSettings,
+        style: {
+          padding: "6px 14px",
+          fontSize: 11,
+          fontWeight: 700,
+          borderRadius: 6,
+          border: "1px solid rgba(251,191,36,0.4)",
+          background: "rgba(251,191,36,0.12)",
+          color: "#fbbf24",
+          cursor: "pointer"
+        },
+        children: "Open AI Settings"
+      }
+    )
+  ] });
+}
+function AnalysisSummaryPanel({ result }) {
+  const s = result.analysis_summary;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "rgba(99,102,241,0.07)",
+    border: "1px solid rgba(99,102,241,0.2)",
+    borderRadius: 8,
+    padding: "12px 14px",
+    marginBottom: 14
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, fontWeight: 700, color: "#a5b4fc", marginBottom: 8 }, children: "🧠 Title Analysis Summary" }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 16px", fontSize: 11 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(InfoRow, { label: "Subject", value: s.title_subject }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(InfoRow, { label: "Viewer Expectation", value: s.viewer_expectation || "" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(InfoRow, { label: "Hidden Variable", value: s.hidden_variable || "" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(InfoRow, { label: "Strongest Proof", value: s.strongest_proof_object || "" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(InfoRow, { label: "Visual Contradiction", value: s.visual_contradiction || "" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(InfoRow, { label: "Recommended Hook", value: s.recommended_hook })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, color: "#64748b", marginTop: 6 }, children: s.overlay_style_summary }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 4, fontSize: 10, color: "#475569" }, children: [
+      "Hook source: ",
+      s.hook_source || "unknown",
+      " · Provider: ",
+      result.provider,
+      " · Model: ",
+      result.model,
+      result.used_ai ? " · ✓ AI-generated" : " · Deterministic fallback"
+    ] })
+  ] });
+}
+function InfoRow({ label, value }) {
+  if (!value) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 4, marginBottom: 2 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#a5b4fc", fontWeight: 600, flexShrink: 0 }, children: [
+      label,
+      ":"
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#cbd5e1" }, children: value })
+  ] });
+}
+function ThumbnailPromptStudio({
+  channelTitle,
+  blueprint,
+  thumbnailIntelligence,
+  market = "US",
+  onOpenSettings
+}) {
+  const [title, setTitle] = reactExports.useState("");
+  const [context, setContext] = reactExports.useState("");
+  const [loading, setLoading] = reactExports.useState(false);
+  const [result, setResult] = reactExports.useState(null);
+  const [error, setError] = reactExports.useState(null);
+  const { copiedKey, copy } = useCopyState();
+  const titleValid = title.trim().length >= 3;
+  const canGenerate = titleValid && !loading;
+  const handleGenerate = reactExports.useCallback(async () => {
+    if (!canGenerate) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const resp = await researchApi.generateThumbnailPrompts({
+        title: title.trim(),
+        video_context: context.trim() || void 0,
+        channel_title: channelTitle,
+        market,
+        blueprint,
+        thumbnail_intelligence: thumbnailIntelligence
+      });
+      setResult(resp);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
+    }
+  }, [canGenerate, title, context, channelTitle, market, blueprint, thumbnailIntelligence]);
+  const handleCopyAll = () => {
+    if (!result) return;
+    const all = result.variants.sort((a, b) => a.recommended_test_rank - b.recommended_test_rank).map((v2, i) => [
+      `=== OPTION ${v2.option_label} (Rank #${v2.recommended_test_rank}): ${v2.concept_name} ===`,
+      `Hook: ${HOOK_FAMILY_LABELS[v2.hook_family] || v2.hook_family} | Quality: ${v2.hook_quality.total_score}/100`,
+      `Visual Question: ${v2.visual_question}`,
+      `Overlay: "${v2.overlay_text.combined_text}"`,
+      ``,
+      v2.full_image_prompt,
+      ``,
+      `Negative: ${v2.negative_prompt}`,
+      i < result.variants.length - 1 ? "\n" + "─".repeat(80) : ""
+    ].join("\n")).join("\n");
+    copy("all_prompts", all);
+  };
+  const displayVariants = result ? [...result.variants].sort((a, b) => a.recommended_test_rank - b.recommended_test_rank) : [];
+  const abVariants = displayVariants.filter((v2) => v2.recommended_for_ab_test);
+  const altVariants = displayVariants.filter((v2) => !v2.recommended_for_ab_test);
+  const aiNotConfigured = result && !result.used_ai && result.provider === "disabled";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "rgba(15,18,26,0.95)",
+    border: "1px solid rgba(139,92,246,0.3)",
+    borderRadius: 12,
+    overflow: "hidden"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+      background: "linear-gradient(135deg, rgba(109,40,217,0.25), rgba(30,64,175,0.12))",
+      borderBottom: "1px solid rgba(139,92,246,0.2)",
+      padding: "14px 18px",
+      display: "flex",
+      alignItems: "center",
+      gap: 12
+    }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 20 }, children: "✨" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: 14, fontWeight: 800, color: "#c4b5fd" }, children: "AI Thumbnail Prompt Studio" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: 0, fontSize: 11, color: "#94a3b8", marginTop: 2 }, children: "Turn your title into 5 hook-intelligent thumbnail concepts. Scored by curiosity, clarity and promise integrity." })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "16px 18px", display: "flex", flexDirection: "column", gap: 14 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 10 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "block", fontSize: 11, fontWeight: 700, color: "#a5b4fc", marginBottom: 5 }, children: [
+            "Video Title ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#f87171" }, children: "*" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "input",
+            {
+              value: title,
+              onChange: (e) => setTitle(e.target.value),
+              maxLength: 200,
+              placeholder: "e.g. The Hidden Fee Making Your Restaurant Bill So Much Higher",
+              style: {
+                width: "100%",
+                background: "rgba(0,0,0,0.35)",
+                border: `1px solid ${title.length > 0 && title.length < 3 ? "#ef4444" : "rgba(255,255,255,0.1)"}`,
+                borderRadius: 8,
+                padding: "9px 12px",
+                fontSize: 13,
+                color: "#f1f5f9",
+                outline: "none",
+                boxSizing: "border-box"
+              }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginTop: 3 }, children: [
+            title.length > 0 && title.length < 3 && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, color: "#f87171" }, children: "Min 3 characters" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "#475569", marginLeft: "auto" }, children: [
+              title.length,
+              "/200"
+            ] })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "block", fontSize: 11, fontWeight: 700, color: "#94a3b8", marginBottom: 5 }, children: [
+            "Video Context / Script Summary",
+            " ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 400, color: "#475569" }, children: "(optional, helps avoid misinterpretation)" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "textarea",
+            {
+              value: context,
+              onChange: (e) => setContext(e.target.value),
+              maxLength: 2e3,
+              rows: 2,
+              placeholder: "Describe what the video is actually about to prevent false urgency or fabricated claims…",
+              style: {
+                width: "100%",
+                background: "rgba(0,0,0,0.2)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 8,
+                padding: "9px 12px",
+                fontSize: 12,
+                color: "#cbd5e1",
+                outline: "none",
+                resize: "vertical",
+                boxSizing: "border-box",
+                fontFamily: "inherit"
+              }
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "right", fontSize: 10, color: "#475569", marginTop: 2 }, children: [
+            context.length,
+            "/2000"
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          background: "rgba(0,0,0,0.2)",
+          borderRadius: 8,
+          padding: "9px 12px",
+          border: "1px solid rgba(255,255,255,0.06)",
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          alignItems: "center"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "#64748b", flexShrink: 0 }, children: "📐 Blueprint:" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, fontWeight: 700, color: "#c4b5fd" }, children: blueprint.name }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            fontSize: 10,
+            padding: "1px 7px",
+            borderRadius: 10,
+            background: blueprint.is_statistically_validated ? "rgba(74,222,128,0.12)" : "rgba(251,191,36,0.12)",
+            color: blueprint.is_statistically_validated ? "#4ade80" : "#fbbf24",
+            border: `1px solid ${blueprint.is_statistically_validated ? "rgba(74,222,128,0.25)" : "rgba(251,191,36,0.25)"}`
+          }, children: blueprint.is_statistically_validated ? "✓ Validated" : "⚠ Observed" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "#475569" }, children: [
+            "hook: ",
+            blueprint.target_hook
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            onClick: handleGenerate,
+            disabled: !canGenerate,
+            style: {
+              padding: "11px 20px",
+              fontSize: 13,
+              fontWeight: 700,
+              borderRadius: 8,
+              border: "none",
+              cursor: canGenerate ? "pointer" : "not-allowed",
+              background: canGenerate ? "linear-gradient(135deg, #7c3aed, #4f46e5)" : "rgba(100,116,139,0.25)",
+              color: canGenerate ? "#fff" : "#64748b",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              gap: 8,
+              transition: "all 0.2s"
+            },
+            children: loading ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { animation: "spin 1s linear infinite", display: "inline-block" }, children: "⟳" }),
+              "Analyzing title & scoring hook candidates…"
+            ] }) : "✨ Generate 5 Hook-Intelligent Thumbnail Prompts"
+          }
+        )
+      ] }),
+      error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "rgba(239,68,68,0.08)",
+        border: "1px solid rgba(239,68,68,0.25)",
+        borderRadius: 8,
+        padding: "10px 14px"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 700, color: "#f87171", marginBottom: 4 }, children: "Generation Failed" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "#fca5a5" }, children: error }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleGenerate, style: { ...btnStyle(false), marginTop: 8 }, children: "Retry" })
+      ] }),
+      result && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        aiNotConfigured && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginBottom: 12 }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(AiProviderBanner, { onOpenSettings }) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(AnalysisSummaryPanel, { result }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8, marginBottom: 14, flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleCopyAll, style: btnStyle(copiedKey === "all_prompts"), children: copiedKey === "all_prompts" ? "✓ All Copied" : "Copy All 5 Prompts" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: handleGenerate, disabled: loading, style: btnStyle(false, true), children: "🔄 Regenerate" })
+        ] }),
+        abVariants.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 16 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            fontSize: 12,
+            fontWeight: 700,
+            color: "#c4b5fd",
+            marginBottom: 8,
+            display: "flex",
+            alignItems: "center",
+            gap: 8
+          }, children: [
+            "🏆 Recommended for A/B Test",
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+              fontSize: 10,
+              background: "rgba(124,58,237,0.15)",
+              color: "#a5b4fc",
+              padding: "2px 8px",
+              borderRadius: 4,
+              border: "1px solid rgba(124,58,237,0.25)"
+            }, children: [
+              abVariants.length,
+              " variants · different test hypotheses"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: abVariants.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsx(VariantCard, { variant: v2, copiedKey, onCopy: copy }, v2.id)) })
+        ] }),
+        altVariants.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 700, color: "#94a3b8", marginBottom: 8 }, children: "💡 Alternative Concepts" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: altVariants.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsx(VariantCard, { variant: v2, copiedKey, onCopy: copy }, v2.id)) })
+        ] })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
+        @keyframes spin { to { transform: rotate(360deg); } }
+        input:focus, textarea:focus { border-color: rgba(139,92,246,0.5) !important; box-shadow: 0 0 0 2px rgba(139,92,246,0.15); }
+      ` })
+  ] });
+}
+const STATUS_CONFIG = {
+  QUALIFIED: { label: "Qualified", color: "#4ade80", bg: "rgba(74,222,128,0.10)", border: "rgba(74,222,128,0.35)" },
+  GROWING: { label: "Growing", color: "#60a5fa", bg: "rgba(96,165,250,0.10)", border: "rgba(96,165,250,0.35)" },
+  WATCHLIST: { label: "Watchlist", color: "#fbbf24", bg: "rgba(251,191,36,0.10)", border: "rgba(251,191,36,0.35)" },
+  REJECTED: { label: "Rejected", color: "#f87171", bg: "rgba(248,113,113,0.08)", border: "rgba(248,113,113,0.20)" }
+};
+const VID_STATUS_COLOR = {
+  PASS_VIEWS: "#4ade80",
+  PASS_GROWTH_CONFIRMED: "#34d399",
+  PASS_GROWTH_PROVISIONAL: "#60a5fa",
+  PENDING_TOO_NEW: "#fbbf24",
+  FAIL: "#f87171",
+  EXCLUDED: "#9ca3af"
+};
+function fmt$1(n2, d = 0) {
+  if (n2 == null) return "—";
+  if (n2 >= 1e6) return (n2 / 1e6).toFixed(1) + "M";
+  if (n2 >= 1e3) return (n2 / 1e3).toFixed(1) + "K";
+  return n2.toLocaleString(void 0, { maximumFractionDigits: d });
+}
+function fmtPct$1(n2) {
+  if (n2 == null) return "—";
+  return (n2 * 100).toFixed(0) + "%";
+}
+function ScoreBar({ label, value, color }) {
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 6 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 11, color: "rgba(255,255,255,0.6)", marginBottom: 2 }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: label }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 700, color: "rgba(255,255,255,0.85)" }, children: value.toFixed(1) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: 4, background: "rgba(255,255,255,0.07)", borderRadius: 3, overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: "100%", width: `${Math.min(value, 100)}%`, background: color, borderRadius: 3, transition: "width 0.5s ease" } }) })
+  ] });
+}
+function VideoRow({ v: v2 }) {
+  const c = VID_STATUS_COLOR[v2.evaluation_status] || "#9ca3af";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 70px 80px 80px 130px", gap: 6, alignItems: "center", padding: "4px 0", borderBottom: "1px solid rgba(255,255,255,0.04)", fontSize: 11 }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("a", { href: v2.video_url, target: "_blank", rel: "noopener noreferrer", style: { color: "rgba(255,255,255,0.7)", textDecoration: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, title: v2.title, children: v2.title }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "rgba(255,255,255,0.45)", textAlign: "right" }, children: [
+      v2.age_days.toFixed(0),
+      "d"
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.75)", textAlign: "right" }, children: fmt$1(v2.views) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: c, textAlign: "right" }, children: [
+      v2.lifetime_views_per_day.toFixed(0),
+      " VPD"
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: c, fontSize: 10, fontWeight: 700, textAlign: "center", background: `${c}20`, borderRadius: 4, padding: "2px 5px", whiteSpace: "nowrap" }, title: v2.evaluation_reason, children: v2.evaluation_status.replace(/_/g, " ") })
+  ] });
+}
+function SimilarChannelCard({ candidate, defaultExpanded = false }) {
+  const [expanded, setExpanded] = reactExports.useState(defaultExpanded);
+  const [showVids, setShowVids] = reactExports.useState(false);
+  const cfg = STATUS_CONFIG[candidate.status] ?? STATUS_CONFIG.WATCHLIST;
+  const sc2 = candidate.scores;
+  const isMP = candidate.is_most_promising;
+  const isBestAvailable = Boolean(candidate.is_best_available || candidate.recommendation_tier === "BEST_AVAILABLE");
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: `similar-channel-card-${candidate.rank}`, style: {
+    background: isMP ? "linear-gradient(135deg, rgba(200,150,12,0.14) 0%, rgba(30,32,60,0.95) 100%)" : isBestAvailable ? "linear-gradient(135deg, rgba(168,85,247,0.12) 0%, rgba(20,20,35,0.95) 100%)" : "rgba(255,255,255,0.03)",
+    border: isMP ? "1.5px solid rgba(200,150,12,0.45)" : isBestAvailable ? "1.5px solid rgba(168,85,247,0.4)" : `1px solid ${cfg.border}`,
+    borderRadius: 12,
+    marginBottom: 10,
+    overflow: "hidden",
+    boxShadow: isMP ? "0 0 16px rgba(200,150,12,0.12)" : isBestAvailable ? "0 0 14px rgba(168,85,247,0.1)" : "none"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        role: "button",
+        tabIndex: 0,
+        onClick: () => setExpanded((e) => !e),
+        onKeyDown: (e) => e.key === "Enter" && setExpanded((p2) => !p2),
+        style: { display: "flex", alignItems: "center", gap: 12, padding: "12px 16px", cursor: "pointer", userSelect: "none" },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            minWidth: 32,
+            height: 32,
+            borderRadius: "50%",
+            background: isMP ? "rgba(200,150,12,0.3)" : isBestAvailable ? "rgba(168,85,247,0.25)" : "rgba(255,255,255,0.07)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 13,
+            fontWeight: 700,
+            color: isMP ? "#f5c842" : isBestAvailable ? "#c084fc" : "rgba(255,255,255,0.7)"
+          }, children: [
+            "#",
+            candidate.rank
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1, minWidth: 0 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "a",
+                {
+                  href: candidate.channel_url,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  onClick: (e) => e.stopPropagation(),
+                  style: {
+                    color: isMP ? "#f5c842" : isBestAvailable ? "#e9d5ff" : "rgba(255,255,255,0.9)",
+                    textDecoration: "none",
+                    fontWeight: 600,
+                    fontSize: 14,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap"
+                  },
+                  children: candidate.channel_title
+                }
+              ),
+              isMP && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, padding: "2px 7px", background: "rgba(200,150,12,0.3)", color: "#f5c842", borderRadius: 5, fontWeight: 700, whiteSpace: "nowrap" }, children: [
+                "★ ",
+                candidate.most_promising_label || "Most Promising"
+              ] }),
+              !isMP && isBestAvailable && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, padding: "2px 7px", background: "rgba(168,85,247,0.25)", color: "#c084fc", borderRadius: 5, fontWeight: 700, whiteSpace: "nowrap", border: "1px solid rgba(168,85,247,0.4)" }, children: [
+                "◎ Best Available ",
+                candidate.best_available_rank ? `#${candidate.best_available_rank}` : ""
+              ] }),
+              candidate.recommendation_tier === "STRICT_MATCH" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, padding: "2px 7px", background: "rgba(74,222,128,0.2)", color: "#4ade80", borderRadius: 5, fontWeight: 700, whiteSpace: "nowrap" }, children: "✓ Strict Match" })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.42)", marginTop: 2, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                candidate.subscriber_count != null ? fmt$1(candidate.subscriber_count) + " subs" : candidate.subscriber_status === "HIDDEN_UNVERIFIED" ? "Subscribers hidden" : "Over limit",
+                candidate.country && ` · ${candidate.country}`
+              ] }),
+              candidate.window_coverage && candidate.window_coverage !== "UNKNOWN" && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: candidate.window_coverage === "COMPLETE" ? "#4ade80" : "#fbbf24" }, children: [
+                "· Window: ",
+                candidate.window_coverage
+              ] }),
+              candidate.date_quality && candidate.date_quality !== "VERIFIED" && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, color: "rgba(255,255,255,0.35)" }, children: [
+                "· Dates: ",
+                candidate.date_quality
+              ] })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 14, alignItems: "center", flexShrink: 0 }, children: [
+            [
+              { v: sc2.final_score.toFixed(1), l: "Score" },
+              { v: fmt$1(candidate.median_recent_views), l: "Median Views" },
+              { v: fmtPct$1(candidate.strict_success_ratio), l: "Pass Rate" }
+            ].map(({ v: v2, l: l2 }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.9)" }, children: v2 }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: "rgba(255,255,255,0.38)" }, children: l2 })
+            ] }, l2)),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { padding: "4px 10px", borderRadius: 6, background: cfg.bg, color: cfg.color, border: `1px solid ${cfg.border}`, fontSize: 11, fontWeight: 700 }, children: cfg.label }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.28)", fontSize: 16 }, children: expanded ? "▲" : "▼" })
+          ] })
+        ]
+      }
+    ),
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "0 16px 16px", borderTop: "1px solid rgba(255,255,255,0.06)" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginTop: 14 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.45)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.08em" }, children: "Score Breakdown" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ScoreBar, { label: "Niche Match", value: sc2.niche_match_score, color: "#818cf8" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ScoreBar, { label: "Recent Consistency", value: sc2.recent_consistency_score, color: "#34d399" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ScoreBar, { label: "Growth Quality", value: sc2.growth_quality_score, color: "#60a5fa" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ScoreBar, { label: "Durability", value: sc2.durability_score, color: "#fb923c" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ScoreBar, { label: "Monetization", value: sc2.monetization_viability_score, color: "#f472b6" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ScoreBar, { label: "Data Confidence", value: sc2.data_confidence_score, color: "#a78bfa" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: 8, paddingTop: 8, display: "flex", justifyContent: "space-between", fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.9)" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Final Score" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: cfg.color }, children: sc2.final_score.toFixed(1) })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.45)", marginBottom: 10, textTransform: "uppercase", letterSpacing: "0.08em" }, children: "90-Day Performance" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 7, marginBottom: 12 }, children: [
+            { l: "Videos", v: candidate.recent_video_count, c: "rgba(255,255,255,0.7)" },
+            { l: "Evaluable", v: candidate.evaluable_video_count, c: "rgba(255,255,255,0.7)" },
+            { l: "Passed", v: candidate.passed_views_count + candidate.passed_growth_confirmed_count, c: "#4ade80" },
+            { l: "Provisional", v: candidate.passed_growth_provisional_count, c: "#60a5fa" },
+            { l: "Pending", v: candidate.pending_video_count, c: "#fbbf24" },
+            { l: "Failed", v: candidate.failed_video_count, c: "#f87171" }
+          ].map(({ l: l2, v: v2, c }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "rgba(255,255,255,0.04)", borderRadius: 7, padding: "6px 8px", textAlign: "center" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 14, fontWeight: 700, color: c }, children: v2 }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 9, color: "rgba(255,255,255,0.38)" }, children: l2 })
+          ] }, l2)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 5, fontSize: 11, color: "rgba(255,255,255,0.55)" }, children: [
+            ["Median Views", fmt$1(candidate.median_recent_views)],
+            ["Max Views", fmt$1(candidate.maximum_recent_views)],
+            ["Total Views", fmt$1(candidate.total_recent_views)],
+            ["Single-Hit Dep.", fmtPct$1(candidate.single_hit_dependency)],
+            ["Evergreen", fmtPct$1(candidate.evergreen_ratio)],
+            ["Active Months", `${candidate.active_months_last_12}/12`]
+          ].map(([label, val]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "rgba(255,255,255,0.38)" }, children: [
+              label,
+              ": "
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.8)" }, children: val })
+          ] }, label)) })
+        ] })
+      ] }),
+      candidate.unmet_criteria && candidate.unmet_criteria.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 12, background: "rgba(248,113,113,0.07)", border: "1px solid rgba(248,113,113,0.22)", borderRadius: 8, padding: "8px 12px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "#f87171", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }, children: "⚠ Unmet Strict Qualification Criteria" }),
+        candidate.unmet_criteria.map((c, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 2 }, children: [
+          "• ",
+          c
+        ] }, i))
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 12, background: "rgba(99,102,241,0.05)", border: "1px solid rgba(99,102,241,0.18)", borderRadius: 8, padding: "8px 12px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 10, fontWeight: 700, color: "#818cf8", marginBottom: 4, textTransform: "uppercase", letterSpacing: "0.05em" }, children: [
+          "Niche Match Evidence (",
+          candidate.scores.niche_match_score.toFixed(0),
+          "/100)"
+        ] }),
+        candidate.niche_match_reason && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.7)", marginBottom: 6 }, children: candidate.niche_match_reason }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 12, fontSize: 10, color: "rgba(255,255,255,0.5)", flexWrap: "wrap" }, children: [
+          candidate.source_coverage != null && candidate.source_coverage > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            "Source Coverage: ",
+            fmtPct$1(candidate.source_coverage)
+          ] }),
+          candidate.candidate_precision != null && candidate.candidate_precision > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            "Precision: ",
+            fmtPct$1(candidate.candidate_precision)
+          ] }),
+          candidate.median_title_similarity != null && candidate.median_title_similarity > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            "Title Similarity: ",
+            fmtPct$1(candidate.median_title_similarity)
+          ] }),
+          candidate.matched_entities && candidate.matched_entities.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+            "Entities: ",
+            candidate.matched_entities.slice(0, 3).join(", ")
+          ] })
+        ] })
+      ] }),
+      (candidate.qualification_reasons.length > 0 || candidate.rejection_reasons.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 12, display: "flex", gap: 12 }, children: [
+        candidate.qualification_reasons.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "#4ade80", marginBottom: 4, textTransform: "uppercase" }, children: "✓ Why Qualified" }),
+          candidate.qualification_reasons.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.62)", marginBottom: 2 }, children: [
+            "• ",
+            r2
+          ] }, i))
+        ] }),
+        candidate.rejection_reasons.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { flex: 1 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "#f87171", marginBottom: 4, textTransform: "uppercase" }, children: "✗ Rejection / Limitations" }),
+          candidate.rejection_reasons.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.62)", marginBottom: 2 }, children: [
+            "• ",
+            r2
+          ] }, i))
+        ] })
+      ] }),
+      candidate.confidence_limitations.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10, background: "rgba(251,191,36,0.06)", borderRadius: 7, padding: "7px 11px", border: "1px solid rgba(251,191,36,0.18)" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "#fbbf24", marginBottom: 3 }, children: "⚠ Data Confidence Limitations" }),
+        candidate.confidence_limitations.map((l2, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.52)", marginBottom: 2 }, children: l2 }, i))
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10, display: "flex", gap: 7, flexWrap: "wrap", alignItems: "center" }, children: [
+        [
+          { label: `Monetization: ${candidate.monetization_viability}`, color: candidate.monetization_viability === "STRONG" ? "#4ade80" : candidate.monetization_viability === "MODERATE" ? "#60a5fa" : "#f87171" },
+          { label: `Confidence: ${candidate.data_confidence}`, color: "#a78bfa" }
+        ].map(({ label, color }) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 10, padding: "3px 8px", borderRadius: 5, background: `${color}18`, color, fontWeight: 700 }, children: label }, label)),
+        candidate.policy_risk_flags.map((f2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: 10, padding: "3px 8px", borderRadius: 5, background: "rgba(248,113,113,0.12)", color: "#f87171" }, children: [
+          "⚠ ",
+          f2.replace(/_/g, " ")
+        ] }, f2))
+      ] }),
+      candidate.recent_videos.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 12 }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            id: `similar-channel-videos-toggle-${candidate.rank}`,
+            onClick: () => setShowVids((s) => !s),
+            style: { background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 7, padding: "5px 12px", color: "rgba(255,255,255,0.65)", fontSize: 11, cursor: "pointer", display: "flex", alignItems: "center", gap: 5 },
+            children: [
+              showVids ? "▲" : "▼",
+              " ",
+              showVids ? "Hide" : "Show",
+              " Video Evidence (",
+              candidate.recent_videos.length,
+              ")"
+            ]
+          }
+        ),
+        showVids && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 8 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 70px 80px 80px 130px", gap: 6, fontSize: 10, color: "rgba(255,255,255,0.32)", fontWeight: 700, textTransform: "uppercase", paddingBottom: 5, borderBottom: "1px solid rgba(255,255,255,0.07)" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Title" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { textAlign: "right" }, children: "Age" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { textAlign: "right" }, children: "Views" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { textAlign: "right" }, children: "VPD" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { textAlign: "center" }, children: "Status" })
+          ] }),
+          candidate.recent_videos.slice(0, 15).map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsx(VideoRow, { v: v2 }, v2.video_id)),
+          candidate.recent_videos.length > 15 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.32)", marginTop: 5 }, children: [
+            "+",
+            candidate.recent_videos.length - 15,
+            " more videos in Excel export"
+          ] })
+        ] })
+      ] })
+    ] })
+  ] });
+}
+const POLL_INTERVAL = 3e3;
+const TERMINAL_STATUSES = /* @__PURE__ */ new Set(["COMPLETED", "FAILED", "CANCELLED", "INTERRUPTED"]);
+const STAGE_LABELS = {
+  STARTING: "Initializing...",
+  BUILDING_NICHE_FINGERPRINT: "Building niche fingerprint & weighted terms...",
+  SEARCHING_EXACT_MATCHES: "Searching Pass 1 (Exact niche relevance)...",
+  EXPANDING_SEARCH_QUERIES: "Expanding queries (Pass 2 & 3 long-tail)...",
+  SEARCHING_PERFORMANCE_RESULTS: "Searching Pass 2 (ViewCount & Date order)...",
+  RESOLVING_CHANNEL_IDS: "Resolving real channel IDs from video metadata...",
+  ENRICHING_90_DAY_WINDOW: "Fetching exact 90-day uploads for candidate channels...",
+  ENRICHING_12_MONTH_HISTORY: "Analyzing 12-month publishing cadence & durability...",
+  LOADING_GROWTH_SNAPSHOTS: "Evaluating historical view snapshots...",
+  SCORING_CANDIDATES: "Evaluating qualification rules & computing niche match...",
+  SELECTING_BEST_AVAILABLE: "Selecting best available fallback candidates...",
+  DEDUPLICATING_CHANNELS: "Grouping candidates by channel...",
+  ENRICHING_CHANNELS: "Enriching candidate channels...",
+  CALCULATING_GROWTH: "Evaluating 90-day performance...",
+  RANKING_CANDIDATES: "Ranking candidates...",
+  PERSISTING: "Saving results & recording view snapshots...",
+  COMPLETED: "Discovery complete.",
+  FAILED: "Discovery failed.",
+  CANCELLED: "Cancelled.",
+  INTERRUPTED: "Interrupted."
+};
+function fmt(n2) {
+  if (n2 == null) return "—";
+  if (n2 >= 1e6) return (n2 / 1e6).toFixed(1) + "M";
+  if (n2 >= 1e3) return (n2 / 1e3).toFixed(1) + "K";
+  return n2.toLocaleString();
+}
+function fmtPct(n2) {
+  if (n2 == null) return "—";
+  return (n2 * 100).toFixed(0) + "%";
+}
+function SimilarChannelsPanel({ competitor, market, language }) {
+  const [runId, setRunId] = reactExports.useState(null);
+  const [progress, setProgress] = reactExports.useState(null);
+  const [result, setResult] = reactExports.useState(null);
+  const [error, setError] = reactExports.useState(null);
+  const [isStarting, setIsStarting] = reactExports.useState(false);
+  const [filter, setFilter] = reactExports.useState("ALL");
+  const [showDiagnostics, setShowDiagnostics] = reactExports.useState(false);
+  const pollRef = reactExports.useRef(null);
+  const runIdRef = reactExports.useRef(null);
+  const stopPolling = reactExports.useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+  const fetchResult = reactExports.useCallback(async (id2) => {
+    try {
+      const res = await researchApi.getSimilarChannelsResult(id2);
+      setResult(res);
+    } catch (e) {
+      setError("Failed to fetch results: " + String(e));
+    }
+  }, []);
+  const poll = reactExports.useCallback(async (id2) => {
+    try {
+      const prog = await researchApi.getSimilarChannelsProgress(id2);
+      setProgress(prog);
+      if (TERMINAL_STATUSES.has(prog.status)) {
+        stopPolling();
+        if (prog.status === "COMPLETED") {
+          await fetchResult(id2);
+        } else if (prog.error) {
+          setError(prog.error);
+        }
+      }
+    } catch (e) {
+    }
+  }, [stopPolling, fetchResult]);
+  const startDiscovery = reactExports.useCallback(async () => {
+    setIsStarting(true);
+    setError(null);
+    setResult(null);
+    setProgress(null);
+    stopPolling();
+    try {
+      const sourceVideos = (competitor.recent_videos || []).map((v2) => ({
+        video_id: v2.video_id || "",
+        title: v2.title || "",
+        published_at: v2.published_at || "",
+        views: v2.views || 0
+      }));
+      const resp = await researchApi.discoverSimilarChannels({
+        source_channel_id: competitor.channel_id,
+        source_channel_title: competitor.channel_title,
+        source_videos: sourceVideos,
+        market,
+        language,
+        window_days: 90,
+        min_views: 1e4,
+        max_subscribers: 5e4,
+        min_evaluable_videos: 3,
+        candidate_channel_limit: 40,
+        search_query_budget: 18
+      });
+      const id2 = resp.run_id;
+      setRunId(id2);
+      runIdRef.current = id2;
+      pollRef.current = setInterval(() => poll(id2), POLL_INTERVAL);
+    } catch (e) {
+      setError("Failed to start discovery: " + String(e));
+    } finally {
+      setIsStarting(false);
+    }
+  }, [competitor, market, language, poll, stopPolling]);
+  const handleCancel = reactExports.useCallback(async () => {
+    if (!runId) return;
+    try {
+      await researchApi.cancelSimilarChannels(runId);
+      setProgress((p2) => p2 ? { ...p2, status: "CANCELLED", stage: "CANCELLED" } : null);
+      stopPolling();
+    } catch (e) {
+      setError("Cancel failed: " + String(e));
+    }
+  }, [runId, stopPolling]);
+  const handleExport = reactExports.useCallback(() => {
+    if (!runId) return;
+    const url = researchApi.getSimilarChannelsExcelUrl(runId, SIDECAR_DEFAULT_URL);
+    window.open(url, "_blank");
+  }, [runId]);
+  reactExports.useEffect(() => {
+    return () => stopPolling();
+  }, [stopPolling]);
+  const allCandidates = result?.candidates ?? [];
+  const recommendedCandidates = allCandidates.filter(
+    (c) => c.status === "QUALIFIED" || c.status === "GROWING" || c.is_best_available || c.recommendation_tier === "BEST_AVAILABLE"
+  );
+  const displayCandidates = filter === "RECOMMENDED" ? recommendedCandidates : filter === "ALL" ? allCandidates : allCandidates.filter((c) => c.status === filter);
+  const counts = {
+    QUALIFIED: allCandidates.filter((c) => c.status === "QUALIFIED").length,
+    GROWING: allCandidates.filter((c) => c.status === "GROWING").length,
+    WATCHLIST: allCandidates.filter((c) => c.status === "WATCHLIST").length,
+    REJECTED: allCandidates.filter((c) => c.status === "REJECTED").length
+  };
+  const isRunning = progress && !TERMINAL_STATUSES.has(progress.status);
+  const isFailed = progress?.status === "FAILED" || progress?.status === "CANCELLED";
+  const isCompleted = result && result.status === "COMPLETED";
+  const qualifiedFirst = allCandidates.find((c) => c.status === "QUALIFIED");
+  const growingFirst = allCandidates.find((c) => c.status === "GROWING");
+  const bestAvailableFirst = allCandidates.find((c) => c.is_best_available || c.recommendation_tier === "BEST_AVAILABLE");
+  const fallbackWatchlist = allCandidates.find((c) => c.status === "WATCHLIST");
+  const featuredCandidate = qualifiedFirst || growingFirst || bestAvailableFirst || fallbackWatchlist;
+  const bannerType = qualifiedFirst ? "QUALIFIED" : growingFirst ? "GROWING" : bestAvailableFirst || fallbackWatchlist ? "BEST_AVAILABLE" : null;
+  const bannerConfig = {
+    QUALIFIED: {
+      title: "★ #1 MOST PROMISING COMPETITOR",
+      bg: "linear-gradient(135deg, rgba(34,197,94,0.15) 0%, rgba(200,150,12,0.18) 100%)",
+      border: "1.5px solid rgba(234,179,8,0.5)",
+      badgeColor: "#f5c842",
+      badgeBg: "rgba(234,179,8,0.25)",
+      accent: "#4ade80"
+    },
+    GROWING: {
+      title: "↗ BEST GROWING CANDIDATE",
+      bg: "linear-gradient(135deg, rgba(59,130,246,0.15) 0%, rgba(99,102,241,0.12) 100%)",
+      border: "1.5px solid rgba(96,165,250,0.45)",
+      badgeColor: "#60a5fa",
+      badgeBg: "rgba(59,130,246,0.25)",
+      accent: "#60a5fa"
+    },
+    BEST_AVAILABLE: {
+      title: "◎ BEST AVAILABLE CANDIDATE",
+      bg: "linear-gradient(135deg, rgba(168,85,247,0.14) 0%, rgba(245,158,11,0.10) 100%)",
+      border: "1.5px solid rgba(168,85,247,0.45)",
+      badgeColor: "#c084fc",
+      badgeBg: "rgba(168,85,247,0.25)",
+      accent: "#fbbf24"
+    }
+  };
+  const currentBannerCfg = bannerType ? bannerConfig[bannerType] : null;
+  const diag = result?.discovery_diagnostics;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      id: "similar-channels-panel",
+      style: {
+        background: "rgba(255,255,255,0.02)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 14,
+        padding: 20,
+        marginTop: 20
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 16 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { margin: 0, fontSize: 17, fontWeight: 700, color: "rgba(255,255,255,0.9)" }, children: "🔍 Similar Channel Discovery" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, color: "rgba(255,255,255,0.45)", marginTop: 4 }, children: "Multi-pass discovery in exact 90-day window · ≤ 50K subscribers · min. 10K views · progressive expansion" })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 8 }, children: [
+            !runId && !isStarting && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                id: "similar-channels-start-btn",
+                onClick: startDiscovery,
+                style: {
+                  background: "linear-gradient(135deg, #6366f1, #8b5cf6)",
+                  border: "none",
+                  borderRadius: 8,
+                  padding: "8px 16px",
+                  color: "#fff",
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: "pointer"
+                },
+                children: "▶ Discover Similar Channels"
+              }
+            ),
+            isStarting && /* @__PURE__ */ jsxRuntimeExports.jsx("button", { disabled: true, style: { background: "rgba(99,102,241,0.4)", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 700 }, children: "Starting..." }),
+            isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                id: "similar-channels-cancel-btn",
+                onClick: handleCancel,
+                style: { background: "rgba(248,113,113,0.15)", border: "1px solid rgba(248,113,113,0.35)", borderRadius: 8, padding: "8px 14px", color: "#f87171", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+                children: "✕ Cancel"
+              }
+            ),
+            isCompleted && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                id: "similar-channels-export-btn",
+                onClick: handleExport,
+                style: { background: "linear-gradient(135deg, #059669, #10b981)", border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+                children: "⬇ Export Excel"
+              }
+            ),
+            (isFailed || result && result.status !== "COMPLETED") && runId && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                id: "similar-channels-restart-btn",
+                onClick: startDiscovery,
+                style: { background: "rgba(251,191,36,0.15)", border: "1px solid rgba(251,191,36,0.3)", borderRadius: 8, padding: "8px 14px", color: "#fbbf24", fontSize: 12, fontWeight: 700, cursor: "pointer" },
+                children: "↺ Retry"
+              }
+            )
+          ] })
+        ] }),
+        progress && !isCompleted && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: 16 }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 12, color: isFailed ? "#f87171" : "rgba(255,255,255,0.75)" }, children: STAGE_LABELS[progress.stage] || progress.stage }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11, color: "rgba(255,255,255,0.4)" }, children: progress.elapsed_seconds > 0 && `${progress.elapsed_seconds}s` })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: 5, background: "rgba(255,255,255,0.07)", borderRadius: 3, overflow: "hidden" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+            height: "100%",
+            width: `${progress.progress_percent}%`,
+            background: isFailed ? "#f87171" : progress.status === "COMPLETED" ? "#4ade80" : "linear-gradient(90deg, #6366f1, #8b5cf6)",
+            borderRadius: 3,
+            transition: "width 0.5s ease"
+          } }) }),
+          progress.message && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.6)", marginTop: 5, fontWeight: 500 }, children: progress.message }),
+          (progress.candidate_videos_found > 0 || progress.channels_enriched > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 16, marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.5)" }, children: [
+            progress.candidate_videos_found > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "📹 ",
+              progress.candidate_videos_found.toLocaleString(),
+              " videos"
+            ] }),
+            progress.candidate_channels_found > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "📺 ",
+              progress.candidate_channels_found,
+              " channels"
+            ] }),
+            progress.channels_enriched > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "✓ ",
+              progress.channels_enriched,
+              " enriched"
+            ] }),
+            progress.channels_qualified > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#4ade80" }, children: [
+              "★ ",
+              progress.channels_qualified,
+              " qualified"
+            ] }),
+            (progress.channels_growing ?? 0) > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#60a5fa" }, children: [
+              "↗ ",
+              progress.channels_growing,
+              " growing"
+            ] }),
+            (progress.channels_watchlist ?? 0) > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "#fbbf24" }, children: [
+              "◎ ",
+              progress.channels_watchlist,
+              " watchlist"
+            ] })
+          ] })
+        ] }),
+        error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.25)", borderRadius: 8, padding: "10px 14px", marginBottom: 14, fontSize: 12, color: "#f87171" }, children: [
+          "⚠ ",
+          error
+        ] }),
+        isCompleted && result && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 8 }, children: [
+            { label: "Qualified", count: counts.QUALIFIED, color: "#4ade80", filterKey: "QUALIFIED" },
+            { label: "Growing", count: counts.GROWING, color: "#60a5fa", filterKey: "GROWING" },
+            { label: "Watchlist", count: counts.WATCHLIST, color: "#fbbf24", filterKey: "WATCHLIST" },
+            { label: "Rejected", count: counts.REJECTED, color: "#f87171", filterKey: "REJECTED" }
+          ].map(({ label, count, color, filterKey }) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              id: `similar-filter-${filterKey}`,
+              onClick: () => setFilter((ff2) => ff2 === filterKey ? "ALL" : filterKey),
+              style: {
+                background: filter === filterKey ? `${color}18` : "rgba(255,255,255,0.03)",
+                border: `1px solid ${filter === filterKey ? color : "rgba(255,255,255,0.1)"}`,
+                borderRadius: 9,
+                padding: "10px 0",
+                cursor: "pointer",
+                textAlign: "center"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 20, fontWeight: 800, color }, children: count }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 11, color: filter === filterKey ? color : "rgba(255,255,255,0.5)", marginTop: 2 }, children: label })
+              ]
+            },
+            label
+          )) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.45)", marginBottom: 16, textAlign: "center" }, children: [
+            result.candidate_channels_found,
+            " channels discovered · ",
+            result.channels_enriched,
+            " enriched · ",
+            recommendedCandidates.length,
+            " recommended"
+          ] }),
+          featuredCandidate && currentBannerCfg && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            background: currentBannerCfg.bg,
+            border: currentBannerCfg.border,
+            borderRadius: 12,
+            padding: "16px 20px",
+            marginBottom: 16
+          }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+                fontSize: 11,
+                fontWeight: 700,
+                color: currentBannerCfg.badgeColor,
+                background: currentBannerCfg.badgeBg,
+                padding: "3px 8px",
+                borderRadius: 5,
+                textTransform: "uppercase",
+                letterSpacing: "0.06em"
+              }, children: currentBannerCfg.title }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "a",
+                {
+                  href: featuredCandidate.channel_url,
+                  target: "_blank",
+                  rel: "noopener noreferrer",
+                  style: {
+                    fontSize: 11,
+                    fontWeight: 700,
+                    color: currentBannerCfg.accent,
+                    textDecoration: "none",
+                    background: "rgba(255,255,255,0.08)",
+                    padding: "4px 10px",
+                    borderRadius: 6
+                  },
+                  children: "Open YouTube Channel ↗"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 8, flexWrap: "wrap" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 17, fontWeight: 700, color: "rgba(255,255,255,0.95)" }, children: featuredCandidate.channel_title }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "rgba(255,255,255,0.55)" }, children: [
+                fmt(featuredCandidate.subscriber_count),
+                " subscribers"
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: 16, margin: "10px 0", fontSize: 12, flexWrap: "wrap" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.4)" }, children: "Final Score: " }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: currentBannerCfg.badgeColor }, children: featuredCandidate.scores.final_score.toFixed(1) })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.4)" }, children: "Median Views: " }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "rgba(255,255,255,0.85)" }, children: fmt(featuredCandidate.median_recent_views) })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.4)" }, children: "Pass Rate: " }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "rgba(255,255,255,0.85)" }, children: fmtPct(featuredCandidate.strict_success_ratio) })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.4)" }, children: "Niche Match: " }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { style: { color: "#818cf8" }, children: [
+                  featuredCandidate.scores.niche_match_score.toFixed(0),
+                  "/100"
+                ] })
+              ] })
+            ] }),
+            (featuredCandidate.qualification_reasons.length > 0 || result.most_promising_reason.length > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10 }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: currentBannerCfg.accent, marginBottom: 4, textTransform: "uppercase" }, children: "Key Strengths / Recommendations:" }),
+              (result.most_promising_reason.length > 0 ? result.most_promising_reason : featuredCandidate.qualification_reasons).slice(0, 3).map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 12, color: "rgba(255,255,255,0.7)", marginBottom: 2 }, children: [
+                "• ",
+                r2
+              ] }, i))
+            ] }),
+            featuredCandidate.unmet_criteria && featuredCandidate.unmet_criteria.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 10, background: "rgba(0,0,0,0.2)", borderRadius: 7, padding: "8px 12px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 10, fontWeight: 700, color: "#f87171", marginBottom: 4, textTransform: "uppercase" }, children: "Criteria Missing for Strict Qualification:" }),
+              featuredCandidate.unmet_criteria.slice(0, 3).map((u2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: 11, color: "rgba(255,255,255,0.65)", marginBottom: 2 }, children: [
+                "• ",
+                u2
+              ] }, i))
+            ] })
+          ] }),
+          counts.QUALIFIED === 0 && allCandidates.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+            background: "rgba(251,191,36,0.06)",
+            border: "1px solid rgba(251,191,36,0.25)",
+            borderRadius: 10,
+            padding: "12px 16px",
+            marginBottom: 16,
+            fontSize: 12,
+            color: "#fbbf24",
+            lineHeight: 1.5
+          }, children: "No channel met every strict qualification rule. The candidates below are the closest available matches discovered in this niche. They remain useful for research, but they are not labeled as fully qualified." }),
+          diag && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            background: "rgba(255,255,255,0.02)",
+            border: "1px solid rgba(255,255,255,0.07)",
+            borderRadius: 9,
+            marginBottom: 16,
+            overflow: "hidden"
+          }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                id: "similar-channels-diagnostics-toggle",
+                onClick: () => setShowDiagnostics((d) => !d),
+                style: {
+                  width: "100%",
+                  background: "transparent",
+                  border: "none",
+                  padding: "10px 14px",
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  color: "rgba(255,255,255,0.65)",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  cursor: "pointer"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🔎 How candidates were found (Discovery Diagnostics)" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: showDiagnostics ? "▲" : "▼" })
+                ]
+              }
+            ),
+            showDiagnostics && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "0 14px 14px", borderTop: "1px solid rgba(255,255,255,0.05)", fontSize: 11, color: "rgba(255,255,255,0.6)" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginTop: 10 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Passes: " }),
+                  diag.discovery_passes_run?.join(", ") || "N/A"
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Queries Executed: " }),
+                  diag.queries_executed ?? 0,
+                  " / ",
+                  diag.queries_generated ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Search Calls: " }),
+                  diag.search_calls_used ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Raw Videos: " }),
+                  diag.raw_videos_found ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Unique Videos: " }),
+                  diag.unique_videos_found ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Unique Channels: " }),
+                  diag.unique_channels_found ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Enriched: " }),
+                  diag.channels_enriched ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "≤ 50K Subs: " }),
+                  diag.channels_under_subscriber_limit ?? "N/A"
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Niche Matches: " }),
+                  diag.channels_matching_niche ?? "N/A"
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Verified Dates: " }),
+                  diag.videos_with_verified_dates ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Approx Dates: " }),
+                  diag.videos_with_approximate_dates ?? 0
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Synthetic Resolved: " }),
+                  diag.resolved_channel_ids ?? 0,
+                  " / ",
+                  diag.synthetic_channel_ids_found ?? 0
+                ] })
+              ] }),
+              diag.stop_reason && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 8, color: "rgba(255,255,255,0.45)" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Stop Reason: " }),
+                diag.stop_reason
+              ] }),
+              diag.provider_breakdown && Object.keys(diag.provider_breakdown).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 6, color: "rgba(255,255,255,0.45)" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "rgba(255,255,255,0.35)" }, children: "Providers: " }),
+                Object.entries(diag.provider_breakdown).map(([k2, v2]) => `${k2}: ${v2}`).join(" · ")
+              ] })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: 6, marginBottom: 14, alignItems: "center", flexWrap: "wrap" }, children: [
+            { id: "RECOMMENDED", label: `Recommended (${recommendedCandidates.length})` },
+            { id: "QUALIFIED", label: `Qualified (${counts.QUALIFIED})` },
+            { id: "GROWING", label: `Growing (${counts.GROWING})` },
+            { id: "WATCHLIST", label: `Watchlist (${counts.WATCHLIST})` },
+            { id: "REJECTED", label: `Rejected (${counts.REJECTED})` },
+            { id: "ALL", label: `All (${allCandidates.length})` }
+          ].map((tab) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              id: `similar-filter-${tab.id}`,
+              onClick: () => setFilter(tab.id),
+              style: {
+                background: filter === tab.id ? "rgba(255,255,255,0.15)" : "rgba(255,255,255,0.03)",
+                border: `1px solid ${filter === tab.id ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.08)"}`,
+                borderRadius: 6,
+                padding: "5px 12px",
+                color: filter === tab.id ? "#fff" : "rgba(255,255,255,0.6)",
+                fontSize: 11,
+                cursor: "pointer",
+                fontWeight: filter === tab.id ? 700 : 400
+              },
+              children: tab.label
+            },
+            tab.id
+          )) }),
+          displayCandidates.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { textAlign: "center", color: "rgba(255,255,255,0.35)", fontSize: 13, padding: "30px 0" }, children: "No channels match the current filter." }) : displayCandidates.map((c) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+            SimilarChannelCard,
+            {
+              candidate: c,
+              defaultExpanded: Boolean(c.is_most_promising || counts.QUALIFIED === 0 && c.is_best_available && c.best_available_rank === 1)
+            },
+            c.channel_id
+          )),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: 14, background: "rgba(255,255,255,0.02)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 8, padding: "10px 14px", fontSize: 11, color: "rgba(255,255,255,0.4)", lineHeight: 1.6 }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "rgba(255,255,255,0.55)" }, children: "Methodology:" }),
+            " Multi-pass candidate retrieval with exact 90-day uploads evaluation. Qualified status requires 100% strict success ratio on evaluable videos (≥10K views or confirmed growth snapshots). Best Available fallback identifies the closest promising research candidates without compromising strict Qualified certification."
+          ] })
+        ] }),
+        !runId && !isStarting && !error && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { textAlign: "center", color: "rgba(255,255,255,0.3)", fontSize: 13, padding: "20px 0" }, children: [
+          "Click ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "rgba(255,255,255,0.55)" }, children: "Discover Similar Channels" }),
+          " to find competitors in the same niche with a verified 90-day performance window."
+        ] })
+      ]
+    }
+  );
+}
+function fmtNum(n2) {
+  if (n2 >= 1e6) return `${(n2 / 1e6).toFixed(1)}M`;
+  if (n2 >= 1e3) return `${(n2 / 1e3).toFixed(1)}K`;
+  return n2.toLocaleString();
+}
+function pctBar(value, total, color) {
+  const pct2 = total > 0 ? Math.round(value / total * 100) : 0;
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px", fontSize: "11px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { flex: 1, height: "4px", background: "var(--bg-base)", borderRadius: "2px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { width: `${pct2}%`, height: "100%", background: color, borderRadius: "2px" } }) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { color: "var(--text-muted)", minWidth: "36px" }, children: [
+      value,
+      "/",
+      total
+    ] })
+  ] });
+}
+function ConfidenceBadge({ level }) {
+  const colors = {
+    high: "#34d399",
+    medium: "#60a5fa",
+    low: "#f59e0b",
+    insufficient: "#ef4444"
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+    fontSize: "9px",
+    fontWeight: 700,
+    padding: "2px 6px",
+    borderRadius: "3px",
+    background: colors[level] + "22",
+    color: colors[level],
+    textTransform: "uppercase",
+    letterSpacing: "0.5px"
+  }, children: level });
+}
+function PerformanceBadge({ group }) {
+  const cfg = {
+    outlier: { color: "#34d399", label: "⚡ Outlier" },
+    baseline: { color: "#60a5fa", label: "〰 Baseline" },
+    low: { color: "#6b7280", label: "↓ Low" }
+  };
+  const c = cfg[group] || cfg.baseline;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+    fontSize: "9px",
+    fontWeight: 700,
+    padding: "2px 7px",
+    borderRadius: "3px",
+    background: c.color + "22",
+    color: c.color
+  }, children: c.label });
+}
+function ThumbnailInspector({
+  analysis,
+  onClose
+}) {
+  const [showOverlays, setShowOverlays] = reactExports.useState(true);
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      style: {
+        position: "fixed",
+        inset: 0,
+        zIndex: 1e3,
+        background: "rgba(0,0,0,0.75)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        padding: "20px"
+      },
+      onClick: onClose,
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            background: "var(--bg-elevated)",
+            borderRadius: "12px",
+            border: "1px solid var(--border-subtle)",
+            width: "100%",
+            maxWidth: "860px",
+            maxHeight: "90vh",
+            overflowY: "auto",
+            padding: "24px"
+          },
+          onClick: (e) => e.stopPropagation(),
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", margin: 0 }, children: "Thumbnail Inspector" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginTop: "2px" }, children: analysis.video_title })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", alignItems: "center" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "button",
+                  {
+                    onClick: () => setShowOverlays((v2) => !v2),
+                    className: "btn btn-secondary",
+                    style: { fontSize: "11px", padding: "4px 10px" },
+                    children: [
+                      showOverlays ? "Hide" : "Show",
+                      " Overlays"
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onClose, className: "btn btn-secondary", style: { fontSize: "11px", padding: "4px 10px" }, children: "✕ Close" })
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", borderRadius: "8px", overflow: "hidden", background: "#000" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "img",
+                    {
+                      src: analysis.thumbnail_url,
+                      alt: analysis.video_title,
+                      style: { width: "100%", display: "block" },
+                      onError: (e) => {
+                        e.target.style.display = "none";
+                      }
+                    }
+                  ),
+                  showOverlays && analysis.composition?.main_subject_box && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "div",
+                    {
+                      style: {
+                        position: "absolute",
+                        left: `${analysis.composition.main_subject_box.x * 100}%`,
+                        top: `${analysis.composition.main_subject_box.y * 100}%`,
+                        width: `${analysis.composition.main_subject_box.width * 100}%`,
+                        height: `${analysis.composition.main_subject_box.height * 100}%`,
+                        border: "2px solid #34d399",
+                        boxSizing: "border-box",
+                        pointerEvents: "none"
+                      }
+                    }
+                  ),
+                  showOverlays && analysis.composition?.text_region_box && analysis.composition.text_region_box.width > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "div",
+                    {
+                      style: {
+                        position: "absolute",
+                        left: `${analysis.composition.text_region_box.x * 100}%`,
+                        top: `${analysis.composition.text_region_box.y * 100}%`,
+                        width: `${analysis.composition.text_region_box.width * 100}%`,
+                        height: `${analysis.composition.text_region_box.height * 100}%`,
+                        border: "2px solid #f59e0b",
+                        boxSizing: "border-box",
+                        pointerEvents: "none"
+                      }
+                    }
+                  ),
+                  showOverlays && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "div",
+                    {
+                      style: {
+                        position: "absolute",
+                        bottom: 0,
+                        right: 0,
+                        width: "15%",
+                        height: "15%",
+                        border: "2px dashed rgba(239,68,68,0.6)",
+                        background: "rgba(239,68,68,0.1)",
+                        pointerEvents: "none"
+                      },
+                      title: "Duration badge zone — avoid placing text here"
+                    }
+                  )
+                ] }),
+                analysis.colors?.dominant_colors?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "10px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "4px" }, children: "Dominant Colors" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "4px" }, children: analysis.colors.dominant_colors.map((c, i) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "div",
+                    {
+                      title: `${c.hex} (${c.label}) — ${(c.fraction * 100).toFixed(0)}%`,
+                      style: {
+                        width: `${Math.max(24, c.fraction * 120)}px`,
+                        height: "20px",
+                        background: c.hex,
+                        borderRadius: "3px",
+                        border: "1px solid rgba(255,255,255,0.1)"
+                      }
+                    },
+                    i
+                  )) }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "9px", color: "var(--text-muted)", marginTop: "3px" }, children: [
+                    analysis.colors.warm_cool_balance,
+                    " · brightness ",
+                    (analysis.colors.brightness * 100).toFixed(0),
+                    "% · contrast ",
+                    (analysis.colors.contrast * 100).toFixed(0),
+                    "%"
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+                  marginTop: "10px",
+                  padding: "10px",
+                  background: "var(--bg-base)",
+                  borderRadius: "6px"
+                }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "4px" }, children: "Mobile Readability" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+                      fontSize: "22px",
+                      fontWeight: 700,
+                      color: analysis.mobile_readability.score >= 60 ? "#34d399" : analysis.mobile_readability.score >= 40 ? "#f59e0b" : "#ef4444"
+                    }, children: analysis.mobile_readability.score }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: "/ 100" })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", marginTop: "4px" }, children: [
+                    ["Text Readable", analysis.mobile_readability.text_readable],
+                    ["Face Visible", analysis.mobile_readability.face_recognizable],
+                    ["Object Clear", analysis.mobile_readability.main_object_clear]
+                  ].map(([label, val]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+                    fontSize: "9px",
+                    padding: "1px 5px",
+                    borderRadius: "3px",
+                    background: val ? "#34d39922" : "#6b728022",
+                    color: val ? "#34d399" : "#6b7280"
+                  }, children: [
+                    val ? "✓" : "✗",
+                    " ",
+                    label
+                  ] }, label)) })
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(PerformanceBadge, { group: analysis.performance_group }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(ConfidenceBadge, { level: analysis.confidence > 0.6 ? "high" : analysis.confidence > 0.35 ? "medium" : "low" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+                    fmtNum(analysis.views),
+                    " views · ",
+                    analysis.views_per_day.toFixed(1),
+                    "/day · ",
+                    analysis.outlier_ratio.toFixed(2),
+                    "x"
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px", textTransform: "uppercase" }, children: "Text Overlay (OCR)" }),
+                  analysis.ocr.is_uncertain ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)", fontStyle: "italic" }, children: [
+                    "OCR uncertain — ",
+                    analysis.ocr.text || "No text detected"
+                  ] }) : analysis.ocr.text ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+                    fontSize: "12px",
+                    color: "#fbbf24",
+                    fontFamily: "monospace",
+                    background: "#111",
+                    padding: "6px 8px",
+                    borderRadius: "4px",
+                    marginBottom: "6px"
+                  }, children: [
+                    '"',
+                    analysis.ocr.text,
+                    '"'
+                  ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "No text overlay detected" }),
+                  analysis.ocr.word_count > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", fontSize: "10px", color: "var(--text-muted)" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                      analysis.ocr.word_count,
+                      " words"
+                    ] }),
+                    analysis.ocr.has_numbers && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "• Has numbers" }),
+                    analysis.ocr.has_question && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "• Has ?" }),
+                    analysis.ocr.has_exclamation && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "• Has !" }),
+                    analysis.ocr.has_uppercase && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "• Uppercase" })
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px", textTransform: "uppercase" }, children: "Composition" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "3px", fontSize: "11px", color: "var(--text-secondary)" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Layout: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.composition.layout_type.replace(/_/g, " ") })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Focal point: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.composition.main_focal_point })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Background: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.composition.background_complexity })
+                    ] }),
+                    analysis.composition.subject_size_pct > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Subject area: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { children: [
+                        (analysis.composition.subject_size_pct * 100).toFixed(0),
+                        "%"
+                      ] }),
+                      " of frame"
+                    ] }),
+                    analysis.composition.duration_badge_risk && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#f87171" }, children: "⚠ Duration badge may overlap bottom-right" })
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px", textTransform: "uppercase" }, children: "Subject Analysis" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "3px", fontSize: "11px", color: "var(--text-secondary)" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Person: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.subjects.has_person ? `Yes (${analysis.subjects.face_count} face${analysis.subjects.face_count !== 1 ? "s" : ""})` : "No" })
+                    ] }),
+                    analysis.subjects.has_person && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        "Shot: ",
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.subjects.shot_type.replace(/_/g, " ") })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        "Expression: ",
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.subjects.facial_expression })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        "Gaze: ",
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.subjects.gaze_direction.replace(/_/g, " ") })
+                      ] })
+                    ] }),
+                    [
+                      ["Proof object", analysis.subjects.has_proof_object],
+                      ["Arrow/circle", analysis.subjects.has_arrow_circle],
+                      ["Comparison", analysis.subjects.has_comparison],
+                      ["Contradiction", analysis.subjects.has_contradiction]
+                    ].filter(([, v2]) => v2).map(([label]) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#34d399" }, children: [
+                      "✓ ",
+                      label
+                    ] }, label))
+                  ] })
+                ] }),
+                analysis.hooks.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px", textTransform: "uppercase" }, children: "Visual Hooks" }),
+                  analysis.hooks.map((h, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginBottom: "6px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "#c084fc", fontWeight: 600 }, children: h.hook_type.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+                        (h.confidence * 100).toFixed(0),
+                        "%"
+                      ] })
+                    ] }),
+                    h.title_evidence && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: h.title_evidence })
+                  ] }, i))
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "6px", textTransform: "uppercase" }, children: "Title–Thumbnail Relationship" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "3px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Type: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: analysis.title_pairing.relationship.replace(/_/g, " ") })
+                    ] }),
+                    analysis.title_pairing.redundancy_pct > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                      "Redundancy: ",
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { children: [
+                        (analysis.title_pairing.redundancy_pct * 100).toFixed(0),
+                        "%"
+                      ] })
+                    ] }),
+                    analysis.title_pairing.has_curiosity_gap && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#34d399" }, children: "✓ Creates curiosity gap" })
+                  ] })
+                ] }),
+                analysis.warnings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", borderTop: "1px solid var(--border-subtle)", paddingTop: "8px" }, children: analysis.warnings.map((w2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  "⚠ ",
+                  w2
+                ] }, i)) })
+              ] })
+            ] })
+          ]
+        }
+      )
+    }
+  );
+}
+function ThumbnailCard({
+  analysis,
+  onInspect
+}) {
+  const [imgError, setImgError] = reactExports.useState(false);
+  const topHook = analysis.hooks[0]?.hook_type?.replace(/_/g, " ") || "—";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "var(--bg-elevated)",
+    border: `1px solid ${analysis.performance_group === "outlier" ? "#34d39944" : "var(--border-subtle)"}`,
+    borderRadius: "8px",
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", aspectRatio: "16/9", background: "#111" }, children: [
+      !imgError ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "img",
+        {
+          src: analysis.thumbnail_url,
+          alt: analysis.video_title,
+          style: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+          loading: "lazy",
+          onError: () => setImgError(true)
+        }
+      ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+        width: "100%",
+        height: "100%",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "var(--text-muted)",
+        fontSize: "11px"
+      }, children: "No preview" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { position: "absolute", top: "6px", left: "6px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(PerformanceBadge, { group: analysis.performance_group }) }),
+      analysis.mobile_readability.score > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        position: "absolute",
+        top: "6px",
+        right: "6px",
+        background: "rgba(0,0,0,0.7)",
+        borderRadius: "3px",
+        padding: "1px 5px",
+        fontSize: "9px",
+        color: "var(--text-muted)"
+      }, children: [
+        "📱 ",
+        analysis.mobile_readability.score
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "10px", flex: 1, display: "flex", flexDirection: "column", gap: "4px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-primary)", lineHeight: 1.3 }, children: analysis.video_title }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px", flexWrap: "wrap", fontSize: "10px", color: "var(--text-muted)" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: fmtNum(analysis.views) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "·" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+          analysis.views_per_day.toFixed(1),
+          "/day"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "·" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+          analysis.outlier_ratio.toFixed(2),
+          "x"
+        ] })
+      ] }),
+      analysis.colors?.dominant_colors?.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "3px", marginTop: "2px" }, children: [
+        analysis.colors.dominant_colors.slice(0, 5).map((c, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+          width: "14px",
+          height: "14px",
+          borderRadius: "2px",
+          background: c.hex,
+          border: "1px solid rgba(255,255,255,0.1)"
+        }, title: c.hex }, i)),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", color: "var(--text-muted)", marginLeft: "2px", alignSelf: "center" }, children: analysis.colors.warm_cool_balance })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "4px", flexWrap: "wrap", marginTop: "2px" }, children: [
+        analysis.subjects.has_person && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", padding: "1px 4px", background: "#818cf822", color: "#818cf8", borderRadius: "2px" }, children: "👤 Person" }),
+        analysis.ocr.word_count > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "9px", padding: "1px 4px", background: "#fbbf2422", color: "#fbbf24", borderRadius: "2px" }, children: [
+          "T ",
+          analysis.ocr.word_count,
+          "w"
+        ] }),
+        analysis.colors.has_yellow && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", padding: "1px 4px", background: "#fde04722", color: "#fde047", borderRadius: "2px" }, children: "🟡" }),
+        analysis.colors.has_red && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "9px", padding: "1px 4px", background: "#ef444422", color: "#ef4444", borderRadius: "2px" }, children: "🔴" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "1px" }, children: [
+        "Hook: ",
+        topHook
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: onInspect,
+          className: "btn btn-secondary",
+          style: { marginTop: "8px", fontSize: "10px", padding: "4px 8px" },
+          children: "🔍 Inspect Thumbnail"
+        }
+      )
+    ] })
+  ] });
+}
+function PatternCard({ pattern, type }) {
+  const color = type === "winning" ? "#34d399" : "#f87171";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "var(--bg-elevated)",
+    border: `1px solid ${color}44`,
+    borderRadius: "8px",
+    padding: "14px"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", marginBottom: "6px", alignItems: "flex-start" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", fontWeight: 700, color }, children: [
+        type === "winning" ? "✓" : "✗",
+        " ",
+        pattern.name
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(ConfidenceBadge, { level: pattern.confidence })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)", marginBottom: "10px" }, children: pattern.description }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
+      { label: "Outliers", count: pattern.outlier_count, total: pattern.outlier_total, color: "#34d399" },
+      { label: "Baseline", count: pattern.baseline_count, total: pattern.baseline_total, color: "#60a5fa" },
+      { label: "Low", count: pattern.low_count, total: pattern.low_total, color: "#6b7280" }
+    ].map(({ label, count, total, color: c }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "2px" }, children: label }),
+      pctBar(count, total, c)
+    ] }, label)) }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "8px" }, children: [
+      "Sample: ",
+      pattern.sample_size,
+      " thumbnails"
+    ] })
+  ] });
+}
+function BlueprintCard({ blueprint, onCopyPrompt, onCopyBlueprint }) {
+  const [expanded, setExpanded] = reactExports.useState(false);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+    background: "var(--bg-elevated)",
+    border: "1px solid var(--border-subtle)",
+    borderRadius: "10px",
+    padding: "18px"
+  }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "10px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "2px" }, children: [
+          "📐 ",
+          blueprint.name
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px", alignItems: "center" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(ConfidenceBadge, { level: blueprint.confidence }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
+            fontSize: "9px",
+            padding: "2px 6px",
+            borderRadius: "4px",
+            background: blueprint.is_statistically_validated ? "rgba(52,211,153,0.1)" : "rgba(245,158,11,0.1)",
+            color: blueprint.is_statistically_validated ? "#34d399" : "#f59e0b",
+            border: `1px solid ${blueprint.is_statistically_validated ? "rgba(52,211,153,0.2)" : "rgba(245,158,11,0.2)"}`
+          }, children: blueprint.is_statistically_validated ? "Validated" : "Not Validated" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: {
+            fontSize: "9px",
+            padding: "2px 6px",
+            borderRadius: "4px",
+            background: "rgba(255,255,255,0.05)",
+            color: "var(--text-muted)"
+          }, children: [
+            "Mode: ",
+            blueprint.blueprint_mode.replace(/_/g, " ")
+          ] })
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          onClick: () => setExpanded((v2) => !v2),
+          className: "btn btn-secondary",
+          style: { fontSize: "11px", padding: "4px 10px" },
+          children: expanded ? "Collapse" : "Expand"
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#60a5fa", marginBottom: "8px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Use when:" }),
+      " ",
+      blueprint.use_when
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#c084fc", marginBottom: "8px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Target hook:" }),
+      " ",
+      blueprint.target_hook.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    ] }),
+    expanded && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "10px", marginTop: "12px" }, children: [
+      !blueprint.is_statistically_validated && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "rgba(245,158,11,0.08)", padding: "10px", borderRadius: "6px", border: "1px solid rgba(245,158,11,0.2)" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#f59e0b", marginBottom: "4px" }, children: "⚠ Not Statistically Validated" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#d97706", marginBottom: "4px" }, children: blueprint.fallback_reason }),
+        blueprint.evidence.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#d97706", fontStyle: "italic" }, children: [
+          "Evidence: ",
+          blueprint.evidence.join(" ")
+        ] })
+      ] }),
+      [
+        { label: "📐 Layout", content: blueprint.layout_description },
+        { label: "👤 Subject Recipe", content: blueprint.subject_recipe },
+        { label: "🖼 Background", content: blueprint.background_recipe },
+        { label: "✍ Text Recipe", content: blueprint.text_recipe },
+        { label: "🎨 Colors", content: blueprint.color_recipe },
+        { label: "💡 Lighting", content: blueprint.lighting_recipe },
+        { label: "👁 Visual Hierarchy", content: blueprint.hierarchy_recipe },
+        { label: "🔗 Title Pairing", content: blueprint.title_pairing_recipe }
+      ].filter(({ content }) => content).map(({ label, content }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "4px" }, children: label }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", whiteSpace: "pre-wrap" }, children: content })
+      ] }, label)),
+      blueprint.overlay_text_formula.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "10px", borderRadius: "6px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "var(--text-muted)", marginBottom: "4px" }, children: "📝 Text Formula" }),
+        blueprint.overlay_text_formula.map((f2, i) => /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "#fbbf24", fontFamily: "monospace" }, children: f2 }, i))
+      ] }),
+      blueprint.originality_rules.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "#111827", border: "1px solid #1f2937", padding: "10px", borderRadius: "6px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", fontWeight: 700, color: "#f59e0b", marginBottom: "4px" }, children: "🛡 Originality Guard" }),
+        blueprint.originality_rules.map((r2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+          "• ",
+          r2
+        ] }, i))
+      ] }),
+      blueprint.evidence.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Evidence:" }),
+        blueprint.evidence.map((e, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          "• ",
+          e
+        ] }, i))
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginTop: "12px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onCopyPrompt, className: "btn btn-primary", style: { fontSize: "11px", padding: "6px 12px" }, children: "📋 Copy Image Prompt" }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("button", { onClick: onCopyBlueprint, className: "btn btn-secondary", style: { fontSize: "11px", padding: "6px 12px" }, children: "📄 Copy Blueprint" })
+    ] })
+  ] });
+}
+function GroupStatsSection({ stats }) {
+  const rows = [
+    { label: "Count", key: "n" },
+    { label: "Has Text Overlay", key: "has_text_pct", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Has Face / Person", key: "has_face_pct", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Has Proof Object", key: "has_proof_pct", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Has Yellow", key: "has_yellow_pct", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Has Red", key: "has_red_pct", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Median Word Count", key: "median_word_count", fmt: (v2) => v2.toFixed(1) },
+    { label: "Median Brightness", key: "median_brightness", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Median Contrast", key: "median_contrast", fmt: (v2) => `${(v2 * 100).toFixed(0)}%` },
+    { label: "Median Mobile Score", key: "median_mobile_score", fmt: (v2) => v2.toFixed(0) },
+    { label: "Top Hook", key: "top_hook" },
+    { label: "Top Layout", key: "top_layout" }
+  ];
+  const out = stats.outlier;
+  const base = stats.baseline;
+  const low = stats.low;
+  function val(s, key, fmt2) {
+    if (!s) return "—";
+    const v2 = s[key];
+    if (v2 === void 0 || v2 === null) return "—";
+    if (typeof v2 === "number" && fmt2) return fmt2(v2);
+    return String(v2).replace(/_/g, " ");
+  }
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { overflowX: "auto" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("table", { style: { width: "100%", borderCollapse: "collapse", fontSize: "11px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("thead", { children: /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("th", { style: { textAlign: "left", padding: "6px 10px", color: "var(--text-muted)", borderBottom: "1px solid var(--border-subtle)", fontWeight: 600 }, children: "Metric" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("th", { style: { textAlign: "right", padding: "6px 10px", color: "#34d399", borderBottom: "1px solid var(--border-subtle)", fontWeight: 600 }, children: [
+          "Outlier (",
+          out?.n || 0,
+          ")"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("th", { style: { textAlign: "right", padding: "6px 10px", color: "#60a5fa", borderBottom: "1px solid var(--border-subtle)", fontWeight: 600 }, children: [
+          "Baseline (",
+          base?.n || 0,
+          ")"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("th", { style: { textAlign: "right", padding: "6px 10px", color: "#6b7280", borderBottom: "1px solid var(--border-subtle)", fontWeight: 600 }, children: [
+          "Low (",
+          low?.n || 0,
+          ")"
+        ] })
+      ] }) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("tbody", { children: rows.slice(1).map(({ label, key, fmt: fmt2 }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("tr", { style: { borderBottom: "1px solid var(--border-subtle)" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "5px 10px", color: "var(--text-muted)" }, children: label }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "5px 10px", textAlign: "right", color: "#34d399", fontWeight: 600 }, children: val(out, key, fmt2) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "5px 10px", textAlign: "right", color: "var(--text-secondary)" }, children: val(base, key, fmt2) }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("td", { style: { padding: "5px 10px", textAlign: "right", color: "var(--text-muted)" }, children: val(low, key, fmt2) })
+      ] }, label)) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "8px", fontStyle: "italic" }, children: "⚠ Associations only. These metrics do not prove causation. Sample sizes may be small. Do not claim thumbnails cause higher views." })
+  ] });
+}
+function createClientSafeFallbackBlueprint(data) {
+  return {
+    id: `client_fallback_${Date.now()}`,
+    name: "Mobile-First Safe Blueprint (Client Fallback)",
+    use_when: "Fallback when no competitor data is available.",
+    target_hook: "curiosity_gap",
+    blueprint_mode: "safe_default",
+    is_statistically_validated: false,
+    fallback_reason: "Legacy data or missing server blueprints. A safe mobile-first default blueprint is provided.",
+    source_group: "default",
+    sample_summary: {
+      total_analyzed: data.analyzed_count,
+      outlier_count: data.outlier_count,
+      baseline_count: data.baseline_count,
+      low_count: data.low_count,
+      has_valid_control_group: false
+    },
+    limitations: ["Not based on specific competitor data."],
+    based_on_pattern_ids: [],
+    layout_description: "Single dominant subject filling 45–60% of frame. Leave clear space for text.",
+    subject_recipe: "One primary subject.",
+    background_recipe: "Simple, uncluttered background with depth.",
+    text_recipe: "Maximum 2 lines, 3-6 words. High contrast.",
+    color_recipe: "High contrast palette.",
+    lighting_recipe: "Bright and clear.",
+    hierarchy_recipe: "Subject -> Text -> Background",
+    title_pairing_recipe: "Curiosity gap",
+    overlay_text_formula: ["Short hook"],
+    image_prompt_template: "YouTube thumbnail 16:9. Simple background with depth. Single dominant subject (45-60% of frame). High contrast. Concept relates to: {title}.",
+    negative_prompt: "unreadable text, distorted face, malformed hands, excessive objects",
+    evidence: [],
+    confidence: "insufficient",
+    originality_rules: ["Keep: abstract composition", "Do NOT use competitor logos or branding."]
+  };
+}
 function CompetitorTab({
   onAnalyzeCompetitor,
-  onCreateProjectFromVideo
+  onAnalyzeThumbnails,
+  onCreateProjectFromVideo,
+  isAdvancedView = false
 }) {
   const [channelUrl, setChannelUrl] = reactExports.useState("");
   const [market, setMarket] = reactExports.useState("US");
   const [loading, setLoading] = reactExports.useState(false);
   const [error, setError] = reactExports.useState(null);
   const [data, setData] = reactExports.useState(null);
+  const [thumbLoading, setThumbLoading] = reactExports.useState(false);
+  const [thumbError, setThumbError] = reactExports.useState(null);
+  const [thumbData, setThumbData] = reactExports.useState(null);
+  const [thumbProgress, setThumbProgress] = reactExports.useState("");
+  const [thumbFilter, setThumbFilter] = reactExports.useState("all");
+  const [thumbSort, setThumbSort] = reactExports.useState("outlier_ratio");
+  const [inspectedThumb, setInspectedThumb] = reactExports.useState(null);
+  const [toast, setToast] = reactExports.useState(null);
+  reactExports.useRef(null);
+  const showToast = reactExports.useCallback((msg) => {
+    setToast(msg);
+    setTimeout(() => setToast(null), 3e3);
+  }, []);
   const handleAnalyze = async (e) => {
     e.preventDefault();
     if (!channelUrl.trim() || loading) return;
     setLoading(true);
     setError(null);
+    setThumbData(null);
+    setThumbError(null);
     try {
       const res = await onAnalyzeCompetitor(channelUrl.trim(), market);
       setData(res);
+      if (res.videos_for_thumbnail && res.videos_for_thumbnail.length > 0) {
+        runThumbnailIntelligence(res);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
   };
+  const runThumbnailIntelligence = reactExports.useCallback(async (channelData) => {
+    if (!channelData.videos_for_thumbnail?.length) {
+      setThumbError("No videos with thumbnails available for analysis.");
+      return;
+    }
+    setThumbLoading(true);
+    setThumbError(null);
+    setThumbProgress("Preparing thumbnail analysis...");
+    try {
+      const result = await onAnalyzeThumbnails({
+        channel_id: channelData.channel_id,
+        channel_title: channelData.channel_title,
+        videos: channelData.videos_for_thumbnail,
+        channel_median_views: channelData.median_recent_views,
+        p75_views: channelData.p75_views,
+        max_videos: 30
+      });
+      setThumbData(result);
+      setThumbProgress("");
+    } catch (err) {
+      setThumbError(err instanceof Error ? err.message : String(err));
+      setThumbProgress("");
+    } finally {
+      setThumbLoading(false);
+    }
+  }, [onAnalyzeThumbnails]);
+  const copyText = reactExports.useCallback((text, label) => {
+    navigator.clipboard.writeText(text).then(
+      () => showToast(`✓ ${label} copied!`),
+      () => showToast(`✗ Copy failed`)
+    );
+  }, [showToast]);
+  const copyBlueprint = reactExports.useCallback((bp) => {
+    const md2 = `# ${bp.name}
+
+**Use when:** ${bp.use_when}
+**Target hook:** ${bp.target_hook.replace(/_/g, " ")}
+**Confidence:** ${bp.confidence}
+
+## Layout
+${bp.layout_description}
+
+## Subject
+${bp.subject_recipe}
+
+## Background
+${bp.background_recipe}
+
+## Text
+${bp.text_recipe}
+
+## Colors
+${bp.color_recipe}
+
+## Lighting
+${bp.lighting_recipe}
+
+## Visual Hierarchy
+${bp.hierarchy_recipe}
+
+## Title–Thumbnail Pairing
+${bp.title_pairing_recipe}
+
+## Text Formula
+${bp.overlay_text_formula.join("\n")}
+
+## Originality Guard
+${bp.originality_rules.join("\n")}
+
+## Evidence
+${bp.evidence.join("\n")}
+
+---
+*Generated by Competitor Thumbnail Intelligence V1. Patterns are correlational, not causal.*`;
+    copyText(md2, "Blueprint");
+  }, [copyText]);
+  const filteredAnalyses = thumbData ? thumbData.analyses.filter((a) => thumbFilter === "all" || a.performance_group === thumbFilter).filter((a) => !a.is_error).sort((a, b) => {
+    if (thumbSort === "outlier_ratio") return b.outlier_ratio - a.outlier_ratio;
+    if (thumbSort === "views") return b.views - a.views;
+    if (thumbSort === "views_per_day") return b.views_per_day - a.views_per_day;
+    if (thumbSort === "mobile") return b.mobile_readability.score - a.mobile_readability.score;
+    if (thumbSort === "newest") return a.video_age_days - b.video_age_days;
+    return 0;
+  }) : [];
   return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "24px" }, children: [
+    toast && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+      position: "fixed",
+      top: "16px",
+      right: "16px",
+      zIndex: 2e3,
+      background: "#1e293b",
+      border: "1px solid #334155",
+      borderRadius: "8px",
+      padding: "10px 16px",
+      fontSize: "12px",
+      color: "#e2e8f0",
+      boxShadow: "0 4px 12px rgba(0,0,0,0.4)"
+    }, children: toast }),
+    inspectedThumb && /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ThumbnailInspector,
+      {
+        analysis: inspectedThumb,
+        onClose: () => setInspectedThumb(null)
+      }
+    ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
       background: "var(--bg-elevated)",
       border: "1px solid var(--border-subtle)",
@@ -19482,7 +26109,7 @@ function CompetitorTab({
       padding: "24px"
     }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { fontSize: "15px", fontWeight: 700, margin: "0 0 6px 0", color: "var(--text-primary)" }, children: "Public Channel Baseline Intelligence" }),
-      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "12px", color: "var(--text-muted)", margin: "0 0 16px 0" }, children: "Analyze public baseline views, upload cadence, repeat topics, and breakout outliers from any creator channel." }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "12px", color: "var(--text-muted)", margin: "0 0 16px 0" }, children: "Analyze public baseline views, upload cadence, repeat topics, breakout outliers, and thumbnail visual patterns from any creator channel." }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("form", { onSubmit: handleAnalyze, style: { display: "flex", gap: "10px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "input",
@@ -19557,11 +26184,7 @@ function CompetitorTab({
           }
         )
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-        display: "grid",
-        gridTemplateColumns: "repeat(4, 1fr)",
-        gap: "12px"
-      }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "12px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-elevated)", padding: "14px", borderRadius: "8px", border: "1px solid var(--border-subtle)" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Median Recent Views" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "20px", fontWeight: 700, color: "#34d399", marginTop: "4px" }, children: data.median_recent_views.toLocaleString() }),
@@ -19583,11 +26206,7 @@ function CompetitorTab({
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }, children: "Content discipline" })
         ] })
       ] }),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
-        display: "grid",
-        gridTemplateColumns: "1fr 1fr",
-        gap: "16px"
-      }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-elevated)", padding: "18px", borderRadius: "8px", border: "1px solid var(--border-subtle)" }, children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", margin: "0 0 10px 0" }, children: "Best Repeated Topic Themes" }),
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: "8px" }, children: data.best_repeated_topics.map((t2, idx) => /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: {
@@ -19618,11 +26237,7 @@ function CompetitorTab({
           data.outlier_videos.length,
           ")"
         ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
-          display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
-          gap: "14px"
-        }, children: data.outlier_videos.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "14px" }, children: data.outlier_videos.map((v2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
           background: "var(--bg-elevated)",
           border: "1px solid var(--border-subtle)",
           borderRadius: "8px",
@@ -19670,8 +26285,270 @@ function CompetitorTab({
             )
           ] })
         ] }, v2.video_id)) })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+        background: "var(--bg-elevated)",
+        border: "1px solid var(--border-subtle)",
+        borderRadius: "10px",
+        overflow: "hidden"
+      }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+          padding: "18px 20px",
+          background: "linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%)",
+          borderBottom: "1px solid var(--border-subtle)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between"
+        }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("h3", { style: { fontSize: "15px", fontWeight: 700, margin: 0, color: "#a5b4fc" }, children: "🖼 Thumbnail Intelligence" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { fontSize: "11px", color: "#6366f1", margin: "4px 0 0 0" }, children: "Visual pattern analysis across outlier, baseline, and low-performing videos" })
+          ] }),
+          data.videos_for_thumbnail && data.videos_for_thumbnail.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              onClick: () => runThumbnailIntelligence(data),
+              disabled: thumbLoading,
+              className: "btn btn-secondary",
+              style: { fontSize: "11px", padding: "6px 12px" },
+              children: thumbLoading ? "⏳ Analyzing..." : "🔄 Re-analyze Thumbnails"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { padding: "20px" }, children: [
+          thumbLoading && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            padding: "20px",
+            textAlign: "center",
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: "8px"
+          }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: {
+              width: "36px",
+              height: "36px",
+              borderRadius: "50%",
+              border: "3px solid var(--border-subtle)",
+              borderTopColor: "#6366f1",
+              animation: "spin 1s linear infinite"
+            } }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", color: "var(--text-muted)" }, children: thumbProgress || "Analyzing thumbnails..." }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Downloading and analyzing up to 30 thumbnails concurrently..." })
+          ] }),
+          thumbError && !thumbLoading && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+            padding: "12px",
+            background: "rgba(239,68,68,0.08)",
+            border: "1px solid rgba(239,68,68,0.2)",
+            borderRadius: "8px",
+            fontSize: "12px",
+            color: "#f87171"
+          }, children: [
+            "⚠ Thumbnail analysis failed: ",
+            thumbError,
+            /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Channel baseline data above is still valid." })
+          ] }),
+          !thumbLoading && !thumbError && !thumbData && data.videos_for_thumbnail?.length === 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-muted)", textAlign: "center", padding: "20px" }, children: "No videos with thumbnail URLs available for analysis." }),
+          thumbData && !thumbLoading && (() => {
+            const safeBlueprints = thumbData.blueprints.length > 0 ? thumbData.blueprints : [createClientSafeFallbackBlueprint(thumbData)];
+            const primaryBlueprint = safeBlueprints[0];
+            return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "24px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "10px" }, children: [
+                { label: "Analyzed", value: thumbData.analyzed_count, color: "#34d399" },
+                { label: "Outliers", value: thumbData.outlier_count, color: "#f59e0b" },
+                { label: "Baseline", value: thumbData.baseline_count, color: "#60a5fa" },
+                { label: "Low Performers", value: thumbData.low_count, color: "#6b7280" }
+              ].map(({ label, value, color }) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: {
+                background: "var(--bg-base)",
+                padding: "12px",
+                borderRadius: "8px",
+                border: "1px solid var(--border-subtle)",
+                textAlign: "center"
+              }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "22px", fontWeight: 700, color }, children: value }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginTop: "2px" }, children: label })
+              ] }, label)) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: "Analysis confidence:" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(ConfidenceBadge, { level: thumbData.overall_confidence }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+                  "Provider: ",
+                  thumbData.provider
+                ] }),
+                thumbData.cached_count > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: [
+                  "• ",
+                  thumbData.cached_count,
+                  " cached"
+                ] }),
+                thumbData.failed_count > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "#f87171" }, children: [
+                  "• ",
+                  thumbData.failed_count,
+                  " failed"
+                ] })
+              ] }),
+              thumbData.limitations.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "10px", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.2)", borderRadius: "6px" }, children: thumbData.limitations.map((l2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "#f59e0b" }, children: [
+                "⚠ ",
+                l2
+              ] }, i)) }),
+              !isAdvancedView ? /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "16px" }, children: [
+                filteredAnalyses.slice(0, 6).length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", fontWeight: 700, color: "var(--text-primary)", marginBottom: "10px" }, children: [
+                    "Thumbnail Sample (",
+                    filteredAnalyses.slice(0, 6).length,
+                    ")"
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "10px" }, children: filteredAnalyses.slice(0, 6).map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx(ThumbnailCard, { analysis: a, onInspect: () => setInspectedThumb(a) }, a.video_id)) })
+                ] }),
+                thumbData.winning_patterns.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { fontSize: "13px", fontWeight: 700, color: "#34d399", margin: "0 0 10px 0" }, children: "✓ Top Observed Patterns (Outliers)" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: "10px" }, children: thumbData.winning_patterns.slice(0, 3).map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(PatternCard, { pattern: p2, type: "winning" }, p2.pattern_id)) })
+                ] }),
+                thumbData.avoid_patterns.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { fontSize: "13px", fontWeight: 700, color: "#f87171", margin: "0 0 10px 0" }, children: "✗ Patterns to Consider Avoiding" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: "10px" }, children: thumbData.avoid_patterns.slice(0, 3).map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(PatternCard, { pattern: p2, type: "avoid" }, p2.pattern_id)) })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { fontSize: "13px", fontWeight: 700, color: "#a5b4fc", margin: "0 0 10px 0" }, children: "📐 Recommended Blueprint" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    BlueprintCard,
+                    {
+                      blueprint: primaryBlueprint,
+                      onCopyPrompt: () => copyText(primaryBlueprint.image_prompt_template, "Image Prompt"),
+                      onCopyBlueprint: () => copyBlueprint(primaryBlueprint)
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  ThumbnailPromptStudio,
+                  {
+                    channelTitle: data.channel_title,
+                    blueprint: primaryBlueprint,
+                    thumbnailIntelligence: thumbData,
+                    market
+                  }
+                )
+              ] }) : (
+                /* Advanced View */
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "24px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "12px", flexWrap: "wrap", gap: "8px" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("h4", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", margin: 0 }, children: [
+                        "Thumbnail Gallery (",
+                        filteredAnalyses.length,
+                        "/",
+                        thumbData.analyses.length,
+                        ")"
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" }, children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                          "select",
+                          {
+                            value: thumbFilter,
+                            onChange: (e) => setThumbFilter(e.target.value),
+                            style: { background: "var(--bg-base)", border: "1px solid var(--border-subtle)", borderRadius: "4px", padding: "4px 8px", color: "var(--text-primary)", fontSize: "11px" },
+                            children: [
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "all", children: "All Groups" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "outlier", children: "Outliers" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "baseline", children: "Baseline" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "low", children: "Low Performers" })
+                            ]
+                          }
+                        ),
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                          "select",
+                          {
+                            value: thumbSort,
+                            onChange: (e) => setThumbSort(e.target.value),
+                            style: { background: "var(--bg-base)", border: "1px solid var(--border-subtle)", borderRadius: "4px", padding: "4px 8px", color: "var(--text-primary)", fontSize: "11px" },
+                            children: [
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "outlier_ratio", children: "Sort: Outlier Ratio" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "views", children: "Sort: Views" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "views_per_day", children: "Sort: Views/Day" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "mobile", children: "Sort: Mobile Score" }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "newest", children: "Sort: Newest" })
+                            ]
+                          }
+                        )
+                      ] })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: "10px" }, children: filteredAnalyses.map((a) => /* @__PURE__ */ jsxRuntimeExports.jsx(ThumbnailCard, { analysis: a, onInspect: () => setInspectedThumb(a) }, a.video_id)) })
+                  ] }),
+                  thumbData.winning_patterns.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("h4", { style: { fontSize: "13px", fontWeight: 700, color: "#34d399", margin: "0 0 10px 0" }, children: [
+                      "✓ Winning Visual Patterns (",
+                      thumbData.winning_patterns.length,
+                      ")"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" }, children: thumbData.winning_patterns.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(PatternCard, { pattern: p2, type: "winning" }, p2.pattern_id)) })
+                  ] }),
+                  thumbData.avoid_patterns.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("h4", { style: { fontSize: "13px", fontWeight: 700, color: "#f87171", margin: "0 0 10px 0" }, children: [
+                      "✗ Patterns to Consider Avoiding (",
+                      thumbData.avoid_patterns.length,
+                      ")"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "12px" }, children: thumbData.avoid_patterns.map((p2) => /* @__PURE__ */ jsxRuntimeExports.jsx(PatternCard, { pattern: p2, type: "avoid" }, p2.pattern_id)) })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "16px", borderRadius: "8px", border: "1px solid var(--border-subtle)" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("h4", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", margin: "0 0 12px 0" }, children: "Outlier vs Baseline vs Low — Statistical Comparison" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(GroupStatsSection, { stats: thumbData.group_stats })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("h4", { style: { fontSize: "13px", fontWeight: 700, color: "#a5b4fc", margin: "0 0 10px 0" }, children: [
+                      "📐 Reusable Thumbnail Blueprints (",
+                      safeBlueprints.length,
+                      ")"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", flexDirection: "column", gap: "12px" }, children: safeBlueprints.map((bp) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      BlueprintCard,
+                      {
+                        blueprint: bp,
+                        onCopyPrompt: () => copyText(bp.image_prompt_template, "Image Prompt"),
+                        onCopyBlueprint: () => copyBlueprint(bp)
+                      },
+                      bp.id
+                    )) })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(ThumbnailGeneratorSection, { blueprints: safeBlueprints }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    ThumbnailPromptStudio,
+                    {
+                      channelTitle: data.channel_title,
+                      blueprint: primaryBlueprint,
+                      thumbnailIntelligence: thumbData,
+                      market
+                    }
+                  ),
+                  thumbData.failure_details.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-base)", padding: "12px", borderRadius: "6px", border: "1px solid var(--border-subtle)" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("h5", { style: { fontSize: "12px", fontWeight: 700, color: "#f87171", margin: "0 0 8px 0" }, children: [
+                      "Failed Thumbnails (",
+                      thumbData.failure_details.length,
+                      ")"
+                    ] }),
+                    thumbData.failure_details.map((f2, i) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "var(--text-muted)", marginBottom: "2px" }, children: [
+                      f2.video_id,
+                      ": ",
+                      f2.reason
+                    ] }, i))
+                  ] })
+                ] })
+              )
+            ] });
+          })(),
+          data && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            SimilarChannelsPanel,
+            {
+              competitor: data,
+              market,
+              language: "en"
+            }
+          )
+        ] })
       ] })
-    ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("style", { children: `
+        @keyframes spin { to { transform: rotate(360deg); } }
+      ` })
   ] });
 }
 function SavedResearchTab({
@@ -20620,9 +27497,11 @@ function YouTubeResearchPage({ onNavigate }) {
         CompetitorTab,
         {
           onAnalyzeCompetitor: (url, mkt) => researchApi.analyzeCompetitor(url, mkt),
+          onAnalyzeThumbnails: (payload) => researchApi.analyzeThumbnailIntelligence(payload),
           onCreateProjectFromVideo: (title) => {
             setHandoffKeyword(title);
-          }
+          },
+          isAdvancedView
         }
       ),
       activeTab === "saved" && /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -20675,7 +27554,8 @@ function YouTubeResearchPage({ onNavigate }) {
       ResearchSettingsModal,
       {
         onClose: () => setSettingsModalOpen(false),
-        onSettingsUpdated: refreshStatusAndProjects
+        onSettingsUpdated: refreshStatusAndProjects,
+        onRestartSidecar: handleRestartSidecar
       }
     )
   ] }) });
@@ -20884,7 +27764,13 @@ function App() {
         ),
         currentPage === "settings" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsPage, { project, onUpdateSettings: updateSettings }),
         currentPage === "analysis" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(AnalysisPage, { project, scanResult }),
-        currentPage === "render" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(RenderPage, { project }),
+        currentPage === "render" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          RenderPage,
+          {
+            project,
+            onNavigate: (p2) => navigate(p2)
+          }
+        ),
         currentPage === "qa" && /* @__PURE__ */ jsxRuntimeExports.jsx(QAPage, {}),
         currentPage === "youtube-research" && /* @__PURE__ */ jsxRuntimeExports.jsx(
           YouTubeResearchPage,
@@ -20892,236 +27778,26 @@ function App() {
             project,
             onNavigate: (p2) => navigate(p2)
           }
+        ),
+        currentPage === "thumbnails" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          ThumbnailStudioPage,
+          {
+            project,
+            onNavigate: (p2) => navigate(p2)
+          }
+        ),
+        currentPage === "thumbnail-library" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          ThumbnailPromptLibraryPage,
+          {
+            onBack: () => navigate(project ? "thumbnails" : "home")
+          }
         )
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(ProgressLog, { logs: activeLogs, scanProgress: activeProgress })
   ] });
 }
-const mockProject = {
-  id: "mock-proj-1",
-  name: "History of Artificial Intelligence",
-  projectDir: "/Users/macbook/Documents/Projects/AI-History",
-  status: "idle",
-  settings: {
-    resolution: "1080p",
-    aspectRatio: "16:9",
-    language: "vi"
-  },
-  inputs: {
-    scriptPath: "/mock/script.txt",
-    voiceoverPath: "/mock/voice.mp3",
-    imagesFolder: "/mock/images",
-    videosFolder: "/mock/videos",
-    musicFolder: "/mock/music",
-    sfxFolder: "/mock/sfx"
-  },
-  stats: {
-    totalImages: 12,
-    totalVideos: 28,
-    totalMusic: 4,
-    totalSfx: 16,
-    voiceDurationSeconds: 480,
-    estimatedScenes: 95,
-    estimatedChapters: 6
-  },
-  createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-  updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-  lastOperation: null,
-  error: null
-};
-function getMockState(mode) {
-  if (mode === "stock-search") {
-    return {
-      schemaVersion: 1,
-      version: 18,
-      runId: "run-stock-search-demo",
-      projectDir: mockProject.projectDir,
-      currentStage: "stock-search",
-      overallStatus: "running",
-      startedAt: new Date(Date.now() - 48e3).toISOString(),
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      inputFingerprint: { scriptPath: "/mock/script.txt", voiceoverPath: "/mock/voice.mp3" },
-      options: { videoDimensions: { width: 1920, height: 1080 } },
-      stages: {
-        validating: { status: "completed", progress: 1, durationMs: 2400 },
-        transcribing: { status: "completed", progress: 1, durationMs: 14200 },
-        planning: { status: "completed", progress: 1, durationMs: 18500 },
-        captions: { status: "completed", progress: 1, durationMs: 8200 },
-        "global-context": { status: "completed", progress: 1, durationMs: 11800, artifactPath: "/mock/artifacts/global-context.json" },
-        "stock-search": {
-          status: "running",
-          progress: 0.83,
-          message: "Searching Pexels/Pixabay [79/95 scenes matched]",
-          startedAt: new Date(Date.now() - 15e3).toISOString(),
-          stats: { totalScenes: 95, processedScenes: 79, assignedScenes: 79, downloadedScenes: 65 }
-        },
-        "audio-search": { status: "pending", progress: 0 },
-        preflight: { status: "pending", progress: 0 },
-        rendering: { status: "pending", progress: 0 },
-        postflight: { status: "pending", progress: 0 }
-      },
-      warnings: [],
-      fatalErrors: []
-    };
-  }
-  if (mode === "rendering") {
-    return {
-      schemaVersion: 1,
-      version: 42,
-      runId: "run-rendering-demo",
-      projectDir: mockProject.projectDir,
-      currentStage: "rendering",
-      overallStatus: "running",
-      startedAt: new Date(Date.now() - 145e3).toISOString(),
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      inputFingerprint: { scriptPath: "/mock/script.txt", voiceoverPath: "/mock/voice.mp3" },
-      options: { videoDimensions: { width: 1920, height: 1080 } },
-      stages: {
-        validating: { status: "completed", progress: 1, durationMs: 2400 },
-        transcribing: { status: "completed", progress: 1, durationMs: 14200 },
-        planning: { status: "completed", progress: 1, durationMs: 18500 },
-        captions: { status: "completed", progress: 1, durationMs: 8200 },
-        "global-context": { status: "completed", progress: 1, durationMs: 11800 },
-        "stock-search": { status: "completed", progress: 1, durationMs: 52e3, stats: { totalScenes: 95, assignedScenes: 95 } },
-        "audio-search": { status: "completed", progress: 1, durationMs: 16e3 },
-        preflight: { status: "completed", progress: 1, durationMs: 4100, artifactPath: "/mock/artifacts/preflight-report.json" },
-        rendering: {
-          status: "running",
-          progress: 0.62,
-          message: "Compositing frame 1302/2100 (Captions + Audio Ducking)",
-          startedAt: new Date(Date.now() - 18e3).toISOString(),
-          stats: { currentFrame: 1302, totalFrames: 2100, fps: 30 }
-        },
-        postflight: { status: "pending", progress: 0 }
-      },
-      warnings: [],
-      fatalErrors: []
-    };
-  }
-  return {
-    schemaVersion: 1,
-    version: 35,
-    runId: "run-recovery-demo",
-    projectDir: mockProject.projectDir,
-    currentStage: "rendering",
-    overallStatus: "interrupted",
-    startedAt: new Date(Date.now() - 165e3).toISOString(),
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    inputFingerprint: { scriptPath: "/mock/script.txt", voiceoverPath: "/mock/voice.mp3" },
-    options: { videoDimensions: { width: 1920, height: 1080 } },
-    stages: {
-      validating: { status: "completed", progress: 1, durationMs: 2400 },
-      transcribing: { status: "completed", progress: 1, durationMs: 14200 },
-      planning: { status: "completed", progress: 1, durationMs: 18500 },
-      captions: { status: "completed", progress: 1, durationMs: 8200 },
-      "global-context": { status: "completed", progress: 1, durationMs: 11800 },
-      "stock-search": { status: "completed", progress: 1, durationMs: 52e3 },
-      "audio-search": { status: "completed", progress: 1, durationMs: 16e3 },
-      preflight: { status: "completed", progress: 1, durationMs: 4100 },
-      rendering: {
-        status: "interrupted",
-        progress: 0.45,
-        message: "Application closed — ready to resume",
-        durationMs: 9500
-      },
-      postflight: { status: "pending", progress: 0 }
-    },
-    warnings: [],
-    fatalErrors: []
-  };
-}
-function PreviewApp() {
-  const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
-  const initialMode = urlParams?.get("preview") || "stock-search";
-  const [activeScenario, setActiveScenario] = reactExports.useState(
-    initialMode === "rendering" || initialMode === "recovery" ? initialMode : "stock-search"
-  );
-  const currentState = getMockState(activeScenario);
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { minHeight: "100vh", background: "var(--bg-void, #12121c)", color: "#fff" }, children: [
-    /* @__PURE__ */ jsxRuntimeExports.jsxs(
-      "div",
-      {
-        style: {
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "8px 24px",
-          background: "rgba(0,0,0,0.6)",
-          borderBottom: "1px solid rgba(255,255,255,0.1)",
-          position: "sticky",
-          top: 0,
-          zIndex: 100
-        },
-        children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--brand-accent, #a78bfa)" }, children: "QA Preview Scenarios:" }),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "button",
-              {
-                type: "button",
-                className: `btn btn-sm ${activeScenario === "stock-search" ? "btn-primary" : "btn-secondary"}`,
-                onClick: () => setActiveScenario("stock-search"),
-                id: "scenario-stock",
-                children: "1. Stock Search (Running)"
-              }
-            ),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "button",
-              {
-                type: "button",
-                className: `btn btn-sm ${activeScenario === "rendering" ? "btn-primary" : "btn-secondary"}`,
-                onClick: () => setActiveScenario("rendering"),
-                id: "scenario-render",
-                children: "2. Rendering Video (Running)"
-              }
-            ),
-            /* @__PURE__ */ jsxRuntimeExports.jsx(
-              "button",
-              {
-                type: "button",
-                className: `btn btn-sm ${activeScenario === "recovery" ? "btn-primary" : "btn-secondary"}`,
-                onClick: () => setActiveScenario("recovery"),
-                id: "scenario-recovery",
-                children: "3. Recovery State (Paused Safely)"
-              }
-            )
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted, #9ca3af)" }, children: [
-            "Mode: ",
-            activeScenario,
-            " · Elapsed: ",
-            activeScenario === "recovery" ? "02:07" : "00:48+"
-          ] })
-        ]
-      }
-    ),
-    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "24px 20px 80px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-      ClientPipelineDashboard,
-      {
-        project: mockProject,
-        pipelineState: currentState,
-        isRunning: activeScenario !== "recovery",
-        onCancel: async () => {
-          alert("Cancel clicked");
-          return true;
-        },
-        onResume: async () => {
-          alert("Resume Production clicked");
-          return true;
-        },
-        onRetryStage: async (stg) => {
-          alert(`Retry stage: ${stg}`);
-          return true;
-        },
-        onNavigate: (page) => {
-          alert(`Navigate called with target page: "${page}"`);
-        }
-      }
-    ) })
-  ] });
-}
-const isPreviewMode = typeof window !== "undefined" && (!window.api || window.location.search.includes("preview="));
+typeof window !== "undefined" && (!window.api || window.location.search.includes("preview="));
 client.createRoot(document.getElementById("root")).render(
-  /* @__PURE__ */ jsxRuntimeExports.jsx(React.StrictMode, { children: isPreviewMode ? /* @__PURE__ */ jsxRuntimeExports.jsx(PreviewApp, {}) : /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
+  /* @__PURE__ */ jsxRuntimeExports.jsx(React.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
 );

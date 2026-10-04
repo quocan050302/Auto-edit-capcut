@@ -1,6 +1,7 @@
 "use strict";
 const electron = require("electron");
 const path = require("path");
+const url = require("url");
 const utils = require("@electron-toolkit/utils");
 const fs = require("fs");
 const uuid = require("uuid");
@@ -8,13 +9,12 @@ const winston = require("winston");
 const crypto = require("crypto");
 const ffprobeStatic$2 = require("ffprobe-static");
 const os = require("os");
-const child_process = require("child_process");
+const cp = require("child_process");
 const genai = require("@google/genai");
 const bundler = require("@remotion/bundler");
 const renderer = require("@remotion/renderer");
 const https = require("https");
 const http = require("http");
-const url = require("url");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -36,6 +36,7 @@ const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const winston__namespace = /* @__PURE__ */ _interopNamespaceDefault(winston);
 const crypto__namespace = /* @__PURE__ */ _interopNamespaceDefault(crypto);
 const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
+const cp__namespace = /* @__PURE__ */ _interopNamespaceDefault(cp);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 const DEFAULT_VISUAL_TRUTH_WEIGHTS = {
@@ -178,7 +179,43 @@ const IPC_CHANNELS = {
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
   RESEARCH_GET_SETTINGS: "research:get-settings",
   RESEARCH_SAVE_SETTINGS: "research:save-settings",
-  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff"
+  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff",
+  // Thumbnail Studio & Google Flow companion workflow
+  THUMBNAIL_TEMPLATE_LIST: "thumbnail:template-list",
+  THUMBNAIL_TEMPLATE_CREATE: "thumbnail:template-create",
+  THUMBNAIL_TEMPLATE_UPDATE: "thumbnail:template-update",
+  THUMBNAIL_TEMPLATE_DUPLICATE: "thumbnail:template-duplicate",
+  THUMBNAIL_TEMPLATE_DELETE: "thumbnail:template-delete",
+  THUMBNAIL_TEMPLATE_IMPORT: "thumbnail:template-import",
+  THUMBNAIL_TEMPLATE_EXPORT: "thumbnail:template-export",
+  THUMBNAIL_SETTINGS_GET: "thumbnail:settings-get",
+  THUMBNAIL_SETTINGS_SAVE: "thumbnail:settings-save",
+  THUMBNAIL_FLOW_HEALTH: "thumbnail:flow-health",
+  THUMBNAIL_FLOW_OPEN: "thumbnail:flow-open",
+  THUMBNAIL_PLAN_GENERATE: "thumbnail:plan-generate",
+  THUMBNAIL_JOB_START: "thumbnail:job-start",
+  THUMBNAIL_JOB_GET: "thumbnail:job-get",
+  THUMBNAIL_JOB_RESUME: "thumbnail:job-resume",
+  THUMBNAIL_JOB_CANCEL: "thumbnail:job-cancel",
+  THUMBNAIL_JOB_GENERATE_MORE: "thumbnail:job-generate-more",
+  THUMBNAIL_CANDIDATE_RETRY: "thumbnail:candidate-retry",
+  THUMBNAIL_CANDIDATE_REGENERATE: "thumbnail:candidate-regenerate",
+  THUMBNAIL_CANDIDATE_EXPORT_4K: "thumbnail:candidate-export-4k",
+  THUMBNAIL_CANDIDATE_SELECT: "thumbnail:candidate-select",
+  THUMBNAIL_OPEN_FOLDER: "thumbnail:open-folder",
+  THUMBNAIL_READ_IMAGE: "thumbnail:read-image",
+  THUMBNAIL_PROGRESS: "thumbnail:progress",
+  // FlowKit Runtime Manager
+  FLOWKIT_RUNTIME_GET_SETTINGS: "flowkit:runtime-get-settings",
+  FLOWKIT_RUNTIME_SAVE_SETTINGS: "flowkit:runtime-save-settings",
+  FLOWKIT_RUNTIME_START: "flowkit:runtime-start",
+  FLOWKIT_RUNTIME_STOP: "flowkit:runtime-stop",
+  FLOWKIT_RUNTIME_STATUS: "flowkit:runtime-status",
+  FLOWKIT_RUNTIME_LOG: "flowkit:runtime-log",
+  FLOWKIT_RUNTIME_SELECT_FOLDER: "flowkit:runtime-select-folder",
+  FLOWKIT_RUNTIME_SELECT_PYTHON: "flowkit:runtime-select-python",
+  FLOWKIT_RUNTIME_ENSURE_READY: "flowkit:runtime-ensure-ready",
+  FLOWKIT_RUNTIME_DETECT_PYTHON: "flowkit:runtime-detect-python"
 };
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
@@ -638,7 +675,7 @@ function getUvPath() {
   }
   try {
     const cmd = process.platform === "win32" ? "where uv" : "which uv";
-    const out = child_process.execSync(cmd, { encoding: "utf8", env: process.env }).trim().split(/\r?\n/)[0].trim();
+    const out = cp.execSync(cmd, { encoding: "utf8", env: process.env }).trim().split(/\r?\n/)[0].trim();
     if (out && fs__namespace.existsSync(out)) {
       return out;
     }
@@ -681,7 +718,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
   }
   const uvExists = fs__namespace.existsSync(uvPath) || (() => {
     try {
-      child_process.execSync(`${uvPath} --version`, { stdio: "ignore" });
+      cp.execSync(`${uvPath} --version`, { stdio: "ignore" });
       return true;
     } catch {
       return false;
@@ -710,7 +747,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
       modelsDir
     ];
     logger.info(`Spawning: ${uvPath} ${args.join(" ")}`);
-    const proc = child_process.spawn(uvPath, args, {
+    const proc = cp.spawn(uvPath, args, {
       env: { ...process.env },
       windowsHide: true
     });
@@ -3178,7 +3215,7 @@ async function probeVideoDuration(filePath) {
     const ffp = require("ffprobe-static");
     if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
     return new Promise((resolve) => {
-      const proc = child_process.spawn(
+      const proc = cp.spawn(
         ffp.path,
         [
           "-v",
@@ -3211,7 +3248,7 @@ async function probeVideoDuration(filePath) {
 }
 function ffmpegRun$2(args) {
   return new Promise((resolve, reject) => {
-    const proc = child_process.spawn(ffmpegPath$2, args, { windowsHide: true });
+    const proc = cp.spawn(ffmpegPath$2, args, { windowsHide: true });
     const stderr = [];
     proc.stderr.on("data", (d) => stderr.push(d.toString()));
     proc.on("close", (code) => {
@@ -4967,7 +5004,7 @@ async function probeMediaDetailed(filePath) {
       return null;
     }
     return new Promise((resolve) => {
-      const proc = child_process.spawn(
+      const proc = cp.spawn(
         ffprobeStatic$1.path,
         [
           "-v",
@@ -5039,7 +5076,7 @@ async function analyzeVideoQuality(filePath, totalDuration) {
     return result;
   }
   return new Promise((resolve) => {
-    const proc = child_process.spawn(
+    const proc = cp.spawn(
       ffmpegStatic$1,
       [
         "-v",
@@ -5112,7 +5149,7 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
       const ts = Math.min(timestamps[i], Math.max(0, durationSecs - 0.2));
       const framePath = `${tmpDir}/frame_${i}.jpg`;
       await new Promise((resolve) => {
-        const p = child_process.spawn(
+        const p = cp.spawn(
           ffmpegStatic$1,
           [
             "-y",
@@ -5142,7 +5179,7 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
     const tileFilter = extractedFiles.length >= 5 ? "tile=5x1" : `tile=${extractedFiles.length}x1`;
     const concatInputArgs = extractedFiles.flatMap((f) => ["-i", f]);
     await new Promise((resolve, reject) => {
-      const p = child_process.spawn(
+      const p = cp.spawn(
         ffmpegStatic$1,
         [
           "-y",
@@ -5500,7 +5537,7 @@ function buildReport(expectedDuration, actualDuration, totalScenes, issues) {
 const ffmpegPath$1 = require("ffmpeg-static");
 function ffmpegRun$1(args) {
   return new Promise((resolve, reject) => {
-    const proc = child_process.spawn(ffmpegPath$1, args, { windowsHide: true });
+    const proc = cp.spawn(ffmpegPath$1, args, { windowsHide: true });
     const stderr = [];
     proc.stderr.on("data", (d) => stderr.push(d.toString()));
     proc.on("close", (code) => {
@@ -5527,7 +5564,7 @@ async function probeVideoInfo(filePath) {
     const ffp = require("ffprobe-static");
     if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
     return new Promise((resolve) => {
-      const proc = child_process.spawn(
+      const proc = cp.spawn(
         ffp.path,
         [
           "-v",
@@ -6630,6 +6667,3149 @@ function resolveProofPosition(pv, captionState, sceneIndex) {
   const corners = ["bottom_right", "top_right", "bottom_right", "top_right"];
   return corners[sceneIndex % corners.length];
 }
+const BUILTIN_MASTER_PROMPT_TEXT = `# MASTER PROMPT — SCRIPT TO YOUTUBE THUMBNAIL
+
+Bạn là chuyên gia thiết kế thumbnail cho kênh YouTube thị trường Mỹ.
+
+Đọc toàn bộ script được cung cấp và tạo đúng {{VARIANT_COUNT}} phương án thumbnail khác nhau. Giá trị mặc định của {{VARIANT_COUNT}} là 5.
+
+Mục tiêu hình ảnh:
+
+- Ảnh chụp đời thực, photorealistic, giàu chi tiết và trông như một khoảnh khắc có thể xảy ra tại Mỹ.
+- Bối cảnh có thể là siêu thị dạng kho, kệ thực phẩm, quầy đồ hộp, cửa hàng tạp hóa, bãi đỗ xe hoặc kho dự trữ tại nhà, tùy nội dung script.
+- Thumbnail 16:9, thiết kế ở 3840 × 2160 px.
+- Hai dòng chữ cực lớn ở vùng 35–45% phía trên ảnh.
+- Dòng đầu màu vàng tươi.
+- Dòng thứ hai màu trắng.
+- Chữ in hoa, condensed sans-serif siêu đậm, viền đen dày và bóng tối nhẹ.
+- Phần dưới thể hiện rõ thực phẩm, vật dụng, con người hoặc tình huống trung tâm.
+- Thumbnail phải đọc được trên điện thoại.
+- Mỗi phương án phải tạo một curiosity gap nhưng không được bóp méo nội dung script.
+
+DỮ LIỆU ĐẦU VÀO
+
+FULL SCRIPT:
+
+{{SCRIPT}}
+
+VIDEO TITLE HIỆN CÓ:
+
+{{VIDEO_TITLE}}
+
+GLOBAL VISUAL CONTEXT:
+
+{{GLOBAL_VISUAL_CONTEXT}}
+
+OUTPUT LANGUAGE:
+
+{{OUTPUT_LANGUAGE}}
+
+CÁC CONCEPT ĐÃ DÙNG Ở CÁC ROUND TRƯỚC:
+
+{{PREVIOUS_CONCEPTS}}
+
+BƯỚC 1 — HIỂU SCRIPT
+
+Đọc toàn bộ script và xác định:
+
+1. Chủ đề chính video thực sự giải thích.
+2. Một chi tiết cụ thể và dễ thể hiện bằng hình ảnh.
+3. Điều người xem lo lắng hoặc muốn đạt được.
+4. Lời hứa thực tế video có thể đáp ứng.
+5. Các con số, địa điểm, thời hạn hoặc sản phẩm được script nhắc đến rõ ràng.
+6. Những tuyên bố không được phép suy diễn thêm.
+
+Không lấy riêng một câu giật gân rồi tạo thumbnail sai trọng tâm.
+
+Không tự bịa:
+
+- Tình trạng thiếu hàng.
+- Tăng giá.
+- Thiên tai.
+- Hạn chót.
+- Khủng hoảng.
+- Con số.
+- Dự báo.
+- Sự kiện chưa được script hỗ trợ.
+
+Nếu script chỉ nói về cách chuẩn bị nói chung, sử dụng hook về lợi ích hoặc sự tò mò, không tuyên bố một cuộc khủng hoảng sắp xảy ra.
+
+BƯỚC 2 — TẠO ĐÚNG 5 GÓC THUMBNAIL
+
+Tạo đúng 5 phương án khác nhau về ý tưởng hình ảnh, bố cục, chủ thể hoặc curiosity gap.
+
+Có thể sử dụng các hướng:
+
+A — Con người và tình huống:
+Người mua hàng, gia đình, giỏ hàng hoặc một hành động cụ thể. Khuôn mặt và hành động đủ lớn để nhìn rõ khi thu nhỏ.
+
+B — Sản phẩm và giải pháp:
+Kệ hàng, thực phẩm hoặc vật dụng thiết yếu được xếp rõ ràng. Có một nhóm sản phẩm chính nổi bật.
+
+C — Hậu quả hoặc sự thay đổi:
+Giá tại quầy, kệ hàng, before/after hoặc sự thay đổi đối với người xem, nhưng chỉ khi script hỗ trợ.
+
+D — Proof object:
+Một vật thể chứng minh trọng tâm video như receipt, price tag, shelf label, grocery total, pantry inventory hoặc sản phẩm cụ thể được script nhắc đến.
+
+E — Curiosity or contrast:
+Một sự đối lập rõ ràng, một tình huống chưa giải thích hết hoặc một chi tiết khiến người xem muốn biết nguyên nhân.
+
+Nếu một hướng không phù hợp, thay bằng một hướng khác phù hợp hơn.
+
+Năm phương án không được chỉ thay đổi vài chữ trên cùng một bức ảnh.
+
+BƯỚC 3 — QUY TẮC TEXT OVERLAY
+
+Mỗi thumbnail có đúng hai dòng chữ.
+
+- Dòng 1 màu vàng tươi.
+- Dòng 2 màu trắng.
+- Ưu tiên tổng cộng 4–7 từ.
+- Tối đa 9 từ nếu thật cần thiết.
+- Chữ phải hiểu được trong chưa đến một giây.
+- Chỉ thể hiện một thông điệp chính.
+- Không thêm logo, badge, mũi tên hoặc dòng phụ không cần thiết.
+- Không dùng ngày tháng hoặc hạn chót nếu script không xác nhận.
+- Không dùng tuyên bố tuyệt đối như NEVER EXPIRE, GUARANTEED hoặc WILL BE DEVASTATING nếu script không hỗ trợ.
+- Text thumbnail và title phải bổ sung cho nhau.
+- Không lặp lại nguyên văn toàn bộ thumbnail text trong title.
+- Kiểm tra chính tả tiếng Anh Mỹ.
+- Tất cả text xuất hiện trên thumbnail phải là tiếng Anh Mỹ.
+
+BƯỚC 4 — IMAGE PROMPT
+
+Mỗi option phải có một IMAGE PROMPT đầy đủ bằng tiếng Anh và sẵn sàng gửi trực tiếp sang Google Flow.
+
+Mỗi image prompt phải tự đầy đủ, không viết “same as above” và không tham chiếu option khác.
+
+Image prompt phải mô tả:
+
+1. YouTube thumbnail 16:9, 3840 × 2160.
+2. Địa điểm cụ thể tại Mỹ phù hợp với script.
+3. Chủ thể chính, vị trí, kích thước, hành động và biểu cảm.
+4. Bố cục với vùng chữ phía trên.
+5. Không để chữ che mặt, tay hoặc proof object.
+6. Tiền cảnh rõ, hậu cảnh có ngữ cảnh nhưng không rối.
+7. Photorealistic documentary look.
+8. Tương phản cao nhưng da người tự nhiên.
+9. Hai dòng text chính xác đã chọn.
+10. Dòng đầu màu vàng và dòng thứ hai màu trắng.
+11. Font condensed sans-serif siêu đậm, chữ in hoa, viền đen dày.
+12. Safe margin.
+13. Không đặt thông tin quan trọng ở góc dưới bên phải.
+14. Giải phẫu chính xác.
+15. Không có mặt hoặc bàn tay bị méo.
+16. Không lặp người.
+17. Không có bao bì biến dạng quá mức.
+18. Không logo hoặc watermark ngoài nội dung được yêu cầu.
+
+Nếu script nói về người hoặc cộng đồng có thật, không trình bày cảnh dàn dựng như bằng chứng chụp tại một sự kiện có thật.
+
+BƯỚC 5 — TITLE
+
+Với mỗi option, tạo hai title tiếng Anh Mỹ:
+
+- titleClear: nói rõ video mang lại thông tin gì.
+- titleCuriosity: tạo lý do bấm xem nhưng vẫn đúng nội dung.
+
+Không tự tạo con số chỉ để tăng click.
+
+BƯỚC 6 — ROUND MỚI
+
+Nếu PREVIOUS_CONCEPTS không trống:
+
+- Không lặp lại concept cũ.
+- Không chỉ đổi góc camera hoặc vài từ.
+- Phải tạo 5 ý tưởng hình ảnh mới thực sự khác biệt.
+- Vẫn giữ đúng nội dung script và visual identity của niche.
+
+OUTPUT
+
+Chỉ trả về một JSON object hợp lệ.
+
+Không markdown.
+Không code fence.
+Không giải thích bên ngoài JSON.
+Không trailing comma.
+
+Schema bắt buộc:
+
+{
+  "scriptInsight": {
+    "mainTopic": "string",
+    "groundedHook": "string",
+    "strongestVisualDetail": "string",
+    "viewerConcernOrGoal": "string",
+    "unsupportedClaimsToAvoid": ["string"]
+  },
+  "options": [
+    {
+      "id": "A",
+      "conceptName": "string",
+      "yellowText": "string",
+      "whiteText": "string",
+      "visualConcept": "string",
+      "imagePrompt": "complete English prompt",
+      "titleClear": "string",
+      "titleCuriosity": "string",
+      "whyItWorks": "string"
+    }
+  ],
+  "recommendedOptionId": "A",
+  "recommendationReason": "string",
+  "postGenerationCheck": "string"
+}
+
+Yêu cầu bắt buộc:
+
+- options phải có đúng 5 phần tử.
+- ID lần lượt là A, B, C, D, E.
+- Mỗi imagePrompt phải đầy đủ.
+- Không để placeholder.
+- Không viết same as above.
+- Chưa tạo ảnh trong bước lập kế hoạch này.`;
+const BUILTIN_TEMPLATE = {
+  id: "builtin-us-grocery-preparedness",
+  name: "US Grocery & Preparedness — Script Grounded",
+  description: "Script-grounded 5-variant YouTube thumbnail generator tailored for US grocery and preparedness topics with bold 2-line overlay text.",
+  category: "US Grocery",
+  promptText: BUILTIN_MASTER_PROMPT_TEXT,
+  isBuiltIn: true,
+  isDefault: true,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z"
+};
+class ThumbnailTemplateStore {
+  customPath;
+  queue = Promise.resolve();
+  constructor(customPath) {
+    this.customPath = customPath;
+  }
+  getFilePath() {
+    if (this.customPath) {
+      return this.customPath;
+    }
+    const dir = electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd();
+    return path__namespace.join(dir, "thumbnail-prompt-library.json");
+  }
+  getBackupPath() {
+    return `${this.getFilePath()}.backup.json`;
+  }
+  runInLock(task) {
+    const res = this.queue.then(task, task);
+    this.queue = res.catch(() => {
+    });
+    return res;
+  }
+  async getAll() {
+    return this.runInLock(async () => this.loadInternal());
+  }
+  async getById(id) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      return list.find((t) => t.id === id) || null;
+    });
+  }
+  async getDefault() {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const def = list.find((t) => t.isDefault);
+      if (def) return def;
+      const builtin = list.find((t) => t.isBuiltIn);
+      if (builtin) return builtin;
+      return list[0] || BUILTIN_TEMPLATE;
+    });
+  }
+  async create(data) {
+    this.validateTemplateData(data.name, data.promptText);
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const id = `tpl-${uuid.v4()}`;
+      const newTemplate = {
+        id,
+        name: data.name.trim(),
+        description: data.description?.trim() || void 0,
+        category: data.category?.trim() || "Custom",
+        promptText: data.promptText.trim(),
+        isBuiltIn: false,
+        isDefault: Boolean(data.isDefault),
+        createdAt: now,
+        updatedAt: now
+      };
+      if (newTemplate.isDefault) {
+        list.forEach((t) => {
+          t.isDefault = false;
+        });
+      }
+      list.push(newTemplate);
+      await this.saveInternal(list);
+      return newTemplate;
+    });
+  }
+  async update(id, updates) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const index = list.findIndex((t) => t.id === id);
+      if (index === -1) {
+        throw new Error(`Template not found: ${id}`);
+      }
+      const current = list[index];
+      const nextName = updates.name !== void 0 ? updates.name : current.name;
+      const nextPrompt = updates.promptText !== void 0 ? updates.promptText : current.promptText;
+      this.validateTemplateData(nextName, nextPrompt);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      if (updates.isDefault) {
+        list.forEach((t) => {
+          t.isDefault = false;
+        });
+      }
+      const updated = {
+        ...current,
+        name: nextName.trim(),
+        description: updates.description !== void 0 ? updates.description.trim() || void 0 : current.description,
+        category: updates.category !== void 0 ? updates.category.trim() : current.category,
+        promptText: nextPrompt.trim(),
+        isDefault: updates.isDefault !== void 0 ? updates.isDefault : current.isDefault,
+        updatedAt: now
+      };
+      list[index] = updated;
+      await this.saveInternal(list);
+      return updated;
+    });
+  }
+  async duplicate(id, newName) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const source = list.find((t) => t.id === id);
+      if (!source) {
+        throw new Error(`Template not found: ${id}`);
+      }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const copyName = newName?.trim() || `${source.name} (Copy)`;
+      const newTemplate = {
+        ...source,
+        id: `tpl-${uuid.v4()}`,
+        name: copyName,
+        isBuiltIn: false,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now
+      };
+      list.push(newTemplate);
+      await this.saveInternal(list);
+      return newTemplate;
+    });
+  }
+  async delete(id) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const target = list.find((t) => t.id === id);
+      if (!target) {
+        return false;
+      }
+      if (target.isBuiltIn) {
+        throw new Error("Cannot delete a built-in template");
+      }
+      const filtered = list.filter((t) => t.id !== id);
+      if (target.isDefault && filtered.length > 0) {
+        const builtin = filtered.find((t) => t.isBuiltIn) || filtered[0];
+        builtin.isDefault = true;
+      }
+      await this.saveInternal(filtered);
+      return true;
+    });
+  }
+  async setDefault(id) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const target = list.find((t) => t.id === id);
+      if (!target) {
+        throw new Error(`Template not found: ${id}`);
+      }
+      list.forEach((t) => {
+        t.isDefault = t.id === id;
+      });
+      await this.saveInternal(list);
+      return target;
+    });
+  }
+  async exportToJson(ids) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const toExport = ids && ids.length > 0 ? list.filter((t) => ids.includes(t.id)) : list;
+      return JSON.stringify(toExport, null, 2);
+    });
+  }
+  async importFromJson(jsonString) {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonString);
+    } catch (err) {
+      throw new Error(`Invalid JSON format: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    let rawTemplates;
+    if (Array.isArray(parsed)) {
+      rawTemplates = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.templates)) {
+      rawTemplates = parsed.templates;
+    } else {
+      throw new Error('Import data must be a JSON array of templates or an object with a "templates" array');
+    }
+    if (rawTemplates.length === 0) {
+      throw new Error("No templates found in import data");
+    }
+    return this.runInLock(async () => {
+      const currentList = await this.loadInternal();
+      const existingIds = new Set(currentList.map((t) => t.id));
+      const importedTemplates = [];
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      for (let i = 0; i < rawTemplates.length; i++) {
+        const item = rawTemplates[i];
+        if (!item || typeof item !== "object") {
+          throw new Error(`Template at index ${i} is not a valid object`);
+        }
+        const record = item;
+        const name = typeof record.name === "string" ? record.name.trim() : "";
+        const promptText = typeof record.promptText === "string" ? record.promptText.trim() : "";
+        const category = typeof record.category === "string" ? record.category.trim() : "Custom";
+        const description = typeof record.description === "string" ? record.description.trim() : void 0;
+        if (!name) {
+          throw new Error(`Template at index ${i} has empty name`);
+        }
+        if (!promptText) {
+          throw new Error(`Template "${name}" has empty promptText`);
+        }
+        if (!promptText.includes("{{SCRIPT}}")) {
+          throw new Error(`Template "${name}" is missing required variable {{SCRIPT}}`);
+        }
+        let id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : `tpl-${uuid.v4()}`;
+        if (existingIds.has(id)) {
+          id = `tpl-${uuid.v4()}`;
+        }
+        existingIds.add(id);
+        const template = {
+          id,
+          name,
+          description,
+          category,
+          promptText,
+          isBuiltIn: false,
+          isDefault: false,
+          createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
+          updatedAt: now
+        };
+        currentList.push(template);
+        importedTemplates.push(template);
+      }
+      await this.saveInternal(currentList);
+      return {
+        importedCount: importedTemplates.length,
+        importedTemplates
+      };
+    });
+  }
+  validateTemplateData(name, promptText) {
+    if (!name || !name.trim()) {
+      throw new Error("Template name cannot be empty");
+    }
+    if (!promptText || !promptText.trim()) {
+      throw new Error("Prompt text cannot be empty");
+    }
+    if (!promptText.includes("{{SCRIPT}}")) {
+      throw new Error("Prompt text must contain the required variable {{SCRIPT}}");
+    }
+  }
+  async loadInternal() {
+    const filePath = this.getFilePath();
+    const backupPath = this.getBackupPath();
+    let raw = "";
+    let loadedFromBackup = false;
+    if (fs__namespace.existsSync(filePath)) {
+      try {
+        raw = fs__namespace.readFileSync(filePath, "utf-8");
+      } catch (err) {
+        logger.warn(`[ThumbnailStore] Failed to read primary library file: ${err}`);
+      }
+    }
+    if (!raw && fs__namespace.existsSync(backupPath)) {
+      try {
+        raw = fs__namespace.readFileSync(backupPath, "utf-8");
+        loadedFromBackup = true;
+        logger.info("[ThumbnailStore] Recovered template library from backup");
+      } catch (err) {
+        logger.warn(`[ThumbnailStore] Failed to read backup file: ${err}`);
+      }
+    }
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        let templates = [];
+        if (Array.isArray(parsed)) {
+          templates = parsed;
+        } else if (parsed && Array.isArray(parsed.templates)) {
+          templates = parsed.templates;
+        }
+        const hasBuiltin = templates.some((t) => t.isBuiltIn && t.id === BUILTIN_TEMPLATE.id);
+        if (!hasBuiltin) {
+          templates.unshift({ ...BUILTIN_TEMPLATE });
+        }
+        const hasDefault = templates.some((t) => t.isDefault);
+        if (!hasDefault && templates.length > 0) {
+          const builtin = templates.find((t) => t.isBuiltIn) || templates[0];
+          builtin.isDefault = true;
+        }
+        if (loadedFromBackup) {
+          await this.saveInternal(templates);
+        }
+        return templates;
+      } catch (err) {
+        logger.error(`[ThumbnailStore] Corrupted library file: ${err}. Attempting recovery...`);
+        if (!loadedFromBackup && fs__namespace.existsSync(backupPath)) {
+          try {
+            const bRaw = fs__namespace.readFileSync(backupPath, "utf-8");
+            const bParsed = JSON.parse(bRaw);
+            const bTemplates = Array.isArray(bParsed) ? bParsed : bParsed.templates || [];
+            if (bTemplates.length > 0) {
+              if (!bTemplates.some((t) => t.isBuiltIn && t.id === BUILTIN_TEMPLATE.id)) {
+                bTemplates.unshift({ ...BUILTIN_TEMPLATE });
+              }
+              await this.saveInternal(bTemplates);
+              return bTemplates;
+            }
+          } catch {
+          }
+        }
+      }
+    }
+    const initialList = [{ ...BUILTIN_TEMPLATE }];
+    await this.saveInternal(initialList);
+    return initialList;
+  }
+  async saveInternal(templates) {
+    const filePath = this.getFilePath();
+    const backupPath = this.getBackupPath();
+    const dir = path__namespace.dirname(filePath);
+    if (!fs__namespace.existsSync(dir)) {
+      fs__namespace.mkdirSync(dir, { recursive: true });
+    }
+    const payload = {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      templates
+    };
+    const serialized = JSON.stringify(payload, null, 2);
+    const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+      try {
+        fs__namespace.copyFileSync(filePath, backupPath);
+      } catch {
+      }
+    } finally {
+      if (fs__namespace.existsSync(tmpPath)) {
+        try {
+          fs__namespace.unlinkSync(tmpPath);
+        } catch {
+        }
+      }
+    }
+  }
+}
+const thumbnailTemplateStore = new ThumbnailTemplateStore();
+function computeSha256(content) {
+  return crypto__namespace.createHash("sha256").update(content.trim(), "utf-8").digest("hex");
+}
+function getProjectThumbnailSettingsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-settings.json");
+}
+async function loadProjectThumbnailSettings(projectDir) {
+  const filePath = getProjectThumbnailSettingsPath(projectDir);
+  if (fs__namespace.existsSync(filePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      return {
+        enabled: parsed.enabled !== void 0 ? parsed.enabled : true,
+        autoGenerateAfterRender: parsed.autoGenerateAfterRender !== void 0 ? parsed.autoGenerateAfterRender : true,
+        selectedTemplateId: parsed.selectedTemplateId,
+        templateSnapshot: parsed.templateSnapshot,
+        templateSnapshotHash: parsed.templateSnapshotHash,
+        existingVideoTitle: parsed.existingVideoTitle || "",
+        variantCount: 5,
+        outputLanguage: "en-US",
+        provider: "google-flow",
+        imageModel: parsed.imageModel || "GEM_PIX_2",
+        outputQuality: "4k"
+      };
+    } catch (err) {
+      logger.warn(`[ThumbnailSettings] Failed to parse ${filePath}: ${err}. Falling back to defaults.`);
+    }
+  }
+  const defTpl = await thumbnailTemplateStore.getDefault();
+  const settings = {
+    enabled: true,
+    autoGenerateAfterRender: true,
+    selectedTemplateId: defTpl.id,
+    templateSnapshot: defTpl.promptText,
+    templateSnapshotHash: computeSha256(defTpl.promptText),
+    existingVideoTitle: "",
+    variantCount: 5,
+    outputLanguage: "en-US",
+    provider: "google-flow",
+    imageModel: "GEM_PIX_2",
+    outputQuality: "4k"
+  };
+  await saveProjectThumbnailSettings(projectDir, settings);
+  return settings;
+}
+async function saveProjectThumbnailSettings(projectDir, settings) {
+  const filePath = getProjectThumbnailSettingsPath(projectDir);
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  if (settings.templateSnapshot && !settings.templateSnapshotHash) {
+    settings.templateSnapshotHash = computeSha256(settings.templateSnapshot);
+  }
+  const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(settings, null, 2), "utf-8");
+  try {
+    fs__namespace.renameSync(tmpPath, filePath);
+  } finally {
+    if (fs__namespace.existsSync(tmpPath)) {
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+  }
+}
+function getThumbnailPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-plan.json");
+}
+function cleanJsonFence(raw) {
+  if (!raw) return "";
+  return raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
+}
+function validateThumbnailPlanSchema(obj) {
+  if (!obj || typeof obj !== "object") {
+    return { valid: false, error: "Output must be a JSON object" };
+  }
+  const p = obj;
+  if (!p.scriptInsight || typeof p.scriptInsight !== "object") {
+    return { valid: false, error: 'Missing "scriptInsight" object in response' };
+  }
+  const insight = p.scriptInsight;
+  if (typeof insight.mainTopic !== "string" || !insight.mainTopic.trim()) {
+    return { valid: false, error: "scriptInsight.mainTopic is missing or empty" };
+  }
+  if (!Array.isArray(p.options)) {
+    return { valid: false, error: '"options" must be an array' };
+  }
+  if (p.options.length !== 5) {
+    return { valid: false, error: `Expected exactly 5 thumbnail options, got ${p.options.length}` };
+  }
+  const requiredIds = ["A", "B", "C", "D", "E"];
+  const validatedOptions = [];
+  for (let i = 0; i < 5; i++) {
+    const opt = p.options[i];
+    const expectedId = requiredIds[i];
+    if (!opt || typeof opt !== "object") {
+      return { valid: false, error: `Option at index ${i} is not a valid object` };
+    }
+    if (String(opt.id || "").toUpperCase() !== expectedId) {
+      return { valid: false, error: `Option at index ${i} must have id "${expectedId}", got "${opt.id}"` };
+    }
+    const conceptName = typeof opt.conceptName === "string" ? opt.conceptName.trim() : "";
+    const yellowText = typeof opt.yellowText === "string" ? opt.yellowText.trim() : "";
+    const whiteText = typeof opt.whiteText === "string" ? opt.whiteText.trim() : "";
+    const visualConcept = typeof opt.visualConcept === "string" ? opt.visualConcept.trim() : "";
+    const imagePrompt = typeof opt.imagePrompt === "string" ? opt.imagePrompt.trim() : "";
+    const titleClear = typeof opt.titleClear === "string" ? opt.titleClear.trim() : "";
+    const titleCuriosity = typeof opt.titleCuriosity === "string" ? opt.titleCuriosity.trim() : "";
+    const whyItWorks = typeof opt.whyItWorks === "string" ? opt.whyItWorks.trim() : "";
+    if (!conceptName) return { valid: false, error: `Option ${expectedId}: conceptName cannot be empty` };
+    if (!yellowText) return { valid: false, error: `Option ${expectedId}: yellowText cannot be empty` };
+    if (!whiteText) return { valid: false, error: `Option ${expectedId}: whiteText cannot be empty` };
+    if (!imagePrompt) return { valid: false, error: `Option ${expectedId}: imagePrompt cannot be empty` };
+    if (imagePrompt.toLowerCase().includes("same as above")) {
+      return { valid: false, error: `Option ${expectedId}: imagePrompt cannot reference previous option or use "same as above"` };
+    }
+    validatedOptions.push({
+      id: expectedId,
+      conceptName,
+      yellowText,
+      whiteText,
+      visualConcept,
+      imagePrompt,
+      titleClear,
+      titleCuriosity,
+      whyItWorks
+    });
+  }
+  const scriptInsight = {
+    mainTopic: String(insight.mainTopic || "").trim(),
+    groundedHook: String(insight.groundedHook || "").trim(),
+    strongestVisualDetail: String(insight.strongestVisualDetail || "").trim(),
+    viewerConcernOrGoal: String(insight.viewerConcernOrGoal || "").trim(),
+    unsupportedClaimsToAvoid: Array.isArray(insight.unsupportedClaimsToAvoid) ? insight.unsupportedClaimsToAvoid.map(String) : []
+  };
+  const plan = {
+    scriptInsight,
+    options: validatedOptions,
+    recommendedOptionId: String(p.recommendedOptionId || "A").toUpperCase(),
+    recommendationReason: String(p.recommendationReason || ""),
+    postGenerationCheck: String(p.postGenerationCheck || "")
+  };
+  return { valid: true, plan };
+}
+function substituteTemplateVariables(templateText, vars) {
+  let prompt = templateText;
+  prompt = prompt.replace(/\{\{SCRIPT\}\}/g, vars.script || "");
+  prompt = prompt.replace(/\{\{VIDEO_TITLE\}\}/g, vars.videoTitle || "Untitled Documentary");
+  prompt = prompt.replace(/\{\{GLOBAL_VISUAL_CONTEXT\}\}/g, vars.globalVisualContext || "None specified");
+  prompt = prompt.replace(/\{\{VARIANT_COUNT\}\}/g, String(vars.variantCount));
+  prompt = prompt.replace(/\{\{PREVIOUS_CONCEPTS\}\}/g, vars.previousConcepts || "None");
+  prompt = prompt.replace(/\{\{OUTPUT_LANGUAGE\}\}/g, vars.outputLanguage || "en-US");
+  if (!templateText.includes("{{VARIANT_COUNT}}") && !prompt.includes("exactly 5")) {
+    prompt += "\n\nIMPORTANT SYSTEM REQUIREMENT: You MUST generate exactly 5 distinct options with IDs A, B, C, D, and E.";
+  }
+  return prompt;
+}
+class ThumbnailPlanner {
+  async plan(params) {
+    const { projectDir } = params;
+    const script = this.readScript(projectDir);
+    if (!script || !script.trim()) {
+      throw new Error(`Cannot plan thumbnails: script file is missing or empty in project "${projectDir}"`);
+    }
+    const settings = await loadProjectThumbnailSettings(projectDir);
+    const globalContext = this.readGlobalContext(projectDir);
+    let templatePrompt = params.templateSnapshot || settings.templateSnapshot;
+    if (!templatePrompt) {
+      if (settings.selectedTemplateId) {
+        const tpl = await thumbnailTemplateStore.getById(settings.selectedTemplateId);
+        if (tpl) templatePrompt = tpl.promptText;
+      }
+      if (!templatePrompt) {
+        const defTpl = await thumbnailTemplateStore.getDefault();
+        templatePrompt = defTpl.promptText;
+      }
+    }
+    const prompt = substituteTemplateVariables(templatePrompt, {
+      script,
+      videoTitle: settings.existingVideoTitle,
+      globalVisualContext: globalContext,
+      variantCount: 5,
+      previousConcepts: params.previousConcepts,
+      outputLanguage: settings.outputLanguage || "en-US"
+    });
+    const config = loadConfig();
+    const apiKey = normalizeApiKey(params.apiKeyOverride || config.geminiApiKey || process.env.GEMINI_API_KEY);
+    if (!apiKey) {
+      throw new Error("THUMBNAIL_PLAN_INVALID: Gemini API key is missing. Please set your Gemini API key in Settings.");
+    }
+    const ai = new genai.GoogleGenAI({ apiKey });
+    const candidateModels = getModelRoute("planning", params.preferredModel || config.preferredModel);
+    let rawOutput = "";
+    let usedModel = "";
+    let lastError = "";
+    for (const modelId of candidateModels) {
+      const normalized = normalizePreferredTextModel(modelId);
+      try {
+        logger.info(`[ThumbnailPlanner] Requesting 5 thumbnail concepts from ${normalized}...`);
+        const response = await ai.models.generateContent({
+          model: normalized,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.3,
+            maxOutputTokens: 8192
+          }
+        });
+        const text = response.text || "";
+        if (text.trim()) {
+          rawOutput = text;
+          usedModel = normalized;
+          recordModelSuccess(normalized);
+          break;
+        }
+      } catch (err) {
+        const classified = classifyGeminiErrorKind(err);
+        recordModelFailure(normalized, classified.kind);
+        lastError = classified.message;
+        logger.warn(`[ThumbnailPlanner] Model ${normalized} failed: ${classified.message}`);
+        if (classified.kind === "RATE_LIMIT") {
+          recordModelRateLimit(normalized);
+        } else if (classified.kind === "SERVICE_UNAVAILABLE") {
+          recordModelUnavailable(normalized);
+        }
+      }
+    }
+    if (!rawOutput) {
+      throw new Error(`THUMBNAIL_PLAN_INVALID: All AI models failed to generate thumbnail plan. Last error: ${lastError}`);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanJsonFence(rawOutput));
+    } catch (parseErr) {
+      logger.warn(`[ThumbnailPlanner] Initial JSON parse failed: ${parseErr}. Attempting repair with ${usedModel}...`);
+      rawOutput = await this.repairJson(ai, usedModel, rawOutput, String(parseErr));
+      try {
+        parsed = JSON.parse(cleanJsonFence(rawOutput));
+      } catch (secondErr) {
+        throw new Error(`THUMBNAIL_PLAN_INVALID: Model returned malformed JSON that could not be parsed: ${secondErr}`);
+      }
+    }
+    let validation = validateThumbnailPlanSchema(parsed);
+    if (!validation.valid) {
+      logger.warn(`[ThumbnailPlanner] Schema validation failed: ${validation.error}. Attempting repair with ${usedModel}...`);
+      rawOutput = await this.repairJson(ai, usedModel, rawOutput, validation.error || "Invalid schema");
+      try {
+        parsed = JSON.parse(cleanJsonFence(rawOutput));
+        validation = validateThumbnailPlanSchema(parsed);
+      } catch (secondErr) {
+        throw new Error(`THUMBNAIL_PLAN_INVALID: Repaired JSON failed to parse: ${secondErr}`);
+      }
+    }
+    if (!validation.valid || !validation.plan) {
+      throw new Error(`THUMBNAIL_PLAN_INVALID: ${validation.error || "Failed schema validation"}`);
+    }
+    const finalPlan = {
+      ...validation.plan,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      modelUsed: usedModel,
+      generationRound: params.generationRound || 1
+    };
+    const outPath = getThumbnailPlanPath(projectDir);
+    fs__namespace.mkdirSync(path__namespace.dirname(outPath), { recursive: true });
+    fs__namespace.writeFileSync(outPath, JSON.stringify(finalPlan, null, 2), "utf-8");
+    logger.info(`[ThumbnailPlanner] Successfully created and saved thumbnail plan to ${outPath}`);
+    return finalPlan;
+  }
+  async repairJson(ai, model, badJson, errorMsg) {
+    const repairPrompt = `The previous JSON response for YouTube thumbnail plan was invalid.
+Error reported: ${errorMsg}
+
+Raw output:
+${badJson.slice(0, 4e3)}
+
+Please output the corrected, valid JSON matching the exact schema with 5 options (A, B, C, D, E).
+Return ONLY the raw JSON object. No markdown code fence. No commentary.`;
+    try {
+      const resp = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: repairPrompt }] }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          maxOutputTokens: 8192
+        }
+      });
+      return resp.text || badJson;
+    } catch {
+      return badJson;
+    }
+  }
+  readScript(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "script.txt"),
+      path__namespace.join(projectDir, "inputs", "script.txt"),
+      path__namespace.join(projectDir, "project-state.json"),
+      path__namespace.join(projectDir, "project.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        if (c.endsWith(".json")) {
+          try {
+            const raw = fs__namespace.readFileSync(c, "utf-8");
+            const st = JSON.parse(raw);
+            const p = st?.inputs?.scriptPath;
+            if (p && fs__namespace.existsSync(p)) {
+              return fs__namespace.readFileSync(p, "utf-8");
+            }
+          } catch {
+          }
+        } else {
+          return fs__namespace.readFileSync(c, "utf-8");
+        }
+      }
+    }
+    return "";
+  }
+  readGlobalContext(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "analysis", "global-script-context.json"),
+      path__namespace.join(projectDir, "analysis", "global-visual-context.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        try {
+          return fs__namespace.readFileSync(c, "utf-8");
+        } catch {
+        }
+      }
+    }
+    return "";
+  }
+}
+const thumbnailPlanner = new ThumbnailPlanner();
+function probeImageDimensions(buffer) {
+  if (!buffer || buffer.length < 24) return null;
+  if (buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+    return { width, height, format: "png" };
+  }
+  if (buffer[0] === 255 && buffer[1] === 216) {
+    let offset = 2;
+    while (offset < buffer.length) {
+      if (buffer[offset] !== 255) {
+        offset++;
+        continue;
+      }
+      const marker = buffer[offset + 1];
+      if (marker >= 192 && marker <= 195 || marker >= 197 && marker <= 199 || marker >= 201 && marker <= 203 || marker >= 205 && marker <= 207) {
+        if (offset + 8 < buffer.length) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+          return { width, height, format: "jpeg" };
+        }
+      }
+      if (offset + 3 < buffer.length) {
+        const length = buffer.readUInt16BE(offset + 2);
+        offset += 2 + length;
+      } else {
+        break;
+      }
+    }
+  }
+  if (buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP") {
+    if (buffer.slice(12, 16).toString("ascii") === "VP8 ") {
+      const width = buffer.readUInt16LE(26) & 16383;
+      const height = buffer.readUInt16LE(28) & 16383;
+      return { width, height, format: "webp" };
+    }
+    if (buffer.slice(12, 16).toString("ascii") === "VP8L") {
+      const b1 = buffer[21];
+      const b2 = buffer[22];
+      const b3 = buffer[23];
+      const b4 = buffer[24];
+      const width = 1 + ((b2 & 63) << 8 | b1);
+      const height = 1 + ((b4 & 15) << 10 | b3 << 2 | (b2 & 192) >> 6);
+      return { width, height, format: "webp" };
+    }
+    if (buffer.slice(12, 16).toString("ascii") === "VP8X") {
+      const width = 1 + buffer.readUIntLE(24, 3);
+      const height = 1 + buffer.readUIntLE(27, 3);
+      return { width, height, format: "webp" };
+    }
+  }
+  return null;
+}
+function probeImageFile(filePath) {
+  if (!fs__namespace.existsSync(filePath)) return null;
+  const stat = fs__namespace.statSync(filePath);
+  if (stat.size === 0) return null;
+  const fd = fs__namespace.openSync(filePath, "r");
+  const readLen = Math.min(stat.size, 65536);
+  const buffer = Buffer.alloc(readLen);
+  try {
+    fs__namespace.readSync(fd, buffer, 0, readLen, 0);
+    return probeImageDimensions(buffer);
+  } finally {
+    fs__namespace.closeSync(fd);
+  }
+}
+const DEFAULT_FLOWKIT_BRIDGE_URL = "http://127.0.0.1:8100";
+class GoogleFlowClient {
+  bridgeUrl;
+  constructor(bridgeUrl) {
+    this.bridgeUrl = (bridgeUrl || DEFAULT_FLOWKIT_BRIDGE_URL).replace(/\/+$/, "");
+  }
+  setBridgeUrl(url2) {
+    this.bridgeUrl = (url2 || DEFAULT_FLOWKIT_BRIDGE_URL).replace(/\/+$/, "");
+  }
+  getBridgeUrl() {
+    return this.bridgeUrl;
+  }
+  async checkHealth() {
+    const health = {
+      reachable: false,
+      providerAvailable: false,
+      extensionConnected: false,
+      signedIn: false,
+      supportsImageGeneration: false,
+      requestedExportQuality: "4k",
+      message: "Checking connection..."
+    };
+    try {
+      const healthResp = await this.fetchWithTimeout(`${this.bridgeUrl}/health`, { method: "GET" }, 3e3);
+      if (!healthResp.ok) {
+        health.message = `FlowKit bridge responded with status ${healthResp.status}`;
+        return health;
+      }
+      health.reachable = true;
+      const healthData = await healthResp.json();
+      health.extensionConnected = Boolean(healthData.extension_connected);
+      try {
+        const flowStatusResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: "GET" }, 3e3);
+        if (flowStatusResp.ok) {
+          const flowData = await flowStatusResp.json();
+          if (flowData.connected) {
+            health.extensionConnected = true;
+          }
+          health.details = {
+            version: healthData.version,
+            flowProjectId: flowData.flow_project_id || flowData.session_project?.project_id,
+            generationThrottle: flowData.generation_throttle
+          };
+        }
+      } catch (err) {
+        logger.debug(`[GoogleFlowClient] /api/flow/status check notice: ${err}`);
+      }
+      try {
+        const provResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/providers/status`, { method: "GET" }, 3e3);
+        if (provResp.ok) {
+          const body = await provResp.json();
+          const provsArray = Array.isArray(body) ? body : Array.isArray(body.providers) ? body.providers : [];
+          const flowProv = provsArray.find((p) => p.name === "flow");
+          if (flowProv) {
+            health.providerAvailable = Boolean(flowProv.available);
+            health.supportsImageGeneration = Boolean(flowProv.capabilities?.generate_image);
+          }
+        }
+      } catch (err) {
+        logger.debug(`[GoogleFlowClient] /api/providers/status check notice: ${err}`);
+      }
+      if (health.extensionConnected) {
+        try {
+          const credResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/credits`, { method: "GET" }, 4e3);
+          if (credResp.ok) {
+            health.signedIn = true;
+            health.supportsImageGeneration = true;
+          } else if (credResp.status === 503) {
+            health.extensionConnected = false;
+            health.message = "Google Flow Chrome extension is disconnected.";
+          } else if (credResp.status === 502) {
+            health.signedIn = false;
+            health.message = "Google Flow account not signed in. Open Google Flow in Chrome and log in.";
+          }
+        } catch {
+          health.signedIn = health.extensionConnected;
+        }
+      }
+      if (!health.extensionConnected) {
+        health.message = "Chrome extension disconnected. Open Google Flow in Chrome, reconnect the extension, then retry.";
+      } else if (!health.signedIn) {
+        health.message = "Google Flow is not signed in. Please log into Google Flow in Chrome.";
+      } else {
+        health.message = "FlowKit bridge and Google Flow are connected and ready for 4K thumbnail generation.";
+      }
+      return health;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      health.reachable = false;
+      health.message = `FlowKit bridge unreachable at ${this.bridgeUrl} (${msg}). Ensure FlowKit is running.`;
+      return health;
+    }
+  }
+  async generateImage(request) {
+    const url2 = `${this.bridgeUrl}/api/flow/generate-image`;
+    const payload = {
+      prompt: request.prompt,
+      project_id: request.projectId || "",
+      image_model: request.imageModel || "GEM_PIX_2",
+      aspect_ratio: request.aspectRatio || "16:9",
+      count: 1,
+      reference_media_ids: []
+    };
+    logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`);
+    let resp;
+    try {
+      resp = await this.fetchWithTimeout(
+        url2,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-flowkit-caller": "long-form-video-factory/thumbnail-studio"
+          },
+          body: JSON.stringify(payload)
+        },
+        12e4
+      );
+    } catch (err) {
+      throw err;
+    }
+    if (resp.ok) {
+      const data = await resp.json();
+      const firstMedia = data.media?.[0];
+      const mediaId = firstMedia?.image?.generatedImage?.mediaId || firstMedia?.name;
+      const fifeUrl = firstMedia?.image?.generatedImage?.fifeUrl;
+      if (!mediaId) {
+        throw new Error("FLOW_GENERATION_FAILED: FlowKit returned response without mediaId.");
+      }
+      logger.info(`[GoogleFlowClient] Candidate ${request.optionId} generated media: ${mediaId}`);
+      return {
+        mediaId,
+        projectId: data.project_id || request.projectId || "",
+        fifeUrl,
+        raw: data
+      };
+    }
+    const status = resp.status;
+    let errorBody = {};
+    try {
+      errorBody = await resp.json();
+    } catch {
+    }
+    const errMsg = errorBody.error || errorBody.detail || (typeof errorBody === "string" ? errorBody : "") || `HTTP ${status}`;
+    if (status === 503 || String(errMsg).toLowerCase().includes("extension not connected")) {
+      throw new Error(`FLOW_EXTENSION_DISCONNECTED: Chrome extension is disconnected. Open Google Flow in Chrome and reconnect.`);
+    }
+    if (status === 400 || status === 422) {
+      throw new Error(`FLOW_GENERATION_FAILED: Invalid argument: ${errMsg}`);
+    }
+    if (status === 429 || String(errMsg).toLowerCase().includes("rate limit") || String(errMsg).toLowerCase().includes("cooldown")) {
+      throw new Error(`FLOW_RATE_LIMITED: Google Flow rate limit reached. (${errMsg})`);
+    }
+    if (String(errMsg).toLowerCase().includes("recaptcha")) {
+      throw new Error(`FLOW_RECAPTCHA_FAILED: Google Flow reCAPTCHA verification failed. (${errMsg})`);
+    }
+    throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`);
+  }
+  async exportImage(request) {
+    const destDir = path__namespace.dirname(request.destinationPath);
+    if (!fs__namespace.existsSync(destDir)) {
+      fs__namespace.mkdirSync(destDir, { recursive: true });
+    }
+    let result = await this.tryExportAtQuality(request.mediaId, request.projectId, "4k", request.destinationPath);
+    if (result.success && result.buffer) {
+      fs__namespace.writeFileSync(request.destinationPath, result.buffer);
+      const dims = probeImageDimensions(result.buffer);
+      const stats = fs__namespace.statSync(request.destinationPath);
+      return {
+        filePath: request.destinationPath,
+        fileSize: stats.size,
+        width: dims?.width || 3840,
+        height: dims?.height || 2160,
+        actualQuality: "native-4k"
+      };
+    }
+    const is4kGated = result.statusCode === 400 || result.statusCode === 403 || result.statusCode === 502 || String(result.error).toLowerCase().includes("tier") || String(result.error).toLowerCase().includes("plan") || String(result.error).toLowerCase().includes("not supported") || String(result.error).toLowerCase().includes("upscale");
+    logger.warn(`[GoogleFlowClient] 4K export failed (${result.error}). Attempting 2K fallback...`);
+    result = await this.tryExportAtQuality(request.mediaId, request.projectId, "2k", request.destinationPath);
+    if (result.success && result.buffer) {
+      fs__namespace.writeFileSync(request.destinationPath, result.buffer);
+      const dims = probeImageDimensions(result.buffer);
+      const stats = fs__namespace.statSync(request.destinationPath);
+      return {
+        filePath: request.destinationPath,
+        fileSize: stats.size,
+        width: dims?.width || 2560,
+        height: dims?.height || 1440,
+        actualQuality: "2k-fallback",
+        is4kPlanGated: is4kGated
+      };
+    }
+    if (request.fallbackToOriginalUrl) {
+      logger.warn(`[GoogleFlowClient] 2K export failed. Falling back to original image download from fifeUrl...`);
+      try {
+        const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: "GET" }, 3e4);
+        if (origResp.ok) {
+          const arrayBuf = await origResp.arrayBuffer();
+          const buf = Buffer.from(arrayBuf);
+          fs__namespace.writeFileSync(request.destinationPath, buf);
+          const dims = probeImageDimensions(buf);
+          const stats = fs__namespace.statSync(request.destinationPath);
+          return {
+            filePath: request.destinationPath,
+            fileSize: stats.size,
+            width: dims?.width || 1376,
+            height: dims?.height || 768,
+            actualQuality: "original-fallback",
+            is4kPlanGated: true
+          };
+        }
+      } catch (fifeErr) {
+        logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`);
+      }
+    }
+    throw new Error(`FLOW_EXPORT_FAILED: Failed to export image for media ${request.mediaId}: ${result.error || "Unknown export error"}`);
+  }
+  async tryExportAtQuality(mediaId, projectId, quality, _destPath) {
+    const url2 = `${this.bridgeUrl}/api/flow/export-image`;
+    const payload = {
+      media_id: mediaId,
+      project_id: projectId || "",
+      quality: quality.toLowerCase()
+    };
+    try {
+      const resp = await this.fetchWithTimeout(
+        url2,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-flowkit-caller": "long-form-video-factory/thumbnail-studio"
+          },
+          body: JSON.stringify(payload)
+        },
+        9e4
+      );
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        if (buf.length > 0) {
+          return { success: true, buffer: buf, statusCode: resp.status };
+        }
+        return { success: false, statusCode: resp.status, error: "Empty binary response returned" };
+      }
+      let errorMsg = `HTTP ${resp.status}`;
+      try {
+        const errJson = await resp.json();
+        errorMsg = String(errJson.error || errJson.detail || errorMsg);
+      } catch {
+      }
+      return { success: false, statusCode: resp.status, error: String(errorMsg) };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  async fetchWithTimeout(url2, init, timeoutMs = 15e3) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url2, {
+        ...init,
+        signal: controller.signal
+      });
+      return resp;
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`Request timed out after ${timeoutMs}ms: ${url2}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+const googleFlowClient = new GoogleFlowClient();
+class GoogleFlowProvider {
+  name = "google-flow";
+  client;
+  constructor(client) {
+    this.client = client || googleFlowClient;
+  }
+  async healthCheck(bridgeUrl) {
+    if (bridgeUrl) {
+      this.client.setBridgeUrl(bridgeUrl);
+    }
+    return this.client.checkHealth();
+  }
+  async generateImage(request) {
+    return this.client.generateImage(request);
+  }
+  async exportImage(request) {
+    return this.client.exportImage(request);
+  }
+}
+const googleFlowProvider = new GoogleFlowProvider();
+const DEFAULT_SETTINGS = {
+  mode: "external",
+  bridgeUrl: "http://127.0.0.1:8100",
+  autoStartBridge: false,
+  autoOpenGoogleFlow: false
+};
+const HEALTH_POLL_INTERVAL_MS = 2e3;
+const HEALTH_START_TIMEOUT_MS = 3e4;
+const GOOGLE_FLOW_URL = "https://flow.google.com/";
+const CONFIG_FILENAME = "flowkit-runtime-settings.json";
+class FlowKitRuntimeManager {
+  settings = { ...DEFAULT_SETTINGS };
+  managedProcess = null;
+  isStarting = false;
+  /** Guard: only open Google Flow browser tab once per app session */
+  hasOpenedGoogleFlowThisSession = false;
+  /** Reference to GoogleFlowClient for URL sync — set by initialize() */
+  googleFlowClientRef = null;
+  // ─── Initialization ───────────────────────────────────────────────────────
+  /**
+   * Must be called once during app startup BEFORE any IPC handlers fire.
+   * Loads persisted settings and optionally links the GoogleFlowClient for URL sync.
+   */
+  initialize(googleFlowClient2) {
+    if (googleFlowClient2) {
+      this.googleFlowClientRef = googleFlowClient2;
+    }
+    this.loadPersistedSettings();
+    logger.info(`[FlowKitRuntime] Initialized. mode=${this.settings.mode} url=${this.settings.bridgeUrl}`);
+  }
+  // ─── Persistence ──────────────────────────────────────────────────────────
+  getConfigPath() {
+    try {
+      return path__namespace.join(electron.app.getPath("userData"), CONFIG_FILENAME);
+    } catch {
+      return path__namespace.join(process.cwd(), CONFIG_FILENAME);
+    }
+  }
+  loadPersistedSettings() {
+    const configPath = this.getConfigPath();
+    try {
+      if (!fs__namespace.existsSync(configPath)) {
+        logger.info("[FlowKitRuntime] No persisted settings found. Using defaults.");
+        return;
+      }
+      const raw = fs__namespace.readFileSync(configPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      this.applySettings(parsed);
+      logger.info(`[FlowKitRuntime] Loaded persisted settings from ${configPath}`);
+    } catch (err) {
+      logger.warn(`[FlowKitRuntime] Failed to load persisted settings (using defaults): ${err}`);
+    }
+  }
+  savePersistedSettings() {
+    const configPath = this.getConfigPath();
+    const tmpPath = `${configPath}.tmp`;
+    try {
+      const data = JSON.stringify(this.settings, null, 2);
+      fs__namespace.writeFileSync(tmpPath, data, "utf-8");
+      fs__namespace.renameSync(tmpPath, configPath);
+      logger.info(`[FlowKitRuntime] Settings persisted to ${configPath}`);
+    } catch (err) {
+      logger.error(`[FlowKitRuntime] Failed to persist settings: ${err}`);
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+  }
+  // ─── Settings ─────────────────────────────────────────────────────────────
+  getSettings() {
+    return { ...this.settings };
+  }
+  applySettings(settings) {
+    const newUrl = this.normalizeBridgeUrl(settings.bridgeUrl || this.settings.bridgeUrl);
+    this.settings = {
+      ...this.settings,
+      ...settings,
+      // Normalize and sanitize
+      bridgeUrl: newUrl,
+      flowProjectId: (settings.flowProjectId ?? this.settings.flowProjectId ?? "").trim() || void 0,
+      flowKitPath: settings.flowKitPath ?? this.settings.flowKitPath,
+      pythonPath: settings.pythonPath ?? this.settings.pythonPath
+    };
+    if (this.googleFlowClientRef) {
+      this.googleFlowClientRef.setBridgeUrl(newUrl);
+    }
+    logger.info(`[FlowKitRuntime] Settings applied: mode=${this.settings.mode} url=${this.settings.bridgeUrl}`);
+  }
+  /** Save settings and apply them atomically */
+  saveSettings(settings) {
+    this.applySettings(settings);
+    this.savePersistedSettings();
+  }
+  normalizeBridgeUrl(url2) {
+    const raw = (url2 || DEFAULT_SETTINGS.bridgeUrl).replace(/\/+$/, "");
+    if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
+      return DEFAULT_SETTINGS.bridgeUrl;
+    }
+    return raw;
+  }
+  // ─── Status ───────────────────────────────────────────────────────────────
+  getStatus() {
+    return {
+      mode: this.settings.mode,
+      bridgeRunning: this.managedProcess !== null && !this.managedProcess.killed,
+      bridgeUrl: this.settings.bridgeUrl,
+      managedPid: this.managedProcess?.pid ?? void 0,
+      flowProjectId: this.settings.flowProjectId
+    };
+  }
+  // ─── Start Bridge (Managed Mode only) ─────────────────────────────────────
+  async startBridge() {
+    if (this.settings.mode !== "managed") {
+      return { success: false, error: "Bridge is in External mode. Start FlowKit manually.", errorCode: "FLOWKIT_NOT_CONFIGURED" };
+    }
+    if (this.managedProcess && !this.managedProcess.killed) {
+      logger.info("[FlowKitRuntime] Bridge already running.");
+      return { success: true };
+    }
+    if (this.isStarting) {
+      return { success: false, error: "Bridge is already starting." };
+    }
+    const flowKitPath = this.settings.flowKitPath || "";
+    if (!flowKitPath || !fs__namespace.existsSync(flowKitPath)) {
+      return { success: false, error: `FlowKit path not found: "${flowKitPath}"`, errorCode: "FLOWKIT_PATH_INVALID" };
+    }
+    const agentMain = path__namespace.join(flowKitPath, "agent", "main.py");
+    if (!fs__namespace.existsSync(agentMain)) {
+      return {
+        success: false,
+        error: `agent/main.py not found in "${flowKitPath}". Is this the correct FlowKit folder?`,
+        errorCode: "FLOWKIT_PATH_INVALID"
+      };
+    }
+    const pythonExe = await this.resolvePython(flowKitPath);
+    if (!pythonExe) {
+      return {
+        success: false,
+        error: "Python 3.10+ not found. Configure the Python path in settings or install Python.",
+        errorCode: "FLOWKIT_PYTHON_NOT_FOUND"
+      };
+    }
+    const bridgePort = this.parseBridgePort();
+    const flowProjectId = this.settings.flowProjectId || "";
+    await this.freePort(bridgePort);
+    this.isStarting = true;
+    this.broadcastLog(`[FlowKitRuntime] Starting FlowKit bridge...
+Python: ${pythonExe}
+Cwd: ${flowKitPath}
+Port: ${bridgePort}`);
+    try {
+      const env = {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([, v]) => v !== void 0)
+        ),
+        API_HOST: "127.0.0.1",
+        API_PORT: String(bridgePort),
+        MEDIA_PROVIDER: "flow",
+        ...flowProjectId ? { FLOW_PROJECT_ID: flowProjectId } : {}
+      };
+      const child = cp__namespace.spawn(pythonExe, ["-m", "agent.main"], {
+        cwd: flowKitPath,
+        env,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      this.managedProcess = child;
+      child.stdout?.on("data", (data) => {
+        const text = data.toString("utf-8").trimEnd();
+        this.broadcastLog(`[FlowKit] ${text}`);
+      });
+      child.stderr?.on("data", (data) => {
+        const text = data.toString("utf-8").trimEnd();
+        this.broadcastLog(`[FlowKit:err] ${text}`);
+      });
+      child.on("exit", (code, signal) => {
+        const wasManaged = this.managedProcess === child;
+        if (wasManaged) {
+          this.managedProcess = null;
+        }
+        const msg = `[FlowKitRuntime] Bridge process exited (code=${code ?? signal})`;
+        logger.warn(msg);
+        this.broadcastLog(msg);
+        this.broadcastStatus();
+      });
+      const ready = await this.pollHealth(HEALTH_START_TIMEOUT_MS);
+      if (!ready) {
+        if (this.managedProcess === child && !child.killed) {
+          child.kill("SIGTERM");
+          this.managedProcess = null;
+        }
+        return { success: false, error: `Bridge did not become healthy within ${HEALTH_START_TIMEOUT_MS / 1e3}s.`, errorCode: "FLOWKIT_HEALTH_TIMEOUT" };
+      }
+      this.broadcastLog("[FlowKitRuntime] Bridge is healthy and ready.");
+      this.broadcastStatus();
+      return { success: true };
+    } catch (err) {
+      this.managedProcess = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[FlowKitRuntime] Failed to start bridge: ${msg}`);
+      return { success: false, error: msg, errorCode: "FLOWKIT_START_FAILED" };
+    } finally {
+      this.isStarting = false;
+    }
+  }
+  // ─── Stop Bridge (Managed Mode only) ──────────────────────────────────────
+  stopBridge() {
+    if (!this.managedProcess || this.managedProcess.killed) {
+      return;
+    }
+    logger.info("[FlowKitRuntime] Stopping managed FlowKit bridge...");
+    this.managedProcess.kill("SIGTERM");
+    setTimeout(() => {
+      if (this.managedProcess && !this.managedProcess.killed) {
+        this.managedProcess.kill("SIGKILL");
+      }
+    }, 5e3);
+    this.managedProcess = null;
+    this.broadcastStatus();
+  }
+  /**
+   * Kill any process occupying `port` on localhost so the bridge can bind.
+   * Only acts on the external/zombie case — if we own `managedProcess` on that
+   * port, `stopBridge()` should have been called first.
+   *
+   * macOS/Linux only. No-op on Windows (port conflicts will surface naturally).
+   */
+  async freePort(port) {
+    if (process.platform === "win32") return;
+    return new Promise((resolve) => {
+      const lsof = cp__namespace.spawn("lsof", ["-ti", `:${port}`]);
+      let pids = "";
+      lsof.stdout?.on("data", (d) => {
+        pids += d.toString();
+      });
+      lsof.on("close", () => {
+        const pidList = pids.trim().split("\n").filter(Boolean);
+        if (pidList.length === 0) return resolve();
+        for (const pid of pidList) {
+          try {
+            process.kill(parseInt(pid, 10), "SIGKILL");
+          } catch {
+          }
+        }
+        logger.info(`[FlowKitRuntime] Freed port ${port}: killed PIDs [${pidList.join(", ")}]`);
+        setTimeout(resolve, 500);
+      });
+      lsof.on("error", () => resolve());
+    });
+  }
+  handleAppQuit() {
+    if (this.settings.mode === "managed") {
+      this.stopBridge();
+    }
+  }
+  /**
+   * Open Google Flow in the default browser.
+   * Only opens once per app session regardless of how many times called.
+   */
+  openGoogleFlow(force = false) {
+    if (!force && this.hasOpenedGoogleFlowThisSession) {
+      logger.info("[FlowKitRuntime] Google Flow already opened this session. Skipping.");
+      return;
+    }
+    this.hasOpenedGoogleFlowThisSession = true;
+    electron.shell.openExternal(GOOGLE_FLOW_URL).catch((err) => {
+      logger.warn(`[FlowKitRuntime] Failed to open Google Flow: ${err}`);
+    });
+    logger.info(`[FlowKitRuntime] Opened Google Flow in browser: ${GOOGLE_FLOW_URL}`);
+  }
+  /**
+   * Auto-start FlowKit in the background (non-blocking).
+   * Called from app startup if mode=managed and autoStartBridge=true.
+   */
+  autoStartIfConfigured() {
+    if (this.settings.mode !== "managed" || !this.settings.autoStartBridge) {
+      return;
+    }
+    logger.info("[FlowKitRuntime] Auto-start configured. Starting FlowKit bridge in background...");
+    this.startBridge().then((result) => {
+      if (result.success) {
+        logger.info("[FlowKitRuntime] Auto-start: bridge is healthy.");
+        if (this.settings.autoOpenGoogleFlow) {
+          this.openGoogleFlow();
+        }
+      } else {
+        logger.warn(`[FlowKitRuntime] Auto-start failed: ${result.error}`);
+      }
+    }).catch((err) => {
+      logger.error(`[FlowKitRuntime] Auto-start error: ${err}`);
+    });
+  }
+  // ─── Readiness Preflight ──────────────────────────────────────────────────
+  /**
+   * Run the full readiness preflight check.
+   * MUST be called before any thumbnail generation.
+   * If not ready, returns blockingCode and message.
+   */
+  async ensureFlowReady(bridgeUrl) {
+    const url2 = this.normalizeBridgeUrl(bridgeUrl || this.settings.bridgeUrl);
+    const result = {
+      ready: false,
+      bridgeReachable: false,
+      extensionConnected: false,
+      flowConnected: false,
+      flowProjectIdPresent: Boolean(this.settings.flowProjectId),
+      imageGenerationReady: false,
+      export4kStatus: "unknown",
+      message: "Checking FlowKit connection..."
+    };
+    let healthData = null;
+    try {
+      const resp = await this.fetchWithTimeout(`${url2}/health`, 5e3);
+      if (resp.ok) {
+        result.bridgeReachable = true;
+        healthData = await resp.json();
+        result.extensionConnected = Boolean(healthData?.extension_connected);
+      } else {
+        result.blockingCode = "FLOWKIT_BRIDGE_OFFLINE";
+        result.message = `FlowKit bridge at ${url2} returned HTTP ${resp.status}.`;
+        return result;
+      }
+    } catch (err) {
+      const errCode = this.extractNodeErrorCode(err);
+      result.bridgeReachable = false;
+      result.extensionConnected = false;
+      result.blockingCode = "FLOWKIT_BRIDGE_OFFLINE";
+      result.message = this.buildBridgeOfflineMessage(url2, errCode);
+      result.diagnostics = { errorCode: errCode, bridgeUrl: url2 };
+      return result;
+    }
+    if (!result.extensionConnected) {
+      result.blockingCode = "FLOW_EXTENSION_DISCONNECTED";
+      result.message = "FlowKit bridge is online, but the Chrome extension is not connected. Open Google Flow in Chrome and reload the extension.";
+      return result;
+    }
+    try {
+      const flowResp = await this.fetchWithTimeout(`${url2}/api/flow/status`, 1e4);
+      if (flowResp.ok) {
+        const flowData = await flowResp.json();
+        result.flowConnected = Boolean(flowData.connected);
+        const bridgeProjectId = flowData.flow_project_id || flowData.session_project?.project_id;
+        if (!this.settings.flowProjectId && bridgeProjectId) {
+          result.flowProjectIdPresent = true;
+        }
+      }
+    } catch {
+    }
+    try {
+      const provResp = await this.fetchWithTimeout(`${url2}/api/providers/status`, 5e3);
+      if (provResp.ok) {
+        const body = await provResp.json();
+        const provsArray = Array.isArray(body) ? body : Array.isArray(body?.providers) ? body.providers : [];
+        const flowProv = provsArray.find((p) => p.name === "flow");
+        if (flowProv?.available && flowProv.capabilities?.generate_image) {
+          result.imageGenerationReady = true;
+        }
+      }
+    } catch {
+    }
+    if (!this.settings.flowProjectId && !result.flowProjectIdPresent) {
+      result.blockingCode = "FLOW_PROJECT_ID_MISSING";
+      result.message = "Flow Project ID is not configured. Open Google Flow, create or open a project, copy the UUID from the URL, and paste it in Settings → Thumbnail Studio.";
+      return result;
+    }
+    result.ready = result.bridgeReachable && result.extensionConnected && result.imageGenerationReady;
+    if (result.ready) {
+      result.message = "Google Flow is connected and ready for thumbnail generation.";
+    } else if (!result.imageGenerationReady) {
+      result.blockingCode = "FLOW_IMAGE_GENERATION_UNAVAILABLE";
+      result.message = "FlowKit is connected but the image generation provider is unavailable. Check that Google Flow is open in Chrome.";
+    }
+    return result;
+  }
+  /**
+   * Lightweight bridge liveness check (no extension/project checks).
+   * Use between candidates in a running batch.
+   */
+  async isBridgeStillReachable(bridgeUrl) {
+    const url2 = this.normalizeBridgeUrl(bridgeUrl || this.settings.bridgeUrl);
+    try {
+      const resp = await this.fetchWithTimeout(`${url2}/health`, 5e3);
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  }
+  // ─── Python resolution ─────────────────────────────────────────────────────
+  async resolvePython(flowKitPath) {
+    const candidates = [];
+    if (this.settings.pythonPath) {
+      candidates.push(this.settings.pythonPath);
+    }
+    candidates.push(
+      path__namespace.join(flowKitPath, ".venv", "Scripts", "python.exe"),
+      path__namespace.join(flowKitPath, "venv", "Scripts", "python.exe"),
+      path__namespace.join(flowKitPath, ".venv", "bin", "python"),
+      path__namespace.join(flowKitPath, "venv", "bin", "python")
+    );
+    candidates.push("py", "python", "python3");
+    for (const py of candidates) {
+      const version = await this.checkPythonVersion(py);
+      if (version) {
+        logger.info(`[FlowKitRuntime] Found Python: ${py} (${version})`);
+        return py;
+      }
+    }
+    return null;
+  }
+  async checkPythonVersion(pythonExe) {
+    return new Promise((resolve) => {
+      try {
+        const child = cp__namespace.spawn(pythonExe, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+        let out = "";
+        child.stdout?.on("data", (d) => {
+          out += d.toString();
+        });
+        child.stderr?.on("data", (d) => {
+          out += d.toString();
+        });
+        child.on("close", (code) => {
+          if (code !== 0) return resolve(null);
+          const match = out.match(/Python (\d+)\.(\d+)/);
+          if (!match) return resolve(null);
+          const major = parseInt(match[1], 10);
+          const minor = parseInt(match[2], 10);
+          if (major >= 3 && minor >= 10) {
+            resolve(out.trim());
+          } else {
+            resolve(null);
+          }
+        });
+        child.on("error", () => resolve(null));
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+  async pollHealth(timeoutMs) {
+    const start = Date.now();
+    const url2 = this.settings.bridgeUrl;
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const resp = await this.fetchWithTimeout(`${url2}/health`, 3e3);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.status === "ok" || resp.ok) return true;
+        }
+      } catch {
+      }
+      await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+    }
+    return false;
+  }
+  parseBridgePort() {
+    try {
+      const url2 = new URL(this.settings.bridgeUrl);
+      return parseInt(url2.port || "8100", 10);
+    } catch {
+      return 8100;
+    }
+  }
+  extractNodeErrorCode(err) {
+    if (err && typeof err === "object") {
+      const cause = err.cause;
+      if (cause?.code) return cause.code;
+      const code = err.code;
+      if (code) return code;
+    }
+    return "UNKNOWN";
+  }
+  buildBridgeOfflineMessage(url2, code) {
+    if (code === "ECONNREFUSED") {
+      return `FlowKit bridge is not running at ${url2}. Start FlowKit with: python -m agent.main`;
+    }
+    if (code === "ETIMEDOUT" || code === "ECONNABORTED") {
+      return `FlowKit bridge at ${url2} timed out. The process may be starting or hung.`;
+    }
+    if (code === "ENOTFOUND") {
+      return `Cannot resolve host for FlowKit at ${url2}. Check the bridge URL in settings.`;
+    }
+    return `Cannot connect to FlowKit at ${url2} (${code}). Ensure FlowKit is running.`;
+  }
+  async fetchWithTimeout(url2, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url2, { signal: controller.signal });
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`Request timed out after ${timeoutMs}ms: ${url2}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  broadcastLog(message) {
+    try {
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        for (const win of electron.BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, { message, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          }
+        }
+      }
+    } catch {
+    }
+    logger.info(message);
+  }
+  broadcastStatus() {
+    const status = this.getStatus();
+    try {
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        for (const win of electron.BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, status);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+}
+const flowkitRuntimeManager = new FlowKitRuntimeManager();
+const APP_INSTANCE_ID$2 = uuid.v4();
+function getThumbnailJobStatePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-job-state.json");
+}
+function getThumbnailJobStateBackupPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-job-state.backup.json");
+}
+function computeThumbnailJobKey(params) {
+  const payload = [
+    params.renderOutputPath,
+    String(params.renderFileSize),
+    String(params.renderMtimeMs),
+    params.scriptHash,
+    params.templateSnapshotHash,
+    String(params.generationRound)
+  ].join("::");
+  return crypto__namespace.createHash("sha256").update(payload, "utf-8").digest("hex");
+}
+function createCandidatesFromPlan(plan, round = 1) {
+  return plan.options.map((opt) => ({
+    id: `cand-${uuid.v4()}`,
+    optionId: opt.id,
+    round,
+    revision: 1,
+    conceptName: opt.conceptName,
+    yellowText: opt.yellowText,
+    whiteText: opt.whiteText,
+    imagePrompt: opt.imagePrompt,
+    titleClear: opt.titleClear,
+    titleCuriosity: opt.titleCuriosity,
+    status: "pending",
+    attempts: 0
+  }));
+}
+function createInitialThumbnailJobState(params) {
+  const round = params.generationRound || 1;
+  const jobKey = computeThumbnailJobKey({
+    renderOutputPath: params.renderOutputPath,
+    renderFileSize: params.renderFileSize || 0,
+    renderMtimeMs: params.renderMtimeMs || 0,
+    scriptHash: params.scriptHash,
+    templateSnapshotHash: params.templateSnapshotHash,
+    generationRound: round
+  });
+  const candidates = params.plan ? createCandidatesFromPlan(params.plan, round) : [];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const jobId = `job-${uuid.v4()}`;
+  return {
+    schemaVersion: 1,
+    version: 1,
+    jobId,
+    jobKey,
+    projectDir: params.projectDir,
+    renderOutputPath: params.renderOutputPath,
+    status: params.plan ? "generating" : "planning",
+    generationRound: round,
+    scriptHash: params.scriptHash,
+    templateSnapshotHash: params.templateSnapshotHash,
+    flowProjectId: params.flowProjectId,
+    candidates,
+    createdAt: now,
+    updatedAt: now,
+    warnings: [],
+    errors: [],
+    lease: {
+      jobId,
+      appInstanceId: APP_INSTANCE_ID$2,
+      pid: process.pid,
+      acquiredAt: now,
+      heartbeatAt: now
+    }
+  };
+}
+function isThumbnailLeaseStale(lease, thresholdMs = 3e4) {
+  if (!lease) return false;
+  if (lease.appInstanceId !== APP_INSTANCE_ID$2) {
+    const age = Date.now() - new Date(lease.heartbeatAt).getTime();
+    if (age > thresholdMs) {
+      return true;
+    }
+    try {
+      process.kill(lease.pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+function saveThumbnailJobStateAtomic(projectDir, state2) {
+  const filePath = getThumbnailJobStatePath(projectDir);
+  const backupPath = getThumbnailJobStateBackupPath(projectDir);
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  state2.version = (state2.version || 0) + 1;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (state2.lease) {
+    state2.lease.heartbeatAt = state2.updatedAt;
+  }
+  const serialized = JSON.stringify(state2, null, 2);
+  const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
+  try {
+    fs__namespace.renameSync(tmpPath, filePath);
+    try {
+      fs__namespace.copyFileSync(filePath, backupPath);
+    } catch {
+    }
+  } finally {
+    if (fs__namespace.existsSync(tmpPath)) {
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+  }
+}
+function loadThumbnailJobState(projectDir) {
+  const filePath = getThumbnailJobStatePath(projectDir);
+  const backupPath = getThumbnailJobStateBackupPath(projectDir);
+  if (fs__namespace.existsSync(filePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(filePath, "utf-8");
+      return JSON.parse(raw);
+    } catch (err) {
+      logger.warn(`[ThumbnailState] Primary state corrupted at ${filePath}: ${err}. Attempting recovery from backup...`);
+    }
+  }
+  if (fs__namespace.existsSync(backupPath)) {
+    try {
+      const raw = fs__namespace.readFileSync(backupPath, "utf-8");
+      const recovered = JSON.parse(raw);
+      logger.info(`[ThumbnailState] Successfully recovered thumbnail state from backup for ${projectDir}`);
+      saveThumbnailJobStateAtomic(projectDir, recovered);
+      return recovered;
+    } catch (err) {
+      logger.error(`[ThumbnailState] Backup state also corrupted at ${backupPath}: ${err}`);
+    }
+  }
+  return null;
+}
+function getRoundDirectory(projectDir, round) {
+  const roundStr = `round-${String(round).padStart(3, "0")}`;
+  return path__namespace.join(projectDir, "output", "thumbnails", roundStr);
+}
+function getCandidateImagePath(projectDir, round, optionId, revision = 1) {
+  const roundDir = getRoundDirectory(projectDir, round);
+  const revSuffix = revision > 1 ? `-rev${revision}` : "";
+  return path__namespace.join(roundDir, `thumbnail-${optionId}-master${revSuffix}.png`);
+}
+function getSelectedDirectory(projectDir) {
+  return path__namespace.join(projectDir, "output", "thumbnails", "selected");
+}
+function reconcileThumbnailArtifacts(projectDir, state2) {
+  let changed = false;
+  getRoundDirectory(projectDir, state2.generationRound);
+  for (const cand of state2.candidates) {
+    if (cand.round !== state2.generationRound) continue;
+    const expectedPath = cand.exportedImagePath || getCandidateImagePath(projectDir, cand.round, cand.optionId, cand.revision);
+    if (fs__namespace.existsSync(expectedPath)) {
+      const stat = fs__namespace.statSync(expectedPath);
+      if (stat.size > 0) {
+        const dims = probeImageFile(expectedPath);
+        if (dims && cand.status !== "completed") {
+          cand.status = "completed";
+          cand.exportedImagePath = expectedPath;
+          cand.actualWidth = dims.width;
+          cand.actualHeight = dims.height;
+          cand.exportQuality = cand.exportQuality || (dims.width >= 3840 ? "native-4k" : "2k-fallback");
+          changed = true;
+          logger.info(`[ThumbnailArtifacts] Reconciled candidate ${cand.optionId} to completed from disk artifact (${expectedPath})`);
+        }
+      }
+    }
+  }
+  const allCompleted = state2.candidates.length === 5 && state2.candidates.every((c) => c.status === "completed");
+  if (allCompleted && state2.status !== "completed") {
+    state2.status = "completed";
+    state2.completedAt = state2.completedAt || (/* @__PURE__ */ new Date()).toISOString();
+    changed = true;
+  }
+  return changed;
+}
+function saveThumbnailManifest(projectDir, state2) {
+  const roundDir = getRoundDirectory(projectDir, state2.generationRound);
+  if (!fs__namespace.existsSync(roundDir)) {
+    fs__namespace.mkdirSync(roundDir, { recursive: true });
+  }
+  const manifestPath = path__namespace.join(roundDir, "manifest.json");
+  const manifest = {
+    projectId: path__namespace.basename(projectDir),
+    renderOutput: state2.renderOutputPath,
+    scriptHash: state2.scriptHash,
+    templateSnapshotHash: state2.templateSnapshotHash,
+    generationRound: state2.generationRound,
+    flowModel: "GEM_PIX_2",
+    flowProjectId: state2.flowProjectId,
+    candidates: state2.candidates.map((c) => ({
+      id: c.id,
+      optionId: c.optionId,
+      conceptName: c.conceptName,
+      yellowText: c.yellowText,
+      whiteText: c.whiteText,
+      titleClear: c.titleClear,
+      titleCuriosity: c.titleCuriosity,
+      imagePrompt: c.imagePrompt,
+      mediaId: c.mediaId,
+      actualDimensions: c.actualWidth && c.actualHeight ? { width: c.actualWidth, height: c.actualHeight } : void 0,
+      actualExportQuality: c.exportQuality,
+      filePath: c.exportedImagePath,
+      status: c.status,
+      error: c.error
+    })),
+    selectedCandidateId: state2.selectedCandidateId,
+    createdAt: state2.createdAt,
+    completedAt: state2.completedAt,
+    errors: state2.errors
+  };
+  fs__namespace.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  logger.info(`[ThumbnailArtifacts] Saved manifest.json for round ${state2.generationRound} to ${manifestPath}`);
+}
+function selectThumbnailCandidate(projectDir, state2, candidateId) {
+  const candidate = state2.candidates.find((c) => c.id === candidateId);
+  if (!candidate) {
+    return { success: false, error: `Candidate not found: ${candidateId}` };
+  }
+  if (candidate.status !== "completed" || !candidate.exportedImagePath || !fs__namespace.existsSync(candidate.exportedImagePath)) {
+    return { success: false, error: `Candidate ${candidate.optionId} is not completed or missing image file` };
+  }
+  const selectedDir = getSelectedDirectory(projectDir);
+  if (!fs__namespace.existsSync(selectedDir)) {
+    fs__namespace.mkdirSync(selectedDir, { recursive: true });
+  }
+  const ext = path__namespace.extname(candidate.exportedImagePath) || ".png";
+  const destImagePath = path__namespace.join(selectedDir, `selected-thumbnail${ext}`);
+  const destMetaPath = path__namespace.join(selectedDir, "selected-thumbnail.json");
+  fs__namespace.copyFileSync(candidate.exportedImagePath, destImagePath);
+  const meta = {
+    selectedCandidateId: candidate.id,
+    optionId: candidate.optionId,
+    conceptName: candidate.conceptName,
+    yellowText: candidate.yellowText,
+    whiteText: candidate.whiteText,
+    titleClear: candidate.titleClear,
+    titleCuriosity: candidate.titleCuriosity,
+    imagePrompt: candidate.imagePrompt,
+    mediaId: candidate.mediaId,
+    actualDimensions: { width: candidate.actualWidth, height: candidate.actualHeight },
+    exportQuality: candidate.exportQuality,
+    sourceFilePath: candidate.exportedImagePath,
+    selectedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  fs__namespace.writeFileSync(destMetaPath, JSON.stringify(meta, null, 2), "utf-8");
+  state2.selectedCandidateId = candidate.id;
+  saveThumbnailJobStateAtomic(projectDir, state2);
+  saveThumbnailManifest(projectDir, state2);
+  logger.info(`[ThumbnailArtifacts] Selected candidate ${candidate.optionId} copied to ${destImagePath}`);
+  return { success: true, selectedPath: destImagePath };
+}
+class ThumbnailFlowError extends Error {
+  code;
+  retryable;
+  scope;
+  constructor(code, message, retryable, scope) {
+    super(message);
+    this.name = "ThumbnailFlowError";
+    this.code = code;
+    this.retryable = retryable;
+    this.scope = scope;
+  }
+}
+class ThumbnailCancelledError extends Error {
+  constructor() {
+    super("THUMBNAIL_JOB_CANCELLED: Generation was cancelled.");
+    this.name = "ThumbnailCancelledError";
+  }
+}
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new ThumbnailCancelledError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new ThumbnailCancelledError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function classifyGenerationError(err, bridgeUrl) {
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error ? err.cause : void 0;
+  const causeCode = cause?.code || "";
+  if (rawMsg.startsWith("FLOWKIT_BRIDGE_OFFLINE") || causeCode === "ECONNREFUSED" || rawMsg.includes("ECONNREFUSED")) {
+    return new ThumbnailFlowError(
+      "FLOWKIT_BRIDGE_OFFLINE",
+      `FlowKit is not running at ${bridgeUrl}. Start FlowKit with: python -m agent.main`,
+      false,
+      "connector"
+    );
+  }
+  if (rawMsg.includes("fetch failed") || rawMsg.includes("Failed to fetch") || rawMsg.includes("ENOTFOUND")) {
+    return new ThumbnailFlowError(
+      "FLOWKIT_BRIDGE_OFFLINE",
+      `FlowKit bridge is not running at ${bridgeUrl}. Start FlowKit with: python -m agent.main`,
+      false,
+      "connector"
+    );
+  }
+  if (rawMsg.startsWith("FLOWKIT_TIMEOUT") || rawMsg.includes("ETIMEDOUT") || rawMsg.includes("timed out")) {
+    return new ThumbnailFlowError(
+      "FLOWKIT_TIMEOUT",
+      "FlowKit bridge request timed out. The bridge may be overloaded or unresponsive.",
+      true,
+      "candidate"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_EXTENSION_DISCONNECTED") || rawMsg.includes("FLOW_EXTENSION_DISCONNECTED")) {
+    return new ThumbnailFlowError(
+      "FLOW_EXTENSION_DISCONNECTED",
+      "Chrome extension is disconnected. Open Google Flow in Chrome and reconnect the extension.",
+      false,
+      "connector"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_RATE_LIMITED")) {
+    return new ThumbnailFlowError(
+      "FLOW_RATE_LIMITED",
+      rawMsg.replace("FLOW_RATE_LIMITED:", "").trim() || "Google Flow rate limit reached.",
+      true,
+      "candidate"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_RECAPTCHA_FAILED")) {
+    return new ThumbnailFlowError(
+      "FLOW_RECAPTCHA_FAILED",
+      rawMsg.replace("FLOW_RECAPTCHA_FAILED:", "").trim() || "reCAPTCHA verification failed.",
+      true,
+      "candidate"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_GENERATION_FAILED") || rawMsg.startsWith("FLOW_EXPORT_FAILED")) {
+    const [code, ...rest] = rawMsg.split(":");
+    return new ThumbnailFlowError(code, rest.join(":").trim() || rawMsg, false, "candidate");
+  }
+  if (rawMsg.includes("THUMBNAIL_JOB_CANCELLED") || err instanceof ThumbnailCancelledError) {
+    return new ThumbnailFlowError("THUMBNAIL_JOB_CANCELLED", "Generation was cancelled.", false, "job");
+  }
+  return new ThumbnailFlowError("FLOW_GENERATION_FAILED", rawMsg, false, "candidate");
+}
+function addUniqueDiagnostic(arr, message) {
+  const key = message.substring(0, 60);
+  const exists = arr.some((e) => e.substring(0, 60) === key);
+  if (!exists) {
+    arr.push(message);
+    return true;
+  }
+  return false;
+}
+function reconcileCandidatesForResume(state2, projectDir, hasActiveRun) {
+  let changed = false;
+  for (const c of state2.candidates) {
+    if (c.status === "generating" || c.status === "exporting") {
+      if (!hasActiveRun) {
+        c.status = "pending";
+        c.error = void 0;
+        changed = true;
+      }
+    } else if (c.status === "completed") {
+      const filePath = c.exportedImagePath || getCandidateImagePath(projectDir, c.round, c.optionId, c.revision);
+      if (!fs__namespace.existsSync(filePath) || fs__namespace.statSync(filePath).size === 0) {
+        c.status = "pending";
+        c.error = void 0;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+function deriveJobStatus(state2, hasActiveRun) {
+  const candidates = state2.candidates;
+  const completedCount = candidates.filter((c) => c.status === "completed").length;
+  const failedCount = candidates.filter((c) => c.status === "failed").length;
+  const runningCount = candidates.filter((c) => c.status === "generating" || c.status === "exporting").length;
+  const pendingCount = candidates.filter((c) => c.status === "pending").length;
+  const total = candidates.length;
+  if (state2.status === "cancelled") return "cancelled";
+  if (completedCount === total && total > 0) return "completed";
+  if (runningCount > 0 || pendingCount > 0 && hasActiveRun) return "generating";
+  if (completedCount > 0 && (failedCount > 0 || pendingCount > 0)) return "partial";
+  if (pendingCount > 0 && !hasActiveRun) return "interrupted";
+  if (failedCount > 0) {
+    const allConnectorFailed = candidates.filter((c) => c.status === "failed").every((c) => c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED")));
+    return allConnectorFailed ? "needs-attention" : "failed";
+  }
+  return state2.status;
+}
+class ThumbnailOrchestrator {
+  /** Single-flight map: projectDir → active run. Only ONE run per project allowed. */
+  activeJobs = /* @__PURE__ */ new Map();
+  provider;
+  defaultCooldownMs = 8e3;
+  runtimeManager;
+  constructor(provider, runtimeManager) {
+    this.provider = provider || googleFlowProvider;
+    this.runtimeManager = runtimeManager || flowkitRuntimeManager;
+  }
+  setRuntimeManager(rm) {
+    this.runtimeManager = rm;
+  }
+  setCooldownMs(ms) {
+    this.defaultCooldownMs = ms;
+  }
+  // ─── getJobState ─────────────────────────────────────────────────────────
+  async getJobState(projectDir) {
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) return null;
+    const hasActiveRun = this.activeJobs.has(projectDir);
+    const changed1 = reconcileThumbnailArtifacts(projectDir, state2);
+    const changed2 = reconcileCandidatesForResume(state2, projectDir, hasActiveRun);
+    let changed3 = false;
+    if (state2.status === "generating" && !hasActiveRun) {
+      const derived = deriveJobStatus(state2, false);
+      if (derived !== state2.status) {
+        logger.info(`[ThumbnailOrchestrator] Reconciled stuck job for ${projectDir}: ${state2.status}→${derived}`);
+        state2.status = derived;
+        changed3 = true;
+      }
+    }
+    if (changed1 || changed2 || changed3) {
+      saveThumbnailJobStateAtomic(projectDir, state2);
+    }
+    return state2;
+  }
+  // ─── startJob ────────────────────────────────────────────────────────────
+  async startJob(params) {
+    const { projectDir } = params;
+    const existing = this.activeJobs.get(projectDir);
+    if (existing) {
+      logger.info(`[ThumbnailOrchestrator] Job already actively running for ${projectDir} (jobId=${existing.jobId}). Returning existing.`);
+      return existing.promise;
+    }
+    const settings = await loadProjectThumbnailSettings(projectDir);
+    const script = this.resolveScriptText(projectDir, params.scriptPath);
+    const scriptHash2 = computeSha256(script || "no-script");
+    const templateSnapshot = params.templateSnapshot || settings.templateSnapshot || "";
+    const templateSnapshotHash = computeSha256(templateSnapshot);
+    const renderOutputPath = params.renderOutputPath || this.resolveRenderOutputPath(projectDir);
+    let renderFileSize = 0;
+    let renderMtimeMs = 0;
+    if (renderOutputPath && fs__namespace.existsSync(renderOutputPath)) {
+      const st = fs__namespace.statSync(renderOutputPath);
+      renderFileSize = st.size;
+      renderMtimeMs = st.mtimeMs;
+    }
+    const round = params.generationRound || 1;
+    const existingState = loadThumbnailJobState(projectDir);
+    if (existingState && !params.forceRestart) {
+      if (existingState.status === "completed" && existingState.generationRound === round) {
+        logger.info(`[ThumbnailOrchestrator] Completed job found for round ${round}. Skipping.`);
+        return existingState;
+      }
+      if (existingState.status === "generating" && isThumbnailLeaseStale(existingState.lease)) {
+        logger.info(`[ThumbnailOrchestrator] Stale lease detected. Reconciling to interrupted state.`);
+        existingState.status = "interrupted";
+        for (const c of existingState.candidates) {
+          if (c.status === "generating" || c.status === "exporting") {
+            c.status = "pending";
+            c.error = void 0;
+          }
+        }
+        if (existingState.lease) delete existingState.lease;
+        saveThumbnailJobStateAtomic(projectDir, existingState);
+        return existingState;
+      }
+    }
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      logger.warn(`[ThumbnailOrchestrator] startJob preflight failed: ${readiness.blockingCode} — ${readiness.message}`);
+      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash: scriptHash2, templateSnapshotHash, round, params, settings, templateSnapshot });
+    }
+    const abortController = new AbortController();
+    const jobIdPlaceholder = `job-${Date.now()}`;
+    const executionPromise = (async () => {
+      try {
+        let state2;
+        if (existingState && existingState.candidates.length === 5 && existingState.generationRound === round && !params.forceRestart) {
+          state2 = existingState;
+          reconcileCandidatesForResume(state2, projectDir, true);
+          state2.status = "generating";
+          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          saveThumbnailJobStateAtomic(projectDir, state2);
+        } else {
+          this.broadcastProgress({
+            projectDir,
+            jobId: jobIdPlaceholder,
+            status: "planning",
+            stage: "planning",
+            completedCount: 0,
+            totalCount: 5,
+            progress: 0.1,
+            message: "Generating 5 distinct thumbnail concepts from script..."
+          });
+          const plan = await thumbnailPlanner.plan({
+            projectDir,
+            templateId: params.templateId || settings.selectedTemplateId,
+            templateSnapshot,
+            preferredModel: params.preferredModel,
+            generationRound: round
+          });
+          state2 = createInitialThumbnailJobState({
+            projectDir,
+            renderOutputPath,
+            renderFileSize,
+            renderMtimeMs,
+            scriptHash: scriptHash2,
+            templateSnapshotHash,
+            generationRound: round,
+            plan
+          });
+          saveThumbnailJobStateAtomic(projectDir, state2);
+        }
+        reconcileThumbnailArtifacts(projectDir, state2);
+        saveThumbnailJobStateAtomic(projectDir, state2);
+        const cooldown = params.cooldownMs ?? this.defaultCooldownMs;
+        await this.runConcurrentCandidates(state2, abortController.signal, cooldown);
+        return this.finalizeJob(state2, projectDir);
+      } finally {
+        this.activeJobs.delete(projectDir);
+      }
+    })();
+    this.activeJobs.set(projectDir, { abortController, promise: executionPromise, jobId: jobIdPlaceholder });
+    return executionPromise;
+  }
+  // ─── resumeJob ───────────────────────────────────────────────────────────
+  async resumeJob(projectDir) {
+    const existing = this.activeJobs.get(projectDir);
+    if (existing) {
+      logger.info(`[ThumbnailOrchestrator] Resume requested but job already running (jobId=${existing.jobId}). Returning existing.`);
+      return existing.promise;
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) {
+      throw new Error(`No thumbnail job state found to resume for ${projectDir}`);
+    }
+    reconcileThumbnailArtifacts(projectDir, state2);
+    reconcileCandidatesForResume(state2, projectDir, false);
+    const incomplete = state2.candidates.filter((c) => c.status !== "completed");
+    if (incomplete.length === 0) {
+      state2.status = "completed";
+      state2.completedAt = state2.completedAt || (/* @__PURE__ */ new Date()).toISOString();
+      saveThumbnailJobStateAtomic(projectDir, state2);
+      return state2;
+    }
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      logger.warn(`[ThumbnailOrchestrator] Resume preflight failed: ${readiness.blockingCode}`);
+      for (const c of state2.candidates) {
+        if (c.status === "generating" || c.status === "exporting") {
+          c.status = "pending";
+          c.error = void 0;
+        }
+      }
+      state2.status = "needs-attention";
+      state2.errors = state2.errors || [];
+      addUniqueDiagnostic(state2.errors, `[${readiness.blockingCode}] ${readiness.message}`);
+      saveThumbnailJobStateAtomic(projectDir, state2);
+      this.broadcastProgress({
+        projectDir,
+        jobId: state2.jobId,
+        status: "needs-attention",
+        stage: "idle",
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: 0,
+        message: readiness.message,
+        jobState: state2
+      });
+      return state2;
+    }
+    for (const c of incomplete) {
+      if (c.status === "failed") {
+        const isConnectorError = c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED"));
+        if (isConnectorError || !c.error) {
+          c.status = "pending";
+          c.error = void 0;
+        }
+      }
+    }
+    state2.status = "generating";
+    state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const abortController = new AbortController();
+    const executionPromise = (async () => {
+      try {
+        await this.runConcurrentCandidates(state2, abortController.signal, this.defaultCooldownMs);
+        return this.finalizeJob(state2, projectDir);
+      } finally {
+        this.activeJobs.delete(projectDir);
+      }
+    })();
+    this.activeJobs.set(projectDir, { abortController, promise: executionPromise, jobId: state2.jobId });
+    return executionPromise;
+  }
+  // ─── cancelJob ───────────────────────────────────────────────────────────
+  async cancelJob(projectDir) {
+    const active = this.activeJobs.get(projectDir);
+    if (active) {
+      active.abortController.abort();
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (state2 && (state2.status === "generating" || state2.status === "planning")) {
+      state2.status = "cancelled";
+      for (const c of state2.candidates) {
+        if (c.status === "generating" || c.status === "exporting") {
+          c.status = "pending";
+        }
+      }
+      saveThumbnailJobStateAtomic(projectDir, state2);
+      this.broadcastProgress({
+        projectDir,
+        jobId: state2.jobId,
+        status: "cancelled",
+        stage: "idle",
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: 0,
+        message: "Thumbnail generation cancelled by user.",
+        jobState: state2
+      });
+      return true;
+    }
+    return false;
+  }
+  // ─── generateMore ─────────────────────────────────────────────────────────
+  async generateMore(projectDir, templateId, templateSnapshot) {
+    if (this.activeJobs.has(projectDir)) {
+      const state2 = loadThumbnailJobState(projectDir);
+      if (state2) return state2;
+      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Generation already in progress.");
+    }
+    const existing = loadThumbnailJobState(projectDir);
+    const nextRound = (existing?.generationRound || 1) + 1;
+    const previousConceptsList = [];
+    if (existing?.candidates) {
+      for (const c of existing.candidates) {
+        previousConceptsList.push(`- [${c.optionId}] ${c.conceptName}: "${c.yellowText} / ${c.whiteText}"`);
+      }
+    }
+    logger.info(`[ThumbnailOrchestrator] Generating 5 More thumbnails for round ${nextRound}...`);
+    return this.startJob({
+      projectDir,
+      templateId,
+      templateSnapshot,
+      generationRound: nextRound,
+      forceRestart: true
+    });
+  }
+  // ─── retryCandidate ───────────────────────────────────────────────────────
+  async retryCandidate(projectDir, candidateId) {
+    if (this.activeJobs.has(projectDir)) {
+      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Cannot retry individual candidate while batch is running.");
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    const candidate = state2.candidates.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      throw new ThumbnailFlowError(
+        readiness.blockingCode || "FLOWKIT_BRIDGE_OFFLINE",
+        readiness.message || "FlowKit is not ready.",
+        false,
+        "connector"
+      );
+    }
+    logger.info(`[ThumbnailOrchestrator] Retrying candidate ${candidate.optionId}...`);
+    candidate.status = "generating";
+    candidate.attempts = (candidate.attempts || 0) + 1;
+    candidate.error = void 0;
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const abortController = new AbortController();
+    try {
+      await this.processSingleCandidate(state2, candidate, abortController.signal);
+    } catch (err) {
+      const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+      candidate.status = "failed";
+      candidate.error = `${structured.code}: ${structured.message}`;
+    }
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    return candidate;
+  }
+  // ─── regenerateCandidate ─────────────────────────────────────────────────
+  async regenerateCandidate(projectDir, candidateId, customPrompt) {
+    if (this.activeJobs.has(projectDir)) {
+      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Cannot regenerate individual candidate while batch is running.");
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    const candidate = state2.candidates.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      throw new ThumbnailFlowError(
+        readiness.blockingCode || "FLOWKIT_BRIDGE_OFFLINE",
+        readiness.message || "FlowKit is not ready.",
+        false,
+        "connector"
+      );
+    }
+    candidate.revision = (candidate.revision || 1) + 1;
+    if (customPrompt) {
+      candidate.imagePrompt = customPrompt.trim();
+    }
+    candidate.status = "generating";
+    candidate.error = void 0;
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const abortController = new AbortController();
+    try {
+      await this.processSingleCandidate(state2, candidate, abortController.signal);
+    } catch (err) {
+      const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+      candidate.status = "failed";
+      candidate.error = `${structured.code}: ${structured.message}`;
+    }
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    return candidate;
+  }
+  // ─── exportCandidate4k ────────────────────────────────────────────────────
+  async exportCandidate4k(projectDir, candidateId) {
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    const candidate = state2.candidates.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
+    if (!candidate.mediaId) {
+      throw new Error(`Candidate ${candidate.optionId} does not have a mediaId yet. Generate it first.`);
+    }
+    candidate.status = "exporting";
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const destPath = getCandidateImagePath(projectDir, candidate.round, candidate.optionId, candidate.revision);
+    const exportRes = await this.provider.exportImage({
+      mediaId: candidate.mediaId,
+      projectId: state2.flowProjectId,
+      quality: "4k",
+      fallbackToOriginalUrl: candidate.originalImagePath,
+      destinationPath: destPath
+    });
+    candidate.status = "completed";
+    candidate.exportedImagePath = exportRes.filePath;
+    candidate.actualWidth = exportRes.width;
+    candidate.actualHeight = exportRes.height;
+    candidate.exportQuality = exportRes.actualQuality;
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    return candidate;
+  }
+  // ─── selectCandidate ─────────────────────────────────────────────────────
+  selectCandidate(projectDir, candidateId) {
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    return selectThumbnailCandidate(projectDir, state2, candidateId);
+  }
+  // ─── handleAppQuit ────────────────────────────────────────────────────────
+  handleAppQuit() {
+    logger.info("[ThumbnailOrchestrator] App quitting. Marking running thumbnail jobs as interrupted...");
+    for (const [projectDir, active] of this.activeJobs.entries()) {
+      active.abortController.abort();
+      const state2 = loadThumbnailJobState(projectDir);
+      if (state2 && (state2.status === "generating" || state2.status === "planning")) {
+        state2.status = "interrupted";
+        for (const c of state2.candidates) {
+          if (c.status === "generating" || c.status === "exporting") {
+            c.status = "pending";
+          }
+        }
+        if (state2.lease) delete state2.lease;
+        saveThumbnailJobStateAtomic(projectDir, state2);
+      }
+    }
+    this.activeJobs.clear();
+  }
+  // ─── Private: runSequentialCandidates ─────────────────────────────────────
+  /**
+   * Run candidates strictly sequentially, one at a time.
+   * Uses ONE retry loop here in the orchestrator. GoogleFlowClient does NOT retry.
+   * @deprecated Kept as fallback. Active path uses runConcurrentCandidates.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async runSequentialCandidates(state2, signal, cooldownMs) {
+    const candidates = state2.candidates;
+    const MAX_CANDIDATE_ATTEMPTS = 4;
+    for (let i = 0; i < candidates.length; i++) {
+      if (signal.aborted) {
+        logger.info("[ThumbnailOrchestrator] Abort signal received. Stopping candidate loop.");
+        state2.status = "cancelled";
+        saveThumbnailJobStateAtomic(state2.projectDir, state2);
+        return;
+      }
+      const candidate = candidates[i];
+      if (candidate.status === "completed") {
+        logger.info(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} already completed, skipping.`);
+        continue;
+      }
+      if (!await this.runtimeManager.isBridgeStillReachable()) {
+        logger.warn(`[ThumbnailOrchestrator] Bridge went offline before candidate ${candidate.optionId}. Pausing batch.`);
+        this.pauseBatchForBridgeOffline(state2, i, candidates);
+        return;
+      }
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: (candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
+        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
+        candidate,
+        jobState: state2
+      });
+      let succeeded = false;
+      let lastError = null;
+      const attemptsAtStart = candidate.attempts || 0;
+      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
+        if (signal.aborted) {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+        logger.info(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} (runId=${state2.jobId})`);
+        try {
+          await this.processSingleCandidate(state2, candidate, signal);
+          succeeded = true;
+          break;
+        } catch (err) {
+          if (err instanceof ThumbnailCancelledError) {
+            state2.status = "cancelled";
+            saveThumbnailJobStateAtomic(state2.projectDir, state2);
+            return;
+          }
+          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+          lastError = structured;
+          logger.error(
+            `[ThumbnailOrchestrator] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
+          );
+          if (structured.scope === "connector") {
+            logger.warn(`[ThumbnailOrchestrator] Connector error on candidate ${candidate.optionId}. Aborting batch.`);
+            candidate.status = "pending";
+            candidate.error = void 0;
+            candidate.attempts = attemptsAtStart;
+            this.pauseBatchForBridgeOffline(state2, i, candidates, structured);
+            return;
+          }
+          if (!structured.retryable) {
+            break;
+          }
+          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
+            const backoffMs = Math.min(3e3 * attempt, 15e3);
+            logger.warn(`[ThumbnailOrchestrator] Retryable error. Waiting ${backoffMs}ms before attempt ${attempt + 1}...`);
+            try {
+              await abortableDelay(backoffMs, signal);
+            } catch {
+              state2.status = "cancelled";
+              saveThumbnailJobStateAtomic(state2.projectDir, state2);
+              return;
+            }
+          }
+        }
+      }
+      if (!succeeded && lastError) {
+        candidate.status = "failed";
+        candidate.error = `${lastError.code}: ${lastError.message}`;
+        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
+        logger.error(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
+      }
+      saveThumbnailJobStateAtomic(state2.projectDir, state2);
+      saveThumbnailManifest(state2.projectDir, state2);
+      const updatedCompleted = candidates.filter((c) => c.status === "completed").length;
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: candidate.status === "completed" ? "exporting" : "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: updatedCompleted,
+        totalCount: 5,
+        progress: updatedCompleted / 5,
+        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
+        candidate,
+        jobState: state2
+      });
+      if (i < candidates.length - 1 && !signal.aborted) {
+        logger.info(`[ThumbnailOrchestrator] Cooldown ${cooldownMs}ms before next candidate...`);
+        try {
+          await abortableDelay(cooldownMs, signal);
+        } catch {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+      }
+    }
+  }
+  // ─── Private: runConcurrentCandidates ─────────────────────────────────────
+  /**
+   * Run all pending candidates in parallel (Promise.allSettled).
+   * Each candidate gets its own retry loop (MAX_CANDIDATE_ATTEMPTS).
+   * Progress is broadcast immediately when each candidate completes.
+   * Connector errors (bridge offline) abort ALL siblings via AbortController.
+   */
+  async runConcurrentCandidates(state2, signal, _cooldownMs) {
+    const candidates = state2.candidates.filter((c) => c.status !== "completed");
+    if (candidates.length === 0) return;
+    const MAX_CANDIDATE_ATTEMPTS = 4;
+    const innerAbort = new AbortController();
+    signal.addEventListener("abort", () => innerAbort.abort(), { once: true });
+    const runOne = async (candidate) => {
+      if (signal.aborted || innerAbort.signal.aborted) {
+        state2.status = "cancelled";
+        return;
+      }
+      const attemptsAtStart = candidate.attempts || 0;
+      let succeeded = false;
+      let lastError = null;
+      if (!await this.runtimeManager.isBridgeStillReachable()) {
+        logger.warn(`[ThumbnailOrchestrator] Bridge offline before concurrent candidate ${candidate.optionId}.`);
+        innerAbort.abort();
+        this.pauseBatchForBridgeOffline(state2, 0, state2.candidates);
+        return;
+      }
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: (state2.candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
+        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
+        candidate,
+        jobState: state2
+      });
+      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
+        if (signal.aborted || innerAbort.signal.aborted) {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+        logger.info(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS}`);
+        try {
+          await this.processSingleCandidate(state2, candidate, innerAbort.signal);
+          succeeded = true;
+          break;
+        } catch (err) {
+          if (err instanceof ThumbnailCancelledError) {
+            state2.status = "cancelled";
+            saveThumbnailJobStateAtomic(state2.projectDir, state2);
+            return;
+          }
+          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+          lastError = structured;
+          logger.error(
+            `[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
+          );
+          if (structured.scope === "connector") {
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Connector error on ${candidate.optionId}. Aborting all concurrent candidates.`);
+            candidate.status = "pending";
+            candidate.error = void 0;
+            candidate.attempts = attemptsAtStart;
+            innerAbort.abort();
+            this.pauseBatchForBridgeOffline(state2, 0, state2.candidates, structured);
+            return;
+          }
+          if (!structured.retryable) break;
+          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
+            const backoffMs = Math.min(3e3 * attempt, 15e3);
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Retryable error on ${candidate.optionId}. Waiting ${backoffMs}ms...`);
+            try {
+              await abortableDelay(backoffMs, innerAbort.signal);
+            } catch {
+              state2.status = "cancelled";
+              saveThumbnailJobStateAtomic(state2.projectDir, state2);
+              return;
+            }
+          }
+        }
+      }
+      if (!succeeded && lastError) {
+        candidate.status = "failed";
+        candidate.error = `${lastError.code}: ${lastError.message}`;
+        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
+        logger.error(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
+      }
+      saveThumbnailJobStateAtomic(state2.projectDir, state2);
+      saveThumbnailManifest(state2.projectDir, state2);
+      const updatedCompleted = state2.candidates.filter((c) => c.status === "completed").length;
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: candidate.status === "completed" ? "exporting" : "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: updatedCompleted,
+        totalCount: 5,
+        progress: updatedCompleted / 5,
+        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
+        candidate,
+        jobState: state2
+      });
+    };
+    await Promise.allSettled(candidates.map((c) => runOne(c)));
+  }
+  // ─── Private: processSingleCandidate ──────────────────────────────────────
+  /**
+   * Process a single candidate: generate + export.
+   * DOES NOT retry. Orchestrator owns retry policy.
+   * Accepts AbortSignal to stop immediately.
+   */
+  async processSingleCandidate(state2, candidate, signal) {
+    if (signal?.aborted) throw new ThumbnailCancelledError();
+    candidate.status = "generating";
+    candidate.attempts = (candidate.attempts || 0) + 1;
+    saveThumbnailJobStateAtomic(state2.projectDir, state2);
+    const genRes = await this.provider.generateImage({
+      prompt: candidate.imagePrompt,
+      projectId: state2.flowProjectId,
+      candidateId: candidate.id,
+      optionId: candidate.optionId
+    });
+    if (signal?.aborted) throw new ThumbnailCancelledError();
+    candidate.mediaId = genRes.mediaId;
+    candidate.originalImagePath = genRes.fifeUrl;
+    if (genRes.projectId && !state2.flowProjectId) {
+      state2.flowProjectId = genRes.projectId;
+    }
+    candidate.status = "exporting";
+    saveThumbnailJobStateAtomic(state2.projectDir, state2);
+    if (signal?.aborted) throw new ThumbnailCancelledError();
+    const destPath = getCandidateImagePath(state2.projectDir, candidate.round, candidate.optionId, candidate.revision);
+    const exportRes = await this.provider.exportImage({
+      mediaId: genRes.mediaId,
+      projectId: state2.flowProjectId,
+      quality: "4k",
+      fallbackToOriginalUrl: genRes.fifeUrl,
+      destinationPath: destPath
+    });
+    if (!fs__namespace.existsSync(exportRes.filePath) || fs__namespace.statSync(exportRes.filePath).size === 0) {
+      throw new Error(`Downloaded image file is missing or 0 bytes: ${exportRes.filePath}`);
+    }
+    candidate.status = "completed";
+    candidate.exportedImagePath = exportRes.filePath;
+    candidate.actualWidth = exportRes.width;
+    candidate.actualHeight = exportRes.height;
+    candidate.exportQuality = exportRes.actualQuality;
+    candidate.error = void 0;
+  }
+  // ─── Private: pauseBatchForBridgeOffline ─────────────────────────────────
+  pauseBatchForBridgeOffline(state2, fromIndex, candidates, error) {
+    for (let j = fromIndex; j < candidates.length; j++) {
+      if (candidates[j].status !== "completed") {
+        candidates[j].status = "pending";
+        candidates[j].error = void 0;
+      }
+    }
+    state2.status = "needs-attention";
+    state2.errors = state2.errors || [];
+    const errMsg = error ? `${error.code}: ${error.message}` : "FLOWKIT_BRIDGE_OFFLINE: Bridge went offline during generation.";
+    addUniqueDiagnostic(state2.errors, errMsg);
+    saveThumbnailJobStateAtomic(state2.projectDir, state2);
+    saveThumbnailManifest(state2.projectDir, state2);
+    this.broadcastProgress({
+      projectDir: state2.projectDir,
+      jobId: state2.jobId,
+      status: "needs-attention",
+      stage: "idle",
+      completedCount: candidates.filter((c) => c.status === "completed").length,
+      totalCount: 5,
+      progress: candidates.filter((c) => c.status === "completed").length / 5,
+      message: error?.message || "FlowKit connection lost. Fix the connection and click Resume.",
+      jobState: state2
+    });
+  }
+  // ─── Private: finalizeJob ─────────────────────────────────────────────────
+  finalizeJob(state2, projectDir) {
+    reconcileThumbnailArtifacts(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    const completedCount = state2.candidates.filter((c) => c.status === "completed").length;
+    const failedCount = state2.candidates.filter((c) => c.status === "failed").length;
+    const pendingCount = state2.candidates.filter((c) => c.status === "pending").length;
+    const allConnectorFailed = failedCount > 0 && state2.candidates.filter((c) => c.status === "failed").every((c) => c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED")));
+    if (state2.status !== "cancelled" && state2.status !== "needs-attention") {
+      state2.status = completedCount === 5 ? "completed" : completedCount > 0 ? "partial" : pendingCount > 0 ? "needs-attention" : allConnectorFailed ? "needs-attention" : "failed";
+    }
+    if (completedCount === 5) {
+      state2.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    }
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    this.broadcastProgress({
+      projectDir,
+      jobId: state2.jobId,
+      status: state2.status,
+      stage: completedCount === 5 ? "completed" : state2.status === "needs-attention" ? "idle" : "failed",
+      completedCount,
+      totalCount: 5,
+      progress: completedCount / 5,
+      message: completedCount === 5 ? "All 5 thumbnails generated and exported successfully." : state2.status === "needs-attention" ? "FlowKit connection failed. Fix the connection and click Resume." : `${completedCount}/5 thumbnails generated. Some candidates require attention.`,
+      jobState: state2
+    });
+    return state2;
+  }
+  // ─── Private: markNeedsAttention ─────────────────────────────────────────
+  async markNeedsAttention(projectDir, readiness, ctx) {
+    let state2;
+    const loadedState = loadThumbnailJobState(projectDir);
+    if (loadedState && loadedState.candidates.length === 5) {
+      state2 = loadedState;
+      for (const c of state2.candidates) {
+        if (c.status === "generating" || c.status === "exporting") {
+          c.status = "pending";
+          c.error = void 0;
+        }
+      }
+    } else {
+      const plan = await thumbnailPlanner.plan({
+        projectDir,
+        templateId: ctx.params.templateId || ctx.settings.selectedTemplateId,
+        templateSnapshot: ctx.templateSnapshot,
+        preferredModel: ctx.params.preferredModel,
+        generationRound: ctx.round
+      }).catch(() => void 0);
+      state2 = createInitialThumbnailJobState({
+        projectDir,
+        renderOutputPath: ctx.renderOutputPath,
+        renderFileSize: ctx.renderFileSize,
+        renderMtimeMs: ctx.renderMtimeMs,
+        scriptHash: ctx.scriptHash,
+        templateSnapshotHash: ctx.templateSnapshotHash,
+        generationRound: ctx.round,
+        plan
+      });
+    }
+    state2.status = "needs-attention";
+    state2.errors = state2.errors || [];
+    addUniqueDiagnostic(state2.errors, `[${readiness.blockingCode}] ${readiness.message}`);
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    this.broadcastProgress({
+      projectDir,
+      jobId: state2.jobId,
+      status: "needs-attention",
+      stage: "idle",
+      completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+      totalCount: 5,
+      progress: 0,
+      message: readiness.message,
+      jobState: state2
+    });
+    return state2;
+  }
+  // ─── Private: resolve helpers ─────────────────────────────────────────────
+  resolveScriptText(projectDir, customPath) {
+    if (customPath && fs__namespace.existsSync(customPath)) {
+      try {
+        return fs__namespace.readFileSync(customPath, "utf-8");
+      } catch {
+      }
+    }
+    const candidates = [
+      path__namespace.join(projectDir, "script.txt"),
+      path__namespace.join(projectDir, "inputs", "script.txt"),
+      path__namespace.join(projectDir, "project-state.json"),
+      path__namespace.join(projectDir, "project.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        if (c.endsWith(".json")) {
+          try {
+            const raw = fs__namespace.readFileSync(c, "utf-8");
+            const st = JSON.parse(raw);
+            if (st?.inputs?.scriptPath && fs__namespace.existsSync(st.inputs.scriptPath)) {
+              return fs__namespace.readFileSync(st.inputs.scriptPath, "utf-8");
+            }
+          } catch {
+          }
+        } else {
+          return fs__namespace.readFileSync(c, "utf-8");
+        }
+      }
+    }
+    return "";
+  }
+  resolveRenderOutputPath(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "output", "final_video.mp4"),
+      path__namespace.join(projectDir, "output", "video.mp4"),
+      path__namespace.join(projectDir, "output", "render.mp4")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) return c;
+    }
+    return candidates[0];
+  }
+  broadcastProgress(payload) {
+    try {
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        const windows = electron.BrowserWindow.getAllWindows();
+        for (const win of windows) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.THUMBNAIL_PROGRESS, payload);
+          }
+        }
+      }
+    } catch {
+    }
+  }
+}
+const thumbnailOrchestrator = new ThumbnailOrchestrator();
+class ThumbnailAutoTrigger {
+  triggeredKeys = /* @__PURE__ */ new Set();
+  /**
+   * Safe, non-blocking auto-trigger entry point.
+   * NEVER throws an error to the caller, never interferes with video pipeline status.
+   */
+  async startIfEligible(params) {
+    try {
+      const { projectDir } = params;
+      if (!projectDir || !fs__namespace.existsSync(projectDir)) {
+        logger.info("[ThumbnailAutoTrigger] Project directory does not exist. Skipping.");
+        return false;
+      }
+      const settings = await loadProjectThumbnailSettings(projectDir);
+      if (!settings.enabled || !settings.autoGenerateAfterRender) {
+        logger.info(`[ThumbnailAutoTrigger] Thumbnail automation disabled for ${projectDir}. Skipping.`);
+        return false;
+      }
+      const renderPath = params.renderOutputPath || this.findRenderOutput(projectDir);
+      if (!renderPath || !fs__namespace.existsSync(renderPath)) {
+        logger.warn(`[ThumbnailAutoTrigger] Render output file not found at "${renderPath}". Skipping thumbnail generation.`);
+        return false;
+      }
+      const st = fs__namespace.statSync(renderPath);
+      const renderFileSize = st.size;
+      const renderMtimeMs = st.mtimeMs;
+      const script = this.readScriptText(projectDir, params.scriptPath);
+      const scriptHash2 = computeSha256(script || "no-script");
+      const templateSnapshotHash = settings.templateSnapshotHash || computeSha256(settings.templateSnapshot || "");
+      const round = 1;
+      const jobKey = computeThumbnailJobKey({
+        renderOutputPath: renderPath,
+        renderFileSize,
+        renderMtimeMs,
+        scriptHash: scriptHash2,
+        templateSnapshotHash,
+        generationRound: round
+      });
+      if (this.triggeredKeys.has(jobKey)) {
+        logger.info(`[ThumbnailAutoTrigger] Job key ${jobKey} already triggered in-memory. Skipping duplicate trigger.`);
+        return false;
+      }
+      const existingState = loadThumbnailJobState(projectDir);
+      if (existingState && existingState.jobKey === jobKey) {
+        if (existingState.status === "completed" || existingState.status === "generating") {
+          logger.info(`[ThumbnailAutoTrigger] Job with key ${jobKey} is already ${existingState.status}. Skipping duplicate.`);
+          return false;
+        }
+      }
+      if (!settings.selectedTemplateId || !settings.templateSnapshot) {
+        logger.warn(`[ThumbnailAutoTrigger] Automation enabled but no template selected for ${projectDir}. Setting status to needs-attention.`);
+        const attentionState = existingState || createInitialThumbnailJobState({
+          projectDir,
+          renderOutputPath: renderPath,
+          renderFileSize,
+          renderMtimeMs,
+          scriptHash: scriptHash2,
+          templateSnapshotHash,
+          generationRound: round
+        });
+        attentionState.status = "needs-attention";
+        attentionState.warnings.push("No master prompt template selected. Please choose a template in Thumbnail Studio.");
+        saveThumbnailJobStateAtomic(projectDir, attentionState);
+        return false;
+      }
+      this.triggeredKeys.add(jobKey);
+      logger.info(`[ThumbnailAutoTrigger] Video completed. Spawning companion thumbnail generation for ${projectDir}...`);
+      void (async () => {
+        try {
+          await thumbnailOrchestrator.startJob({
+            projectDir,
+            renderOutputPath: renderPath,
+            scriptPath: params.scriptPath,
+            templateId: settings.selectedTemplateId,
+            templateSnapshot: settings.templateSnapshot,
+            generationRound: round
+          });
+        } catch (jobErr) {
+          logger.error(`[ThumbnailAutoTrigger] Companion thumbnail run failed: ${jobErr}`);
+          const state2 = loadThumbnailJobState(projectDir);
+          if (state2 && state2.status !== "completed") {
+            state2.status = "failed";
+            state2.errors.push(jobErr instanceof Error ? jobErr.message : String(jobErr));
+            saveThumbnailJobStateAtomic(projectDir, state2);
+          }
+        }
+      })();
+      return true;
+    } catch (outerErr) {
+      logger.error(`[ThumbnailAutoTrigger] Unexpected error in startIfEligible: ${outerErr}`);
+      return false;
+    }
+  }
+  findRenderOutput(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "output", "final_video.mp4"),
+      path__namespace.join(projectDir, "output", "video.mp4"),
+      path__namespace.join(projectDir, "output", "render.mp4")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) return c;
+    }
+    return null;
+  }
+  readScriptText(projectDir, customPath) {
+    if (customPath && fs__namespace.existsSync(customPath)) {
+      try {
+        return fs__namespace.readFileSync(customPath, "utf-8");
+      } catch {
+      }
+    }
+    const candidates = [
+      path__namespace.join(projectDir, "script.txt"),
+      path__namespace.join(projectDir, "inputs", "script.txt"),
+      path__namespace.join(projectDir, "project-state.json"),
+      path__namespace.join(projectDir, "project.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        if (c.endsWith(".json")) {
+          try {
+            const raw = fs__namespace.readFileSync(c, "utf-8");
+            const st = JSON.parse(raw);
+            if (st?.inputs?.scriptPath && fs__namespace.existsSync(st.inputs.scriptPath)) {
+              return fs__namespace.readFileSync(st.inputs.scriptPath, "utf-8");
+            }
+          } catch {
+          }
+        } else {
+          return fs__namespace.readFileSync(c, "utf-8");
+        }
+      }
+    }
+    return "";
+  }
+}
+const thumbnailAutoTrigger = new ThumbnailAutoTrigger();
 function registerRenderHandlers(ipcMain) {
   ipcMain.handle(
     IPC_CHANNELS.RENDER_START,
@@ -6662,6 +9842,12 @@ function registerRenderHandlers(ipcMain) {
           // truyền vào renderer — undefined = bỏ qua burn step
           onProgress: sendProgress
         });
+        if (result && result.outputPath && fs__namespace.existsSync(result.outputPath)) {
+          void thumbnailAutoTrigger.startIfEligible({
+            projectDir: params.projectDir,
+            renderOutputPath: result.outputPath
+          });
+        }
         return { success: true, result };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -8866,7 +12052,7 @@ async function downloadPreviewTemp(url2, destPath, timeoutMs = 8e3) {
 async function probeDuration(filePath) {
   if (!ffprobeStatic?.path || !fs__namespace.existsSync(filePath)) return 0;
   return new Promise((resolve) => {
-    const proc = child_process.spawn(
+    const proc = cp.spawn(
       ffprobeStatic.path,
       [
         "-v",
@@ -8947,7 +12133,7 @@ async function extractCandidateFrames(candidate, maxFrames = 3) {
           resolve();
           return;
         }
-        const p = child_process.spawn(
+        const p = cp.spawn(
           ffmpegStatic,
           [
             "-y",
@@ -11346,7 +14532,7 @@ function saveCaptionPlan(projectDir, plan) {
 const ffmpegPath = require("ffmpeg-static");
 function ffmpegRun(args) {
   return new Promise((resolve, reject) => {
-    const proc = child_process.spawn(ffmpegPath, args, { windowsHide: true });
+    const proc = cp.spawn(ffmpegPath, args, { windowsHide: true });
     const stderr = [];
     proc.stderr.on("data", (d) => stderr.push(d.toString()));
     proc.on("close", (code) => {
@@ -12082,7 +15268,7 @@ function probeAudioDuration(filePath) {
       if (!ffp?.path && !fs__namespace.existsSync(ffprobePath)) {
         return resolve(null);
       }
-      const proc = child_process.spawn(
+      const proc = cp.spawn(
         ffprobePath,
         [
           "-v",
@@ -13589,6 +16775,11 @@ class PipelineOrchestrator {
         savePipelineStateAtomic(norm, state2);
         this.broadcastProgress(state2);
         logger.info(`[Pipeline] Pipeline ${state2.runId} completed successfully!`);
+        void thumbnailAutoTrigger.startIfEligible({
+          projectDir: norm,
+          renderOutputPath: state2.renderOutputPath,
+          scriptPath: state2.options?.scriptPath
+        });
       }
     } finally {
       this.stopHeartbeat(norm);
@@ -13831,10 +17022,10 @@ class ResearchSidecarManager {
         this.cleanupStaleProcess();
         try {
           if (process.platform === "win32") {
-            const out = child_process.execSync("netstat -ano | findstr :8765").toString();
+            const out = cp.execSync("netstat -ano | findstr :8765").toString();
             const match = out.match(/\s+(\d+)\s*$/m);
             if (match && match[1]) {
-              child_process.execSync(`taskkill /pid ${match[1]} /T /F`, { stdio: "ignore" });
+              cp.execSync(`taskkill /pid ${match[1]} /T /F`, { stdio: "ignore" });
             }
           }
         } catch {
@@ -13865,7 +17056,7 @@ class ResearchSidecarManager {
         "--log-level",
         "info"
       ];
-      this.process = child_process.spawn(uvPath, args, {
+      this.process = cp.spawn(uvPath, args, {
         cwd: serviceDir,
         env: {
           ...process.env,
@@ -13991,7 +17182,7 @@ class ResearchSidecarManager {
       logger.info(`[ResearchSidecar] Stopping sidecar PID ${this.process.pid}`);
       try {
         if (process.platform === "win32") {
-          child_process.execSync(`taskkill /pid ${this.process.pid} /T /F`, { stdio: "ignore" });
+          cp.execSync(`taskkill /pid ${this.process.pid} /T /F`, { stdio: "ignore" });
         } else {
           this.process.kill("SIGTERM");
         }
@@ -14052,7 +17243,7 @@ class ResearchSidecarManager {
         if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
           if (process.platform === "win32") {
             try {
-              child_process.execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: "ignore" });
+              cp.execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: "ignore" });
             } catch {
             }
           } else {
@@ -14183,6 +17374,470 @@ function registerResearchHandlers(ipcMain) {
     }
   );
 }
+function registerThumbnailHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_LIST,
+    async () => {
+      try {
+        const templates = await thumbnailTemplateStore.getAll();
+        return { success: true, templates };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Failed to list templates: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_CREATE,
+    async (_event, data) => {
+      try {
+        const template = await thumbnailTemplateStore.create(data);
+        return { success: true, template };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Failed to create template: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_UPDATE,
+    async (_event, params) => {
+      try {
+        const template = await thumbnailTemplateStore.update(params.id, params.updates);
+        return { success: true, template };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Failed to update template: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_DUPLICATE,
+    async (_event, params) => {
+      try {
+        const template = await thumbnailTemplateStore.duplicate(params.id, params.newName);
+        return { success: true, template };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Failed to duplicate template: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_DELETE,
+    async (_event, params) => {
+      try {
+        const success = await thumbnailTemplateStore.delete(params.id);
+        return { success };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Failed to delete template: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_IMPORT,
+    async (event, params) => {
+      try {
+        let content = params?.jsonContent;
+        if (!content) {
+          const win = electron.BrowserWindow.fromWebContents(event.sender);
+          const result = await electron.dialog.showOpenDialog(win || void 0, {
+            title: "Import Thumbnail Templates",
+            filters: [{ name: "JSON Files", extensions: ["json"] }],
+            properties: ["openFile"]
+          });
+          if (result.canceled || result.filePaths.length === 0) {
+            return { success: false, error: "Import cancelled" };
+          }
+          content = fs__namespace.readFileSync(result.filePaths[0], "utf-8");
+        }
+        const res = await thumbnailTemplateStore.importFromJson(content);
+        return { success: true, importedCount: res.importedCount, importedTemplates: res.importedTemplates };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Import failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_TEMPLATE_EXPORT,
+    async (event, params) => {
+      try {
+        const json = await thumbnailTemplateStore.exportToJson(params?.ids);
+        if (params?.saveToFile) {
+          const win = electron.BrowserWindow.fromWebContents(event.sender);
+          const result = await electron.dialog.showSaveDialog(win || void 0, {
+            title: "Export Thumbnail Templates",
+            defaultPath: "thumbnail-templates.json",
+            filters: [{ name: "JSON Files", extensions: ["json"] }]
+          });
+          if (result.canceled || !result.filePath) {
+            return { success: false, error: "Export cancelled" };
+          }
+          fs__namespace.writeFileSync(result.filePath, json, "utf-8");
+          return { success: true, json, filePath: result.filePath };
+        }
+        return { success: true, json };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Export failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_SETTINGS_GET,
+    async (_event, params) => {
+      try {
+        const settings = await loadProjectThumbnailSettings(params.projectDir);
+        return { success: true, settings };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_SETTINGS_SAVE,
+    async (_event, params) => {
+      try {
+        await saveProjectThumbnailSettings(params.projectDir, params.settings);
+        return { success: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_FLOW_HEALTH,
+    async (_event, params) => {
+      try {
+        if (params?.bridgeUrl) {
+          const customClient = new GoogleFlowClient(params.bridgeUrl);
+          const customProvider = new GoogleFlowProvider(customClient);
+          return await customProvider.healthCheck();
+        }
+        return await googleFlowProvider.healthCheck();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          reachable: false,
+          providerAvailable: false,
+          extensionConnected: false,
+          signedIn: false,
+          supportsImageGeneration: false,
+          requestedExportQuality: "4k",
+          message: msg
+        };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_FLOW_OPEN,
+    async () => {
+      try {
+        flowkitRuntimeManager.openGoogleFlow(true);
+        return { success: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_PLAN_GENERATE,
+    async (_event, params) => {
+      try {
+        const plan = await thumbnailPlanner.plan(params);
+        return { success: true, plan };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Plan generation failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_JOB_START,
+    async (_event, params) => {
+      try {
+        const state2 = await thumbnailOrchestrator.startJob(params);
+        return { success: true, jobId: state2.jobId, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Start job failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_JOB_GET,
+    async (_event, params) => {
+      try {
+        const state2 = await thumbnailOrchestrator.getJobState(params.projectDir);
+        return { success: true, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_JOB_RESUME,
+    async (_event, params) => {
+      try {
+        const state2 = await thumbnailOrchestrator.resumeJob(params.projectDir);
+        return { success: true, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Resume job failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_JOB_CANCEL,
+    async (_event, params) => {
+      try {
+        const success = await thumbnailOrchestrator.cancelJob(params.projectDir);
+        return { success };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_JOB_GENERATE_MORE,
+    async (_event, params) => {
+      try {
+        const state2 = await thumbnailOrchestrator.generateMore(
+          params.projectDir,
+          params.templateId,
+          params.templateSnapshot
+        );
+        return { success: true, jobId: state2.jobId, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Generate More failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_CANDIDATE_RETRY,
+    async (_event, params) => {
+      try {
+        const candidate = await thumbnailOrchestrator.retryCandidate(params.projectDir, params.candidateId);
+        return { success: true, candidate };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Retry candidate failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_CANDIDATE_REGENERATE,
+    async (_event, params) => {
+      try {
+        const candidate = await thumbnailOrchestrator.regenerateCandidate(
+          params.projectDir,
+          params.candidateId,
+          params.customPrompt
+        );
+        return { success: true, candidate };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Regenerate candidate failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_CANDIDATE_EXPORT_4K,
+    async (_event, params) => {
+      try {
+        const candidate = await thumbnailOrchestrator.exportCandidate4k(params.projectDir, params.candidateId);
+        return { success: true, candidate };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Export 4k failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_CANDIDATE_SELECT,
+    async (_event, params) => {
+      try {
+        const result = thumbnailOrchestrator.selectCandidate(params.projectDir, params.candidateId);
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ThumbnailIPC] Select candidate failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_OPEN_FOLDER,
+    async (_event, params) => {
+      try {
+        const target = params.folderPath || path__namespace.join(params.projectDir, "output", "thumbnails");
+        if (fs__namespace.existsSync(target)) {
+          electron.shell.openPath(target);
+          return { success: true };
+        } else {
+          fs__namespace.mkdirSync(target, { recursive: true });
+          electron.shell.openPath(target);
+          return { success: true };
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_READ_IMAGE,
+    async (_event, filePath) => {
+      try {
+        if (!filePath || !fs__namespace.existsSync(filePath)) {
+          return { error: `File not found: ${filePath}` };
+        }
+        const buf = fs__namespace.readFileSync(filePath);
+        const ext = path__namespace.extname(filePath).toLowerCase().slice(1);
+        const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+        return { dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_GET_SETTINGS,
+    async () => {
+      try {
+        return { success: true, settings: flowkitRuntimeManager.getSettings() };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_SAVE_SETTINGS,
+    async (_event, params) => {
+      try {
+        flowkitRuntimeManager.saveSettings(params);
+        googleFlowProvider.healthCheck(flowkitRuntimeManager.getSettings().bridgeUrl).catch(() => {
+        });
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_START,
+    async () => {
+      try {
+        return await flowkitRuntimeManager.startBridge();
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_STOP,
+    async () => {
+      flowkitRuntimeManager.stopBridge();
+      return { success: true };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS,
+    async () => {
+      return flowkitRuntimeManager.getStatus();
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_ENSURE_READY,
+    async (_event, params) => {
+      return flowkitRuntimeManager.ensureFlowReady(params?.bridgeUrl);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_DETECT_PYTHON,
+    async (_event, params) => {
+      try {
+        const flowKitPath = params?.flowKitPath || flowkitRuntimeManager.getSettings().flowKitPath || "";
+        const pythonPath = await flowkitRuntimeManager.resolvePython(flowKitPath);
+        if (pythonPath) {
+          return { success: true, pythonPath };
+        }
+        return { success: false, error: "Python 3.10+ not found in expected locations." };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_FOLDER,
+    async (event) => {
+      try {
+        const win = electron.BrowserWindow.fromWebContents(event.sender);
+        const result = await electron.dialog.showOpenDialog(win || void 0, {
+          title: "Select FlowKit Folder",
+          properties: ["openDirectory"],
+          buttonLabel: "Select FlowKit Folder"
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+          return { success: false, error: "Cancelled" };
+        }
+        const folderPath = result.filePaths[0];
+        const agentMain = path__namespace.join(folderPath, "agent", "main.py");
+        if (!fs__namespace.existsSync(agentMain)) {
+          return { success: false, error: `agent/main.py not found in "${folderPath}". Is this the correct FlowKit folder?` };
+        }
+        return { success: true, folderPath };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.FLOWKIT_RUNTIME_SELECT_PYTHON,
+    async (event) => {
+      try {
+        const win = electron.BrowserWindow.fromWebContents(event.sender);
+        const result = await electron.dialog.showOpenDialog(win || void 0, {
+          title: "Select Python Executable",
+          properties: ["openFile"],
+          filters: [
+            { name: "Python Executable", extensions: ["exe", ""] },
+            { name: "All Files", extensions: ["*"] }
+          ]
+        });
+        if (result.canceled || result.filePaths.length === 0) {
+          return { success: false, error: "Cancelled" };
+        }
+        return { success: true, pythonPath: result.filePaths[0] };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+}
+flowkitRuntimeManager.initialize(googleFlowClient);
 function createWindow() {
   const mainWindow = new electron.BrowserWindow({
     width: 1440,
@@ -14217,6 +17872,12 @@ function createWindow() {
 }
 electron.app.whenReady().then(() => {
   utils.electronApp.setAppUserModelId("com.videofactory.app");
+  electron.protocol.handle("app-media", (request) => {
+    const rawPath = request.url.slice("app-media://".length);
+    const decoded = decodeURIComponent(rawPath);
+    const normalized = path.normalize(decoded);
+    return electron.net.fetch(url.pathToFileURL(normalized).href);
+  });
   electron.app.on("browser-window-created", (_, window) => {
     utils.optimizer.watchWindowShortcuts(window);
   });
@@ -14231,10 +17892,12 @@ electron.app.whenReady().then(() => {
   registerCaptionHandlers(electron.ipcMain);
   registerPipelineHandlers(electron.ipcMain);
   registerResearchHandlers(electron.ipcMain);
+  registerThumbnailHandlers(electron.ipcMain);
   researchSidecar.start().catch((err) => {
     logger.warn("[ResearchSidecar] Non-blocking startup error:", err);
   });
   const mainWindow = createWindow();
+  flowkitRuntimeManager.autoStartIfConfigured();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
   electron.ipcMain.on("window:maximize", () => {
     if (mainWindow.isMaximized()) mainWindow.unmaximize();
@@ -14257,9 +17920,20 @@ electron.app.on("before-quit", () => {
   researchSidecar.stop().catch((error) => {
     logger.warn("[ResearchSidecar] Failed to stop during app quit:", error);
   });
+  thumbnailOrchestrator.handleAppQuit();
+  flowkitRuntimeManager.handleAppQuit();
 });
 process.on("uncaughtException", (error) => {
   logger.error("[App] Uncaught exception:", error);
+  try {
+    pipelineOrchestrator.handleAppQuit();
+    thumbnailOrchestrator.handleAppQuit();
+    flowkitRuntimeManager.handleAppQuit();
+    researchSidecar.markAppQuitting();
+    researchSidecar.stop().catch(() => {
+    });
+  } catch {
+  }
 });
 process.on("unhandledRejection", (reason) => {
   logger.error("[App] Unhandled rejection:", reason);
