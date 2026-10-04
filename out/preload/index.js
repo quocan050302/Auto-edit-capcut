@@ -96,6 +96,10 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  // YouTube Foreign Market Researcher (Isolated Module)
+  RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
+  RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
+  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff",
   // Thumbnail Studio & Google Flow companion workflow
   THUMBNAIL_TEMPLATE_LIST: "thumbnail:template-list",
   THUMBNAIL_TEMPLATE_CREATE: "thumbnail:template-create",
@@ -119,6 +123,7 @@ const IPC_CHANNELS = {
   THUMBNAIL_CANDIDATE_EXPORT_4K: "thumbnail:candidate-export-4k",
   THUMBNAIL_CANDIDATE_SELECT: "thumbnail:candidate-select",
   THUMBNAIL_OPEN_FOLDER: "thumbnail:open-folder",
+  THUMBNAIL_READ_IMAGE: "thumbnail:read-image",
   THUMBNAIL_PROGRESS: "thumbnail:progress",
   // FlowKit Runtime Manager
   FLOWKIT_RUNTIME_GET_SETTINGS: "flowkit:runtime-get-settings",
@@ -295,6 +300,11 @@ const api = {
       };
     }
   },
+  research: {
+    getStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS),
+    restartSidecar: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_RESTART),
+    createProjectHandoff: (payload) => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF, payload)
+  },
   thumbnail: {
     templates: {
       list: () => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_TEMPLATE_LIST),
@@ -328,6 +338,7 @@ const api = {
       select: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_SELECT, params)
     },
     openFolder: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_OPEN_FOLDER, params),
+    readImage: (filePath) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_READ_IMAGE, filePath),
     onProgress: (callback) => {
       const handler = (_event, payload) => {
         callback(payload);

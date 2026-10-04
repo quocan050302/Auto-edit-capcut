@@ -1,0 +1,29 @@
+{
+  "use_official_api": true,
+  "official_api_key": "AIzaSyBMSBTQKwv026p0SeSARcShHxYgBtzZ418",
+  "scraper_fallback": true,
+  "provider_priority": "scraper_first",
+  "default_market": "US",
+  "default_language": "en",
+  "default_time_range": "30d",
+  "default_content_type": "LONG",
+  "default_result_size": 50,
+  "ai_provider": "disabled",
+  "ollama_base_url": "http://localhost:11434",
+  "ollama_model": "llama3",
+  "cloud_ai_key": "",
+  "max_expanded_keywords": 25,
+  "raw_video_limit": 150,
+  "max_enrichment_videos": 50,
+  "channel_baseline_size": 25,
+  "debug": false,
+  "scoring_weights": {
+    "demand": 0.2,
+    "velocity": 0.2,
+    "outlier": 0.2,
+    "cross_channel": 0.1,
+    "market_fit": 0.1,
+    "freshness": 0.1,
+    "competition": 0.1
+  }
+}

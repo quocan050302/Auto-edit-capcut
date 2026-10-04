@@ -174,6 +174,12 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  // YouTube Foreign Market Researcher (Isolated Module)
+  RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
+  RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
+  RESEARCH_GET_SETTINGS: "research:get-settings",
+  RESEARCH_SAVE_SETTINGS: "research:save-settings",
+  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff",
   // Thumbnail Studio & Google Flow companion workflow
   THUMBNAIL_TEMPLATE_LIST: "thumbnail:template-list",
   THUMBNAIL_TEMPLATE_CREATE: "thumbnail:template-create",
@@ -197,6 +203,7 @@ const IPC_CHANNELS = {
   THUMBNAIL_CANDIDATE_EXPORT_4K: "thumbnail:candidate-export-4k",
   THUMBNAIL_CANDIDATE_SELECT: "thumbnail:candidate-select",
   THUMBNAIL_OPEN_FOLDER: "thumbnail:open-folder",
+  THUMBNAIL_READ_IMAGE: "thumbnail:read-image",
   THUMBNAIL_PROGRESS: "thumbnail:progress",
   // FlowKit Runtime Manager
   FLOWKIT_RUNTIME_GET_SETTINGS: "flowkit:runtime-get-settings",
@@ -16907,6 +16914,466 @@ function registerPipelineHandlers(ipcMain) {
     }
   );
 }
+class ResearchSidecarManager {
+  static instance;
+  process = null;
+  port = 8765;
+  host = "127.0.0.1";
+  status = "stopped";
+  lastError;
+  healthCheckInterval = null;
+  pidFilePath;
+  lastSuccessfulHealthCheck = null;
+  buildId;
+  expectedStopReason = "none";
+  isAppQuitting = false;
+  restartAttempts = 0;
+  restartTimer = null;
+  isRestarting = false;
+  constructor() {
+    this.buildId = `dev_${Date.now()}_${Math.random().toString(36).substring(7)}`;
+    this.pidFilePath = path.join(
+      electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
+      "youtube-research-sidecar.pid"
+    );
+  }
+  static getInstance() {
+    if (!ResearchSidecarManager.instance) {
+      ResearchSidecarManager.instance = new ResearchSidecarManager();
+    }
+    return ResearchSidecarManager.instance;
+  }
+  markAppQuitting() {
+    this.isAppQuitting = true;
+    this.clearRestartTimer();
+  }
+  clearRestartTimer() {
+    if (this.restartTimer) {
+      clearTimeout(this.restartTimer);
+      this.restartTimer = null;
+    }
+  }
+  getStatus() {
+    return {
+      online: this.status === "running",
+      port: this.port,
+      pid: this.process?.pid,
+      url: `http://${this.host}:${this.port}`,
+      version: "1.0.0",
+      status: this.status,
+      error: this.lastError,
+      lastHealthCheck: this.lastSuccessfulHealthCheck || void 0
+    };
+  }
+  async pingHealth() {
+    return new Promise((resolve) => {
+      const req = http__namespace.get(`http://${this.host}:${this.port}/health`, { timeout: 2e3 }, (res) => {
+        if (res.statusCode === 200) {
+          let body = "";
+          res.on("data", (chunk) => {
+            body += chunk;
+          });
+          res.on("end", () => {
+            try {
+              const data = JSON.parse(body);
+              if (data.service === "YouTube Foreign Market Researcher" && data.status === "online") {
+                this.lastSuccessfulHealthCheck = (/* @__PURE__ */ new Date()).toISOString();
+                const isPackaged = electron.app && electron.app.isPackaged;
+                const buildIdMatch = isPackaged ? true : data.build_id === this.buildId;
+                resolve({ isAlive: true, buildIdMatch, pid: data.parent_pid });
+              } else {
+                resolve({ isAlive: false, buildIdMatch: false });
+              }
+            } catch {
+              resolve({ isAlive: false, buildIdMatch: false });
+            }
+          });
+        } else {
+          resolve({ isAlive: false, buildIdMatch: false });
+        }
+      });
+      req.on("error", () => resolve({ isAlive: false, buildIdMatch: false }));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve({ isAlive: false, buildIdMatch: false });
+      });
+    });
+  }
+  async start() {
+    if (this.isAppQuitting) {
+      return this.getStatus();
+    }
+    this.clearRestartTimer();
+    if (this.status === "running" && this.process) {
+      return this.getStatus();
+    }
+    const health = await this.pingHealth();
+    if (health.isAlive) {
+      if (health.buildIdMatch) {
+        logger.info(`[ResearchSidecar] Sidecar already responding on http://${this.host}:${this.port}/health`);
+        logger.info(`[ResearchSidecar] spawn.success pid=${this.process?.pid ?? "existing"} (reusing alive process)`);
+        this.status = "running";
+        this.lastError = void 0;
+        this.restartAttempts = 0;
+        this.startMonitoring();
+        return this.getStatus();
+      } else {
+        logger.info(`[ResearchSidecar] Found stale dev sidecar (build ID mismatch). Stopping it...`);
+        this.cleanupStaleProcess();
+        try {
+          if (process.platform === "win32") {
+            const out = cp.execSync("netstat -ano | findstr :8765").toString();
+            const match = out.match(/\s+(\d+)\s*$/m);
+            if (match && match[1]) {
+              cp.execSync(`taskkill /pid ${match[1]} /T /F`, { stdio: "ignore" });
+            }
+          }
+        } catch {
+        }
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+    }
+    this.cleanupStaleProcess();
+    const uvPath = getUvPath();
+    const serviceDir = electron.app && !electron.app.isPackaged ? path.join(process.cwd(), "services", "youtube-research") : path.join(process.resourcesPath, "services", "youtube-research");
+    if (!fs__namespace.existsSync(serviceDir)) {
+      this.status = "error";
+      this.lastError = `YouTube Research service directory not found at: ${serviceDir}`;
+      logger.warn(`[ResearchSidecar] ${this.lastError}`);
+      return this.getStatus();
+    }
+    this.status = "starting";
+    logger.info(`[ResearchSidecar] spawn.start via uv...`, { uvPath, serviceDir });
+    try {
+      const args = [
+        "run",
+        "uvicorn",
+        "main:app",
+        "--host",
+        this.host,
+        "--port",
+        String(this.port),
+        "--log-level",
+        "info"
+      ];
+      this.process = cp.spawn(uvPath, args, {
+        cwd: serviceDir,
+        env: {
+          ...process.env,
+          PYTHONPATH: serviceDir,
+          UV_LINK_MODE: "copy",
+          RESEARCH_SIDECAR_BUILD_ID: this.buildId,
+          RESEARCH_SIDECAR_PARENT_PID: process.pid.toString()
+        },
+        windowsHide: true
+      });
+      if (this.process.pid) {
+        logger.info(`[ResearchSidecar] spawn.success pid=${this.process.pid} build_id=${this.buildId}`);
+        const metadata = {
+          pid: this.process.pid,
+          port: this.port,
+          startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          service: "YouTube Foreign Market Researcher",
+          buildId: this.buildId
+        };
+        fs__namespace.writeFileSync(this.pidFilePath, JSON.stringify(metadata, null, 2), "utf-8");
+      }
+      this.process.stdout?.on("data", (data) => {
+        const line = data.toString().trim();
+        if (line) logger.debug(`[ResearchSidecar:stdout] ${line}`);
+      });
+      this.process.stderr?.on("data", (data) => {
+        const line = data.toString().trim();
+        if (line) logger.info(`[ResearchSidecar:stderr] ${line}`);
+      });
+      this.process.on("error", (err) => {
+        logger.warn(`[ResearchSidecar] Child process error: ${err.message}`);
+        this.status = "error";
+        this.lastError = err.message;
+      });
+      this.process.on("exit", (code, signal) => {
+        const isExpected = this.expectedStopReason === "manual" || this.expectedStopReason === "restart" || this.expectedStopReason === "app_quit" || this.isAppQuitting;
+        logger.info(`[ResearchSidecar] process.exit code=${code} signal=${signal} expected=${isExpected} reason=${this.expectedStopReason}`);
+        this.process = null;
+        if (!isExpected) {
+          this.expectedStopReason = "unexpected";
+          this.handleUnexpectedExit();
+        } else {
+          this.status = "stopped";
+        }
+      });
+      let attempts = 0;
+      while (attempts < 24) {
+        await new Promise((r) => setTimeout(r, 500));
+        const { isAlive, buildIdMatch } = await this.pingHealth();
+        if (isAlive && buildIdMatch) {
+          this.status = "running";
+          this.lastError = void 0;
+          this.restartAttempts = 0;
+          logger.info(`[ResearchSidecar] Successfully connected on http://${this.host}:${this.port}`);
+          this.startMonitoring();
+          return this.getStatus();
+        }
+        attempts++;
+      }
+      this.status = "degraded";
+      this.lastError = "Sidecar started but health check timed out after 12s";
+      logger.warn(`[ResearchSidecar] ${this.lastError}`);
+      return this.getStatus();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.status = "error";
+      this.lastError = msg;
+      logger.warn(`[ResearchSidecar] Failed to spawn sidecar: ${msg}`);
+      return this.getStatus();
+    }
+  }
+  handleUnexpectedExit() {
+    if (this.isAppQuitting || this.expectedStopReason === "manual") {
+      this.status = "stopped";
+      return;
+    }
+    if (this.restartAttempts < 3) {
+      this.restartAttempts++;
+      const delayMs = Math.pow(2, this.restartAttempts - 1) * 1e3;
+      logger.warn(`[ResearchSidecar] restart.scheduled attempt=${this.restartAttempts} delay_ms=${delayMs}`);
+      this.status = "starting";
+      this.clearRestartTimer();
+      this.restartTimer = setTimeout(async () => {
+        this.restartTimer = null;
+        if (this.isAppQuitting || this.expectedStopReason === "manual") return;
+        try {
+          this.isRestarting = true;
+          const status = await this.start();
+          if (status.online) {
+            logger.info(`[ResearchSidecar] restart.success pid=${status.pid}`);
+          } else {
+            logger.warn(`[ResearchSidecar] restart attempt ${this.restartAttempts} did not come online`);
+          }
+        } catch (err) {
+          logger.warn(`[ResearchSidecar] restart attempt ${this.restartAttempts} failed: ${err?.message || err}`);
+        } finally {
+          this.isRestarting = false;
+        }
+      }, delayMs);
+    } else {
+      logger.error("[ResearchSidecar] restart.exhausted max attempts reached (3)");
+      this.status = "error";
+      this.lastError = "Research sidecar exited unexpectedly and failed all auto-restart attempts";
+    }
+  }
+  async stop(isManual = false) {
+    this.clearRestartTimer();
+    if (this.isAppQuitting) {
+      this.expectedStopReason = "app_quit";
+      logger.info("[ResearchSidecar] stop.app_quit");
+    } else if (isManual) {
+      this.expectedStopReason = "manual";
+      logger.info("[ResearchSidecar] stop.manual");
+    } else {
+      logger.info("[ResearchSidecar] stop.internal (expectedReason=" + this.expectedStopReason + ")");
+    }
+    this.status = "stopped";
+    if (this.healthCheckInterval) {
+      clearInterval(this.healthCheckInterval);
+      this.healthCheckInterval = null;
+    }
+    if (this.process && this.process.pid) {
+      logger.info(`[ResearchSidecar] Stopping sidecar PID ${this.process.pid}`);
+      try {
+        if (process.platform === "win32") {
+          cp.execSync(`taskkill /pid ${this.process.pid} /T /F`, { stdio: "ignore" });
+        } else {
+          this.process.kill("SIGTERM");
+        }
+      } catch {
+      }
+      this.process = null;
+    }
+    this.cleanupStaleProcess();
+  }
+  async restart() {
+    if (this.isRestarting) {
+      logger.warn("[ResearchSidecar] Restart already in progress.");
+      return this.getStatus();
+    }
+    try {
+      this.isRestarting = true;
+      this.clearRestartTimer();
+      this.restartAttempts = 0;
+      this.expectedStopReason = "restart";
+      await this.stop(false);
+      let waitTime = 0;
+      while (this.process !== null && waitTime < 5e3) {
+        await new Promise((r) => setTimeout(r, 200));
+        waitTime += 200;
+      }
+      this.expectedStopReason = "none";
+      return await this.start();
+    } finally {
+      this.isRestarting = false;
+    }
+  }
+  startMonitoring() {
+    if (this.healthCheckInterval) clearInterval(this.healthCheckInterval);
+    this.healthCheckInterval = setInterval(async () => {
+      const health = await this.pingHealth();
+      if (!health.isAlive && this.status === "running") {
+        logger.warn("[ResearchSidecar] Periodic ping failed. Marking degraded.");
+        this.status = "degraded";
+      } else if (health.isAlive && this.status === "degraded") {
+        this.status = "running";
+      }
+    }, 15e3);
+  }
+  cleanupStaleProcess() {
+    try {
+      if (fs__namespace.existsSync(this.pidFilePath)) {
+        const content = fs__namespace.readFileSync(this.pidFilePath, "utf-8").trim();
+        let oldPid = null;
+        try {
+          const parsed = JSON.parse(content);
+          if (parsed && parsed.service === "YouTube Foreign Market Researcher" && typeof parsed.pid === "number") {
+            oldPid = parsed.pid;
+          }
+        } catch {
+          const numeric = parseInt(content, 10);
+          if (!isNaN(numeric)) oldPid = numeric;
+        }
+        if (oldPid && !isNaN(oldPid) && oldPid !== process.pid) {
+          if (process.platform === "win32") {
+            try {
+              cp.execSync(`taskkill /pid ${oldPid} /T /F`, { stdio: "ignore" });
+            } catch {
+            }
+          } else {
+            try {
+              process.kill(oldPid, "SIGTERM");
+            } catch {
+            }
+          }
+        }
+        if (fs__namespace.existsSync(this.pidFilePath)) {
+          fs__namespace.unlinkSync(this.pidFilePath);
+        }
+      }
+    } catch {
+    }
+  }
+}
+const researchSidecar = ResearchSidecarManager.getInstance();
+function registerResearchHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS, async () => {
+    return researchSidecar.getStatus();
+  });
+  ipcMain.handle(IPC_CHANNELS.RESEARCH_SIDECAR_RESTART, async () => {
+    logger.info("[IPC:Research] User requested sidecar restart");
+    return await researchSidecar.restart();
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF,
+    async (_event, payload) => {
+      try {
+        logger.info("[IPC:Research] Creating Video Project from research handoff", {
+          name: payload.projectName,
+          keyword: payload.keyword,
+          angle: payload.angle
+        });
+        const projectsDir = process.platform === "win32" ? "D:\\Video_factory_hutteries" : path.join(process.env.HOME || "", "Video_factory_hutteries");
+        const safeProjectName = payload.projectName.replace(/[^a-zA-Z0-9_\-\s]/g, "").trim() || "Research_Video_Project";
+        const projectDir = path.join(projectsDir, safeProjectName);
+        if (!fs__namespace.existsSync(projectDir)) {
+          fs__namespace.mkdirSync(projectDir, { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "source"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/images"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/videos"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/music"), { recursive: true });
+          fs__namespace.mkdirSync(path.join(projectDir, "media/sfx"), { recursive: true });
+        }
+        const briefPath = path.join(projectDir, "source", "research_brief.txt");
+        const briefContent = [
+          `RESEARCH-BACKED VIDEO BRIEF: ${payload.projectName}`,
+          `Target Market: ${payload.market}`,
+          `Primary Keyword: ${payload.keyword}`,
+          `Angle / Hook: ${payload.angle || "Not specified"}`,
+          `Opportunity Score: ${payload.researchData.opportunityScore ?? "N/A"}/100`,
+          `Market Fit Signal: ${payload.researchData.marketFitScore ?? "N/A"}/100`,
+          `Confidence: ${payload.researchData.confidence ?? "N/A"}`,
+          "",
+          "WINNING TITLE PATTERNS:",
+          ...(payload.researchData.topTitles || []).map((t) => `- ${t}`),
+          "",
+          "IDENTIFIED CONTENT GAPS:",
+          ...(payload.researchData.contentGaps || []).map((g) => `- ${g}`),
+          "",
+          "RELATED KEYWORDS:",
+          ...(payload.researchData.relatedKeywords || []).map((k) => `- ${k}`),
+          "",
+          "AI / STRATEGIC IDEAS:",
+          ...(payload.researchData.aiContentIdeas || []).map((i) => `- ${i}`),
+          "",
+          "TOP BREAKOUT REFERENCE VIDEOS (PUBLIC YOUTUBE INSPIRATION ONLY - NOT MEDIA ASSETS):",
+          ...(payload.researchData.breakoutVideos || []).map(
+            (b) => `- "${b.title}" by ${b.channel || "Unknown"} (${(b.views || 0).toLocaleString()} views)`
+          )
+        ].join("\n");
+        fs__namespace.writeFileSync(briefPath, briefContent, "utf-8");
+        const scriptPath = path.join(projectDir, "source", "script.txt");
+        if (!fs__namespace.existsSync(scriptPath)) {
+          const draftScript = [
+            `# ${payload.projectName}`,
+            `## Target Topic: ${payload.keyword}`,
+            `## Hook Angle: ${payload.angle || "Investigative Documentary"}`,
+            "",
+            "[SCENE 1: COLD OPEN]",
+            `Why does everyone seem to be talking about ${payload.keyword}?`,
+            "The data tells a story that mainstream media is missing completely.",
+            "",
+            "[SCENE 2: THE REALITY]",
+            "Here is what is really happening behind closed doors.",
+            "",
+            "[SCENE 3: EVIDENCE & NUMBERS]",
+            "Let us look at the actual statistics and historical comparisons.",
+            "",
+            "[SCENE 4: CONCLUSION]",
+            "What happens next, and what can you do about it?"
+          ].join("\n");
+          fs__namespace.writeFileSync(scriptPath, draftScript, "utf-8");
+        }
+        const statePath = path.join(projectDir, "project.json");
+        const projectState = {
+          name: safeProjectName,
+          projectDir,
+          status: "NEW",
+          settings: {
+            videoType: "documentary",
+            aspectRatio: "16:9",
+            resolution: { width: 1920, height: 1080 },
+            fps: 30,
+            pacing: "balanced"
+          },
+          inputs: {
+            scriptPath,
+            voiceoverPath: null,
+            imagesFolder: path.join(projectDir, "media/images"),
+            videosFolder: path.join(projectDir, "media/videos"),
+            musicFolder: path.join(projectDir, "media/music"),
+            sfxFolder: path.join(projectDir, "media/sfx")
+          },
+          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        fs__namespace.writeFileSync(statePath, JSON.stringify(projectState, null, 2), "utf-8");
+        logger.info(`[IPC:Research] Successfully created project draft at ${projectDir}`);
+        return { success: true, projectDir };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[IPC:Research] Failed creating project from research: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
 function registerThumbnailHandlers(ipcMain) {
   ipcMain.handle(
     IPC_CHANNELS.THUMBNAIL_TEMPLATE_LIST,
@@ -17241,6 +17708,22 @@ function registerThumbnailHandlers(ipcMain) {
     }
   );
   ipcMain.handle(
+    IPC_CHANNELS.THUMBNAIL_READ_IMAGE,
+    async (_event, filePath) => {
+      try {
+        if (!filePath || !fs__namespace.existsSync(filePath)) {
+          return { error: `File not found: ${filePath}` };
+        }
+        const buf = fs__namespace.readFileSync(filePath);
+        const ext = path__namespace.extname(filePath).toLowerCase().slice(1);
+        const mime = ext === "jpg" ? "image/jpeg" : ext === "webp" ? "image/webp" : "image/png";
+        return { dataUrl: `data:${mime};base64,${buf.toString("base64")}` };
+      } catch (err) {
+        return { error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
     IPC_CHANNELS.FLOWKIT_RUNTIME_GET_SETTINGS,
     async () => {
       try {
@@ -17408,7 +17891,11 @@ electron.app.whenReady().then(() => {
   registerAudioHandlers(electron.ipcMain);
   registerCaptionHandlers(electron.ipcMain);
   registerPipelineHandlers(electron.ipcMain);
+  registerResearchHandlers(electron.ipcMain);
   registerThumbnailHandlers(electron.ipcMain);
+  researchSidecar.start().catch((err) => {
+    logger.warn("[ResearchSidecar] Non-blocking startup error:", err);
+  });
   const mainWindow = createWindow();
   flowkitRuntimeManager.autoStartIfConfigured();
   electron.ipcMain.on("window:minimize", () => mainWindow.minimize());
@@ -17429,6 +17916,10 @@ electron.app.on("window-all-closed", () => {
 });
 electron.app.on("before-quit", () => {
   pipelineOrchestrator.handleAppQuit();
+  researchSidecar.markAppQuitting();
+  researchSidecar.stop().catch((error) => {
+    logger.warn("[ResearchSidecar] Failed to stop during app quit:", error);
+  });
   thumbnailOrchestrator.handleAppQuit();
   flowkitRuntimeManager.handleAppQuit();
 });
@@ -17438,6 +17929,9 @@ process.on("uncaughtException", (error) => {
     pipelineOrchestrator.handleAppQuit();
     thumbnailOrchestrator.handleAppQuit();
     flowkitRuntimeManager.handleAppQuit();
+    researchSidecar.markAppQuitting();
+    researchSidecar.stop().catch(() => {
+    });
   } catch {
   }
 });

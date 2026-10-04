@@ -12,6 +12,8 @@ import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
 import { registerPipelineHandlers } from './ipc/pipeline.ipc'
+import { registerResearchHandlers } from './ipc/research.ipc'
+import { researchSidecar } from './research/research-sidecar'
 import { registerThumbnailHandlers } from './ipc/thumbnail.ipc'
 import { pipelineOrchestrator } from './pipeline/pipeline-orchestrator'
 import { thumbnailOrchestrator } from './thumbnail/thumbnail-orchestrator'
@@ -91,7 +93,13 @@ app.whenReady().then(() => {
   registerAudioHandlers(ipcMain)
   registerCaptionHandlers(ipcMain)
   registerPipelineHandlers(ipcMain)
+  registerResearchHandlers(ipcMain)
   registerThumbnailHandlers(ipcMain)
+
+  // Asynchronously launch YouTube Research sidecar (non-blocking, failures do NOT crash app)
+  researchSidecar.start().catch((err) => {
+    logger.warn('[ResearchSidecar] Non-blocking startup error:', err)
+  })
 
   const mainWindow = createWindow()
 
@@ -121,6 +129,10 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   pipelineOrchestrator.handleAppQuit()
+  researchSidecar.markAppQuitting()
+  researchSidecar.stop().catch((error) => {
+    logger.warn('[ResearchSidecar] Failed to stop during app quit:', error)
+  })
   thumbnailOrchestrator.handleAppQuit()
   flowkitRuntimeManager.handleAppQuit()
 })
@@ -131,6 +143,8 @@ process.on('uncaughtException', (error) => {
     pipelineOrchestrator.handleAppQuit()
     thumbnailOrchestrator.handleAppQuit()
     flowkitRuntimeManager.handleAppQuit()
+    researchSidecar.markAppQuitting()
+    researchSidecar.stop().catch(() => {})
   } catch {
     /* ignore */
   }

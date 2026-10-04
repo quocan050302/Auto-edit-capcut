@@ -28,6 +28,8 @@ import type {
   DocumentaryClaim,
   EvidenceSource,
   ClaimVerificationStatus,
+  ResearchSidecarStatus,
+  ResearchProjectHandoffPayload,
   ThumbnailPromptTemplate,
   ProjectThumbnailSettings,
   ThumbnailProviderHealth,
@@ -414,6 +416,19 @@ const api = {
         ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
       }
     }
+  },
+
+  research: {
+    getStatus: (): Promise<ResearchSidecarStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS),
+
+    restartSidecar: (): Promise<ResearchSidecarStatus> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_RESTART),
+
+    createProjectHandoff: (
+      payload: ResearchProjectHandoffPayload
+    ): Promise<{ success: boolean; projectDir?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF, payload)
   },
 
   thumbnail: {
