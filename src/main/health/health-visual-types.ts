@@ -3,7 +3,11 @@ import type {
   HealthVisualPlan,
   HealthVisualScenePlan,
   HealthVisualConfig,
-  HealthMotionPreset
+  HealthMotionPreset,
+  HealthMotionSpec,
+  HealthSfxType,
+  HealthSfxCuePlan,
+  HealthMotionReport
 } from '../../../shared/types'
 
 export const HEALTH_SCHEMA_VERSION = 1

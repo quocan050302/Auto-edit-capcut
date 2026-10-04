@@ -823,6 +823,12 @@ export interface AudioPlan {
   generatedAt: string
   sections: AudioSection[]
   sfxAssignments: AudioSfxAssignment[]
+  healthSfx?: {
+    enabled: boolean
+    planHash: string
+    generatedAt: string
+    cueCount: number
+  }
 }
 
 /** Result from a runAudioDirector() call */
@@ -1632,6 +1638,63 @@ export type HealthMotionPreset =
   | 'pan-right'
   | 'micro-drift'
   | 'none'
+  | 'push-in-center'
+  | 'push-in-left'
+  | 'push-in-right'
+  | 'push-out-center'
+  | 'pan-up'
+  | 'pan-down'
+  | 'drift-up-left'
+  | 'drift-up-right'
+  | 'drift-down-left'
+  | 'drift-down-right'
+  | 'focus-left'
+  | 'focus-right'
+  | 'gentle-pulse'
+  | 'still-hold'
+
+export interface HealthMotionSpec {
+  preset: HealthMotionPreset
+  intensity: 'very-subtle' | 'subtle' | 'medium'
+  focusX: number
+  focusY: number
+  zoomStart: number
+  zoomEnd: number
+  ease: 'linear' | 'ease-in-out' | 'ease-out'
+  reason: string
+}
+
+export type HealthSfxType =
+  | 'none'
+  | 'soft-whoosh'
+  | 'reverse-whoosh'
+  | 'air-swish'
+  | 'soft-impact'
+  | 'digital-scan'
+  | 'soft-pulse'
+  | 'heartbeat'
+  | 'clock-tick'
+  | 'subtle-riser'
+
+export interface HealthSfxCuePlan {
+  sceneIndex: number
+  type: HealthSfxType
+  queryCandidates: string[]
+  relativeStart: number
+  duration: number
+  volumeDb: number
+  reason: string
+  strength: 'subtle' | 'accent'
+}
+
+export interface HealthMotionReport {
+  totalAiScenes: number
+  motionDistribution: Record<string, number>
+  sfxCueCount: number
+  sfxDistribution: Record<string, number>
+  maxConsecutiveSameMotion: number
+  generatedAt: string
+}
 
 export interface HealthVisualConfig {
   aiRatio?: number
@@ -1652,6 +1715,8 @@ export interface HealthVisualScenePlan {
   imagePrompt?: string
   stockQueries?: string[]
   motionPreset: HealthMotionPreset
+  motion?: HealthMotionSpec
+  sfxCue?: HealthSfxCuePlan
   generationHash?: string
   generatedAssetPath?: string
   startTime: number

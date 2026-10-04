@@ -7,8 +7,10 @@ import type {
   AudioPlan,
   RenderQaReport,
   StockSceneAssignment,
-  AutoPipelineOptions
+  AutoPipelineOptions,
+  ContentType
 } from '../../../shared/types'
+import { computeHealthMotionHash } from '../health/health-visual-cache'
 
 export interface StockCompletionResult {
   totalScenes: number
@@ -226,7 +228,7 @@ export function checkStockCompletion(projectDir: string): StockCompletionResult 
   }
 }
 
-export function isAudioValid(projectDir: string, requireMusic?: boolean): boolean {
+export function isAudioValid(projectDir: string, requireMusic?: boolean, contentType?: ContentType): boolean {
   const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
   if (!fs.existsSync(audioPlanPath)) return false
 
@@ -237,8 +239,26 @@ export function isAudioValid(projectDir: string, requireMusic?: boolean): boolea
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
       )
-      return hasDownloadedMusic
+      if (!hasDownloadedMusic) return false
     }
+
+    if (contentType === 'health') {
+      const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
+      if (fs.existsSync(healthPlanPath)) {
+        try {
+          const healthPlan = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+          const hasSfxCues = (healthPlan.scenes || []).some((s: any) => s.sfxCue)
+          if (hasSfxCues) {
+            if (!plan.healthSfx?.enabled) return false
+            const expectedHash = computeHealthMotionHash(healthPlan)
+            if (plan.healthSfx.planHash !== expectedHash) return false
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     return true
   } catch {
     return false

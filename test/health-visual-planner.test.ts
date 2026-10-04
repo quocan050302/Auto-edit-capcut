@@ -159,6 +159,43 @@ async function runTests(): Promise<void> {
     assert.strictEqual(preset6, 'pan-left')
   })
 
+  // HEALTH MOTION SPEC & REPORT VERIFICATION
+  await it('HealthVisualPlanner creates rich HealthMotionSpec and motion distribution report', () => {
+    const planner = new HealthVisualPlanner()
+    const scenes: MasterEditPlan['scenes'] = [
+      { sceneIndex: 1, startTime: 0, endTime: 4, narration: 'Human heart pumping blood through valves', visualDescription: 'Heart anatomy' },
+      { sceneIndex: 2, startTime: 4, endTime: 8, narration: 'Liver filtering glucose into glycogen storage', visualDescription: 'Liver' },
+      { sceneIndex: 3, startTime: 8, endTime: 12, narration: 'Cellular signals traveling up to brain cortex', visualDescription: 'Neurons' },
+      { sceneIndex: 4, startTime: 12, endTime: 16, narration: 'Digestive enzyme breaking down food downward', visualDescription: 'Stomach digestion' }
+    ]
+    const plan = planner.createPlan({
+      id: 'motion-test-plan',
+      version: '1.0',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      totalDuration: 16,
+      scenes
+    })
+
+    const aiScenes = plan.scenes.filter((s) => s.strategy === 'ai-still')
+    assert.ok(aiScenes.length > 0)
+    for (const s of aiScenes) {
+      assert.ok(s.motion, `Scene ${s.sceneIndex} must have a motion spec`)
+      assert.ok(s.motion.preset, `Scene ${s.sceneIndex} must have a motion preset`)
+      assert.ok(s.motion.intensity, `Scene ${s.sceneIndex} must have an intensity`)
+      assert.ok(typeof s.motion.focusX === 'number')
+      assert.ok(typeof s.motion.focusY === 'number')
+      assert.ok(typeof s.motion.zoomEnd === 'number')
+      // Backward compatibility: motionPreset string must still match spec.preset
+      assert.strictEqual(s.motionPreset, s.motion.preset)
+    }
+
+    if (plan.report) {
+      assert.strictEqual(plan.report.totalAiScenes, aiScenes.length)
+      assert.ok(plan.report.maxConsecutiveSameMotion <= 2)
+    }
+  })
+
   console.log(`\nPlanner Tests: ${passed} passed, ${failed} failed.\n`)
   if (failed > 0) process.exit(1)
 }

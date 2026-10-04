@@ -806,8 +806,34 @@ export async function renderVideo(params: {
         const beats = decision?.visualBeats ?? []
         const hasMultipleBeats = beats.length > 1
 
-        if (hasMultipleBeats && retentionSettings.enabled) {
-          // ── ENHANCED: render visual beats then concat into scene clip ──────────
+        // Check if this is a Health AI still scene or Health generated image
+        const healthScene = healthPlanMap.get(scene.sceneIndex)
+        const isHealthAiImage =
+          isImage &&
+          (healthScene?.strategy === 'ai-still' ||
+            mediaPath.includes(path.join('assets', 'generated', 'health')) ||
+            mediaPath.includes('/assets/generated/health/'))
+
+        if (isHealthAiImage) {
+          // Health Motion Director is the PRIMARY camera motion for Health AI still images
+          const motionParam = healthScene?.motion || healthScene?.motionPreset || 'push-in-center'
+          const motionFilter = buildHealthMotionFilter(motionParam, width, height, scene.duration, fps)
+          const presetName = typeof motionParam === 'object' ? motionParam.preset : motionParam
+          logger.info(`[HealthMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`)
+
+          await ffmpegRun([
+            '-y',
+            '-loop', '1',
+            '-i', mediaPath,
+            '-vf', motionFilter,
+            '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+            '-t', String(scene.duration),
+            '-r', String(fps),
+            '-pix_fmt', 'yuv420p',
+            outClip
+          ])
+        } else if (hasMultipleBeats && retentionSettings.enabled) {
+          // ── ENHANCED: render visual beats then concat into scene clip (default non-health behavior)
           await renderVisualBeatsToClip({
             beats,
             mediaPath,
@@ -822,35 +848,14 @@ export async function renderVideo(params: {
           })
         } else {
           // ── LEGACY: single clip render (unchanged behavior) ─────────────────
-          // Apply crop if single beat has semantic crop
           const singleBeat = beats[0]
           let vfFilter = scaleFilt
-          let hasSemanticMotion = false
           if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
             const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps)
             if (zf) {
-              // Apply scale first then zoompan
               vfFilter = `${scaleFilt},${zf}`
-              hasSemanticMotion = true
               logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`)
             }
-          }
-
-          // If no intentional Retention crop was applied and this is an image scene:
-          // Check if this is a Health AI still scene or Health generated image
-          const healthScene = healthPlanMap.get(scene.sceneIndex)
-          const isHealthAiImage =
-            isImage &&
-            !hasSemanticMotion &&
-            (healthScene?.strategy === 'ai-still' ||
-              mediaPath.includes(path.join('assets', 'generated', 'health')) ||
-              mediaPath.includes('/assets/generated/health/'))
-
-          if (isHealthAiImage) {
-            const preset: HealthMotionPreset = healthScene?.motionPreset || 'slow-push-in'
-            const motionFilter = buildHealthMotionFilter(preset, width, height, scene.duration, fps)
-            vfFilter = motionFilter
-            logger.info(`[HealthMotion] Scene ${scene.sceneIndex}: applying subtle motion preset '${preset}'`)
           }
 
           if (isImage) {
@@ -1054,16 +1059,15 @@ export async function renderVideo(params: {
 
       // Build filter_complex
       const filterParts: string[] = []
-      const mixLabels: string[] = []
 
       // Voiceover — normalize loudness to -16 LUFS so it's always clear and consistent
       if (hasAudio) {
         filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`)
-        mixLabels.push('[vo]')
       }
 
       // Music sections — ducked under voiceover
       // Default: -30 dB (3.2% amplitude) — subtle background bed
+      const musicLabels: string[] = []
       for (const { idx, section } of musicInputs) {
         const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6)
         const fadeIn = section.fadeInSecs ?? 2
@@ -1077,14 +1081,15 @@ export async function renderVideo(params: {
           `adelay=${Math.round(section.startTime * 1000)}|${Math.round(section.startTime * 1000)},` +
           `apad[${label}]`
         )
-        mixLabels.push(`[${label}]`)
+        musicLabels.push(`[${label}]`)
       }
 
       // SFX — placed at scene start time
+      const sfxLabels: string[] = []
       for (const { idx, sfx } of sfxInputs) {
-        const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6)
-        const fadeIn = sfx.fadeInSecs ?? 0.5
-        const fadeOut = sfx.fadeOutSecs ?? 0.5
+        const vol = Math.pow(10, (sfx.volumeDb ?? -24) / 20).toFixed(6)
+        const fadeIn = sfx.fadeInSecs ?? 0.05
+        const fadeOut = sfx.fadeOutSecs ?? 0.15
         const dur = sfx.endTime - sfx.startTime
         const label = `sfx_${idx}`
         filterParts.push(
@@ -1094,17 +1099,51 @@ export async function renderVideo(params: {
           `adelay=${Math.round(sfx.startTime * 1000)}|${Math.round(sfx.startTime * 1000)},` +
           `apad[${label}]`
         )
-        mixLabels.push(`[${label}]`)
+        sfxLabels.push(`[${label}]`)
       }
 
-      // Mix all tracks, then limit output to prevent clipping
-      const nInputs = mixLabels.length
-      filterParts.push(
-        // normalize=1 scales by 1/nInputs to prevent summing clips
-        `${mixLabels.join('')}amix=inputs=${nInputs}:duration=first:normalize=1,` +
-        // Final brick-wall limiter: ensure no sample exceeds -1 dBTP
-        `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
-      )
+      // Mix all tracks, protecting voiceover loudness
+      if (sfxInputs.length === 0) {
+        // Legacy Default path (when no SFX are present): unchanged behavior
+        const mixLabels: string[] = []
+        if (hasAudio) mixLabels.push('[vo]')
+        mixLabels.push(...musicLabels)
+        const nInputs = mixLabels.length
+        filterParts.push(
+          `${mixLabels.join('')}amix=inputs=${nInputs}:duration=first:normalize=1,` +
+          `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+        )
+      } else {
+        // Bus architecture when SFX are present:
+        // Isolates SFX and Music buses so that amix normalize=0 does not divide voiceover by N tracks
+        const finalBuses: string[] = []
+        if (hasAudio) finalBuses.push('[vo]')
+
+        if (musicLabels.length === 1) {
+          filterParts.push(`${musicLabels[0]}asplit=1[music_bus]`)
+          finalBuses.push('[music_bus]')
+        } else if (musicLabels.length > 1) {
+          filterParts.push(
+            `${musicLabels.join('')}amix=inputs=${musicLabels.length}:duration=longest:normalize=0[music_bus]`
+          )
+          finalBuses.push('[music_bus]')
+        }
+
+        if (sfxLabels.length === 1) {
+          filterParts.push(`${sfxLabels[0]}asplit=1[sfx_bus]`)
+          finalBuses.push('[sfx_bus]')
+        } else if (sfxLabels.length > 1) {
+          filterParts.push(
+            `${sfxLabels.join('')}amix=inputs=${sfxLabels.length}:duration=longest:normalize=0[sfx_bus]`
+          )
+          finalBuses.push('[sfx_bus]')
+        }
+
+        filterParts.push(
+          `${finalBuses.join('')}amix=inputs=${finalBuses.length}:duration=first:normalize=0,` +
+          `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+        )
+      }
 
       const filterComplex = filterParts.join(';')
       logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`)

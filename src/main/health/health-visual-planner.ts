@@ -9,10 +9,14 @@ import type {
   HealthVisualCategory,
   HealthScientificAccuracy,
   HealthMotionPreset,
+  HealthMotionSpec,
+  HealthMotionReport,
   HealthVisualConfig
 } from './health-visual-types'
 import { HEALTH_SCHEMA_VERSION, DEFAULT_HEALTH_CONFIG } from './health-visual-types'
 import { computeHealthGenerationHash } from './health-visual-cache'
+import { HealthMotionDirector } from './health-motion-director'
+import { HealthSfxDirector, SfxDirectorSceneInput } from './health-sfx-director'
 
 // ─── Semantic Matching Keywords ──────────────────────────────────────────────
 
@@ -350,18 +354,45 @@ export class HealthVisualPlanner {
       }
     }
 
-    // 4. Build final scene plans
+    // 4. Build final scene plans with Motion Director and SFX Director
+    const recentPresets: HealthMotionPreset[] = []
+    const aiScenesForSfx: SfxDirectorSceneInput[] = []
+
     const scenePlans: HealthVisualScenePlan[] = classified.map(({ scene, cls }) => {
       const strategy = strategyMap.get(scene.sceneIndex) || 'stock'
-      const motionPreset = pickMotionPreset(cls.category, scene.sceneIndex)
       const narration = scene.narrativeText || ''
       const visualIntent = scene.visualIntent || narration
 
+      let motionSpec: HealthMotionSpec | undefined
+      let motionPreset: HealthMotionPreset = 'push-in-center'
       let imagePrompt: string | undefined
       let stockQueries: string[] | undefined
       let generationHash: string | undefined
 
       if (strategy === 'ai-still') {
+        motionSpec = HealthMotionDirector.planSceneMotion({
+          sceneIndex: scene.sceneIndex,
+          category: cls.category,
+          narration,
+          visualIntent,
+          duration: scene.duration,
+          scientificAccuracy: cls.scientificAccuracy,
+          recentPresets
+        })
+        motionPreset = motionSpec.preset
+        recentPresets.push(motionPreset)
+
+        aiScenesForSfx.push({
+          sceneIndex: scene.sceneIndex,
+          startTime: scene.startTime,
+          endTime: scene.endTime,
+          duration: scene.duration,
+          category: cls.category,
+          narration,
+          visualIntent,
+          motionPreset
+        })
+
         imagePrompt = buildHealthImagePrompt(narration, visualIntent, cls.category)
         generationHash = computeHealthGenerationHash(
           scene.sceneIndex,
@@ -392,12 +423,21 @@ export class HealthVisualPlanner {
         imagePrompt,
         stockQueries,
         motionPreset,
+        motion: motionSpec,
         generationHash,
         startTime: scene.startTime,
         endTime: scene.endTime,
         duration: scene.duration
       }
     })
+
+    // Plan subtle SFX cues for AI scenes
+    const sfxCues = HealthSfxDirector.planSfxCues(aiScenesForSfx)
+    for (const sp of scenePlans) {
+      if (sfxCues.has(sp.sceneIndex)) {
+        sp.sfxCue = sfxCues.get(sp.sceneIndex)
+      }
+    }
 
     const finalPlan: HealthVisualPlan = {
       schemaVersion: HEALTH_SCHEMA_VERSION,
@@ -410,8 +450,47 @@ export class HealthVisualPlanner {
       scenes: scenePlans
     }
 
-    // 5. Save plan atomically if projectDir is provided
+    // 5. Generate and save motion/SFX report & plan atomically if projectDir is provided
     if (projectDir && projectDir.trim().length > 0) {
+      const motionDistribution: Record<string, number> = {}
+      let maxConsecutive = 0
+      let currConsecutive = 0
+      let lastPreset = ''
+
+      for (const p of recentPresets) {
+        motionDistribution[p] = (motionDistribution[p] || 0) + 1
+        if (p === lastPreset) {
+          currConsecutive++
+        } else {
+          lastPreset = p
+          currConsecutive = 1
+        }
+        if (currConsecutive > maxConsecutive) {
+          maxConsecutive = currConsecutive
+        }
+      }
+
+      const sfxDistribution: Record<string, number> = {}
+      for (const cue of sfxCues.values()) {
+        sfxDistribution[cue.type] = (sfxDistribution[cue.type] || 0) + 1
+      }
+
+      const report: HealthMotionReport = {
+        totalAiScenes: recentPresets.length,
+        motionDistribution,
+        sfxCueCount: sfxCues.size,
+        sfxDistribution,
+        maxConsecutiveSameMotion: maxConsecutive,
+        generatedAt: new Date().toISOString()
+      }
+
+      const reportPath = path.join(projectDir, 'analysis', 'health-motion-report.json')
+      try {
+        fs.writeFileSync(reportPath, JSON.stringify(report, null, 2), 'utf-8')
+      } catch (err) {
+        logger.warn(`[HealthVisual] Failed to write motion report: ${err}`)
+      }
+
       const planPath = this.getPlanPath(projectDir)
       const dir = path.dirname(planPath)
       if (!fs.existsSync(dir)) {

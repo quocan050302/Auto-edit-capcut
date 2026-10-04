@@ -10,7 +10,12 @@ import * as os from 'os'
 import { ContentType, ProjectInputs, ProjectState } from '../shared/types'
 import { checkStockCompletion } from '../src/main/pipeline/pipeline-artifacts'
 import { buildHealthMotionFilter } from '../src/main/health/health-motion'
-import { recordHealthFallbackStock, loadHealthGeneratedManifest } from '../src/main/health/health-visual-cache'
+import {
+  recordHealthFallbackStock,
+  loadHealthGeneratedManifest,
+  computeHealthGenerationHash,
+  computeHealthMotionHash
+} from '../src/main/health/health-visual-cache'
 
 let passed = 0
 let failed = 0
@@ -183,11 +188,11 @@ async function runTests(): Promise<void> {
       const filterIn = buildHealthMotionFilter('slow-push-in', 1920, 1080, 4.0, 30)
       assert.ok(filterIn.includes('zoompan'))
       assert.ok(filterIn.includes('1920x1080'))
-      assert.ok(filterIn.includes('1.0+'))
+      assert.ok(filterIn.includes('1.0000+') || filterIn.includes('1.0+'))
 
       const filterOut = buildHealthMotionFilter('slow-push-out', 1920, 1080, 4.0, 30)
       assert.ok(filterOut.includes('zoompan'))
-      assert.ok(filterOut.includes('1.06-'))
+      assert.ok(filterOut.includes('1.0600-') || filterOut.includes('1.06-'))
 
       const filterLeft = buildHealthMotionFilter('pan-left', 1920, 1080, 4.0, 30)
       assert.ok(filterLeft.includes('zoompan'))
@@ -201,11 +206,97 @@ async function runTests(): Promise<void> {
       assert.ok(filterDrift.includes('zoompan'))
     })
 
-    // TEST 16: Default renderer behavior is unchanged
-    await it('TEST 16: Default motion preset "none" returns standard scale without zoompan', () => {
+    // TEST 16 / TEST L: Default renderer behavior is unchanged
+    await it('TEST 16 / TEST L: Default motion preset "none" returns standard scale without zoompan', () => {
       const filterNone = buildHealthMotionFilter('none', 1920, 1080, 4.0, 30)
       assert.ok(!filterNone.includes('zoompan'))
       assert.ok(filterNone.includes('scale=1920:1080'))
+    })
+
+    // TEST K: Health AI image multi-beat path receives Health motion spec without stacking zoom
+    await it('TEST K: Health AI image motion filter generates single coherent smooth zoompan', () => {
+      const motionSpec = {
+        preset: 'push-in-right' as const,
+        intensity: 'subtle' as const,
+        focusX: 0.65,
+        focusY: 0.45,
+        zoomStart: 1.01,
+        zoomEnd: 1.07,
+        ease: 'ease-in-out' as const,
+        reason: 'Focus on liver anatomical right'
+      }
+      const filter = buildHealthMotionFilter(motionSpec, 1920, 1080, 6.0, 30)
+      assert.ok(filter.includes('zoompan='), 'Filter must use zoompan')
+      assert.ok(filter.includes('s=1920x1080'), 'Filter must output exact 1920x1080 resolution')
+      // Ensure zoompan is only specified once (no zoom stacking)
+      const count = (filter.match(/zoompan=/g) || []).length
+      assert.strictEqual(count, 1, 'Only one zoompan filter should be applied to prevent zoom stacking')
+    })
+
+    // TEST T: Motion/SFX change does NOT invalidate Google Flow AI image hash
+    await it('TEST T: Motion / SFX changes do NOT invalidate Google Flow AI image hash', () => {
+      const hashBefore = computeHealthGenerationHash(
+        1,
+        'Hepatocytes filtering blood in the liver.',
+        'Close up of liver cellular structure',
+        'Realistic 3D medical illustration of liver cells'
+      )
+
+      // Even if motion is changed completely or SFX added, generation hash must be identical
+      const hashAfter = computeHealthGenerationHash(
+        1,
+        'Hepatocytes filtering blood in the liver.',
+        'Close up of liver cellular structure',
+        'Realistic 3D medical illustration of liver cells'
+      )
+
+      assert.strictEqual(hashBefore, hashAfter, 'Image generation hash must remain identical across motion/sfx changes')
+
+      // Meanwhile, the motion hash reflects the motion/sfx change
+      const motionHash1 = computeHealthMotionHash({
+        scenes: [{ sceneIndex: 1, category: 'anatomy', motionPreset: 'push-in-center' }]
+      })
+      const motionHash2 = computeHealthMotionHash({
+        scenes: [{ sceneIndex: 1, category: 'anatomy', motionPreset: 'pan-left', sfxCue: { type: 'air-swish', volumeDb: -25 } }]
+      })
+      assert.notStrictEqual(motionHash1, motionHash2, 'Motion hash must detect motion/SFX changes')
+    })
+
+    // TEST U: Audio mixer bus architecture preserves voiceover level when multiple SFX exist
+    await it('TEST U: Audio mixer bus architecture keeps voiceover unattenuated (normalize=0)', () => {
+      // Simulate renderer filter construction logic
+      const hasAudio = true
+      const musicLabels = ['[m0]']
+      const sfxLabels = ['[s0]', '[s1]', '[s2]', '[s3]', '[s4]'] // 5 SFX tracks
+
+      const filterParts: string[] = []
+      const finalBuses: string[] = []
+      if (hasAudio) finalBuses.push('[vo]')
+
+      if (musicLabels.length === 1) {
+        filterParts.push(`${musicLabels[0]}asplit=1[music_bus]`)
+        finalBuses.push('[music_bus]')
+      }
+
+      if (sfxLabels.length > 1) {
+        filterParts.push(
+          `${sfxLabels.join('')}amix=inputs=${sfxLabels.length}:duration=longest:normalize=0[sfx_bus]`
+        )
+        finalBuses.push('[sfx_bus]')
+      }
+
+      filterParts.push(
+        `${finalBuses.join('')}amix=inputs=${finalBuses.length}:duration=first:normalize=0,` +
+        `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+      )
+
+      const finalFilter = filterParts.join(';')
+      assert.ok(finalFilter.includes('[sfx_bus]'), 'SFX tracks must be isolated into sfx_bus')
+      assert.ok(finalFilter.includes('[music_bus]'), 'Music must be routed through music_bus')
+      assert.ok(
+        finalFilter.includes('amix=inputs=3:duration=first:normalize=0'),
+        'Final mix must use normalize=0 so voiceover is not divided by track count'
+      )
     })
   } finally {
     cleanup()

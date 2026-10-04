@@ -41,6 +41,15 @@ export function computeHealthGenerationHash(
   return crypto.createHash('sha256').update(payload).digest('hex')
 }
 
+export function computeHealthMotionHash(plan: { scenes?: Array<{ sceneIndex: number; category: string; motionPreset?: string; motion?: { preset: string; intensity: string; zoomEnd: number }; sfxCue?: { type: string; volumeDb: number } }> }): string {
+  const parts = (plan.scenes || []).map((s) => {
+    const motionStr = s.motion ? `${s.motion.preset}:${s.motion.intensity}:${s.motion.zoomEnd}` : s.motionPreset || 'none'
+    const sfxStr = s.sfxCue ? `${s.sfxCue.type}:${s.sfxCue.volumeDb}` : 'none'
+    return `${s.sceneIndex}:${s.category}:${motionStr}:${sfxStr}`
+  })
+  return crypto.createHash('sha256').update(parts.join('||')).digest('hex')
+}
+
 export function loadHealthGeneratedManifest(projectDir: string): HealthGeneratedAssetsManifest {
   const manifestPath = getHealthManifestPath(projectDir)
   if (fs.existsSync(manifestPath)) {
