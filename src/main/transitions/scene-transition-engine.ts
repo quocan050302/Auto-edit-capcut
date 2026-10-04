@@ -1,4 +1,5 @@
 import * as fs from 'fs'
+import * as path from 'path'
 import { spawn } from 'child_process'
 import { logger } from '../logger'
 import type {
@@ -6,9 +7,10 @@ import type {
   TransitionRenderMode,
   RenderTransitionSettings
 } from '../../../shared/types'
-
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const ffmpegPath: string = require('ffmpeg-static')
+import {
+  ffmpegRun as sharedFfmpegRun,
+  type FfmpegRunOptions
+} from '../render-cache/ffmpeg-process'
 
 export interface RenderSceneEntry {
   scene: {
@@ -404,22 +406,132 @@ export async function probeVideoDuration(filePath: string): Promise<number | nul
   }
 }
 
-function ffmpegRun(args: string[]): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args, { windowsHide: true })
-    const stderr: string[] = []
-    proc.stderr.on('data', (d: Buffer) => stderr.push(d.toString()))
-    proc.on('close', (code) => {
-      if (code === 0) resolve()
-      else reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join('')}`))
-    })
-    proc.on('error', reject)
-  })
+function ffmpegRun(args: string[], options?: FfmpegRunOptions): Promise<void> {
+  return sharedFfmpegRun(args, options ?? {})
 }
+
+// ─── Segmented assembly (bounded memory for long timelines) ──────────────────
+
+export interface TransitionSegmentPlan {
+  segmentIndex: number       // 1-based
+  firstScene: number         // 0-based index into sceneEntries (inclusive)
+  lastScene: number          // 0-based index (inclusive) — needed to render up to endSec
+  /** absolute timeline start of firstScene */
+  shiftSec: number
+  /** absolute output window [startSec, endSec) — frame aligned */
+  startSec: number
+  endSec: number
+  startFrame: number
+  endFrameExclusive: number
+}
+
+/**
+ * Splits a transition timeline into independent segments.
+ *
+ * A split point T is placed inside scene k's "pure" region — after the incoming
+ * transition into k has finished and before the outgoing transition into k+1 starts.
+ * Frames at t ≥ T depend only on scenes ≥ k, so a segment can start its filter graph
+ * at scene k and shift its timestamps back to absolute time. This keeps every
+ * segment's filter graph small (≤ maxScenesPerSegment + 1 inputs).
+ */
+export function planTransitionSegments(
+  scenes: Array<{ duration: number }>,
+  transitions: ResolvedSceneTransition[],
+  fps: number,
+  maxScenesPerSegment: number
+): TransitionSegmentPlan[] {
+  const count = scenes.length
+  const starts: number[] = []
+  let acc = 0
+  for (const s of scenes) {
+    starts.push(acc)
+    acc += s.duration
+  }
+  const total = Math.round(acc * 10000) / 10000
+  const totalFrames = Math.ceil(total * fps - 1e-6)
+
+  const splitScenes: Array<{ scene: number; frame: number }> = []
+  const maxPer = Math.max(2, Math.floor(maxScenesPerSegment))
+  let lastSplitScene = 0
+  for (let k = 1; k < count; k++) {
+    if (k - lastSplitScene < maxPer) continue
+    const incoming = transitions[k - 1]
+    const dIn = incoming && incoming.type !== 'cut' ? incoming.duration : 0
+    const pureStart = starts[k] + dIn
+    const pureEnd = k + 1 < count ? starts[k + 1] : total
+    // one frame of safety margin on both sides
+    const frame = Math.ceil(pureStart * fps - 1e-6) + 1
+    if (frame / fps >= pureEnd - 1 / fps || frame >= totalFrames) continue
+    splitScenes.push({ scene: k, frame })
+    lastSplitScene = k
+  }
+
+  const segments: TransitionSegmentPlan[] = []
+  let curScene = 0
+  let curFrame = 0
+  for (let i = 0; i <= splitScenes.length; i++) {
+    const next = splitScenes[i]
+    const endFrame = next ? next.frame : totalFrames
+    const lastScene = next ? next.scene : count - 1
+    segments.push({
+      segmentIndex: segments.length + 1,
+      firstScene: curScene,
+      lastScene,
+      shiftSec: starts[curScene],
+      startSec: curFrame / fps,
+      endSec: next ? endFrame / fps : total,
+      startFrame: curFrame,
+      endFrameExclusive: endFrame
+    })
+    if (next) {
+      curScene = next.scene
+      curFrame = next.frame
+    }
+  }
+  return segments
+}
+
+/** Filter graph for one segment: sub-graph of its scenes + absolute-time window trim. */
+export function buildSegmentFilterGraph(
+  allScenes: Array<{ duration: number }>,
+  allTransitions: ResolvedSceneTransition[],
+  seg: TransitionSegmentPlan,
+  fps: number
+): string {
+  const subScenes = allScenes.slice(seg.firstScene, seg.lastScene + 1)
+  const subTransitions = allTransitions.slice(seg.firstScene, seg.lastScene)
+  let body: string
+  if (subScenes.length === 1) {
+    body = `[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[seg0]`
+  } else {
+    const { filterComplex } = buildTransitionFilterGraph(subScenes, subTransitions, fps)
+    // Replace the final full-length trim with our absolute window
+    const lines = filterComplex.split(';\n')
+    lines.pop()
+    const lastLabelMatch = /(\[[a-z]\d+\])$/.exec(lines[lines.length - 1])
+    const lastLabel = lastLabelMatch ? lastLabelMatch[1] : '[v0]'
+    lines.push(`${lastLabel}null[seg0]`)
+    body = lines.join(';\n')
+  }
+  return (
+    `${body};\n` +
+    `[seg0]setpts=PTS+${seg.shiftSec.toFixed(6)}/TB,` +
+    `trim=start=${seg.startSec.toFixed(6)}:end=${seg.endSec.toFixed(6)},setpts=PTS-STARTPTS[vout]`
+  )
+}
+
+export type SegmentRunner = (
+  seg: TransitionSegmentPlan,
+  render: (outputPath: string) => Promise<void>
+) => Promise<string>
 
 /**
  * Concatenates scene clips with transitions using FFmpeg filter_complex xfade.
  * Returns true if transitions were applied, or false if no xfade was needed (all cuts).
+ *
+ * When `segmentRunner` is provided and the timeline is longer than
+ * `maxScenesPerSegment`, the timeline is rendered in independent segments
+ * (each resumable via the runner) and joined with a stream-copy concat.
  */
 export async function concatSceneClipsWithTransitions(params: {
   sceneEntries: RenderSceneEntry[]
@@ -429,6 +541,11 @@ export async function concatSceneClipsWithTransitions(params: {
   tmpDir: string
   rawVideoPath: string
   onProgress?: (stage: string, pct: number) => void
+  ffmpegOptions?: FfmpegRunOptions
+  /** x264 args for the encode (defaults to the legacy libx264 fast/CRF20). */
+  videoCodecArgs?: string[]
+  maxScenesPerSegment?: number
+  segmentRunner?: SegmentRunner
 }): Promise<boolean> {
   const {
     sceneEntries,
@@ -469,40 +586,78 @@ export async function concatSceneClipsWithTransitions(params: {
 
   onProgress?.('Applying scene transitions...', 0.78)
 
-  // 2. Build filter graph
-  const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps)
-  logger.debug(`[Transitions] FFmpeg filter_complex:\n${filterComplex}`)
+  const codecArgs = params.videoCodecArgs ?? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '20']
+  const maxPer = params.maxScenesPerSegment ?? 0
+  const useSegments = !!params.segmentRunner && maxPer >= 2 && sceneClips.length > maxPer + 1
 
-  // 3. Assemble FFmpeg args
-  const inputArgs: string[] = []
-  for (const clip of sceneClips) {
-    inputArgs.push('-i', clip)
+  if (!useSegments) {
+    // 2. Build filter graph (original single-graph path)
+    const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps)
+    logger.debug(`[Transitions] FFmpeg filter_complex:\n${filterComplex}`)
+
+    // 3. Assemble FFmpeg args
+    const inputArgs: string[] = []
+    for (const clip of sceneClips) {
+      inputArgs.push('-i', clip)
+    }
+
+    const args = [
+      '-y',
+      ...inputArgs,
+      '-filter_complex',
+      filterComplex,
+      '-map',
+      '[vout]',
+      ...codecArgs,
+      '-pix_fmt',
+      'yuv420p',
+      '-r',
+      String(fps),
+      '-movflags',
+      '+faststart',
+      rawVideoPath
+    ]
+
+    // 4. Run FFmpeg
+    await ffmpegRun(args, params.ffmpegOptions)
+  } else {
+    const segments = planTransitionSegments(scenes, transitions, fps, maxPer)
+    logger.info(`[Transitions] Segmented assembly: ${segments.length} segments (≤${maxPer + 1} inputs each)`)
+    const segmentFiles: string[] = []
+    for (const seg of segments) {
+      onProgress?.(
+        `Assembling scene segment ${seg.segmentIndex}/${segments.length}...`,
+        0.78 + (seg.segmentIndex / segments.length) * 0.05
+      )
+      const file = await params.segmentRunner!(seg, async (outputPath) => {
+        const inputArgs: string[] = []
+        for (let i = seg.firstScene; i <= seg.lastScene; i++) inputArgs.push('-i', sceneClips[i])
+        const filterComplex = buildSegmentFilterGraph(scenes, transitions, seg, fps)
+        await ffmpegRun([
+          '-y',
+          ...inputArgs,
+          '-filter_complex', filterComplex,
+          '-map', '[vout]',
+          ...codecArgs,
+          '-pix_fmt', 'yuv420p',
+          '-r', String(fps),
+          outputPath
+        ], params.ffmpegOptions)
+      })
+      segmentFiles.push(file)
+    }
+    const listPath = path.join(params.tmpDir, `assembly-concat-${Date.now()}.txt`)
+    fs.writeFileSync(
+      listPath,
+      segmentFiles.map((f) => `file '${process.platform === 'win32' ? f.replace(/\\/g, '/') : f.replace(/'/g, "'\\''")}'`).join('\n'),
+      'utf-8'
+    )
+    try {
+      await ffmpegRun(['-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-movflags', '+faststart', rawVideoPath], params.ffmpegOptions)
+    } finally {
+      try { fs.unlinkSync(listPath) } catch { /* ignore */ }
+    }
   }
-
-  const args = [
-    '-y',
-    ...inputArgs,
-    '-filter_complex',
-    filterComplex,
-    '-map',
-    '[vout]',
-    '-c:v',
-    'libx264',
-    '-preset',
-    'fast',
-    '-crf',
-    '20',
-    '-pix_fmt',
-    'yuv420p',
-    '-r',
-    String(fps),
-    '-movflags',
-    '+faststart',
-    rawVideoPath
-  ]
-
-  // 4. Run FFmpeg
-  await ffmpegRun(args)
 
   // 5. Verify duration with probe
   const outputDuration = await probeVideoDuration(rawVideoPath)
@@ -525,3 +680,4 @@ export async function concatSceneClipsWithTransitions(params: {
 
   return true
 }
+

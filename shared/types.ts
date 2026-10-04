@@ -925,6 +925,13 @@ export const IPC_CHANNELS = {
   RENDER_START: 'render:start',
   RENDER_PROGRESS: 'render:progress',
   RENDER_CANCEL: 'render:cancel',
+  // Resumable Render Engine V2
+  RENDER_RECOVERY_GET: 'render:recovery-get',
+  RENDER_RESUME_CACHED: 'render:resume-cached',
+  RENDER_CACHE_CLEAR: 'render:cache-clear',
+  RENDER_PREFERENCES_GET: 'render:preferences-get',
+  RENDER_PREFERENCES_SET: 'render:preferences-set',
+  RENDER_ENCODER_PROBE: 'render:encoder-probe',
 
   // Stock Media Engine
   STOCK_SEARCH_START: 'stock:search-start',
@@ -1556,5 +1563,55 @@ export interface ThumbnailProgressPayload {
   message: string
   candidate?: ThumbnailCandidate
   jobState?: ThumbnailJobState
+}
+
+// ─── Resumable Render Engine V2 (all fields optional for backward compatibility) ──
+
+export type RenderResourceProfileId = 'balanced' | 'low-power' | 'fast'
+export type RenderVideoEncoderMode = 'software-h264' | 'videotoolbox-h264'
+
+export interface RenderPreferencesDTO {
+  resourceProfile: RenderResourceProfileId
+  videoEncoder: RenderVideoEncoderMode
+  remotionHardwareAcceleration: boolean
+  autoResumeAfterCrash: boolean
+  maxCacheBytes: number
+}
+
+export type RenderRecoveryStatus =
+  | 'none'
+  | 'available'
+  | 'resuming'
+  | 'partially-invalidated'
+  | 'complete'
+
+export interface RenderRecoveryInfo {
+  manifestFound: boolean
+  resumable: boolean
+  fingerprintMatches: boolean
+  currentPhase?: string
+  completedScenes: number
+  totalScenes: number
+  completedOverlayBlocks: number
+  totalOverlayBlocks: number
+  lastValidArtifact?: string
+  invalidArtifacts: string[]
+  status?: RenderRecoveryStatus
+  assemblyStatus?: string
+  audioMixStatus?: string
+  compositeStatus?: string
+  interruptionReason?: string
+  source?: 'manual' | 'pipeline'
+  canAutoResume?: boolean
+  estimatedWorkSavedPct?: number
+  cacheSizeBytes?: number
+  message?: string
+  resumeParams?: {
+    voiceoverPath: string
+    outputName: string
+    resolution: { width: number; height: number }
+    fps: number
+    transitionSettings?: RenderTransitionSettings
+  }
 }
 

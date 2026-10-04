@@ -33,6 +33,14 @@ const IPC_CHANNELS = {
   // Video Rendering
   RENDER_START: "render:start",
   RENDER_PROGRESS: "render:progress",
+  RENDER_CANCEL: "render:cancel",
+  // Resumable Render Engine V2
+  RENDER_RECOVERY_GET: "render:recovery-get",
+  RENDER_RESUME_CACHED: "render:resume-cached",
+  RENDER_CACHE_CLEAR: "render:cache-clear",
+  RENDER_PREFERENCES_GET: "render:preferences-get",
+  RENDER_PREFERENCES_SET: "render:preferences-set",
+  RENDER_ENCODER_PROBE: "render:encoder-probe",
   // Stock Media Engine
   STOCK_SEARCH_START: "stock:search-start",
   STOCK_SEARCH_PROGRESS: "stock:search-progress",
@@ -119,6 +127,7 @@ const IPC_CHANNELS = {
   THUMBNAIL_CANDIDATE_EXPORT_4K: "thumbnail:candidate-export-4k",
   THUMBNAIL_CANDIDATE_SELECT: "thumbnail:candidate-select",
   THUMBNAIL_OPEN_FOLDER: "thumbnail:open-folder",
+  THUMBNAIL_READ_IMAGE: "thumbnail:read-image",
   THUMBNAIL_PROGRESS: "thumbnail:progress",
   // FlowKit Runtime Manager
   FLOWKIT_RUNTIME_GET_SETTINGS: "flowkit:runtime-get-settings",
@@ -190,6 +199,14 @@ const api = {
     },
     runPreflight: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFLIGHT_RUN, params),
     getQaReport: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_QA_GET, params),
+    // ── Resumable Render Engine V2 ──
+    cancel: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_CANCEL, params),
+    getRecovery: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_RECOVERY_GET, params),
+    resumeCached: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_RESUME_CACHED, params),
+    clearCache: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_CACHE_CLEAR, params),
+    getPreferences: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFERENCES_GET),
+    setPreferences: (patch) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFERENCES_SET, patch),
+    probeEncoder: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.RENDER_ENCODER_PROBE, params),
     onQaProgress: (callback) => {
       const handler = (_event, data) => callback(data);
       electron.ipcRenderer.on(IPC_CHANNELS.RENDER_QA_PROGRESS, handler);
@@ -328,6 +345,7 @@ const api = {
       select: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_CANDIDATE_SELECT, params)
     },
     openFolder: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_OPEN_FOLDER, params),
+    readImage: (filePath) => electron.ipcRenderer.invoke(IPC_CHANNELS.THUMBNAIL_READ_IMAGE, filePath),
     onProgress: (callback) => {
       const handler = (_event, payload) => {
         callback(payload);

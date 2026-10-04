@@ -18,6 +18,12 @@ import { thumbnailOrchestrator } from './thumbnail/thumbnail-orchestrator'
 import { flowkitRuntimeManager } from './thumbnail/flowkit-runtime-manager'
 import { googleFlowClient } from './thumbnail/google-flow-client'
 import { logger } from './logger'
+import { renderJobCoordinator } from './render-cache/render-job-coordinator'
+import {
+  getLiveRenderProcessCount,
+  getLiveRenderProcessPids,
+  terminateAllRenderProcesses
+} from './render-cache/ffmpeg-process'
 
 // Initialize FlowKit Runtime Manager with persisted settings BEFORE IPC is registered.
 // This ensures any UI startup health checks use the correct saved bridge URL.
@@ -119,10 +125,40 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+let renderShutdownStarted = false
+
+app.on('before-quit', (event) => {
   pipelineOrchestrator.handleAppQuit()
   thumbnailOrchestrator.handleAppQuit()
   flowkitRuntimeManager.handleAppQuit()
+
+  // Resumable Render Engine V2: stop render jobs as "app-closed" (interrupted, not
+  // cancelled), flush manifests and terminate FFmpeg/Remotion before quitting.
+  if (!renderShutdownStarted && (renderJobCoordinator.hasAnyActive() || getLiveRenderProcessCount() > 0)) {
+    renderShutdownStarted = true
+    event.preventDefault()
+    void (async () => {
+      try {
+        await renderJobCoordinator.abortAll('app-closed', 4000)
+        await terminateAllRenderProcesses(1500)
+      } catch (err) {
+        logger.warn(`[App] Render shutdown error: ${String(err)}`)
+      } finally {
+        app.quit()
+      }
+    })()
+  }
+})
+
+process.on('exit', () => {
+  // Last resort: never leave an FFmpeg child running after the app is gone
+  for (const pid of getLiveRenderProcessPids()) {
+    try {
+      process.kill(pid, 'SIGKILL')
+    } catch {
+      /* already gone */
+    }
+  }
 })
 
 process.on('uncaughtException', (error) => {
