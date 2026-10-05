@@ -16,6 +16,8 @@ import type { StageRunResult, StageProgressCallback } from '../pipeline/pipeline
 import { HealthVisualPlanner } from './health-visual-planner'
 import { healthImageGenerator, HealthImageGenerator } from './health-image-generator'
 import { loadHealthGeneratedManifest } from './health-visual-cache'
+import { resolveVisualMixConfig } from '../visual-mix/visual-mix-config'
+import { runMixedVisualEngine } from '../visual-mix/mixed-visual-engine'
 
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -30,6 +32,18 @@ export async function runHealthVisualEngine(
   imageGenerator: HealthImageGenerator = healthImageGenerator
 ): Promise<StageRunResult> {
   checkAborted(signal)
+
+  if (imageGenerator === healthImageGenerator) {
+    const mix = resolveVisualMixConfig(options)
+    return runMixedVisualEngine({
+      options,
+      profile: 'health',
+      mix,
+      onProgress,
+      signal
+    })
+  }
+
   const projectDir = options.projectDir
 
   // 1. Check Google Flow readiness before starting any work

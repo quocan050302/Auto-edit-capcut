@@ -159,6 +159,10 @@ export class GoogleFlowClient {
 
     logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`)
 
+    const callerHeader = request.caller
+      ? `long-form-video-factory/${request.caller}`
+      : 'long-form-video-factory/thumbnail-studio'
+
     let resp: Response
     try {
       resp = await this.fetchWithTimeout(
@@ -167,7 +171,7 @@ export class GoogleFlowClient {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-flowkit-caller': 'long-form-video-factory/thumbnail-studio'
+            'x-flowkit-caller': callerHeader
           },
           body: JSON.stringify(payload)
         },

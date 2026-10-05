@@ -1,5 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react'
-import type { ProjectState, ProjectInputs, PipelineStage, ContentType } from '../../../../shared/types'
+import type {
+  ProjectState,
+  ProjectInputs,
+  PipelineStage,
+  ContentType,
+  VisualSourceMode,
+  VisualMixConfig
+} from '../../../../shared/types'
+import {
+  resolveVisualMixConfig,
+  HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG
+} from '../../../../shared/types'
 import { usePipeline } from '../hooks/usePipeline'
 import { useUiPreferences } from '../hooks/useUiPreferences'
 import { PipelineTimeline } from '../components/PipelineTimeline'
@@ -102,6 +113,357 @@ function FileRow({
   )
 }
 
+interface VisualSourceSectionProps {
+  isCustomMix: boolean
+  currentAiPercent: number
+  currentStockPercent: number
+  flowHealth: { reachable?: boolean; extensionConnected?: boolean; checking?: boolean }
+  isRunning: boolean
+  onSelectMode: (mode: VisualSourceMode) => void
+  onSetAiRatio: (ai: number) => void
+  onSetStockRatio: (stock: number) => void
+  isAdvanced?: boolean
+}
+
+function VisualSourceSection({
+  isCustomMix,
+  currentAiPercent,
+  currentStockPercent,
+  flowHealth,
+  isRunning,
+  onSelectMode,
+  onSetAiRatio,
+  onSetStockRatio,
+  isAdvanced
+}: VisualSourceSectionProps): React.ReactElement {
+  const containerClass = isAdvanced ? 'panel' : 'setup-section'
+  const idSuffix = isAdvanced ? '-adv' : ''
+
+  return (
+    <div className={containerClass} style={{ marginBottom: '16px' }}>
+      <div className={isAdvanced ? 'panel-header' : 'setup-section__header'}>
+        <div>
+          <h2 className={isAdvanced ? 'panel-title' : 'setup-section__title'}>Visual Source</h2>
+          <p
+            className={isAdvanced ? '' : 'setup-section__desc'}
+            style={isAdvanced ? { fontSize: '12px', color: 'var(--text-secondary)' } : undefined}
+          >
+            Choose where scene visuals come from — standard stock or AI-generated visual mix
+          </p>
+        </div>
+        <span className="panel-badge badge-primary">
+          {isCustomMix ? 'Custom Mix' : 'Default Workflow'}
+        </span>
+      </div>
+
+      <div className={isAdvanced ? 'panel-body' : ''}>
+        <div className="content-type-grid" style={{ marginBottom: '12px' }}>
+          <button
+            type="button"
+            id={`visual-mode-legacy${idSuffix}`}
+            className={`content-type-card ${!isCustomMix ? 'is-selected' : ''}`}
+            onClick={() => onSelectMode('legacy')}
+            disabled={isRunning}
+          >
+            <div className="content-type-card__icon">🎞️</div>
+            <div className="content-type-card__content">
+              <div className="content-type-card__title">
+                Default Workflow
+                {!isCustomMix && (
+                  <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Active</span>
+                )}
+              </div>
+              <div className="content-type-card__subtitle">Stock Footage</div>
+              <div className="content-type-card__desc">
+                Use current stock footage production flow (Pexels / Pixabay / local assets). No Google Flow scene images.
+              </div>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            id={`visual-mode-custom-mix${idSuffix}`}
+            className={`content-type-card ${isCustomMix ? 'is-selected' : ''}`}
+            onClick={() => onSelectMode('custom-mix')}
+            disabled={isRunning}
+          >
+            <div className="content-type-card__icon">🎨</div>
+            <div className="content-type-card__content">
+              <div className="content-type-card__title">
+                Custom Mix
+                {isCustomMix && (
+                  <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Active</span>
+                )}
+              </div>
+              <div className="content-type-card__subtitle">AI Stills + Real Footage</div>
+              <div className="content-type-card__desc">
+                Combine AI-generated stills with real footage.
+              </div>
+            </div>
+          </button>
+        </div>
+
+        {!isCustomMix ? (
+          <div
+            style={{
+              padding: '10px 14px',
+              borderRadius: 'var(--radius-sm, 6px)',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              fontSize: '12px',
+              color: 'var(--text-secondary)'
+            }}
+          >
+            ✓ Uses existing production flow: Pexels / Pixabay / local assets. No Google Flow scene images will be generated.
+          </div>
+        ) : (
+          <div
+            style={{
+              padding: '14px 16px',
+              borderRadius: 'var(--radius-md, 8px)',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                Visual Mix
+              </div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                Total: <strong>100%</strong>
+              </div>
+            </div>
+
+            {/* Linked Inputs */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                gap: '16px'
+              }}
+            >
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  background: 'rgba(99, 102, 241, 0.08)',
+                  border: '1px solid rgba(99, 102, 241, 0.25)'
+                }}
+              >
+                <label
+                  htmlFor={`input-ai-image-ratio${idSuffix}`}
+                  style={{
+                    display: 'block',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: 'var(--color-brand, #818cf8)',
+                    marginBottom: '4px'
+                  }}
+                >
+                  AI Images (Google Flow)
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <input
+                    id={`input-ai-image-ratio${idSuffix}`}
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={currentAiPercent}
+                    onChange={(e) => onSetAiRatio(Number(e.target.value))}
+                    disabled={isRunning}
+                    style={{
+                      width: '80px',
+                      padding: '6px 10px',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      background: 'rgba(0, 0, 0, 0.4)',
+                      color: '#fff',
+                      fontSize: '16px',
+                      fontWeight: 700
+                    }}
+                  />
+                  <span style={{ fontSize: '14px', fontWeight: 600, color: '#fff' }}>%</span>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  background: 'rgba(14, 165, 233, 0.08)',
+                  border: '1px solid rgba(14, 165, 233, 0.25)'
+                }}
+              >
+                <label
+                  htmlFor={`input-stock-footage-ratio${idSuffix}`}
+                  style={{
+                    display: 'block',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#38bdf8',
+                    marginBottom: '4px'
+                  }}
+                >
+                  Real Footage
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <input
+                    id={`input-stock-footage-ratio${idSuffix}`}
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={currentStockPercent}
+                    onChange={(e) => onSetStockRatio(Number(e.target.value))}
+                    disabled={isRunning}
+                    style={{
+                      width: '80px',
+                      padding: '6px 10px',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      background: 'rgba(0, 0, 0, 0.4)',
+                      color: '#fff',
+                      fontSize: '16px',
+                      fontWeight: 700
+                    }}
+                  />
+                  <span style={{ fontSize: '14px', fontWeight: 600, color: '#fff' }}>%</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Dual Visual Bar */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div
+                style={{
+                  height: '10px',
+                  width: '100%',
+                  borderRadius: '5px',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  background: 'rgba(255, 255, 255, 0.1)'
+                }}
+              >
+                <div
+                  style={{
+                    width: `${currentAiPercent}%`,
+                    background: 'linear-gradient(90deg, #6366f1, #8b5cf6)',
+                    transition: 'width 0.2s ease'
+                  }}
+                />
+                <div
+                  style={{
+                    width: `${currentStockPercent}%`,
+                    background: 'linear-gradient(90deg, #0284c7, #0ea5e9)',
+                    transition: 'width 0.2s ease'
+                  }}
+                />
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: '11px',
+                  color: 'var(--text-secondary)'
+                }}
+              >
+                <span>AI Images: {currentAiPercent}%</span>
+                <span>Real Footage: {currentStockPercent}%</span>
+              </div>
+            </div>
+
+            {/* Quick Presets */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Presets:</span>
+              {[
+                { label: '100 / 0', ai: 100 },
+                { label: '80 / 20', ai: 80 },
+                { label: '70 / 30', ai: 70 },
+                { label: '50 / 50', ai: 50 },
+                { label: '30 / 70', ai: 30 },
+                { label: '0 / 100', ai: 0 }
+              ].map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  id={`preset-${preset.ai}-${100 - preset.ai}${idSuffix}`}
+                  className="btn btn-secondary btn-sm"
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: '11px',
+                    background: currentAiPercent === preset.ai ? 'var(--color-brand)' : undefined,
+                    color: currentAiPercent === preset.ai ? '#fff' : undefined
+                  }}
+                  onClick={() => onSetAiRatio(preset.ai)}
+                  disabled={isRunning}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Google Flow status for Custom Mix */}
+            {currentAiPercent > 0 ? (
+              flowHealth.checking === false &&
+              (flowHealth.reachable === false || flowHealth.extensionConnected === false) ? (
+                <div
+                  style={{
+                    marginTop: '6px',
+                    padding: '8px 12px',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    borderRadius: 'var(--radius-sm, 6px)',
+                    fontSize: '11px',
+                    color: '#f87171',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px'
+                  }}
+                >
+                  <div>
+                    ⚠️ <strong>Google Flow / FlowKit is not ready:</strong> Health mode requires Google Flow / FlowKit connection. Open Google Flow in Chrome and ensure the FlowKit extension is connected.
+                  </div>
+                  {window.api?.thumbnail?.openFlowTab && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      style={{ flexShrink: 0, fontSize: '11px', padding: '3px 8px' }}
+                      onClick={() => window.api.thumbnail.openFlowTab()}
+                    >
+                      Open Google Flow
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: 'var(--color-success, #10b981)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span>●</span> AI Images — Google Flow: Ready
+                </div>
+              )
+            ) : (
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                No Google Flow images required (100% stock footage).
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function InputPage({
   project,
   onUpdateInputs,
@@ -115,7 +477,17 @@ export function InputPage({
   // Mode: 'manual' (default) hoặc 'auto'
   const [workflowMode, setWorkflowMode] = useState<'manual' | 'auto'>('auto')
 
-  // Flow health check for Health mode
+  // Resolve effective visual mix settings
+  const effectiveMix = resolveVisualMixConfig({
+    visualSourceMode: inputs.visualSourceMode,
+    visualMixConfig: inputs.visualMixConfig,
+    contentType: inputs.contentType
+  })
+  const isCustomMix = effectiveMix.mode === 'custom-mix'
+  const currentAiPercent = Math.round(effectiveMix.aiImageRatio * 100)
+  const currentStockPercent = 100 - currentAiPercent
+
+  // Flow health check for Custom Mix with AI ratio > 0
   const [flowHealth, setFlowHealth] = useState<{
     reachable?: boolean
     extensionConnected?: boolean
@@ -126,7 +498,10 @@ export function InputPage({
   useEffect(() => {
     let cancelled = false
     const checkFlow = async (): Promise<void> => {
-      if ((inputs.contentType ?? 'default') !== 'health') return
+      if (!isCustomMix || currentAiPercent <= 0) {
+        setFlowHealth({ checking: false })
+        return
+      }
       try {
         setFlowHealth((prev) => ({ ...prev, checking: true }))
         const h = await window.api?.thumbnail?.checkFlowHealth?.()
@@ -148,11 +523,66 @@ export function InputPage({
     return () => {
       cancelled = true
     }
-  }, [inputs.contentType])
+  }, [isCustomMix, currentAiPercent])
 
   async function handleSelectContentType(type: ContentType): Promise<void> {
     if (isRunning) return
-    await onUpdateInputs({ contentType: type })
+    const updates: Partial<ProjectInputs> = { contentType: type }
+    // When selecting Health for the first time without custom preference:
+    if (type === 'health' && !inputs.visualSourceMode && !inputs.visualMixConfig) {
+      updates.visualSourceMode = 'custom-mix'
+      updates.visualMixConfig = { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG }
+    }
+    await onUpdateInputs(updates)
+  }
+
+  async function handleSelectVisualSourceMode(mode: VisualSourceMode): Promise<void> {
+    if (isRunning) return
+    const baseAi = inputs.visualMixConfig?.aiImageRatio ?? (inputs.contentType === 'health' ? 0.8 : 0.7)
+    const aiRatio = mode === 'legacy' ? 0 : baseAi
+    const stockRatio = mode === 'legacy' ? 1 : Math.round((1 - aiRatio) * 1000) / 1000
+
+    const nextConfig: VisualMixConfig = {
+      mode,
+      aiImageRatio: aiRatio,
+      stockFootageRatio: stockRatio,
+      width: inputs.visualMixConfig?.width ?? 1920,
+      height: inputs.visualMixConfig?.height ?? 1080,
+      motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
+      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 6,
+      postProcessConcurrency: inputs.visualMixConfig?.postProcessConcurrency ?? 2
+    }
+
+    await onUpdateInputs({
+      visualSourceMode: mode,
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSetAiRatio(aiPercent: number): Promise<void> {
+    if (isRunning) return
+    const clampedAi = Math.max(0, Math.min(100, Math.round(isNaN(aiPercent) ? 0 : aiPercent)))
+    const clampedStock = 100 - clampedAi
+    const nextConfig: VisualMixConfig = {
+      mode: 'custom-mix',
+      aiImageRatio: clampedAi / 100,
+      stockFootageRatio: clampedStock / 100,
+      width: inputs.visualMixConfig?.width ?? 1920,
+      height: inputs.visualMixConfig?.height ?? 1080,
+      motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
+      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 6,
+      postProcessConcurrency: inputs.visualMixConfig?.postProcessConcurrency ?? 2
+    }
+    await onUpdateInputs({
+      visualSourceMode: 'custom-mix',
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSetStockRatio(stockPercent: number): Promise<void> {
+    if (isRunning) return
+    const clampedStock = Math.max(0, Math.min(100, Math.round(isNaN(stockPercent) ? 0 : stockPercent)))
+    await handleSetAiRatio(100 - clampedStock)
   }
 
   // Auto Pipeline Options
@@ -207,7 +637,7 @@ export function InputPage({
       return
     }
 
-    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}`
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${inputs.contentType ?? 'default'}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`
     if (lastAutoStartedFingerprintRef.current === currentFp) {
       return
     }
@@ -228,7 +658,17 @@ export function InputPage({
         clearTimeout(debounceTimerRef.current)
       }
     }
-  }, [workflowMode, autoStartOnReady, isAutoReady, inputs.scriptPath, inputs.voiceoverPath, isRunning])
+  }, [
+    workflowMode,
+    autoStartOnReady,
+    isAutoReady,
+    inputs.scriptPath,
+    inputs.voiceoverPath,
+    inputs.contentType,
+    effectiveMix.mode,
+    effectiveMix.aiImageRatio,
+    isRunning
+  ])
 
   async function handleStartAutoPipeline(): Promise<void> {
     if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return
@@ -242,12 +682,14 @@ export function InputPage({
         requireBackgroundMusic: requireBgMusic,
         autoStartOnReady,
         contentType: inputs.contentType ?? 'default',
+        visualSourceMode: effectiveMix.mode,
+        visualMixConfig: effectiveMix,
         healthVisualConfig: (inputs.contentType === 'health') ? {
-          aiRatio: 0.8,
-          stockRatio: 0.2,
-          width: 1920,
-          height: 1080,
-          motionEnabled: true
+          aiRatio: effectiveMix.aiImageRatio,
+          stockRatio: effectiveMix.stockFootageRatio,
+          width: effectiveMix.width,
+          height: effectiveMix.height,
+          motionEnabled: effectiveMix.motionEnabled
         } : undefined
       })
       if (ok && onNavigate && isSimpleMode) {
@@ -422,7 +864,7 @@ export function InputPage({
               </div>
 
               {/* Warning if Flow is disconnected */}
-              {flowHealth.checking === false &&
+              {isCustomMix && currentAiPercent > 0 && flowHealth.checking === false &&
               (flowHealth.reachable === false || flowHealth.extensionConnected === false) ? (
                 <div
                   style={{
@@ -457,6 +899,19 @@ export function InputPage({
             </div>
           )}
         </div>
+
+        {/* Visual Source / Mix Section */}
+        <VisualSourceSection
+          isCustomMix={isCustomMix}
+          currentAiPercent={currentAiPercent}
+          currentStockPercent={currentStockPercent}
+          flowHealth={flowHealth}
+          isRunning={isRunning}
+          onSelectMode={handleSelectVisualSourceMode}
+          onSetAiRatio={handleSetAiRatio}
+          onSetStockRatio={handleSetStockRatio}
+          isAdvanced={false}
+        />
 
         {/* Required Inputs Section */}
         <div className="setup-section">
@@ -895,6 +1350,19 @@ export function InputPage({
           </div>
         </div>
       </div>
+
+      {/* Visual Source / Mix Section */}
+      <VisualSourceSection
+        isCustomMix={isCustomMix}
+        currentAiPercent={currentAiPercent}
+        currentStockPercent={currentStockPercent}
+        flowHealth={flowHealth}
+        isRunning={isRunning}
+        onSelectMode={handleSelectVisualSourceMode}
+        onSetAiRatio={handleSetAiRatio}
+        onSetStockRatio={handleSetStockRatio}
+        isAdvanced={true}
+      />
 
       {/* Required Source Files */}
       <div className="panel">

@@ -438,24 +438,40 @@ export function determineInvalidatedStages(
     invalidated.add('postflight')
   }
 
-  // Content type (default vs health) thay đổi
+  // Content profile (default vs health) thay đổi
   const oldContentType = oldState.options.contentType ?? 'default'
   const newContentType = newOptions.contentType ?? 'default'
   if (oldContentType !== newContentType) {
     invalidated.add('stock-search')
+    if (oldContentType === 'health' || newContentType === 'health') {
+      invalidated.add('audio-search')
+    }
     invalidated.add('preflight')
     invalidated.add('rendering')
     invalidated.add('postflight')
   }
 
-  // Health visual config thay đổi
-  if (
-    oldContentType === 'health' &&
-    newContentType === 'health' &&
-    JSON.stringify(oldState.options.healthVisualConfig) !==
-      JSON.stringify(newOptions.healthVisualConfig)
-  ) {
+  // Visual source mode thay đổi
+  const oldVisualMode = oldState.options.visualSourceMode ?? (oldContentType === 'health' ? 'custom-mix' : 'legacy')
+  const newVisualMode = newOptions.visualSourceMode ?? (newContentType === 'health' ? 'custom-mix' : 'legacy')
+  if (oldVisualMode !== newVisualMode) {
     invalidated.add('stock-search')
+    if (oldContentType === 'health' || newContentType === 'health') {
+      invalidated.add('audio-search')
+    }
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
+  // Visual mix config hoặc legacy health visual config thay đổi
+  const oldVisualConfigStr = JSON.stringify(oldState.options.visualMixConfig ?? oldState.options.healthVisualConfig)
+  const newVisualConfigStr = JSON.stringify(newOptions.visualMixConfig ?? newOptions.healthVisualConfig)
+  if (oldVisualConfigStr !== newVisualConfigStr) {
+    invalidated.add('stock-search')
+    if (oldContentType === 'health' || newContentType === 'health') {
+      invalidated.add('audio-search')
+    }
     invalidated.add('preflight')
     invalidated.add('rendering')
     invalidated.add('postflight')

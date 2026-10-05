@@ -119,6 +119,7 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
           musicFolder: null,
           sfxFolder: null,
           contentType: "default",
+          visualSourceMode: "legacy"
         },
         stats: {
           totalImages: 0,
@@ -157,8 +158,9 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
         const state: ProjectState = JSON.parse(
           fs.readFileSync(statePath, "utf-8"),
         );
-        if (state.inputs && !state.inputs.contentType) {
-          state.inputs.contentType = 'default';
+        if (state.inputs) {
+          state.inputs.contentType ??= 'default';
+          state.inputs.visualSourceMode ??= 'legacy';
         }
         logger.info(`Project opened: ${state.name}`, { projectDir });
         return { success: true, state };

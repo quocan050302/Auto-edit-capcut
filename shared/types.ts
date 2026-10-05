@@ -93,6 +93,187 @@ export interface ProjectSettings {
 
 export type ContentType = 'default' | 'health'
 
+export type VisualSourceMode = 'legacy' | 'custom-mix'
+
+export interface VisualMixConfig {
+  mode: VisualSourceMode
+  aiImageRatio: number
+  stockFootageRatio: number
+  width: number
+  height: number
+  motionEnabled: boolean
+  generationConcurrency: number
+  postProcessConcurrency: number
+}
+
+export const DEFAULT_VISUAL_MIX_CONFIG: VisualMixConfig = {
+  mode: 'legacy',
+  aiImageRatio: 0,
+  stockFootageRatio: 1,
+  width: 1920,
+  height: 1080,
+  motionEnabled: true,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2
+}
+
+export const HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG: VisualMixConfig = {
+  mode: 'custom-mix',
+  aiImageRatio: 0.8,
+  stockFootageRatio: 0.2,
+  width: 1920,
+  height: 1080,
+  motionEnabled: true,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2
+}
+
+export const GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG: VisualMixConfig = {
+  mode: 'custom-mix',
+  aiImageRatio: 0.7,
+  stockFootageRatio: 0.3,
+  width: 1920,
+  height: 1080,
+  motionEnabled: true,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2
+}
+
+export function normalizeVisualMixConfig(
+  config?: Partial<VisualMixConfig>,
+  modeOverride?: VisualSourceMode
+): VisualMixConfig {
+  const mode = modeOverride ?? config?.mode ?? 'legacy'
+
+  if (mode === 'legacy') {
+    return {
+      mode: 'legacy',
+      aiImageRatio: 0,
+      stockFootageRatio: 1,
+      width: config?.width && config.width > 0 ? Math.round(config.width) : 1920,
+      height: config?.height && config.height > 0 ? Math.round(config.height) : 1080,
+      motionEnabled: config?.motionEnabled ?? true,
+      generationConcurrency: 6,
+      postProcessConcurrency: 2
+    }
+  }
+
+  let rawAi = config?.aiImageRatio
+  let rawStock = config?.stockFootageRatio
+
+  if (rawAi === undefined && rawStock === undefined) {
+    rawAi = 0.7
+    rawStock = 0.3
+  } else if (rawAi !== undefined && rawStock === undefined) {
+    const clampedAi = Math.max(0, Math.min(1, rawAi))
+    rawAi = Math.round(clampedAi * 1000) / 1000
+    rawStock = Math.round((1 - rawAi) * 1000) / 1000
+  } else if (rawAi === undefined && rawStock !== undefined) {
+    const clampedStock = Math.max(0, Math.min(1, rawStock))
+    rawStock = Math.round(clampedStock * 1000) / 1000
+    rawAi = Math.round((1 - rawStock) * 1000) / 1000
+  } else {
+    const clampedAi = Math.max(0, Math.min(1, rawAi!))
+    const clampedStock = Math.max(0, Math.min(1, rawStock!))
+    const sum = clampedAi + clampedStock
+
+    if (sum === 0) {
+      rawAi = 0
+      rawStock = 1
+    } else if (Math.abs(sum - 1.0) < 0.0001) {
+      rawAi = Math.round(clampedAi * 1000) / 1000
+      rawStock = Math.round((1 - rawAi) * 1000) / 1000
+    } else {
+      rawAi = Math.round((clampedAi / sum) * 1000) / 1000
+      rawStock = Math.round((1 - rawAi) * 1000) / 1000
+    }
+  }
+
+  const aiRatio = Math.max(0, Math.min(1, Math.round(rawAi * 1000) / 1000))
+  const stockRatio = Math.max(0, Math.min(1, Math.round((1 - aiRatio) * 1000) / 1000))
+
+  const generationConcurrency = Math.max(
+    1,
+    Math.min(6, config?.generationConcurrency ? Math.round(config.generationConcurrency) : 6)
+  )
+  const postProcessConcurrency = Math.max(
+    1,
+    Math.min(2, config?.postProcessConcurrency ? Math.round(config.postProcessConcurrency) : 2)
+  )
+
+  return {
+    mode: 'custom-mix',
+    aiImageRatio: aiRatio,
+    stockFootageRatio: stockRatio,
+    width: config?.width && config.width > 0 ? Math.round(config.width) : 1920,
+    height: config?.height && config.height > 0 ? Math.round(config.height) : 1080,
+    motionEnabled: config?.motionEnabled ?? true,
+    generationConcurrency,
+    postProcessConcurrency
+  }
+}
+
+export function resolveVisualMixConfig(options?: {
+  visualSourceMode?: VisualSourceMode
+  visualMixConfig?: Partial<VisualMixConfig>
+  contentType?: ContentType
+  healthVisualConfig?: HealthVisualConfig
+} | null): VisualMixConfig {
+  if (!options) {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG }
+  }
+
+  const isHealth = (options.contentType ?? 'default') === 'health'
+
+  if (options.visualMixConfig) {
+    const mode = options.visualSourceMode ?? options.visualMixConfig.mode ?? 'custom-mix'
+    return normalizeVisualMixConfig(options.visualMixConfig, mode)
+  }
+
+  if (options.visualSourceMode === 'legacy') {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG }
+  }
+
+  if (options.visualSourceMode === 'custom-mix') {
+    if (isHealth) {
+      if (options.healthVisualConfig) {
+        return normalizeVisualMixConfig(
+          {
+            mode: 'custom-mix',
+            aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+            stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+            width: options.healthVisualConfig.width ?? 1920,
+            height: options.healthVisualConfig.height ?? 1080,
+            motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+          },
+          'custom-mix'
+        )
+      }
+      return { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG }
+    }
+    return { ...GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG }
+  }
+
+  if (isHealth) {
+    if (options.healthVisualConfig) {
+      return normalizeVisualMixConfig(
+        {
+          mode: 'custom-mix',
+          aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+          stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+          width: options.healthVisualConfig.width ?? 1920,
+          height: options.healthVisualConfig.height ?? 1080,
+          motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+        },
+        'custom-mix'
+      )
+    }
+    return { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG }
+  }
+
+  return { ...DEFAULT_VISUAL_MIX_CONFIG }
+}
+
 export interface ProjectInputs {
   scriptPath: string | null
   voiceoverPath: string | null
@@ -101,6 +282,8 @@ export interface ProjectInputs {
   musicFolder: string | null
   sfxFolder: string | null
   contentType?: ContentType
+  visualSourceMode?: VisualSourceMode
+  visualMixConfig?: VisualMixConfig
 }
 
 export type MediaItemType = 'image' | 'video' | 'audio'
@@ -1252,6 +1435,8 @@ export interface AutoPipelineOptions {
   transitionSettings?: RenderTransitionSettings
   autoStartOnReady?: boolean
   contentType?: ContentType
+  visualSourceMode?: VisualSourceMode
+  visualMixConfig?: VisualMixConfig
   healthVisualConfig?: HealthVisualConfig
 }
 
@@ -1757,3 +1942,67 @@ export interface HealthGeneratedAssetsManifest {
   configHash: string
   scenes: Record<string, HealthGeneratedAssetRecord>
 }
+
+// ─── General Visual Mix Types ────────────────────────────────────────────────
+
+export type VisualMixProfile = 'general' | 'health'
+
+export type VisualStrategy = 'ai-still' | 'stock'
+
+export interface VisualMixScenePlan {
+  sceneIndex: number
+  narration: string
+  visualIntent: string
+  strategy: VisualStrategy
+  category?: string
+  reasoning?: string
+  imagePrompt?: string
+  stockQueries?: string[]
+  motionPreset?: string
+  motion?: HealthMotionSpec
+  sfxCue?: HealthSfxCuePlan
+  generationHash?: string
+  generatedAssetPath?: string
+  startTime: number
+  endTime: number
+  duration: number
+}
+
+export interface VisualMixPlan {
+  schemaVersion: number
+  generatedAt: string
+  profile: VisualMixProfile
+  sourceMode: VisualSourceMode
+  requestedAiRatio: number
+  requestedStockRatio: number
+  totalScenes: number
+  targetAiScenes: number
+  targetStockScenes: number
+  scenes: VisualMixScenePlan[]
+}
+
+export interface GeneratedVisualAssetRecord {
+  sceneIndex: number
+  strategy: VisualStrategy
+  profile: VisualMixProfile
+  promptHash: string
+  prompt?: string
+  status: 'pending' | 'generating' | 'exporting' | 'completed' | 'failed' | 'fallback-stock'
+  mediaId?: string
+  flowProjectId?: string
+  outputPath?: string
+  width?: number
+  height?: number
+  motionPreset?: string
+  generatedAt?: string
+  error?: string
+}
+
+export interface GeneratedVisualAssetsManifest {
+  schemaVersion: number
+  updatedAt: string
+  configHash: string
+  profile?: VisualMixProfile
+  scenes: Record<string, GeneratedVisualAssetRecord>
+}
+

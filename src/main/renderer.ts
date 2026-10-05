@@ -599,15 +599,26 @@ export async function renderVideo(params: {
     const totalScenes = scenes.length
     progress(`Processing ${totalScenes} scenes...`, 0.06)
 
-    // Load Health visual plan if available to detect Health AI images and motion presets
-    const healthPlanMap = new Map<number, HealthVisualScenePlan>()
+    // Load visual mix plan or Health visual plan if available to detect AI images and motion presets
+    const visualPlanMap = new Map<number, { strategy?: string; motion?: any; motionPreset?: any }>()
+    const visualMixPlanPath = path.join(projectDir, 'analysis', 'visual-mix-plan.json')
+    if (fs.existsSync(visualMixPlanPath)) {
+      try {
+        const vp = JSON.parse(fs.readFileSync(visualMixPlanPath, 'utf-8'))
+        for (const sc of vp.scenes || []) {
+          if (sc && typeof sc.sceneIndex === 'number') {
+            visualPlanMap.set(sc.sceneIndex, sc)
+          }
+        }
+      } catch { /* ignore */ }
+    }
     const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
     if (fs.existsSync(healthPlanPath)) {
       try {
         const hp = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
         for (const sc of hp.scenes || []) {
-          if (sc && typeof sc.sceneIndex === 'number') {
-            healthPlanMap.set(sc.sceneIndex, sc)
+          if (sc && typeof sc.sceneIndex === 'number' && !visualPlanMap.has(sc.sceneIndex)) {
+            visualPlanMap.set(sc.sceneIndex, sc)
           }
         }
       } catch { /* ignore */ }
@@ -806,20 +817,22 @@ export async function renderVideo(params: {
         const beats = decision?.visualBeats ?? []
         const hasMultipleBeats = beats.length > 1
 
-        // Check if this is a Health AI still scene or Health generated image
-        const healthScene = healthPlanMap.get(scene.sceneIndex)
-        const isHealthAiImage =
+        // Check if this is an AI still scene or generated image (Health or General)
+        const visualScene = visualPlanMap.get(scene.sceneIndex)
+        const isAiStillImage =
           isImage &&
-          (healthScene?.strategy === 'ai-still' ||
+          (visualScene?.strategy === 'ai-still' ||
             mediaPath.includes(path.join('assets', 'generated', 'health')) ||
-            mediaPath.includes('/assets/generated/health/'))
+            mediaPath.includes('/assets/generated/health/') ||
+            mediaPath.includes(path.join('assets', 'generated', 'general')) ||
+            mediaPath.includes('/assets/generated/general/'))
 
-        if (isHealthAiImage) {
-          // Health Motion Director is the PRIMARY camera motion for Health AI still images
-          const motionParam = healthScene?.motion || healthScene?.motionPreset || 'push-in-center'
+        if (isAiStillImage) {
+          // Camera motion spec for AI still images (Health or General)
+          const motionParam = visualScene?.motion || visualScene?.motionPreset || 'push-in-center'
           const motionFilter = buildHealthMotionFilter(motionParam, width, height, scene.duration, fps)
           const presetName = typeof motionParam === 'object' ? motionParam.preset : motionParam
-          logger.info(`[HealthMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`)
+          logger.info(`[VisualMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`)
 
           await ffmpegRun([
             '-y',

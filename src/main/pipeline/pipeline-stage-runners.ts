@@ -402,6 +402,9 @@ export async function runGlobalContextStage(
   }
 }
 
+import { resolveVisualMixConfig } from '../visual-mix/visual-mix-config'
+import { runMixedVisualEngine } from '../visual-mix/mixed-visual-engine'
+
 // ─── Stage 6: Stock Search & Candidate Ranking ───────────────────────────────
 
 export async function runStockSearchStage(
@@ -411,8 +414,17 @@ export async function runStockSearchStage(
 ): Promise<StageRunResult> {
   checkAborted(signal)
 
-  if (options.contentType === 'health') {
-    return runHealthVisualEngine(options, onProgress, signal)
+  const mix = resolveVisualMixConfig(options)
+
+  if (mix.mode === 'custom-mix' && mix.aiImageRatio > 0) {
+    const profile = options.contentType === 'health' ? 'health' : 'general'
+    return runMixedVisualEngine({
+      options,
+      profile,
+      mix,
+      onProgress,
+      signal
+    })
   }
 
   // Đảm bảo Global Context đã tồn tại trước khi chạy stock
