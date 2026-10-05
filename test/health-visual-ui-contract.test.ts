@@ -1,5 +1,5 @@
 /**
- * Automated UI Contract & Integrity Tests for Health Visual Mode
+ * Automated UI Contract & Integrity Tests for Health Visual Mode (Section 67)
  */
 
 import * as assert from 'assert'
@@ -31,38 +31,46 @@ function runTests(): void {
   const inputPagePath = path.join(__dirname, '..', 'src', 'renderer', 'src', 'pages', 'InputPage.tsx')
   const inputPageSource = fs.readFileSync(inputPagePath, 'utf-8')
 
-  // 1. Selector IDs
-  it('1. InputPage contains both selectable card IDs (content-type-default, content-type-health)', () => {
-    assert.ok(
+  // 1. Simple Mode must NOT render visible Content Type selector (Section 4 & 67)
+  it('1. Simple Mode does NOT contain visible Content Type selector (content-type-default / content-type-health)', () => {
+    assert.strictEqual(
       inputPageSource.includes('id="content-type-default"'),
-      'InputPage must contain id="content-type-default"'
+      false,
+      'Simple Mode must NOT contain id="content-type-default"'
     )
-    assert.ok(
+    assert.strictEqual(
       inputPageSource.includes('id="content-type-health"'),
-      'InputPage must contain id="content-type-health"'
+      false,
+      'Simple Mode must NOT contain id="content-type-health"'
     )
   })
 
-  // 2. Titles & descriptions (Section 77)
-  it('2. InputPage renders accurate titles and descriptions for Default and Health modes', () => {
-    assert.ok(inputPageSource.includes('Standard production'))
-    assert.ok(inputPageSource.includes('Uses normal planning + stock footage workflow'))
-    assert.ok(inputPageSource.includes('Medical explainer'))
-    assert.ok(inputPageSource.includes('Medical / health explainer production profile'))
+  // 2. Simple Mode must NOT render Health Visual Mode summary panel (Section 4 & 67)
+  it('2. Simple Mode does NOT contain Health Visual Mode summary panel', () => {
+    assert.strictEqual(
+      inputPageSource.includes('content-type-summary'),
+      false,
+      'Simple Mode must NOT render content-type-summary panel'
+    )
+    assert.strictEqual(
+      inputPageSource.includes('Health Visual Mode</span>'),
+      false,
+      'Simple Mode must NOT render Health Visual Mode title badge'
+    )
   })
 
-  // 3. Compact Health summary bullets
-  it('3. Health mode displays complete compact summary', () => {
-    assert.ok(inputPageSource.includes('Medical / health explainer visual intelligence'))
-    assert.ok(inputPageSource.includes('Anatomy, physiology and clinical accuracy'))
-    assert.ok(inputPageSource.includes('Automatic motion effects (Health Motion Director)'))
-    assert.ok(inputPageSource.includes('Heartbeat, scan, and pulse audio effects (Health SFX)'))
+  // 3. Visual Source selection remains prominent (Section 9)
+  it('3. Visual Source selection remains prominent with Default Workflow and Custom Mix', () => {
+    assert.ok(inputPageSource.includes('Visual Source'))
+    assert.ok(inputPageSource.includes('Default Workflow'))
+    assert.ok(inputPageSource.includes('Custom Mix'))
   })
 
-  // 4. FlowKit warning when disconnected
-  it('4. Health mode displays FlowKit connection warning when disconnected', () => {
-    assert.ok(inputPageSource.includes('Google Flow / FlowKit is not ready'))
-    assert.ok(inputPageSource.includes('Open Google Flow in Chrome and ensure the FlowKit extension is connected.'))
+  // 4. Advanced Mode provides optional Content Profile override (Section 7)
+  it('4. Advanced Mode provides optional Content Profile override (Auto Detect, General, Health)', () => {
+    assert.ok(inputPageSource.includes('id="content-profile-auto-adv"'))
+    assert.ok(inputPageSource.includes('id="content-profile-general-adv"'))
+    assert.ok(inputPageSource.includes('id="content-profile-health-adv"'))
   })
 
   // 5. Default health config constants

@@ -93,6 +93,36 @@ export interface ProjectSettings {
 
 export type ContentType = 'default' | 'health'
 
+export type ContentProfileMode = 'auto' | 'general' | 'health'
+
+export type ResolvedContentProfile = 'general' | 'health'
+
+export interface ContentProfileDetection {
+  schemaVersion: number
+  mode: ContentProfileMode
+  resolvedProfile: ResolvedContentProfile
+  confidence: number
+  reasons: string[]
+  detectedSignals: string[]
+  generatedAt: string
+}
+
+export function resolveContentProfileMode(options?: {
+  contentProfileMode?: ContentProfileMode
+  contentType?: ContentType
+} | null): ContentProfileMode {
+  if (options?.contentProfileMode) {
+    return options.contentProfileMode
+  }
+  if (options?.contentType === 'health') {
+    return 'health'
+  }
+  if (options?.contentType === 'default') {
+    return 'general'
+  }
+  return 'auto'
+}
+
 export type VisualSourceMode = 'legacy' | 'custom-mix'
 
 export type AiImageOutputResolution = '1080p' | '2k' | '4k'
@@ -345,6 +375,7 @@ export interface ProjectInputs {
   musicFolder: string | null
   sfxFolder: string | null
   contentType?: ContentType
+  contentProfileMode?: ContentProfileMode
   visualSourceMode?: VisualSourceMode
   visualMixConfig?: VisualMixConfig
 }
@@ -1498,6 +1529,7 @@ export interface AutoPipelineOptions {
   transitionSettings?: RenderTransitionSettings
   autoStartOnReady?: boolean
   contentType?: ContentType
+  contentProfileMode?: ContentProfileMode
   visualSourceMode?: VisualSourceMode
   visualMixConfig?: VisualMixConfig
   healthVisualConfig?: HealthVisualConfig
@@ -2035,6 +2067,7 @@ export interface VisualMixPlan {
   schemaVersion: number
   generatedAt: string
   profile: VisualMixProfile
+  resolvedProfile?: ResolvedContentProfile
   sourceMode: VisualSourceMode
   planHash?: string
   requestedAiRatio: number

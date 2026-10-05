@@ -404,6 +404,11 @@ export async function runGlobalContextStage(
 
 import { resolveVisualMixConfig } from '../visual-mix/visual-mix-config'
 import { runMixedVisualEngine } from '../visual-mix/mixed-visual-engine'
+import {
+  detectOrResolveContentProfile,
+  loadContentProfileArtifact
+} from '../visual-mix/content-profile-detector'
+import { resolveContentProfileMode } from '../../../shared/types'
 
 // ─── Stage 6: Stock Search & Candidate Ranking ───────────────────────────────
 
@@ -417,7 +422,14 @@ export async function runStockSearchStage(
   const mix = resolveVisualMixConfig(options)
 
   if (mix.mode === 'custom-mix') {
-    const profile = options.contentType === 'health' ? 'health' : 'general'
+    const mode = options.contentProfileMode ?? resolveContentProfileMode(options)
+    onProgress('Resolving content profile...', 0.02)
+    const detection = await detectOrResolveContentProfile({
+      projectDir: options.projectDir,
+      mode
+    })
+    const profile = detection.resolvedProfile
+
     return runMixedVisualEngine({
       options,
       profile,
@@ -560,8 +572,13 @@ export async function runAudioSearchStage(
   checkAborted(signal)
   const audioPlanPath = path.join(options.projectDir, 'analysis', 'audio-plan.json')
 
+  const profileArtifact = loadContentProfileArtifact(options.projectDir)
+  const isHealthAudio = profileArtifact
+    ? profileArtifact.resolvedProfile === 'health'
+    : (options.contentProfileMode === 'health' || options.contentType === 'health')
+
   // Check cache nếu audio plan đã tồn tại và hợp lệ
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, options.contentType)) {
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? 'health' : 'default')) {
     const cachedPlan = loadAudioPlan(options.projectDir)
     if (cachedPlan) {
       const downloadedMusicCount = cachedPlan.sections.filter(
@@ -595,8 +612,8 @@ export async function runAudioSearchStage(
 
   checkAborted(signal)
 
-  // Health Mode: Auto-plan, auto-approve, and download Health cinematic SFX
-  if (options.contentType === 'health') {
+  // Health Mode: Auto-plan, auto-approve, and download Health cinematic SFX only when profile === 'health'
+  if (isHealthAudio) {
     const healthPlanPath = path.join(options.projectDir, 'analysis', 'health-visual-plan.json')
     if (fs.existsSync(healthPlanPath)) {
       try {

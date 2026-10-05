@@ -172,15 +172,29 @@ export async function runMixedVisualEngine(
   const aiSceneIndices = plan.aiSceneIndices || aiScenes.map((s) => s.sceneIndex)
   const stockSceneIndices = plan.stockSceneIndices || initialStockScenes.map((s) => s.sceneIndex)
 
-  // Section 34: Write visual-input-snapshot.json
+  // Section 28 & 31: Runtime assertions against ratio inversion
+  if (aiScenes.length !== plan.targetAiScenes) {
+    throw new Error(
+      `VISUAL_MIX_AI_COUNT_MISMATCH expected=${plan.targetAiScenes} actual=${aiScenes.length}`
+    )
+  }
+  if (stockSceneIndices.length !== plan.targetStockScenes) {
+    throw new Error(
+      `VISUAL_MIX_STOCK_COUNT_MISMATCH expected=${plan.targetStockScenes} actual=${stockSceneIndices.length}`
+    )
+  }
+
+  // Section 38: Write visual-input-snapshot.json
   const inputSnapshot = {
-    contentType: profile,
     visualSourceMode: mix.mode || 'custom-mix',
-    aiImagePercent: Math.round(mix.aiImageRatio * 100),
-    stockFootagePercent: Math.round(mix.stockFootageRatio * 100),
+    requestedAiPercent: Math.round(mix.aiImageRatio * 100),
+    requestedStockPercent: Math.round(mix.stockFootageRatio * 100),
     aiImageRatio: mix.aiImageRatio,
     stockFootageRatio: mix.stockFootageRatio,
     imageOutputResolution: mix.imageOutputResolution || '1080p',
+    profileMode: options.contentProfileMode || 'auto',
+    resolvedProfile: profile,
+    contentType: profile,
     totalScenes
   }
   fs.writeFileSync(
@@ -191,7 +205,7 @@ export async function runMixedVisualEngine(
 
   // Section 72: Logging mix
   logger.info(
-    `[VisualMixInput] profile=${profile} mode=${mix.mode} AI=${inputSnapshot.aiImagePercent}% Stock=${inputSnapshot.stockFootagePercent}% quality=${inputSnapshot.imageOutputResolution}`
+    `[VisualMixInput] profile=${profile} mode=${mix.mode} AI=${inputSnapshot.requestedAiPercent}% Stock=${inputSnapshot.requestedStockPercent}% quality=${inputSnapshot.imageOutputResolution}`
   )
   logger.info(
     `[VisualMixPlan] total=${totalScenes} AI=${aiScenes.length} Stock=${initialStockScenes.length}`
@@ -489,9 +503,14 @@ export async function runMixedVisualEngine(
     }
   }
 
-  // Count final AI stills vs stock
+  // Count final AI stills vs stock and provider distribution (Section 37)
   let finalAiCount = 0
   let finalStockCount = 0
+  let googleFlowCount = 0
+  let pexelsCount = 0
+  let pixabayCount = 0
+  let localCount = 0
+
   const reviewPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
   if (fs.existsSync(reviewPath)) {
     try {
@@ -501,8 +520,16 @@ export async function runMixedVisualEngine(
       for (const a of finalAssigns) {
         if (a.asset?.provider === 'google-flow') {
           finalAiCount++
+          googleFlowCount++
+        } else if (a.asset?.provider === 'pexels') {
+          finalStockCount++
+          pexelsCount++
+        } else if (a.asset?.provider === 'pixabay') {
+          finalStockCount++
+          pixabayCount++
         } else {
           finalStockCount++
+          localCount++
         }
       }
     } catch {
@@ -510,9 +537,14 @@ export async function runMixedVisualEngine(
     }
   }
 
+  // Section 37: Final assignment provider counts log
+  logger.info(
+    `[VisualMixFinal] requested AI=${Math.round(mix.aiImageRatio * 100)} Stock=${Math.round(mix.stockFootageRatio * 100)} planned AI=${aiScenes.length} Stock=${initialStockScenes.length} final AI=${finalAiCount} Stock=${finalStockCount} fallback=${aiFallbackCount} (googleFlow=${googleFlowCount} pexels=${pexelsCount} pixabay=${pixabayCount} local=${localCount})`
+  )
+
   const phase2WallTimeMs = Date.now() - phase2StartTime
 
-  // 10. Write visual-performance-report.json (Section 70)
+  // 10. Write visual-performance-report.json (Section 66 & 70)
   let flowThrottleInfo = { maxConcurrent: 1, minIntervalS: 3, cooldownActive: false }
   try {
     const t = await googleFlowClient.getFlowThrottle()
@@ -526,17 +558,24 @@ export async function runMixedVisualEngine(
   }
 
   const perfReport = {
-    requestedMix: {
-      aiPercent: Math.round(mix.aiImageRatio * 100),
-      stockPercent: Math.round(mix.stockFootageRatio * 100)
+    resolvedProfile: profile,
+    requestedRatio: {
+      ai: Math.round(mix.aiImageRatio * 100),
+      stock: Math.round(mix.stockFootageRatio * 100)
     },
-    plannedMix: {
+    plannedRatio: {
       ai: aiScenes.length,
       stock: initialStockScenes.length
     },
-    actualMix: {
+    finalRatio: {
       ai: finalAiCount,
       stock: finalStockCount
+    },
+    providerCounts: {
+      googleFlow: googleFlowCount,
+      pexels: pexelsCount,
+      pixabay: pixabayCount,
+      local: localCount
     },
     totalScenes,
     aiCacheHits: aiRes.cached,
@@ -576,7 +615,13 @@ export async function runMixedVisualEngine(
       stockScenes: finalStockCount,
       aiFallbackToStock: aiFallbackCount,
       cachedAiScenes: aiRes.cached,
-      completionMessage: completionMsg
+      completionMessage: completionMsg,
+      detectedProfile: isHealth ? 'Health Explainer' : 'General Documentary',
+      resolvedProfile: profile,
+      requestedAiPercent: Math.round(mix.aiImageRatio * 100),
+      requestedStockPercent: Math.round(mix.stockFootageRatio * 100),
+      targetAiScenes: aiScenes.length,
+      targetStockScenes: initialStockScenes.length
     }
   }
 }

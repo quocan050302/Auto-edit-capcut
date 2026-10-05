@@ -7,7 +7,7 @@ import {
   PIPELINE_SCHEMA_VERSION,
   PIPELINE_EXECUTION_STAGES
 } from './pipeline-types'
-import { resolveVisualMixConfig } from '../../../shared/types'
+import { resolveVisualMixConfig, resolveContentProfileMode } from '../../../shared/types'
 import type {
   AutoPipelineState,
   AutoPipelineOptions,
@@ -439,12 +439,20 @@ export function determineInvalidatedStages(
     invalidated.add('postflight')
   }
 
-  // Content profile (default vs health) thay đổi
+  // Content profile mode hoặc legacy contentType thay đổi
+  const oldProfileMode = resolveContentProfileMode(oldState.options)
+  const newProfileMode = resolveContentProfileMode(newOptions)
   const oldContentType = oldState.options.contentType ?? 'default'
   const newContentType = newOptions.contentType ?? 'default'
-  if (oldContentType !== newContentType) {
+
+  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
     invalidated.add('stock-search')
-    if (oldContentType === 'health' || newContentType === 'health') {
+    if (
+      oldProfileMode === 'health' ||
+      newProfileMode === 'health' ||
+      oldContentType === 'health' ||
+      newContentType === 'health'
+    ) {
       invalidated.add('audio-search')
     }
     invalidated.add('preflight')
@@ -453,11 +461,11 @@ export function determineInvalidatedStages(
   }
 
   // Visual source mode thay đổi
-  const oldVisualMode = oldState.options.visualSourceMode ?? (oldContentType === 'health' ? 'custom-mix' : 'legacy')
-  const newVisualMode = newOptions.visualSourceMode ?? (newContentType === 'health' ? 'custom-mix' : 'legacy')
+  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === 'health' ? 'custom-mix' : 'legacy')
+  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === 'health' ? 'custom-mix' : 'legacy')
   if (oldVisualMode !== newVisualMode) {
     invalidated.add('stock-search')
-    if (oldContentType === 'health' || newContentType === 'health') {
+    if (oldProfileMode === 'health' || newProfileMode === 'health' || oldContentType === 'health' || newContentType === 'health') {
       invalidated.add('audio-search')
     }
     invalidated.add('preflight')

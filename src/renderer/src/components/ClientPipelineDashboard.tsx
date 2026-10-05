@@ -513,6 +513,23 @@ export function ClientPipelineDashboard({
             <span className="production-meta-item">
               <strong>Phase:</strong> {currentPhaseTitle}
             </span>
+            {pipelineState?.stages?.['stock-search']?.stats?.detectedProfile ? (
+              <span className="production-meta-item">
+                <strong>Profile:</strong>{' '}
+                <span
+                  style={{
+                    padding: '2px 8px',
+                    borderRadius: '999px',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    background: 'rgba(99, 102, 241, 0.15)',
+                    color: '#818cf8'
+                  }}
+                >
+                  {String(pipelineState.stages['stock-search'].stats.detectedProfile)}
+                </span>
+              </span>
+            ) : null}
             <span className="production-meta-item">
               <strong>Elapsed:</strong> {fmtStopwatch(elapsedSecs)}
             </span>

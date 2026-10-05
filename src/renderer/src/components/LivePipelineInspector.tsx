@@ -333,6 +333,54 @@ export function LivePipelineInspector({
             </div>
           )}
 
+          {/* Visual Acquisition & Mixed Mode Inspection (Section 56 & 64) */}
+          {effectiveStage === 'stock-search' && (
+            <div className="live-inspector-card" style={{ borderColor: 'rgba(99,102,241,0.3)' }}>
+              <div className="live-inspector-card-header">
+                <span className="live-inspector-card-label" style={{ color: 'var(--color-brand)' }}>
+                  🎬 Visual Acquisition Strategy
+                </span>
+                <span className="inspector-badge inspector-badge--completed">
+                  {(stageData?.stats?.detectedProfile as string) ||
+                    (pipelineState?.options?.contentType === 'health' ? 'Health Explainer' : 'General Documentary')}
+                </span>
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px', fontSize: '11px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
+                  <span>Requested Visual Mix:</span>
+                  <strong style={{ color: 'var(--text-primary)' }}>
+                    AI Images: {typeof stageData?.stats?.requestedAiPercent === 'number' ? stageData.stats.requestedAiPercent : Math.round((pipelineState?.options?.visualMixConfig?.aiImageRatio ?? 0.8) * 100)}% · Real Footage: {typeof stageData?.stats?.requestedStockPercent === 'number' ? stageData.stats.requestedStockPercent : Math.round((pipelineState?.options?.visualMixConfig?.stockFootageRatio ?? 0.2) * 100)}%
+                  </strong>
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '4px' }}>
+                  <div style={{ background: 'var(--bg-void)', padding: '6px 8px', borderRadius: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '9px', display: 'block' }}>AI IMAGES</span>
+                    <strong>
+                      {stageData?.stats?.aiGeneratedScenes !== undefined
+                        ? `${stageData.stats.aiGeneratedScenes} / ${stageData.stats.targetAiScenes ?? stageData.stats.aiGeneratedScenes}`
+                        : 'Generating'} ready
+                    </strong>
+                  </div>
+                  <div style={{ background: 'var(--bg-void)', padding: '6px 8px', borderRadius: '4px' }}>
+                    <span style={{ color: 'var(--text-muted)', fontSize: '9px', display: 'block' }}>REAL FOOTAGE</span>
+                    <strong>
+                      {stageData?.stats?.stockScenes !== undefined
+                        ? `${stageData.stats.stockScenes} / ${stageData.stats.targetStockScenes ?? stageData.stats.stockScenes}`
+                        : 'Searching'} ready
+                    </strong>
+                  </div>
+                </div>
+
+                {typeof stageData?.stats?.aiFallbackToStock === 'number' && (stageData.stats.aiFallbackToStock as number) > 0 && (
+                  <div style={{ fontSize: '10px', color: '#f59e0b' }}>
+                    ⚡ {stageData.stats.aiFallbackToStock} AI scene{(stageData.stats.aiFallbackToStock as number) > 1 ? 's' : ''} fell back to stock footage
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Visual Truth Reranker Inspection (when inspecting stock-search) */}
           {effectiveStage === 'stock-search' && (
             <div className="live-inspector-card" style={{ borderColor: 'rgba(34,197,94,0.3)' }}>

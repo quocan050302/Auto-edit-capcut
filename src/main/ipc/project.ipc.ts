@@ -8,6 +8,7 @@ import {
   ProjectSettings,
   ProjectInputs,
   ProjectStatus,
+  resolveContentProfileMode,
 } from "../../../shared/types";
 import { logger } from "../logger";
 
@@ -119,6 +120,7 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
           musicFolder: null,
           sfxFolder: null,
           contentType: "default",
+          contentProfileMode: "auto",
           visualSourceMode: "legacy"
         },
         stats: {
@@ -160,6 +162,7 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
         );
         if (state.inputs) {
           state.inputs.contentType ??= 'default';
+          state.inputs.contentProfileMode ??= resolveContentProfileMode(state.inputs);
           state.inputs.visualSourceMode ??= 'legacy';
         }
         logger.info(`Project opened: ${state.name}`, { projectDir });

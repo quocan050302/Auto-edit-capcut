@@ -4,12 +4,14 @@ import type {
   ProjectInputs,
   PipelineStage,
   ContentType,
+  ContentProfileMode,
   VisualSourceMode,
   VisualMixConfig,
   AiImageOutputResolution
 } from '../../../../shared/types'
 import {
   resolveVisualMixConfig,
+  resolveContentProfileMode,
   HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG,
   GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG
 } from '../../../../shared/types'
@@ -567,13 +569,20 @@ export function InputPage({
 
   async function handleSelectContentType(type: ContentType): Promise<void> {
     if (isRunning) return
-    const updates: Partial<ProjectInputs> = { contentType: type }
-    // When selecting Health for the first time without custom preference:
-    if (type === 'health' && !inputs.visualSourceMode && !inputs.visualMixConfig) {
-      updates.visualSourceMode = 'custom-mix'
-      updates.visualMixConfig = { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG }
+    const updates: Partial<ProjectInputs> = {
+      contentType: type,
+      contentProfileMode: type === 'health' ? 'health' : 'general'
     }
     await onUpdateInputs(updates)
+  }
+
+  async function handleSelectContentProfileMode(mode: ContentProfileMode): Promise<void> {
+    if (isRunning) return
+    const legacyType: ContentType = mode === 'health' ? 'health' : 'default'
+    await onUpdateInputs({
+      contentProfileMode: mode,
+      contentType: legacyType
+    })
   }
 
   async function handleSelectVisualSourceMode(mode: VisualSourceMode): Promise<void> {
@@ -686,7 +695,8 @@ export function InputPage({
       return
     }
 
-    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${inputs.contentType ?? 'default'}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`
+    const currentProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`
     if (lastAutoStartedFingerprintRef.current === currentFp) {
       return
     }
@@ -714,6 +724,7 @@ export function InputPage({
     inputs.scriptPath,
     inputs.voiceoverPath,
     inputs.contentType,
+    inputs.contentProfileMode,
     effectiveMix.mode,
     effectiveMix.aiImageRatio,
     isRunning
@@ -728,9 +739,10 @@ export function InputPage({
         visualMixConfig: inputs.visualMixConfig,
         contentType: inputs.contentType
       })
+      const resolvedProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
 
       console.log(
-        `[Setup] Starting pipeline:\nprofile=${inputs.contentType ?? 'default'}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}`
+        `[Setup] Starting pipeline:\nprofileMode=${resolvedProfileMode}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}`
       )
 
       const ok = await startPipeline({
@@ -740,10 +752,11 @@ export function InputPage({
         whisperModel,
         requireBackgroundMusic: requireBgMusic,
         autoStartOnReady,
-        contentType: inputs.contentType ?? 'default',
+        contentType: inputs.contentType ?? (resolvedProfileMode === 'health' ? 'health' : 'default'),
+        contentProfileMode: resolvedProfileMode,
         visualSourceMode: resolvedMix.mode,
         visualMixConfig: resolvedMix,
-        healthVisualConfig: inputs.contentType === 'health' && resolvedMix.mode === 'custom-mix' ? {
+        healthVisualConfig: (inputs.contentType === 'health' || resolvedProfileMode === 'health') && resolvedMix.mode === 'custom-mix' ? {
           aiRatio: resolvedMix.aiImageRatio,
           stockRatio: resolvedMix.stockFootageRatio,
           width: resolvedMix.width,
@@ -844,119 +857,6 @@ export function InputPage({
             </div>
           </div>
         )}
-
-        {/* Content Type Selector Section */}
-        <div className="setup-section" style={{ marginBottom: '16px' }}>
-          <div className="setup-section__header">
-            <div>
-              <h2 className="setup-section__title">Content Type</h2>
-              <p className="setup-section__desc">
-                Choose the visual production profile for your video
-              </p>
-            </div>
-            <span className="panel-badge badge-primary">
-              {(inputs.contentType ?? 'default') === 'health' ? 'Health Mode' : 'Default Mode'}
-            </span>
-          </div>
-
-          <div className="content-type-grid">
-            {/* Default Card */}
-            <button
-              type="button"
-              id="content-type-default"
-              className={`content-type-card ${(inputs.contentType ?? 'default') === 'default' ? 'is-selected' : ''}`}
-              onClick={() => handleSelectContentType('default')}
-              disabled={isRunning}
-            >
-              <div className="content-type-card__icon">🎬</div>
-              <div className="content-type-card__content">
-                <div className="content-type-card__title">
-                  Default
-                  {(inputs.contentType ?? 'default') === 'default' && (
-                    <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Active</span>
-                  )}
-                </div>
-                <div className="content-type-card__subtitle">Standard production</div>
-                <div className="content-type-card__desc">
-                  Uses normal planning + stock footage workflow
-                </div>
-              </div>
-            </button>
-
-            {/* Health Card */}
-            <button
-              type="button"
-              id="content-type-health"
-              className={`content-type-card ${(inputs.contentType ?? 'default') === 'health' ? 'is-selected' : ''}`}
-              onClick={() => handleSelectContentType('health')}
-              disabled={isRunning}
-            >
-              <div className="content-type-card__icon">🩺</div>
-              <div className="content-type-card__content">
-                <div className="content-type-card__title">
-                  Health
-                  {(inputs.contentType ?? 'default') === 'health' && (
-                    <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Active</span>
-                  )}
-                </div>
-                <div className="content-type-card__subtitle">Medical explainer</div>
-                <div className="content-type-card__desc">
-                  Medical / health explainer production profile
-                </div>
-              </div>
-            </button>
-          </div>
-
-          {/* Compact summary for Health */}
-          {(inputs.contentType ?? 'default') === 'health' && (
-            <div className="content-type-summary">
-              <div className="content-type-summary__header">
-                <span>🩺</span>
-                <span>Health Visual Mode</span>
-              </div>
-              <div className="content-type-summary__list">
-                <div className="content-type-summary__item">✓ Medical / health explainer visual intelligence</div>
-                <div className="content-type-summary__item">✓ Anatomy, physiology and clinical accuracy</div>
-                <div className="content-type-summary__item">✓ Automatic motion effects (Health Motion Director)</div>
-                <div className="content-type-summary__item">✓ Heartbeat, scan, and pulse audio effects (Health SFX)</div>
-              </div>
-
-              {/* Warning if Flow is disconnected */}
-              {isCustomMix && currentAiPercent > 0 && flowHealth.checking === false &&
-              (flowHealth.reachable === false || flowHealth.extensionConnected === false) ? (
-                <div
-                  style={{
-                    marginTop: '10px',
-                    padding: '8px 12px',
-                    background: 'rgba(239, 68, 68, 0.1)',
-                    border: '1px solid rgba(239, 68, 68, 0.3)',
-                    borderRadius: 'var(--radius-sm)',
-                    fontSize: '11px',
-                    color: '#f87171',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'space-between',
-                    gap: '8px'
-                  }}
-                >
-                  <div>
-                    ⚠️ <strong>Google Flow / FlowKit is not ready:</strong> Health mode requires Google Flow / FlowKit connection. Open Google Flow in Chrome and ensure the FlowKit extension is connected.
-                  </div>
-                  {window.api?.thumbnail?.openFlowTab && (
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-sm"
-                      style={{ flexShrink: 0, fontSize: '11px', padding: '3px 8px' }}
-                      onClick={() => window.api.thumbnail.openFlowTab()}
-                    >
-                      Open Google Flow
-                    </button>
-                  )}
-                </div>
-              ) : null}
-            </div>
-          )}
-        </div>
 
         {/* Visual Source / Mix Section */}
         <VisualSourceSection
@@ -1359,7 +1259,7 @@ export function InputPage({
         </div>
       )}
 
-      {/* Content Type Selector (Advanced Mode) */}
+      {/* Content Profile Selector (Advanced Mode Override - Section 7) */}
       <div className="panel">
         <div className="panel-header">
           <div className="panel-title">
@@ -1368,42 +1268,62 @@ export function InputPage({
                 <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
               </svg>
             </div>
-            Production Profile
+            Content Profile
           </div>
           <span className="panel-badge badge-primary">
-            {(inputs.contentType ?? 'default') === 'health' ? 'Health Explainer' : 'Default Standard'}
+            {(inputs.contentProfileMode ?? 'auto') === 'auto'
+              ? 'Auto Detect'
+              : inputs.contentProfileMode === 'health'
+              ? 'Health (Override)'
+              : 'General (Override)'}
           </span>
         </div>
         <div className="panel-body">
-          <div className="content-type-grid">
+          <div className="content-type-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
             <button
               type="button"
-              id="content-type-default-adv"
-              className={`content-type-card ${(inputs.contentType ?? 'default') === 'default' ? 'is-selected' : ''}`}
-              onClick={() => handleSelectContentType('default')}
+              id="content-profile-auto-adv"
+              className={`content-type-card ${(inputs.contentProfileMode ?? 'auto') === 'auto' ? 'is-selected' : ''}`}
+              onClick={() => handleSelectContentProfileMode('auto')}
               disabled={isRunning}
             >
-              <div className="content-type-card__icon">🎬</div>
+              <div className="content-type-card__icon">🤖</div>
               <div className="content-type-card__content">
-                <div className="content-type-card__title">Default Production</div>
+                <div className="content-type-card__title">Auto Detect (Default)</div>
                 <div className="content-type-card__desc">
-                  Standard planning + stock footage workflow (Pexels / Pixabay)
+                  Automatically detects medical vs general documentary from script
                 </div>
               </div>
             </button>
 
             <button
               type="button"
-              id="content-type-health-adv"
-              className={`content-type-card ${(inputs.contentType ?? 'default') === 'health' ? 'is-selected' : ''}`}
-              onClick={() => handleSelectContentType('health')}
+              id="content-profile-general-adv"
+              className={`content-type-card ${inputs.contentProfileMode === 'general' ? 'is-selected' : ''}`}
+              onClick={() => handleSelectContentProfileMode('general')}
+              disabled={isRunning}
+            >
+              <div className="content-type-card__icon">🎬</div>
+              <div className="content-type-card__content">
+                <div className="content-type-card__title">General Documentary</div>
+                <div className="content-type-card__desc">
+                  General documentary still prompts (no medical anatomy/SFX)
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              id="content-profile-health-adv"
+              className={`content-type-card ${inputs.contentProfileMode === 'health' ? 'is-selected' : ''}`}
+              onClick={() => handleSelectContentProfileMode('health')}
               disabled={isRunning}
             >
               <div className="content-type-card__icon">🩺</div>
               <div className="content-type-card__content">
-                <div className="content-type-card__title">Health Visual Mode</div>
+                <div className="content-type-card__title">Health Explainer</div>
                 <div className="content-type-card__desc">
-                  Medical / health explainer production profile
+                  Enforces anatomical realism, scientific prompts & Health SFX
                 </div>
               </div>
             </button>
