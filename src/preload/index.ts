@@ -36,7 +36,9 @@ import type {
   ThumbnailJobState,
   ThumbnailCandidate,
   ThumbnailPlan,
-  ThumbnailProgressPayload
+  ThumbnailProgressPayload,
+  RenderRecoveryInfo,
+  RenderPreferencesDTO
 } from '../../shared/types'
 import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
@@ -174,6 +176,30 @@ const api = {
 
     getQaReport: (params: { projectDir: string }): Promise<RenderQaReport | null> =>
       ipcRenderer.invoke(IPC_CHANNELS.RENDER_QA_GET, params),
+
+    // ── Resumable Render Engine V2 ──
+    cancel: (params: { projectDir: string }): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_CANCEL, params),
+
+    getRecovery: (params: { projectDir: string }): Promise<RenderRecoveryInfo & {
+      activeProgress?: { stage: string; progress: number } | null
+      activeSource?: string | null
+    }> => ipcRenderer.invoke(IPC_CHANNELS.RENDER_RECOVERY_GET, params),
+
+    resumeCached: (params: { projectDir: string }): Promise<{ success: boolean; result?: unknown; error?: string; cancelled?: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_RESUME_CACHED, params),
+
+    clearCache: (params: { projectDir: string }): Promise<{ success: boolean; removed?: number; cacheSizeBytes?: number; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_CACHE_CLEAR, params),
+
+    getPreferences: (): Promise<RenderPreferencesDTO> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFERENCES_GET),
+
+    setPreferences: (patch: Partial<RenderPreferencesDTO>): Promise<RenderPreferencesDTO> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFERENCES_SET, patch),
+
+    probeEncoder: (params?: { force?: boolean }): Promise<{ ok: boolean; reason?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_ENCODER_PROBE, params),
 
     onQaProgress: (callback: (data: { stage: string; progress: number; message: string }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: { stage: string; progress: number; message: string }): void =>

@@ -7,8 +7,10 @@ import type {
   AudioPlan,
   RenderQaReport,
   StockSceneAssignment,
-  AutoPipelineOptions
+  AutoPipelineOptions,
+  RenderRecoveryInfo
 } from '../../../shared/types'
+import { inspectRenderRecovery } from '../render-cache/render-recovery'
 
 export interface StockCompletionResult {
   totalScenes: number
@@ -267,6 +269,8 @@ export interface ArtifactReconciliationSummary {
   preflightValid: boolean
   renderValid: boolean
   postflightValid: boolean
+  /** Resumable Render Engine V2 cache state (present when no final MP4 exists yet). */
+  renderRecovery?: RenderRecoveryInfo
 }
 
 /**
@@ -305,6 +309,27 @@ export function reconcileProjectArtifacts(
   const qaPath = path.join(projectDir, 'analysis', 'render-qa.json')
   const postflightValid = renderValid && fs.existsSync(qaPath)
 
+  // Render cache recovery: when the final MP4 is not there yet, report what the
+  // interrupted render already completed so it can resume from the last checkpoint.
+  let renderRecovery: RenderRecoveryInfo | undefined
+  if (!renderValid) {
+    try {
+      renderRecovery = inspectRenderRecovery(projectDir, {
+        fallbackParams: options?.voiceoverPath
+          ? {
+              voiceoverPath: options.voiceoverPath,
+              outputName: options.outputName || 'final_output',
+              resolution: options.resolution ?? { width: 1920, height: 1080 },
+              fps: options.fps ?? 30,
+              transitionSettings: options.transitionSettings
+            }
+          : undefined
+      })
+    } catch {
+      renderRecovery = undefined
+    }
+  }
+
   return {
     transcribingValid,
     planningValid,
@@ -314,6 +339,7 @@ export function reconcileProjectArtifacts(
     audioValid,
     preflightValid,
     renderValid,
-    postflightValid
+    postflightValid,
+    renderRecovery
   }
 }
