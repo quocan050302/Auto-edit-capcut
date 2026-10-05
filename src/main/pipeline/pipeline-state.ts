@@ -7,6 +7,7 @@ import {
   PIPELINE_SCHEMA_VERSION,
   PIPELINE_EXECUTION_STAGES
 } from './pipeline-types'
+import { resolveVisualMixConfig } from '../../../shared/types'
 import type {
   AutoPipelineState,
   AutoPipelineOptions,
@@ -465,9 +466,26 @@ export function determineInvalidatedStages(
   }
 
   // Visual mix config hoặc legacy health visual config thay đổi
+  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: oldState.options.visualSourceMode,
+    visualMixConfig: oldState.options.visualMixConfig,
+    contentType: oldContentType
+  }) : undefined
+  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: newOptions.visualSourceMode,
+    visualMixConfig: newOptions.visualMixConfig,
+    contentType: newContentType
+  }) : undefined
+
   const oldVisualConfigStr = JSON.stringify(oldState.options.visualMixConfig ?? oldState.options.healthVisualConfig)
   const newVisualConfigStr = JSON.stringify(newOptions.visualMixConfig ?? newOptions.healthVisualConfig)
-  if (oldVisualConfigStr !== newVisualConfigStr) {
+  const visualConfigChanged =
+    oldVisualConfigStr !== newVisualConfigStr ||
+    oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio ||
+    oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio ||
+    oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution
+
+  if (visualConfigChanged) {
     invalidated.add('stock-search')
     if (oldContentType === 'health' || newContentType === 'health') {
       invalidated.add('audio-search')

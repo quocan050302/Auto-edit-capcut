@@ -22,6 +22,7 @@ export interface ThumbnailExportRequest {
   mediaId: string
   projectId?: string
   quality: '4k' | '2k'
+  preferredQuality?: '2k' | '4k'
   fallbackToOriginalUrl?: string
   destinationPath: string
 }

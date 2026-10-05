@@ -95,48 +95,76 @@ export type ContentType = 'default' | 'health'
 
 export type VisualSourceMode = 'legacy' | 'custom-mix'
 
+export type AiImageOutputResolution = '1080p' | '2k' | '4k'
+
 export interface VisualMixConfig {
-  mode: VisualSourceMode
+  mode?: VisualSourceMode
   aiImageRatio: number
   stockFootageRatio: number
-  width: number
-  height: number
+  imageOutputResolution: AiImageOutputResolution
   motionEnabled: boolean
-  generationConcurrency: number
-  postProcessConcurrency: number
+  requestedGenerationConcurrency: number
+  exportConcurrency: number
+  normalizeConcurrency: number
+  stockSearchConcurrency: number
+  stockDownloadConcurrency: number
+
+  // Backward-compatible alias fields
+  generationConcurrency?: number
+  postProcessConcurrency?: number
+  width?: number
+  height?: number
 }
 
 export const DEFAULT_VISUAL_MIX_CONFIG: VisualMixConfig = {
   mode: 'legacy',
   aiImageRatio: 0,
   stockFootageRatio: 1,
-  width: 1920,
-  height: 1080,
+  imageOutputResolution: '1080p',
   motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
   generationConcurrency: 6,
-  postProcessConcurrency: 2
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
 }
 
 export const HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG: VisualMixConfig = {
   mode: 'custom-mix',
   aiImageRatio: 0.8,
   stockFootageRatio: 0.2,
-  width: 1920,
-  height: 1080,
+  imageOutputResolution: '1080p',
   motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
   generationConcurrency: 6,
-  postProcessConcurrency: 2
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
 }
 
 export const GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG: VisualMixConfig = {
   mode: 'custom-mix',
-  aiImageRatio: 0.7,
-  stockFootageRatio: 0.3,
-  width: 1920,
-  height: 1080,
+  aiImageRatio: 0.5,
+  stockFootageRatio: 0.5,
+  imageOutputResolution: '1080p',
   motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
   generationConcurrency: 6,
-  postProcessConcurrency: 2
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
 }
 
 export function normalizeVisualMixConfig(
@@ -145,16 +173,57 @@ export function normalizeVisualMixConfig(
 ): VisualMixConfig {
   const mode = modeOverride ?? config?.mode ?? 'legacy'
 
+  const imageOutputResolution: AiImageOutputResolution =
+    config?.imageOutputResolution === '4k'
+      ? '4k'
+      : config?.imageOutputResolution === '2k'
+        ? '2k'
+        : '1080p'
+
+  const resDims =
+    imageOutputResolution === '4k'
+      ? { width: 3840, height: 2160 }
+      : imageOutputResolution === '2k'
+        ? { width: 2560, height: 1440 }
+        : { width: 1920, height: 1080 }
+
+  const requestedGenerationConcurrency = Math.max(
+    1,
+    Math.min(6, config?.requestedGenerationConcurrency ?? config?.generationConcurrency ?? 2)
+  )
+  const exportConcurrency = Math.max(
+    1,
+    Math.min(4, config?.exportConcurrency ?? config?.postProcessConcurrency ?? 2)
+  )
+  const normalizeConcurrency = Math.max(
+    1,
+    Math.min(4, config?.normalizeConcurrency ?? config?.postProcessConcurrency ?? 2)
+  )
+  const stockSearchConcurrency = Math.max(
+    1,
+    Math.min(8, config?.stockSearchConcurrency ?? 4)
+  )
+  const stockDownloadConcurrency = Math.max(
+    1,
+    Math.min(6, config?.stockDownloadConcurrency ?? 3)
+  )
+
   if (mode === 'legacy') {
     return {
       mode: 'legacy',
       aiImageRatio: 0,
       stockFootageRatio: 1,
-      width: config?.width && config.width > 0 ? Math.round(config.width) : 1920,
-      height: config?.height && config.height > 0 ? Math.round(config.height) : 1080,
+      imageOutputResolution,
       motionEnabled: config?.motionEnabled ?? true,
-      generationConcurrency: 6,
-      postProcessConcurrency: 2
+      requestedGenerationConcurrency,
+      exportConcurrency,
+      normalizeConcurrency,
+      stockSearchConcurrency,
+      stockDownloadConcurrency,
+      generationConcurrency: requestedGenerationConcurrency,
+      postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+      width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+      height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
     }
   }
 
@@ -162,8 +231,8 @@ export function normalizeVisualMixConfig(
   let rawStock = config?.stockFootageRatio
 
   if (rawAi === undefined && rawStock === undefined) {
-    rawAi = 0.7
-    rawStock = 0.3
+    rawAi = 0.5
+    rawStock = 0.5
   } else if (rawAi !== undefined && rawStock === undefined) {
     const clampedAi = Math.max(0, Math.min(1, rawAi))
     rawAi = Math.round(clampedAi * 1000) / 1000
@@ -192,24 +261,21 @@ export function normalizeVisualMixConfig(
   const aiRatio = Math.max(0, Math.min(1, Math.round(rawAi * 1000) / 1000))
   const stockRatio = Math.max(0, Math.min(1, Math.round((1 - aiRatio) * 1000) / 1000))
 
-  const generationConcurrency = Math.max(
-    1,
-    Math.min(6, config?.generationConcurrency ? Math.round(config.generationConcurrency) : 6)
-  )
-  const postProcessConcurrency = Math.max(
-    1,
-    Math.min(2, config?.postProcessConcurrency ? Math.round(config.postProcessConcurrency) : 2)
-  )
-
   return {
     mode: 'custom-mix',
     aiImageRatio: aiRatio,
     stockFootageRatio: stockRatio,
-    width: config?.width && config.width > 0 ? Math.round(config.width) : 1920,
-    height: config?.height && config.height > 0 ? Math.round(config.height) : 1080,
+    imageOutputResolution,
     motionEnabled: config?.motionEnabled ?? true,
-    generationConcurrency,
-    postProcessConcurrency
+    requestedGenerationConcurrency,
+    exportConcurrency,
+    normalizeConcurrency,
+    stockSearchConcurrency,
+    stockDownloadConcurrency,
+    generationConcurrency: requestedGenerationConcurrency,
+    postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+    width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+    height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
   }
 }
 
@@ -225,6 +291,7 @@ export function resolveVisualMixConfig(options?: {
 
   const isHealth = (options.contentType ?? 'default') === 'health'
 
+  // If user has explicitly persisted visualMixConfig, it is the authoritative Single Source of Truth
   if (options.visualMixConfig) {
     const mode = options.visualSourceMode ?? options.visualMixConfig.mode ?? 'custom-mix'
     return normalizeVisualMixConfig(options.visualMixConfig, mode)
@@ -242,8 +309,7 @@ export function resolveVisualMixConfig(options?: {
             mode: 'custom-mix',
             aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
             stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
-            width: options.healthVisualConfig.width ?? 1920,
-            height: options.healthVisualConfig.height ?? 1080,
+            imageOutputResolution: '1080p',
             motionEnabled: options.healthVisualConfig.motionEnabled ?? true
           },
           'custom-mix'
@@ -254,21 +320,18 @@ export function resolveVisualMixConfig(options?: {
     return { ...GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG }
   }
 
-  if (isHealth) {
-    if (options.healthVisualConfig) {
-      return normalizeVisualMixConfig(
-        {
-          mode: 'custom-mix',
-          aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
-          stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
-          width: options.healthVisualConfig.width ?? 1920,
-          height: options.healthVisualConfig.height ?? 1080,
-          motionEnabled: options.healthVisualConfig.motionEnabled ?? true
-        },
-        'custom-mix'
-      )
-    }
-    return { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG }
+  // Fallback for legacy health configurations
+  if (isHealth && options.healthVisualConfig) {
+    return normalizeVisualMixConfig(
+      {
+        mode: 'custom-mix',
+        aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+        stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+        imageOutputResolution: '1080p',
+        motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+      },
+      'custom-mix'
+    )
   }
 
   return { ...DEFAULT_VISUAL_MIX_CONFIG }
@@ -1973,11 +2036,22 @@ export interface VisualMixPlan {
   generatedAt: string
   profile: VisualMixProfile
   sourceMode: VisualSourceMode
+  planHash?: string
   requestedAiRatio: number
   requestedStockRatio: number
+  requested?: {
+    aiPercent: number
+    stockPercent: number
+  }
   totalScenes: number
   targetAiScenes: number
   targetStockScenes: number
+  target?: {
+    ai: number
+    stock: number
+  }
+  aiSceneIndices?: number[]
+  stockSceneIndices?: number[]
   scenes: VisualMixScenePlan[]
 }
 

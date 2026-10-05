@@ -7,8 +7,7 @@ import { normalizeImageTo1080p } from '../health/health-image-generator'
 import type {
   VisualMixScenePlan,
   VisualMixConfig,
-  VisualMixProfile,
-  GeneratedVisualAssetRecord
+  VisualMixProfile
 } from '../../../shared/types'
 import { recordVisualAssetQueued } from './visual-mix-cache'
 
@@ -19,6 +18,13 @@ export interface GenerationPoolItem {
   projectDir: string
 }
 
+export interface GenerationItemPerformance {
+  generateMs: number
+  exportMs: number
+  normalizeMs: number
+  totalMs: number
+}
+
 export interface GenerationItemResult {
   sceneIndex: number
   success: boolean
@@ -26,6 +32,7 @@ export interface GenerationItemResult {
   fallbackToStock?: boolean
   cached?: boolean
   reason?: string
+  performance?: GenerationItemPerformance
 }
 
 export interface PoolProgressStats {
@@ -33,7 +40,8 @@ export interface PoolProgressStats {
   cached: number
   queued: number
   generating: number
-  postProcessing: number
+  exporting: number
+  normalizing: number
   completed: number
   fallbackStock: number
 }
@@ -45,76 +53,13 @@ export type PoolProgressCallback = (
 ) => void
 
 /**
- * Reusable sliding concurrency worker pool.
- * Guarantees true sliding-window execution: as soon as one slot completes,
- * the next item starts immediately.
- * Results preserve original input array order.
- */
-export async function mapWithConcurrency<T, R>(
-  items: T[],
-  concurrency: number,
-  worker: (item: T, index: number) => Promise<R>,
-  signal?: AbortSignal
-): Promise<R[]> {
-  if (items.length === 0) return []
-
-  const maxWorkers = Math.max(1, Math.min(concurrency, items.length))
-  const results: R[] = new Array(items.length)
-  let nextIndex = 0
-
-  return new Promise<R[]>((resolve, reject) => {
-    let active = 0
-    let rejected = false
-
-    const launchNext = (): void => {
-      if (rejected) return
-
-      if (signal?.aborted) {
-        rejected = true
-        reject(new Error('Operation cancelled by AbortSignal.'))
-        return
-      }
-
-      if (nextIndex >= items.length) {
-        if (active === 0) {
-          resolve(results)
-        }
-        return
-      }
-
-      const currentIndex = nextIndex++
-      const item = items[currentIndex]
-      active++
-
-      worker(item, currentIndex)
-        .then((res) => {
-          results[currentIndex] = res
-          active--
-          launchNext()
-        })
-        .catch((err) => {
-          rejected = true
-          reject(err)
-        })
-    }
-
-    for (let i = 0; i < maxWorkers; i++) {
-      launchNext()
-    }
-  })
-}
-
-/**
- * Semaphore queue for bounding concurrent tasks (e.g. max 2 post-processing jobs).
+ * Reusable async counting semaphore.
  */
 export class AsyncSemaphore {
   private currentRunning = 0
-  private maxConcurrency: number
   private queue: Array<() => void> = []
 
-  constructor(maxConcurrency: number) {
-    this.maxConcurrency = maxConcurrency
-  }
+  constructor(public maxConcurrency: number) {}
 
   public async acquire(): Promise<() => void> {
     if (this.currentRunning < this.maxConcurrency) {
@@ -154,25 +99,52 @@ export class AsyncSemaphore {
     }
   }
 
+  public async run<T>(fn: () => Promise<T>): Promise<T> {
+    const release = await this.acquire()
+    try {
+      return await fn()
+    } finally {
+      release()
+    }
+  }
+
   public get activeCount(): number {
     return this.currentRunning
   }
 }
 
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal
+): Promise<R[]> {
+  const semaphore = new AsyncSemaphore(concurrency)
+  return Promise.all(
+    items.map((item, idx) =>
+      semaphore.run(async () => {
+        if (signal?.aborted) {
+          throw new Error('Aborted')
+        }
+        return fn(item, idx)
+      })
+    )
+  )
+}
+
+/**
+ * AI Conveyor Worker Pool (Section 44).
+ * Separates Generation, Export, and Normalization into decoupled conveyor stages.
+ * Releases Generation worker slot immediately upon receiving mediaId, allowing the next
+ * image prompt to generate while export and normalization proceed concurrently.
+ */
 export class FlowImagePool {
   private client: GoogleFlowClient
-  private postProcessSemaphore: AsyncSemaphore
 
-  constructor(client?: GoogleFlowClient, postProcessConcurrency = 2) {
+  constructor(client?: GoogleFlowClient) {
     this.client = client || googleFlowClient
-    this.postProcessSemaphore = new AsyncSemaphore(postProcessConcurrency)
   }
 
-  /**
-   * Executes continuous sliding generation for uncached scenes.
-   * Generation max concurrency = 6.
-   * Post-processing (FFmpeg export & normalize) max concurrency = 2.
-   */
   public async processBatch(
     items: GenerationPoolItem[],
     onProgress?: PoolProgressCallback,
@@ -184,7 +156,8 @@ export class FlowImagePool {
     let completedCount = 0
     let fallbackCount = 0
     let generatingCount = 0
-    let postProcessingCount = 0
+    let exportingCount = 0
+    let normalizingCount = 0
 
     const updateProgress = (message: string): void => {
       const finished = completedCount + fallbackCount
@@ -192,21 +165,53 @@ export class FlowImagePool {
       const stats: PoolProgressStats = {
         total,
         cached: 0,
-        queued: Math.max(0, total - finished - generatingCount - postProcessingCount),
+        queued: Math.max(0, total - finished - generatingCount - exportingCount - normalizingCount),
         generating: generatingCount,
-        postProcessing: postProcessingCount,
+        exporting: exportingCount,
+        normalizing: normalizingCount,
         completed: completedCount,
         fallbackStock: fallbackCount
       }
       onProgress?.(message, progress, stats)
     }
 
-    const generationConcurrency = items[0]?.config.generationConcurrency ?? 6
+    // 1. FlowKit Throttling & Effective Concurrency (Section 42 & 43)
+    let flowThrottle: { maxConcurrent?: number; minIntervalS?: number; cooldownActive?: boolean } | null = null
+    if (typeof this.client.getFlowThrottle === 'function') {
+      try {
+        flowThrottle = await this.client.getFlowThrottle()
+      } catch {
+        /* ignore */
+      }
+    }
 
-    const results = await mapWithConcurrency<GenerationPoolItem, GenerationItemResult>(
-      items,
-      generationConcurrency,
-      async (item) => {
+    const requestedGen =
+      items[0]?.config.requestedGenerationConcurrency ??
+      items[0]?.config.generationConcurrency ??
+      2
+    const flowMax = flowThrottle?.maxConcurrent !== undefined ? flowThrottle.maxConcurrent : requestedGen
+    const effectiveGenConcurrency = Math.max(
+      1,
+      Math.min(requestedGen, flowMax)
+    )
+
+    const exportConcurrency = Math.max(1, items[0]?.config.exportConcurrency ?? 2)
+    const normalizeConcurrency = Math.max(1, items[0]?.config.normalizeConcurrency ?? 2)
+
+    logger.info(
+      `[FlowImagePool] Conveyor initialized: effectiveGenConcurrency=${effectiveGenConcurrency} (requested=${requestedGen}, flowKitMax=${flowThrottle?.maxConcurrent ?? 'unthrottled'}), exportConcurrency=${exportConcurrency}, normalizeConcurrency=${normalizeConcurrency}`
+    )
+
+    const genSemaphore = new AsyncSemaphore(effectiveGenConcurrency)
+    const expSemaphore = new AsyncSemaphore(exportConcurrency)
+    const normSemaphore = new AsyncSemaphore(normalizeConcurrency)
+
+    // Rate limiter tracking for minIntervalS
+    let lastGenLaunchTime = 0
+
+    // Process all items concurrently across the 3 conveyor stages
+    const results: GenerationItemResult[] = await Promise.all(
+      items.map(async (item) => {
         if (signal?.aborted) {
           return {
             sceneIndex: item.scene.sceneIndex,
@@ -216,54 +221,74 @@ export class FlowImagePool {
           }
         }
 
+        const tStart = Date.now()
+        let tGenEnd = tStart
+        let tExpEnd = tStart
+        let tNormEnd = tStart
+
+        // ══════════════════════════════════════════════════════════════
+        // STAGE 1: GENERATION (bounded by genSemaphore)
+        // ══════════════════════════════════════════════════════════════
+        const releaseGen = await genSemaphore.acquire()
         generatingCount++
-        updateProgress(
-          `Generating AI visual for Scene ${item.scene.sceneIndex} (${generatingCount} generating)...`
-        )
+        updateProgress(`Generating Scene ${item.scene.sceneIndex}...`)
 
         let genResult: { mediaId: string; projectId: string; fifeUrl?: string } | null = null
         const caller = item.profile === 'health' ? 'health-visuals' : 'general-visuals'
-
-        // 1. Generation phase (concurrency cap = 6) with bounded retry
         let lastError: Error | null = null
-        const maxRetries = 2
+        const maxRetries = 1 // 2 total attempts: initial + 1 retry (Section 46)
 
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
-          if (signal?.aborted) break
-          try {
-            if (attempt > 0) {
-              logger.warn(
-                `[FlowImagePool] Scene ${item.scene.sceneIndex} retry attempt ${attempt}/${maxRetries}...`
-              )
-              await new Promise((r) => setTimeout(r, 2000 * attempt))
-            }
+        try {
+          // FlowKit rate limit gap
+          const now = Date.now()
+          const minGapMs = flowThrottle?.minIntervalS ? flowThrottle.minIntervalS * 1000 : 0
+          const timeSinceLast = now - lastGenLaunchTime
+          if (timeSinceLast < minGapMs) {
+            await new Promise((r) => setTimeout(r, minGapMs - timeSinceLast))
+          }
+          lastGenLaunchTime = Date.now()
 
-            genResult = await this.client.generateImage({
-              prompt: item.scene.imagePrompt || '',
-              projectId: '',
-              imageModel: 'GEM_PIX_2',
-              aspectRatio: '16:9',
-              count: 1, // Strictly 1 per scene prompt
-              optionId: String(item.scene.sceneIndex) as any,
-              caller
-            } as any)
+          for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            if (signal?.aborted) break
+            try {
+              if (attempt > 0) {
+                logger.warn(
+                  `[FlowImagePool] Scene ${item.scene.sceneIndex} retry attempt ${attempt}/${maxRetries}...`
+                )
+                await new Promise((r) => setTimeout(r, 2500 * attempt))
+              }
 
-            break
-          } catch (err: unknown) {
-            lastError = err instanceof Error ? err : new Error(String(err))
-            const msg = lastError.message
-            // Rate limit / cooldown backoff
-            if (msg.includes('FLOW_RATE_LIMITED') || msg.includes('429')) {
-              logger.warn(`[FlowImagePool] Scene ${item.scene.sceneIndex} rate limited, backing off...`)
-              await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)))
-            } else if (msg.includes('FLOW_EXTENSION_DISCONNECTED') || msg.includes('FLOW_RECAPTCHA_FAILED')) {
-              // Terminal error for this job
+              genResult = await this.client.generateImage({
+                prompt: item.scene.imagePrompt || '',
+                projectId: '',
+                imageModel: 'GEM_PIX_2',
+                aspectRatio: '16:9',
+                count: 1,
+                optionId: String(item.scene.sceneIndex) as any,
+                caller
+              } as any)
+
               break
+            } catch (err: unknown) {
+              lastError = err instanceof Error ? err : new Error(String(err))
+              const msg = lastError.message
+              if (msg.includes('FLOW_RATE_LIMITED') || msg.includes('429')) {
+                logger.warn(`[FlowImagePool] Scene ${item.scene.sceneIndex} rate limited, backing off...`)
+                await new Promise((r) => setTimeout(r, 4000 * (attempt + 1)))
+              } else if (
+                msg.includes('FLOW_EXTENSION_DISCONNECTED') ||
+                msg.includes('FLOW_RECAPTCHA_FAILED')
+              ) {
+                break
+              }
             }
           }
+        } finally {
+          tGenEnd = Date.now()
+          generatingCount--
+          // CRITICAL REQUIREMENT (Section 44): Release generation slot as soon as mediaId is obtained!
+          releaseGen()
         }
-
-        generatingCount--
 
         if (!genResult || !genResult.mediaId) {
           fallbackCount++
@@ -289,52 +314,58 @@ export class FlowImagePool {
           }
         }
 
-        // 2. Post-processing phase: export + normalize (concurrency cap = 2 via semaphore)
-        postProcessingCount++
-        updateProgress(
-          `Exporting & normalizing Scene ${item.scene.sceneIndex} (${postProcessingCount} processing)...`
+        // ══════════════════════════════════════════════════════════════
+        // STAGE 2: EXPORT (bounded by expSemaphore, concurrency = 2)
+        // ══════════════════════════════════════════════════════════════
+        const releaseExp = await expSemaphore.acquire()
+        exportingCount++
+        updateProgress(`Exporting Scene ${item.scene.sceneIndex}...`)
+
+        const assetsFolder =
+          item.profile === 'health'
+            ? path.join(item.projectDir, 'assets', 'generated', 'health')
+            : path.join(item.projectDir, 'assets', 'generated', 'general')
+
+        if (!fs.existsSync(assetsFolder)) {
+          fs.mkdirSync(assetsFolder, { recursive: true })
+        }
+
+        const sceneIdStr = `S${String(item.scene.sceneIndex).padStart(4, '0')}`
+        const hashPrefix = (item.scene.generationHash || 'hash').slice(0, 8)
+        const finalFilename = `${sceneIdStr}_${hashPrefix}.png`
+        const finalAssetPath = path.join(assetsFolder, finalFilename)
+
+        const tempExportPath = path.join(
+          assetsFolder,
+          `.tmp_export_${item.scene.sceneIndex}_${Date.now()}_${Math.random().toString(36).slice(2)}.png`
         )
 
-        const releasePostProcess = await this.postProcessSemaphore.acquire()
-        let tempExportPath: string | null = null
+        const targetRes = item.config.imageOutputResolution || '1080p'
+        const exportQuality: '2k' | '4k' = targetRes === '4k' ? '4k' : '2k'
+
+        let exportSuccess = false
+        let effectiveWidth = 1920
+        let effectiveHeight = 1080
 
         try {
           if (signal?.aborted) {
             throw new Error('Pipeline execution was cancelled.')
           }
 
-          const assetsFolder =
-            item.profile === 'health'
-              ? path.join(item.projectDir, 'assets', 'generated', 'health')
-              : path.join(item.projectDir, 'assets', 'generated', 'general')
-
-          if (!fs.existsSync(assetsFolder)) {
-            fs.mkdirSync(assetsFolder, { recursive: true })
-          }
-
-          const sceneIdStr = `S${String(item.scene.sceneIndex).padStart(4, '0')}`
-          const hashPrefix = (item.scene.generationHash || 'hash').slice(0, 8)
-          const finalFilename = `${sceneIdStr}_${hashPrefix}.png`
-          const finalAssetPath = path.join(assetsFolder, finalFilename)
-
-          tempExportPath = path.join(
-            assetsFolder,
-            `.tmp_export_${item.scene.sceneIndex}_${Date.now()}_${Math.random().toString(36).slice(2)}.png`
-          )
-
           const exportResult = await this.client.exportImage({
             mediaId: genResult.mediaId,
             projectId: genResult.projectId,
             destinationPath: tempExportPath,
             fallbackToOriginalUrl: genResult.fifeUrl,
-            quality: '4k'
+            quality: exportQuality,
+            preferredQuality: exportQuality
           })
 
-          // Quality gate check: width >= 1920 && height >= 1080
           const dims = probeImageFileDimensions(tempExportPath)
-          const effectiveWidth = dims?.width || exportResult.width
-          const effectiveHeight = dims?.height || exportResult.height
+          effectiveWidth = dims?.width || exportResult.width
+          effectiveHeight = dims?.height || exportResult.height
 
+          // Section 13: For 1080p, do NOT upscale low-res originals (< 1920x1080)
           if (effectiveWidth < 1920 || effectiveHeight < 1080) {
             logger.warn(
               `[FlowImagePool] Scene ${item.scene.sceneIndex} quality gate failed: ${effectiveWidth}x${effectiveHeight} < 1920x1080. Not upscaling; falling back to stock.`
@@ -343,7 +374,7 @@ export class FlowImagePool {
               try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
             }
             fallbackCount++
-            const reason = `Resolution ${effectiveWidth}x${effectiveHeight} below 1920x1080 quality gate`
+            const reason = `Resolution ${effectiveWidth}x${effectiveHeight} below quality gate`
 
             await recordVisualAssetQueued(item.projectDir, {
               sceneIndex: item.scene.sceneIndex,
@@ -363,53 +394,14 @@ export class FlowImagePool {
             }
           }
 
-          // Normalize to target dimensions (1920x1080 PNG)
-          const targetWidth = item.config.width || 1920
-          const targetHeight = item.config.height || 1080
-          if (effectiveWidth === targetWidth && effectiveHeight === targetHeight) {
-            const destDir = path.dirname(finalAssetPath)
-            if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
-            fs.copyFileSync(tempExportPath, finalAssetPath)
-          } else {
-            await normalizeImageTo1080p(tempExportPath, finalAssetPath, targetWidth, targetHeight)
-          }
-
-          if (fs.existsSync(tempExportPath)) {
-            try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
-          }
-
-          // Persist record atomically into manifest
-          await recordVisualAssetQueued(item.projectDir, {
-            sceneIndex: item.scene.sceneIndex,
-            strategy: 'ai-still',
-            profile: item.profile,
-            promptHash: item.scene.generationHash || 'hash',
-            prompt: item.scene.imagePrompt,
-            status: 'completed',
-            mediaId: genResult.mediaId,
-            flowProjectId: genResult.projectId,
-            outputPath: finalAssetPath,
-            width: targetWidth,
-            height: targetHeight,
-            motionPreset: item.scene.motionPreset,
-            generatedAt: new Date().toISOString()
-          })
-
-          completedCount++
-          updateProgress(`AI visual completed for Scene ${item.scene.sceneIndex}`)
-
-          return {
-            sceneIndex: item.scene.sceneIndex,
-            success: true,
-            assetPath: finalAssetPath
-          }
-        } catch (postErr) {
+          exportSuccess = true
+        } catch (expErr) {
           if (tempExportPath && fs.existsSync(tempExportPath)) {
             try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
           }
           fallbackCount++
-          const reason = postErr instanceof Error ? postErr.message : String(postErr)
-          logger.warn(`[FlowImagePool] Post-processing failed for scene ${item.scene.sceneIndex}: ${reason}`)
+          const reason = expErr instanceof Error ? expErr.message : String(expErr)
+          logger.warn(`[FlowImagePool] Export failed for scene ${item.scene.sceneIndex}: ${reason}`)
 
           await recordVisualAssetQueued(item.projectDir, {
             sceneIndex: item.scene.sceneIndex,
@@ -428,11 +420,124 @@ export class FlowImagePool {
             reason
           }
         } finally {
-          postProcessingCount--
-          releasePostProcess()
+          tExpEnd = Date.now()
+          exportingCount--
+          releaseExp()
         }
-      },
-      signal
+
+        if (!exportSuccess) {
+          return {
+            sceneIndex: item.scene.sceneIndex,
+            success: false,
+            fallbackToStock: true,
+            reason: 'Export stage failed'
+          }
+        }
+
+        // ══════════════════════════════════════════════════════════════
+        // STAGE 3: NORMALIZATION (bounded by normSemaphore, concurrency = 2)
+        // ══════════════════════════════════════════════════════════════
+        const releaseNorm = await normSemaphore.acquire()
+        normalizingCount++
+        updateProgress(`Normalizing Scene ${item.scene.sceneIndex}...`)
+
+        const targetDims =
+          targetRes === '4k'
+            ? { width: 3840, height: 2160 }
+            : targetRes === '2k'
+              ? { width: 2560, height: 1440 }
+              : { width: 1920, height: 1080 }
+
+        try {
+          if (signal?.aborted) {
+            throw new Error('Pipeline execution was cancelled.')
+          }
+
+          if (effectiveWidth === targetDims.width && effectiveHeight === targetDims.height) {
+            const destDir = path.dirname(finalAssetPath)
+            if (!fs.existsSync(destDir)) fs.mkdirSync(destDir, { recursive: true })
+            fs.copyFileSync(tempExportPath, finalAssetPath)
+          } else {
+            // Downscale via FFmpeg to exact target resolution
+            await normalizeImageTo1080p(tempExportPath, finalAssetPath, targetDims.width, targetDims.height)
+          }
+
+          if (fs.existsSync(tempExportPath)) {
+            try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
+          }
+
+          tNormEnd = Date.now()
+
+          const genMs = tGenEnd - tStart
+          const expMs = tExpEnd - tGenEnd
+          const normMs = tNormEnd - tExpEnd
+          const totMs = tNormEnd - tStart
+
+          // Performance log (Section 71)
+          logger.info(
+            `[FlowPerf] Scene ${item.scene.sceneIndex} generate=${genMs}ms export=${expMs}ms normalize=${normMs}ms total=${totMs}ms`
+          )
+
+          // Persist record atomically into manifest
+          await recordVisualAssetQueued(item.projectDir, {
+            sceneIndex: item.scene.sceneIndex,
+            strategy: 'ai-still',
+            profile: item.profile,
+            promptHash: item.scene.generationHash || 'hash',
+            prompt: item.scene.imagePrompt,
+            status: 'completed',
+            mediaId: genResult.mediaId,
+            flowProjectId: genResult.projectId,
+            outputPath: finalAssetPath,
+            width: targetDims.width,
+            height: targetDims.height,
+            motionPreset: item.scene.motionPreset,
+            generatedAt: new Date().toISOString()
+          })
+
+          completedCount++
+          updateProgress(`AI visual completed for Scene ${item.scene.sceneIndex}`)
+
+          return {
+            sceneIndex: item.scene.sceneIndex,
+            success: true,
+            assetPath: finalAssetPath,
+            performance: {
+              generateMs: genMs,
+              exportMs: expMs,
+              normalizeMs: normMs,
+              totalMs: totMs
+            }
+          }
+        } catch (normErr) {
+          if (tempExportPath && fs.existsSync(tempExportPath)) {
+            try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
+          }
+          fallbackCount++
+          const reason = normErr instanceof Error ? normErr.message : String(normErr)
+          logger.warn(`[FlowImagePool] Normalization failed for scene ${item.scene.sceneIndex}: ${reason}`)
+
+          await recordVisualAssetQueued(item.projectDir, {
+            sceneIndex: item.scene.sceneIndex,
+            strategy: 'stock',
+            profile: item.profile,
+            promptHash: item.scene.generationHash || 'hash',
+            status: 'fallback-stock',
+            error: reason,
+            generatedAt: new Date().toISOString()
+          })
+
+          return {
+            sceneIndex: item.scene.sceneIndex,
+            success: false,
+            fallbackToStock: true,
+            reason
+          }
+        } finally {
+          normalizingCount--
+          releaseNorm()
+        }
+      })
     )
 
     return results
@@ -455,7 +560,7 @@ export async function runFlowImagePool(params: {
   failedCount: number
   fallbackStockIndices: number[]
 }> {
-  const pool = new FlowImagePool(params.flowClient, params.config.postProcessConcurrency)
+  const pool = new FlowImagePool(params.flowClient)
   const items: GenerationPoolItem[] = params.scenes.map((scene) => ({
     scene,
     config: params.config,

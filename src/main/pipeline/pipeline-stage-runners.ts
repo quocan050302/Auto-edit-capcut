@@ -416,7 +416,7 @@ export async function runStockSearchStage(
 
   const mix = resolveVisualMixConfig(options)
 
-  if (mix.mode === 'custom-mix' && mix.aiImageRatio > 0) {
+  if (mix.mode === 'custom-mix') {
     const profile = options.contentType === 'health' ? 'health' : 'general'
     return runMixedVisualEngine({
       options,

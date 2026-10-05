@@ -21,6 +21,7 @@ import type { StageRunResult, StageProgressCallback } from '../pipeline/pipeline
 import { VisualMixPlanner } from './visual-mix-planner'
 import { FlowImagePool, flowImagePool, GenerationPoolItem } from './flow-image-pool'
 import { getCachedVisualAsset } from './visual-mix-cache'
+import { VisualAssignmentStore } from './visual-assignment-store'
 
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -43,13 +44,55 @@ export async function runMixedVisualEngine(
   const { options, profile, mix, onProgress, signal } = params
   const pool = params.flowPool || flowImagePool
   const projectDir = options.projectDir
+  const phase2StartTime = Date.now()
 
   checkAborted(signal)
 
   const isHealth = profile === 'health'
   const targetAiRatio = mix.aiImageRatio
+  const targetStockRatio = mix.stockFootageRatio
 
-  // 1. Google Flow readiness check: ONLY if AI ratio > 0 (Section 34)
+  // 1. Snapshot Visual Input (Section 34)
+  const analysisDir = path.join(projectDir, 'analysis')
+  if (!fs.existsSync(analysisDir)) {
+    fs.mkdirSync(analysisDir, { recursive: true })
+  }
+
+  // 2. Validate Config Consistency (Section 37 & 73)
+  const statePath = path.join(projectDir, 'project-state.json')
+  const projectJsonPath = path.join(projectDir, 'project.json')
+  const activeJsonPath = fs.existsSync(statePath)
+    ? statePath
+    : fs.existsSync(projectJsonPath)
+      ? projectJsonPath
+      : null
+
+  if (activeJsonPath) {
+    try {
+      const proj = JSON.parse(fs.readFileSync(activeJsonPath, 'utf-8'))
+      const projInputs = proj?.inputs
+      if (projInputs?.visualSourceMode === 'custom-mix' && projInputs?.visualMixConfig) {
+        const setupAi = Math.round((projInputs.visualMixConfig.aiImageRatio ?? 0) * 100)
+        const setupStock = Math.round((projInputs.visualMixConfig.stockFootageRatio ?? 0) * 100)
+        const pipelineAi = Math.round(mix.aiImageRatio * 100)
+        const pipelineStock = Math.round(mix.stockFootageRatio * 100)
+
+        if (setupAi !== pipelineAi || setupStock !== pipelineStock) {
+          const err = `VISUAL_MIX_CONFIG_MISMATCH: Setup requested AI=${setupAi} Stock=${setupStock}, pipeline received AI=${pipelineAi} Stock=${pipelineStock}.`
+          logger.error(`[MixedVisualEngine] ${err}`)
+          return {
+            success: false,
+            needsAttention: true,
+            error: err
+          }
+        }
+      }
+    } catch {
+      /* non-fatal if project-state is not parseable */
+    }
+  }
+
+  // 3. Google Flow readiness check: ONLY if AI ratio > 0 (Section 20 & 34)
   if (targetAiRatio > 0) {
     onProgress('Checking Google Flow readiness...', 0.02)
     try {
@@ -92,7 +135,7 @@ export async function runMixedVisualEngine(
 
   checkAborted(signal)
 
-  // 2. Load Edit Plan & Global Context
+  // 4. Load Edit Plan & Global Context
   onProgress('Planning visuals...', 0.05)
   const rawScenes = VisualMixPlanner.loadScenesFromEditPlan(projectDir)
   if (rawScenes.length === 0) {
@@ -112,6 +155,7 @@ export async function runMixedVisualEngine(
     }
   }
 
+  // 5. Build authoritative Visual Mix Plan (Sections 15, 16, 17, 35)
   const plan = VisualMixPlanner.buildPlan({
     projectDir,
     rawScenes,
@@ -122,134 +166,102 @@ export async function runMixedVisualEngine(
 
   checkAborted(signal)
 
+  const totalScenes = rawScenes.length
   const aiScenes = plan.scenes.filter((s) => s.strategy === 'ai-still')
   const initialStockScenes = plan.scenes.filter((s) => s.strategy === 'stock')
+  const aiSceneIndices = plan.aiSceneIndices || aiScenes.map((s) => s.sceneIndex)
+  const stockSceneIndices = plan.stockSceneIndices || initialStockScenes.map((s) => s.sceneIndex)
 
-  logger.info(
-    `[MixedVisualEngine] Execution plan: ${aiScenes.length} AI scenes, ${initialStockScenes.length} stock scenes (profile=${profile})`
+  // Section 34: Write visual-input-snapshot.json
+  const inputSnapshot = {
+    contentType: profile,
+    visualSourceMode: mix.mode || 'custom-mix',
+    aiImagePercent: Math.round(mix.aiImageRatio * 100),
+    stockFootagePercent: Math.round(mix.stockFootageRatio * 100),
+    aiImageRatio: mix.aiImageRatio,
+    stockFootageRatio: mix.stockFootageRatio,
+    imageOutputResolution: mix.imageOutputResolution || '1080p',
+    totalScenes
+  }
+  fs.writeFileSync(
+    path.join(analysisDir, 'visual-input-snapshot.json'),
+    JSON.stringify(inputSnapshot, null, 2),
+    'utf-8'
   )
 
-  // Load existing stock assignments
-  const reviewPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
-  let existingAssignments: StockSceneAssignment[] = []
-  if (fs.existsSync(reviewPath)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(reviewPath, 'utf-8'))
-      if (Array.isArray(parsed)) {
-        existingAssignments = parsed
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
-  const assignmentMap = new Map<number, StockSceneAssignment>()
-  for (const a of existingAssignments) {
-    if (a && typeof a.sceneIndex === 'number') {
-      assignmentMap.set(a.sceneIndex, a)
-    }
-  }
-
-  const stockScenesToSearch = new Set<number>(initialStockScenes.map((s) => s.sceneIndex))
-  let reusedAiCount = 0
-  let newlyGeneratedAiCount = 0
-  let aiFallbackCount = 0
-
-  // 3. Separate cached AI items vs uncached AI items (Section 44)
-  const uncachedItems: GenerationPoolItem[] = []
-
-  for (const sc of aiScenes) {
-    const hash = sc.generationHash || 'hash'
-    const cached = getCachedVisualAsset(projectDir, sc.sceneIndex, hash, profile)
-
-    if (cached && cached.outputPath && fs.existsSync(cached.outputPath)) {
-      reusedAiCount++
-      const stat = fs.statSync(cached.outputPath)
-      const asset: StockAsset = {
-        assetId: `flow_${hash.slice(0, 12)}`,
-        provider: 'google-flow',
-        mediaType: 'photo',
-        localPath: cached.outputPath,
-        thumbnailUrl: `file://${cached.outputPath}`,
-        downloadUrl: '',
-        creator: 'Google Flow AI',
-        searchQuery: sc.imagePrompt || '',
-        downloadedAt: cached.generatedAt || new Date().toISOString(),
-        fileSizeBytes: stat.size
-      }
-
-      assignmentMap.set(sc.sceneIndex, {
-        sceneId: `scene_${sc.sceneIndex}`,
-        sceneIndex: sc.sceneIndex,
-        narrationText: sc.narration,
-        startTime: sc.startTime,
-        endTime: sc.endTime,
-        visualIntent: sc.visualIntent,
-        searchQueries: [],
-        usedQuery: isHealth ? 'AI Medical Still (Google Flow)' : 'AI Still (Google Flow)',
-        score: 95,
-        locked: true,
-        manualOverride: false,
-        status: 'assigned',
-        asset
-      })
-    } else {
-      uncachedItems.push({
-        scene: sc,
-        config: mix,
-        profile,
-        projectDir
-      })
-    }
-  }
-
+  // Section 72: Logging mix
   logger.info(
-    `[MixedVisualEngine] AI scenes breakdown: ${reusedAiCount} cached on disk, ${uncachedItems.length} queued for generation`
+    `[VisualMixInput] profile=${profile} mode=${mix.mode} AI=${inputSnapshot.aiImagePercent}% Stock=${inputSnapshot.stockFootagePercent}% quality=${inputSnapshot.imageOutputResolution}`
+  )
+  logger.info(
+    `[VisualMixPlan] total=${totalScenes} AI=${aiScenes.length} Stock=${initialStockScenes.length}`
   )
 
-  // 4. Generate uncached AI scenes with continuous sliding worker pool (concurrency 6)
-  if (uncachedItems.length > 0) {
-    onProgress(
-      `Starting concurrent AI visual generation (${uncachedItems.length} scenes, max 6 concurrent)...`,
-      0.10
-    )
+  // 6. Initialize VisualAssignmentStore (Section 28 & 29)
+  const store = new VisualAssignmentStore(projectDir)
 
-    const poolResults = await pool.processBatch(
-      uncachedItems,
-      (msg, prog, stats) => {
-        checkAborted(signal)
-        const mappedPct = 0.10 + prog * 0.50 // 0.10 -> 0.60
-        onProgress(
-          `AI Visuals: ${stats.completed}/${stats.total} complete (${stats.generating} active, ${stats.postProcessing} normalizing) — ${msg}`,
-          mappedPct
-        )
-      },
-      signal
-    )
+  // Reconcile assignments: remove obsolete entries if ownership flipped
+  for (const s of initialStockScenes) {
+    const existing = store.get(s.sceneIndex)
+    if (existing?.asset?.provider === 'google-flow') {
+      store.delete(s.sceneIndex)
+    }
+  }
+  for (const s of aiScenes) {
+    const existing = store.get(s.sceneIndex)
+    if (existing && existing.asset?.provider !== 'google-flow') {
+      store.delete(s.sceneIndex)
+    }
+  }
+  await store.flushAtomic()
 
-    checkAborted(signal)
+  // 7. Parallel Execution: Run AI and Stock simultaneous pipelines (Section 21 & 47)
+  let aiBranchTimeMs = 0
+  let stockBranchTimeMs = 0
+  let totalFlowCalls = 0
 
-    for (const res of poolResults) {
-      const sc = aiScenes.find((s) => s.sceneIndex === res.sceneIndex)
-      if (!sc) continue
+  // ─── Branch A: AI Visual Acquisition ─────────────────────────────────────
+  const runAiBranch = async (): Promise<{
+    newlyGenerated: number
+    cached: number
+    failedScenes: VisualMixScenePlan[]
+    totalGenMs: number
+    totalExpMs: number
+    totalNormMs: number
+  }> => {
+    const t0 = Date.now()
 
-      if (res.success && res.assetPath && fs.existsSync(res.assetPath)) {
-        newlyGeneratedAiCount++
-        const stat = fs.statSync(res.assetPath)
+    // Section 20: 0/100 MUST MEAN ZERO GOOGLE FLOW CALLS
+    if (aiScenes.length === 0) {
+      aiBranchTimeMs = Date.now() - t0
+      logger.info('[VisualMix] 0% AI requested: Skipping AI generation completely.')
+      return { newlyGenerated: 0, cached: 0, failedScenes: [], totalGenMs: 0, totalExpMs: 0, totalNormMs: 0 }
+    }
+
+    let reusedCount = 0
+    const uncached: GenerationPoolItem[] = []
+
+    for (const sc of aiScenes) {
+      const hash = sc.generationHash || 'hash'
+      const cached = getCachedVisualAsset(projectDir, sc.sceneIndex, hash, profile)
+
+      if (cached && cached.outputPath && fs.existsSync(cached.outputPath)) {
+        reusedCount++
+        const stat = fs.statSync(cached.outputPath)
         const asset: StockAsset = {
-          assetId: `flow_${(sc.generationHash || 'gen').slice(0, 12)}`,
+          assetId: `flow_${hash.slice(0, 12)}`,
           provider: 'google-flow',
           mediaType: 'photo',
-          localPath: res.assetPath,
-          thumbnailUrl: `file://${res.assetPath}`,
+          localPath: cached.outputPath,
+          thumbnailUrl: `file://${cached.outputPath}`,
           downloadUrl: '',
           creator: 'Google Flow AI',
           searchQuery: sc.imagePrompt || '',
-          downloadedAt: new Date().toISOString(),
+          downloadedAt: cached.generatedAt || new Date().toISOString(),
           fileSizeBytes: stat.size
         }
 
-        assignmentMap.set(sc.sceneIndex, {
+        store.set(sc.sceneIndex, {
           sceneId: `scene_${sc.sceneIndex}`,
           sceneIndex: sc.sceneIndex,
           narrationText: sc.narration,
@@ -265,43 +277,124 @@ export async function runMixedVisualEngine(
           asset
         })
       } else {
-        // Individual scene fallback to stock (Section 46)
-        aiFallbackCount++
-        stockScenesToSearch.add(sc.sceneIndex)
-        logger.warn(
-          `[MixedVisualEngine] Scene ${sc.sceneIndex} falling back to stock footage (${res.reason})`
-        )
+        uncached.push({
+          scene: sc,
+          config: mix,
+          profile,
+          projectDir
+        })
       }
     }
-  }
 
-  // 5. Reconciliation for scenes changing AI -> Stock (Section 30, 31)
-  // If a scene is planned as stock, remove any obsolete Google Flow locked assignment
-  for (const stockIdx of stockScenesToSearch) {
-    const existing = assignmentMap.get(stockIdx)
-    if (existing && existing.asset?.provider === 'google-flow') {
-      assignmentMap.delete(stockIdx)
+    await store.flushAtomic()
+
+    // Section 72 Logging
+    logger.info(
+      `[VisualMixExecution] AI queue=${uncached.length} AI cache hits=${reusedCount} Stock initial targets=${initialStockScenes.length}`
+    )
+    logger.info(
+      `[VisualMix] AI ownership: target=${aiScenes.length} queue=${uncached.length} cached=${reusedCount}`
+    )
+
+    totalFlowCalls = uncached.length
+    let newlyGenerated = 0
+    const failedScenes: VisualMixScenePlan[] = []
+    let totalGenMs = 0
+    let totalExpMs = 0
+    let totalNormMs = 0
+
+    if (uncached.length > 0) {
+      const poolResults = await pool.processBatch(
+        uncached,
+        (msg, prog, stats) => {
+          checkAborted(signal)
+          // Progress reporting: accurately show completed / aiScenes.length (Section 55)
+          const completedTotal = reusedCount + stats.completed
+          onProgress(
+            `AI Visuals: [${completedTotal}/${aiScenes.length}] complete (${stats.generating} generating, ${stats.exporting} exporting) — ${msg}`,
+            0.10 + prog * 0.45
+          )
+        },
+        signal
+      )
+
+      for (const res of poolResults) {
+        const sc = aiScenes.find((s) => s.sceneIndex === res.sceneIndex)
+        if (!sc) continue
+
+        if (res.performance) {
+          totalGenMs += res.performance.generateMs
+          totalExpMs += res.performance.exportMs
+          totalNormMs += res.performance.normalizeMs
+        }
+
+        if (res.success && res.assetPath && fs.existsSync(res.assetPath)) {
+          newlyGenerated++
+          const stat = fs.statSync(res.assetPath)
+          const asset: StockAsset = {
+            assetId: `flow_${(sc.generationHash || 'gen').slice(0, 12)}`,
+            provider: 'google-flow',
+            mediaType: 'photo',
+            localPath: res.assetPath,
+            thumbnailUrl: `file://${res.assetPath}`,
+            downloadUrl: '',
+            creator: 'Google Flow AI',
+            searchQuery: sc.imagePrompt || '',
+            downloadedAt: new Date().toISOString(),
+            fileSizeBytes: stat.size
+          }
+
+          store.set(sc.sceneIndex, {
+            sceneId: `scene_${sc.sceneIndex}`,
+            sceneIndex: sc.sceneIndex,
+            narrationText: sc.narration,
+            startTime: sc.startTime,
+            endTime: sc.endTime,
+            visualIntent: sc.visualIntent,
+            searchQueries: [],
+            usedQuery: isHealth ? 'AI Medical Still (Google Flow)' : 'AI Still (Google Flow)',
+            score: 95,
+            locked: true,
+            manualOverride: false,
+            status: 'assigned',
+            asset
+          })
+        } else {
+          failedScenes.push(sc)
+        }
+      }
+
+      await store.flushAtomic()
+    }
+
+    aiBranchTimeMs = Date.now() - t0
+    return {
+      newlyGenerated,
+      cached: reusedCount,
+      failedScenes,
+      totalGenMs,
+      totalExpMs,
+      totalNormMs
     }
   }
 
-  // 6. Save intermediate stock assignments
-  const currentAssignments = Array.from(assignmentMap.values()).sort(
-    (a, b) => a.sceneIndex - b.sceneIndex
-  )
-  const dir = path.dirname(reviewPath)
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-  const tmpReview = `${reviewPath}.tmp.${Date.now()}`
-  fs.writeFileSync(tmpReview, JSON.stringify(currentAssignments, null, 2), 'utf-8')
-  fs.renameSync(tmpReview, reviewPath)
+  // ─── Branch B: Stock Acquisition ─────────────────────────────────────────
+  const runStockBranch = async (
+    targetIndices: number[],
+    isFallback = false
+  ): Promise<{ assigned: number; failed: number }> => {
+    const t0 = Date.now()
 
-  // 7. Run stock search for planned stock scenes + fallbacks (Section 32, 46)
-  const stockSceneIndices = Array.from(stockScenesToSearch).sort((a, b) => a - b)
+    // Section 19: 100/0 MUST MEAN ZERO INITIAL FOOTAGE
+    if (targetIndices.length === 0) {
+      stockBranchTimeMs = Date.now() - t0
+      logger.info('[VisualMix] 0 stock scenes targeted: Skipping stock search completely.')
+      return { assigned: 0, failed: 0 }
+    }
 
-  if (stockSceneIndices.length > 0) {
     logger.info(
-      `[MixedVisualEngine] Running stock search for ${stockSceneIndices.length} scenes: ${stockSceneIndices.join(', ')}`
+      `[MixedVisualEngine] Launching Stock acquisition for ${targetIndices.length} scenes: ${targetIndices.join(', ')} (isFallback=${isFallback})`
     )
-    onProgress(`Finding real footage 1/${stockSceneIndices.length}...`, 0.65)
 
     const appCfg = loadConfig()
     const apiKey = resolveGeminiApiKey()
@@ -310,8 +403,7 @@ export async function runMixedVisualEngine(
 
     const stockProgressBridge: StageProgressCallback = (msg, pct) => {
       checkAborted(signal)
-      const mappedPct = 0.65 + pct * 0.3 // 0.65 -> 0.95
-      onProgress(msg, mappedPct)
+      onProgress(msg, 0.55 + pct * 0.40)
     }
 
     if (apiKey) {
@@ -327,7 +419,7 @@ export async function runMixedVisualEngine(
           apiKey,
           model: options.geminiModel,
           forceReanalysis: false,
-          targetSceneIndices: stockSceneIndices
+          targetSceneIndices: targetIndices
         },
         stockProgressBridge
       )
@@ -338,16 +430,44 @@ export async function runMixedVisualEngine(
           pexelsApiKey: pexelsKey,
           pixabayApiKey: pixabayKey,
           preferredAspectRatio: '16:9',
-          targetSceneIndices: stockSceneIndices
+          targetSceneIndices: targetIndices
         },
         stockProgressBridge
       )
     }
+
+    // Refresh store from disk to incorporate stock engine results
+    store.load()
+    await store.flushAtomic()
+
+    stockBranchTimeMs = Date.now() - t0
+    return { assigned: targetIndices.length, failed: 0 }
+  }
+
+  // Launch AI and Stock branches in parallel (Section 21 & 47)
+  const [aiRes] = await Promise.all([
+    runAiBranch(),
+    runStockBranch(stockSceneIndices, false)
+  ])
+
+  checkAborted(signal)
+
+  // 8. AI Failure Fallback (Section 25)
+  // If any AI scenes failed, run a small fallback stock search ONLY for those scene indices!
+  let aiFallbackCount = 0
+  if (aiRes.failedScenes.length > 0) {
+    const fallbackIndices = aiRes.failedScenes.map((s) => s.sceneIndex)
+    aiFallbackCount = fallbackIndices.length
+    logger.warn(
+      `[MixedVisualEngine] ${aiFallbackCount} AI scenes failed generation. Running fallback stock search on scenes: ${fallbackIndices.join(', ')}`
+    )
+    onProgress(`Running stock fallback for ${aiFallbackCount} failed AI scenes...`, 0.90)
+    await runStockBranch(fallbackIndices, true)
   }
 
   checkAborted(signal)
 
-  // 8. Reconcile final visual completion using checkStockCompletion
+  // 9. Reconcile final visual completion using checkStockCompletion
   const stockSummary = checkStockCompletion(projectDir)
 
   if (stockSummary.missingScenes > 0) {
@@ -363,7 +483,7 @@ export async function runMixedVisualEngine(
         downloadedScenes: stockSummary.downloadedScenes,
         missingScenes: stockSummary.missingScenes,
         missingSceneIndices: stockSummary.missingSceneIndices,
-        aiGeneratedScenes: reusedAiCount + newlyGeneratedAiCount,
+        aiGeneratedScenes: aiRes.cached + aiRes.newlyGenerated,
         aiFallbackToStock: aiFallbackCount
       }
     }
@@ -372,6 +492,7 @@ export async function runMixedVisualEngine(
   // Count final AI stills vs stock
   let finalAiCount = 0
   let finalStockCount = 0
+  const reviewPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
   if (fs.existsSync(reviewPath)) {
     try {
       const finalAssigns: StockSceneAssignment[] = JSON.parse(
@@ -389,6 +510,55 @@ export async function runMixedVisualEngine(
     }
   }
 
+  const phase2WallTimeMs = Date.now() - phase2StartTime
+
+  // 10. Write visual-performance-report.json (Section 70)
+  let flowThrottleInfo = { maxConcurrent: 1, minIntervalS: 3, cooldownActive: false }
+  try {
+    const t = await googleFlowClient.getFlowThrottle()
+    flowThrottleInfo = {
+      maxConcurrent: t.maxConcurrent,
+      minIntervalS: t.minIntervalS,
+      cooldownActive: t.cooldownActive
+    }
+  } catch {
+    /* ignore */
+  }
+
+  const perfReport = {
+    requestedMix: {
+      aiPercent: Math.round(mix.aiImageRatio * 100),
+      stockPercent: Math.round(mix.stockFootageRatio * 100)
+    },
+    plannedMix: {
+      ai: aiScenes.length,
+      stock: initialStockScenes.length
+    },
+    actualMix: {
+      ai: finalAiCount,
+      stock: finalStockCount
+    },
+    totalScenes,
+    aiCacheHits: aiRes.cached,
+    flowCalls: totalFlowCalls,
+    flowSuccessfulCalls: aiRes.newlyGenerated,
+    aiFallbackCount,
+    timings: {
+      phase2WallTimeMs,
+      aiBranchTimeMs,
+      stockBranchTimeMs,
+      totalAiGenerationTimeMs: aiRes.totalGenMs,
+      totalAiExportTimeMs: aiRes.totalExpMs,
+      totalAiNormalizationTimeMs: aiRes.totalNormMs
+    },
+    flowThrottleSettings: flowThrottleInfo
+  }
+  fs.writeFileSync(
+    path.join(analysisDir, 'visual-performance-report.json'),
+    JSON.stringify(perfReport, null, 2),
+    'utf-8'
+  )
+
   const completionMsg = `${isHealth ? 'Health' : 'Mixed'} visuals completed — ${stockSummary.totalScenes}/${stockSummary.totalScenes} scenes ready · ${finalAiCount} AI stills · ${finalStockCount} stock`
   logger.info(`[MixedVisualEngine] ${completionMsg}`)
   onProgress(completionMsg, 1.0)
@@ -405,7 +575,7 @@ export async function runMixedVisualEngine(
       aiGeneratedScenes: finalAiCount,
       stockScenes: finalStockCount,
       aiFallbackToStock: aiFallbackCount,
-      cachedAiScenes: reusedAiCount,
+      cachedAiScenes: aiRes.cached,
       completionMessage: completionMsg
     }
   }

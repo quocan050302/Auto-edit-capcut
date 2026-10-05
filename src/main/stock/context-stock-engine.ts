@@ -324,8 +324,27 @@ export async function runContextAwareStockEngine(
     if (scene.locked || existing?.locked) return false
     if (existing?.manualOverride) return false
     if (existing?.approvalStatus === "approved") return false
+    if (!targetSceneIndices && existing?.asset?.provider === 'google-flow' && existing?.status === 'assigned' && existing?.asset?.localPath && fs.existsSync(existing.asset.localPath)) {
+      return false
+    }
     return true
   })
+
+  if (targetSceneIndices) {
+    const expectedTargetCount = targetSceneIndices.length
+    const actualEligibleTargetCount = scenesToProcess.length
+    const totalProjectScenes = flattenedEntries.length
+
+    logger.info(
+      `[VisualMix] Stock ownership: expected=${expectedTargetCount} actualEligible=${actualEligibleTargetCount} totalProjectScenes=${totalProjectScenes}`
+    )
+
+    if (expectedTargetCount < totalProjectScenes && actualEligibleTargetCount > expectedTargetCount) {
+      throw new Error(
+        `VISUAL_MIX_STOCK_SCOPE_VIOLATION: Expected at most ${expectedTargetCount} scenes but stock engine targeted ${actualEligibleTargetCount} scenes out of ${totalProjectScenes}.`
+      )
+    }
+  }
 
   onProgress(`Starting context-aware stock search for ${scenesToProcess.length} scenes...`, 0.01)
 

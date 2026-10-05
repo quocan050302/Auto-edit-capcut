@@ -242,16 +242,38 @@ export class VisualMixPlanner {
         duration: s.duration
       }))
 
+      const aiSceneIndices = convertedScenes
+        .filter((s) => s.strategy === 'ai-still')
+        .map((s) => s.sceneIndex)
+        .sort((a, b) => a - b)
+      const stockSceneIndices = convertedScenes
+        .filter((s) => s.strategy === 'stock')
+        .map((s) => s.sceneIndex)
+        .sort((a, b) => a - b)
+
+      const planHash = `health_${config.mode || 'custom-mix'}_${aiRatio}_${stockRatio}_${config.imageOutputResolution || '1080p'}_${totalScenes}`
+
       const visualMixPlan: VisualMixPlan = {
         schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
         generatedAt: healthPlan.generatedAt,
         profile: 'health',
-        sourceMode: config.mode,
+        sourceMode: config.mode ?? 'custom-mix',
+        planHash,
         requestedAiRatio: aiRatio,
         requestedStockRatio: stockRatio,
+        requested: {
+          aiPercent: Math.round(aiRatio * 100),
+          stockPercent: Math.round(stockRatio * 100)
+        },
         totalScenes: healthPlan.totalScenes,
         targetAiScenes: healthPlan.targetAiScenes,
         targetStockScenes: healthPlan.targetStockScenes,
+        target: {
+          ai: healthPlan.targetAiScenes,
+          stock: healthPlan.targetStockScenes
+        },
+        aiSceneIndices,
+        stockSceneIndices,
         scenes: convertedScenes
       }
 
@@ -422,16 +444,38 @@ export class VisualMixPlanner {
       }
     })
 
+    const aiSceneIndices = scenePlans
+      .filter((s) => s.strategy === 'ai-still')
+      .map((s) => s.sceneIndex)
+      .sort((a, b) => a - b)
+    const stockSceneIndices = scenePlans
+      .filter((s) => s.strategy === 'stock')
+      .map((s) => s.sceneIndex)
+      .sort((a, b) => a - b)
+
+    const planHash = `general_${config.mode || 'custom-mix'}_${aiRatio}_${stockRatio}_${config.imageOutputResolution || '1080p'}_${totalScenes}`
+
     const finalPlan: VisualMixPlan = {
       schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
       generatedAt: new Date().toISOString(),
       profile: 'general',
-      sourceMode: config.mode,
+      sourceMode: config.mode ?? 'custom-mix',
+      planHash,
       requestedAiRatio: aiRatio,
       requestedStockRatio: stockRatio,
+      requested: {
+        aiPercent: Math.round(aiRatio * 100),
+        stockPercent: Math.round(stockRatio * 100)
+      },
       totalScenes,
       targetAiScenes,
       targetStockScenes,
+      target: {
+        ai: targetAiScenes,
+        stock: targetStockScenes
+      },
+      aiSceneIndices,
+      stockSceneIndices,
       scenes: scenePlans
     }
 

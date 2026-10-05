@@ -5,11 +5,13 @@ import type {
   PipelineStage,
   ContentType,
   VisualSourceMode,
-  VisualMixConfig
+  VisualMixConfig,
+  AiImageOutputResolution
 } from '../../../../shared/types'
 import {
   resolveVisualMixConfig,
-  HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG
+  HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG,
+  GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG
 } from '../../../../shared/types'
 import { usePipeline } from '../hooks/usePipeline'
 import { useUiPreferences } from '../hooks/useUiPreferences'
@@ -117,11 +119,13 @@ interface VisualSourceSectionProps {
   isCustomMix: boolean
   currentAiPercent: number
   currentStockPercent: number
+  imageOutputResolution?: AiImageOutputResolution
   flowHealth: { reachable?: boolean; extensionConnected?: boolean; checking?: boolean }
   isRunning: boolean
   onSelectMode: (mode: VisualSourceMode) => void
   onSetAiRatio: (ai: number) => void
   onSetStockRatio: (stock: number) => void
+  onSelectResolution?: (res: AiImageOutputResolution) => void
   isAdvanced?: boolean
 }
 
@@ -129,11 +133,13 @@ function VisualSourceSection({
   isCustomMix,
   currentAiPercent,
   currentStockPercent,
+  imageOutputResolution = '1080p',
   flowHealth,
   isRunning,
   onSelectMode,
   onSetAiRatio,
   onSetStockRatio,
+  onSelectResolution,
   isAdvanced
 }: VisualSourceSectionProps): React.ReactElement {
   const containerClass = isAdvanced ? 'panel' : 'setup-section'
@@ -406,6 +412,40 @@ function VisualSourceSection({
               ))}
             </div>
 
+            {/* AI Image Quality Selector (Section 12) */}
+            <div style={{ marginTop: '2px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                AI Image Quality:
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {(['1080p', '2k', '4k'] as const).map((res) => {
+                  const isSelected = (imageOutputResolution || '1080p') === res
+                  return (
+                    <button
+                      key={res}
+                      type="button"
+                      id={`quality-opt-${res}${idSuffix}`}
+                      className={`btn btn-sm ${isSelected ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: '11px',
+                        fontWeight: isSelected ? 600 : 400
+                      }}
+                      onClick={() => onSelectResolution?.(res)}
+                      disabled={isRunning}
+                    >
+                      {isSelected ? '● ' : ''}{res === '1080p' ? '1080p — Recommended' : res.toUpperCase()}
+                    </button>
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px', fontStyle: 'italic' }}>
+                {(imageOutputResolution || '1080p') === '1080p' && '1080p: Best for faster long-form production'}
+                {(imageOutputResolution || '1080p') === '2k' && '2K: Higher-resolution still output'}
+                {(imageOutputResolution || '1080p') === '4k' && '4K: Highest quality, slower generation/export'}
+              </div>
+            </div>
+
             {/* Google Flow status for Custom Mix */}
             {currentAiPercent > 0 ? (
               flowHealth.checking === false &&
@@ -538,7 +578,7 @@ export function InputPage({
 
   async function handleSelectVisualSourceMode(mode: VisualSourceMode): Promise<void> {
     if (isRunning) return
-    const baseAi = inputs.visualMixConfig?.aiImageRatio ?? (inputs.contentType === 'health' ? 0.8 : 0.7)
+    const baseAi = inputs.visualMixConfig?.aiImageRatio ?? (inputs.contentType === 'health' ? 0.8 : 0.5)
     const aiRatio = mode === 'legacy' ? 0 : baseAi
     const stockRatio = mode === 'legacy' ? 1 : Math.round((1 - aiRatio) * 1000) / 1000
 
@@ -546,10 +586,11 @@ export function InputPage({
       mode,
       aiImageRatio: aiRatio,
       stockFootageRatio: stockRatio,
+      imageOutputResolution: effectiveMix.imageOutputResolution,
       width: inputs.visualMixConfig?.width ?? 1920,
       height: inputs.visualMixConfig?.height ?? 1080,
       motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
-      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 6,
+      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 2,
       postProcessConcurrency: inputs.visualMixConfig?.postProcessConcurrency ?? 2
     }
 
@@ -559,19 +600,27 @@ export function InputPage({
     })
   }
 
+  async function handleSelectResolution(resolution: AiImageOutputResolution): Promise<void> {
+    if (isRunning) return
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      imageOutputResolution: resolution
+    }
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    })
+  }
+
   async function handleSetAiRatio(aiPercent: number): Promise<void> {
     if (isRunning) return
     const clampedAi = Math.max(0, Math.min(100, Math.round(isNaN(aiPercent) ? 0 : aiPercent)))
     const clampedStock = 100 - clampedAi
     const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
       mode: 'custom-mix',
       aiImageRatio: clampedAi / 100,
       stockFootageRatio: clampedStock / 100,
-      width: inputs.visualMixConfig?.width ?? 1920,
-      height: inputs.visualMixConfig?.height ?? 1080,
-      motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
-      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 6,
-      postProcessConcurrency: inputs.visualMixConfig?.postProcessConcurrency ?? 2
+      imageOutputResolution: effectiveMix.imageOutputResolution
     }
     await onUpdateInputs({
       visualSourceMode: 'custom-mix',
@@ -674,6 +723,16 @@ export function InputPage({
     if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return
     setIsStarting(true)
     try {
+      const resolvedMix = resolveVisualMixConfig({
+        visualSourceMode: inputs.visualSourceMode,
+        visualMixConfig: inputs.visualMixConfig,
+        contentType: inputs.contentType
+      })
+
+      console.log(
+        `[Setup] Starting pipeline:\nprofile=${inputs.contentType ?? 'default'}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}`
+      )
+
       const ok = await startPipeline({
         projectDir: project.projectDir,
         scriptPath: inputs.scriptPath,
@@ -682,14 +741,14 @@ export function InputPage({
         requireBackgroundMusic: requireBgMusic,
         autoStartOnReady,
         contentType: inputs.contentType ?? 'default',
-        visualSourceMode: effectiveMix.mode,
-        visualMixConfig: effectiveMix,
-        healthVisualConfig: (inputs.contentType === 'health') ? {
-          aiRatio: effectiveMix.aiImageRatio,
-          stockRatio: effectiveMix.stockFootageRatio,
-          width: effectiveMix.width,
-          height: effectiveMix.height,
-          motionEnabled: effectiveMix.motionEnabled
+        visualSourceMode: resolvedMix.mode,
+        visualMixConfig: resolvedMix,
+        healthVisualConfig: inputs.contentType === 'health' && resolvedMix.mode === 'custom-mix' ? {
+          aiRatio: resolvedMix.aiImageRatio,
+          stockRatio: resolvedMix.stockFootageRatio,
+          width: resolvedMix.width,
+          height: resolvedMix.height,
+          motionEnabled: resolvedMix.motionEnabled
         } : undefined
       })
       if (ok && onNavigate && isSimpleMode) {
@@ -842,7 +901,7 @@ export function InputPage({
                 </div>
                 <div className="content-type-card__subtitle">Medical explainer</div>
                 <div className="content-type-card__desc">
-                  80% AI visuals + 20% real footage
+                  Medical / health explainer production profile
                 </div>
               </div>
             </button>
@@ -856,11 +915,10 @@ export function InputPage({
                 <span>Health Visual Mode</span>
               </div>
               <div className="content-type-summary__list">
-                <div className="content-type-summary__item">✓ 80% AI-generated visuals</div>
-                <div className="content-type-summary__item">✓ 20% real footage</div>
-                <div className="content-type-summary__item">✓ 1920×1080 generated stills</div>
-                <div className="content-type-summary__item">✓ Automatic motion effects</div>
-                <div className="content-type-summary__item">✓ Google Flow image generation (AI-generated medical stills)</div>
+                <div className="content-type-summary__item">✓ Medical / health explainer visual intelligence</div>
+                <div className="content-type-summary__item">✓ Anatomy, physiology and clinical accuracy</div>
+                <div className="content-type-summary__item">✓ Automatic motion effects (Health Motion Director)</div>
+                <div className="content-type-summary__item">✓ Heartbeat, scan, and pulse audio effects (Health SFX)</div>
               </div>
 
               {/* Warning if Flow is disconnected */}
@@ -905,11 +963,13 @@ export function InputPage({
           isCustomMix={isCustomMix}
           currentAiPercent={currentAiPercent}
           currentStockPercent={currentStockPercent}
+          imageOutputResolution={effectiveMix.imageOutputResolution}
           flowHealth={flowHealth}
           isRunning={isRunning}
           onSelectMode={handleSelectVisualSourceMode}
           onSetAiRatio={handleSetAiRatio}
           onSetStockRatio={handleSetStockRatio}
+          onSelectResolution={handleSelectResolution}
           isAdvanced={false}
         />
 
@@ -1343,7 +1403,7 @@ export function InputPage({
               <div className="content-type-card__content">
                 <div className="content-type-card__title">Health Visual Mode</div>
                 <div className="content-type-card__desc">
-                  80% AI medical stills + 20% real footage
+                  Medical / health explainer production profile
                 </div>
               </div>
             </button>
@@ -1356,11 +1416,13 @@ export function InputPage({
         isCustomMix={isCustomMix}
         currentAiPercent={currentAiPercent}
         currentStockPercent={currentStockPercent}
+        imageOutputResolution={effectiveMix.imageOutputResolution}
         flowHealth={flowHealth}
         isRunning={isRunning}
         onSelectMode={handleSelectVisualSourceMode}
         onSetAiRatio={handleSetAiRatio}
         onSetStockRatio={handleSetStockRatio}
+        onSelectResolution={handleSelectResolution}
         isAdvanced={true}
       />
 

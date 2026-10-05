@@ -43,21 +43,20 @@ function runTests(): void {
     )
   })
 
-  // 2. Titles & descriptions
+  // 2. Titles & descriptions (Section 77)
   it('2. InputPage renders accurate titles and descriptions for Default and Health modes', () => {
     assert.ok(inputPageSource.includes('Standard production'))
     assert.ok(inputPageSource.includes('Uses normal planning + stock footage workflow'))
     assert.ok(inputPageSource.includes('Medical explainer'))
-    assert.ok(inputPageSource.includes('80% AI visuals + 20% real footage'))
+    assert.ok(inputPageSource.includes('Medical / health explainer production profile'))
   })
 
   // 3. Compact Health summary bullets
-  it('3. Health mode displays complete 5-point compact summary', () => {
-    assert.ok(inputPageSource.includes('80% AI-generated visuals'))
-    assert.ok(inputPageSource.includes('20% real footage'))
-    assert.ok(inputPageSource.includes('1920×1080 generated stills'))
-    assert.ok(inputPageSource.includes('Automatic motion effects'))
-    assert.ok(inputPageSource.includes('Google Flow image generation'))
+  it('3. Health mode displays complete compact summary', () => {
+    assert.ok(inputPageSource.includes('Medical / health explainer visual intelligence'))
+    assert.ok(inputPageSource.includes('Anatomy, physiology and clinical accuracy'))
+    assert.ok(inputPageSource.includes('Automatic motion effects (Health Motion Director)'))
+    assert.ok(inputPageSource.includes('Heartbeat, scan, and pulse audio effects (Health SFX)'))
   })
 
   // 4. FlowKit warning when disconnected

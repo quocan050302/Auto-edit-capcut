@@ -99,8 +99,8 @@ function runTests(): void {
     assert.strictEqual(HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG.stockFootageRatio, 0.2)
 
     assert.strictEqual(GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG.mode, 'custom-mix')
-    assert.strictEqual(GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG.aiImageRatio, 0.7)
-    assert.strictEqual(GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG.stockFootageRatio, 0.3)
+    assert.strictEqual(GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG.aiImageRatio, 0.5)
+    assert.strictEqual(GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG.stockFootageRatio, 0.5)
   })
 
   // 2. Resolution & Backward Compatibility

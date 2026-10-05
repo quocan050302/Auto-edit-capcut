@@ -184,7 +184,7 @@ async function runTests(): Promise<void> {
     assert.ok(generatedCounts.every((c) => c === 1), 'Every request must specify count === 1')
     const uniquePrompts = new Set(receivedPrompts)
     assert.strictEqual(uniquePrompts.size, 10, 'All 10 unique scenes were requested')
-    assert.strictEqual(receivedPrompts.length, 12, 'Scene 4 was retried twice before falling back')
+    assert.strictEqual(receivedPrompts.length, 11, 'Scene 4 had 2 total attempts (initial + 1 retry per Section 46) before falling back')
 
     // Scene 4 failed and fell back to stock
     assert.strictEqual(poolResult.failedCount, 1)
