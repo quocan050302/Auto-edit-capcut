@@ -98,6 +98,7 @@ export function ClientSidebar({
     if (page === 'production') return 'production'
     if (page === 'stock') return 'stock'
     if (page === 'render' || page === 'qa') return 'render'
+    if (page === 'youtube-research') return 'youtube-research'
     if (page === 'thumbnails') return 'thumbnails'
     // Deep technical stages opened in simple mode map to nearest step
     if (page === 'transcribe' || page === 'planning' || page === 'captions' || page === 'audio') {
@@ -148,6 +149,36 @@ export function ClientSidebar({
           )
         })}
       </nav>
+
+      <div className="sidebar-header" style={{ marginTop: '8px' }}>
+        <div className="sidebar-section-label">Intelligence</div>
+      </div>
+      <div style={{ padding: '0 8px', marginBottom: '8px' }}>
+        <button
+          type="button"
+          className={`sidebar-nav-item ${activeNavId === 'youtube-research' ? 'active' : ''}`}
+          onClick={() => onNavigate('youtube-research')}
+          style={{ width: '100%' }}
+        >
+          <svg viewBox="0 0 20 20" fill="currentColor" className="nav-icon">
+            <path fillRule="evenodd" d="M12 7a1 1 0 110-2h5a1 1 0 011 1v5a1 1 0 11-2 0V8.414l-4.293 4.293a1 1 0 01-1.414 0L8 10.414l-4.293 4.293a1 1 0 01-1.414-1.414l5-5a1 1 0 011.414 0L11 10.586 14.586 7H12z" clipRule="evenodd" />
+          </svg>
+          <span style={{ flex: 1, textAlign: 'left' }}>YouTube Research</span>
+          <span
+            style={{
+              fontSize: '10px',
+              fontWeight: 700,
+              background: 'rgba(239,68,68,0.15)',
+              color: '#f87171',
+              borderRadius: '999px',
+              padding: '1px 6px',
+              flexShrink: 0
+            }}
+          >
+            New
+          </span>
+        </button>
+      </div>
 
       <div className="sidebar-footer">
         {/* Project info */}

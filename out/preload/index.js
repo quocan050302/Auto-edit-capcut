@@ -104,6 +104,10 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  // YouTube Foreign Market Researcher (Isolated Module)
+  RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
+  RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
+  RESEARCH_CREATE_PROJECT_HANDOFF: "research:create-project-handoff",
   // Thumbnail Studio & Google Flow companion workflow
   THUMBNAIL_TEMPLATE_LIST: "thumbnail:template-list",
   THUMBNAIL_TEMPLATE_CREATE: "thumbnail:template-create",
@@ -311,6 +315,11 @@ const api = {
         electron.ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
       };
     }
+  },
+  research: {
+    getStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS),
+    restartSidecar: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_RESTART),
+    createProjectHandoff: (payload) => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_CREATE_PROJECT_HANDOFF, payload)
   },
   thumbnail: {
     templates: {

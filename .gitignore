@@ -10,3 +10,14 @@ logs/
 .env
 .env.local
 app-config.json
+
+# YouTube Research module isolated data
+data/*.db
+data/*.sqlite
+data/*.db-journal
+cache/
+research-temp/
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/

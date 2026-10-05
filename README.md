@@ -25,6 +25,7 @@
 - [8. Yêu Cầu Môi Trường & Hướng Dẫn Cài Đặt](#8-yêu-cầu-môi-trường--hướng-dẫn-cài-đặt)
 - [9. Khắc Phục Sự Cố (Troubleshooting)](#9-khắc-phục-sự-cố-troubleshooting)
 - [10. Production Intelligence: Visual Truth Reranker & Claim & Evidence Ledger](#10-production-intelligence-visual-truth-reranker--claim--evidence-ledger)
+- [11. YouTube Foreign Market Researcher (Module Nghiên Cứu Thị Trường)](#11-youtube-foreign-market-researcher)
 
 ---
 
@@ -484,6 +485,17 @@ Khi quá trình sản xuất hoàn tất, các tệp minh chứng sẽ được 
 ### 10.8. Lưu Ý Cốt Lõi Về Sản Xuất
 > [!IMPORTANT]
 > **Stock footage không đồng nghĩa với Factual Evidence**. Một đoạn video stock người mẫu đếm tiền không thể chứng minh cho báo cáo tài chính của một tập đoàn. Claim Ledger giúp biên tập viên phân định rạch ròi giữa cảnh quay minh họa không khí (`STOCK_CONTEXT`) và tài liệu bằng chứng xác thực (`DOCUMENT`, `REPORT`, `DATA_NOTE`).
+
+---
+
+## 11. YouTube Foreign Market Researcher
+
+Module nghiên cứu keyword, phát hiện chủ đề và breakout video tại 8 thị trường quốc tế (US, GB, CA, AU, DE, FR, JP, KR) bằng tín hiệu YouTube công khai.
+
+- **Độc lập 100%**: Tuyệt đối không can thiệp vào Auto Production Pipeline hoặc Render.
+- **Free-First**: Hoạt động đầy đủ bằng Scraper và Autocomplete Expander mà không bắt buộc có API key trả phí.
+- **Tính toán xác thực (Zero AI Hallucination)**: Điểm cơ hội (Opportunity), Velocity, Outlier và Competition hoàn toàn do code công thức toán học tính toán.
+- **Tài liệu chi tiết**: Xem [docs/youtube-research.md](docs/youtube-research.md).
 
 ---
 

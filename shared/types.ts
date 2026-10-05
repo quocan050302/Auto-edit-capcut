@@ -1013,6 +1013,12 @@ export const IPC_CHANNELS = {
   PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
   PIPELINE_RECOVER: 'pipeline:recover',
 
+  // YouTube Foreign Market Researcher (Isolated Module)
+  RESEARCH_SIDECAR_STATUS: 'research:sidecar-status',
+  RESEARCH_SIDECAR_RESTART: 'research:sidecar-restart',
+  RESEARCH_GET_SETTINGS: 'research:get-settings',
+  RESEARCH_SAVE_SETTINGS: 'research:save-settings',
+  RESEARCH_CREATE_PROJECT_HANDOFF: 'research:create-project-handoff',
   // Thumbnail Studio & Google Flow companion workflow
   THUMBNAIL_TEMPLATE_LIST: 'thumbnail:template-list',
   THUMBNAIL_TEMPLATE_CREATE: 'thumbnail:template-create',
@@ -1321,6 +1327,43 @@ export interface PipelineError {
   originalError?: string
 }
 
+// ─── YouTube Foreign Market Researcher Isolated Types ─────────────────────────
+
+export interface ResearchSidecarStatus {
+  online: boolean
+  port: number
+  pid?: number
+  url: string
+  version?: string
+  status: 'running' | 'stopped' | 'starting' | 'error' | 'degraded'
+  error?: string
+  lastHealthCheck?: string
+}
+
+export interface ResearchProjectHandoffPayload {
+  projectName: string
+  keyword: string
+  angle?: string
+  market: string
+  includeMarketFindings: boolean
+  includeTitlePatterns: boolean
+  includeBreakoutReferences: boolean
+  includeContentGaps: boolean
+  includeRelatedKeywords: boolean
+  includeAiIdeas: boolean
+  researchData: {
+    opportunityScore?: number
+    marketFitScore?: number
+    confidence?: string
+    topTitles?: string[]
+    contentGaps?: string[]
+    relatedKeywords?: string[]
+    breakoutVideos?: Array<{ title: string; url?: string; views?: number; channel?: string }>
+    aiContentIdeas?: string[]
+    summary?: string
+  }
+}
+
 // ─── Thumbnail Studio & Google Flow Types ─────────────────────────────────────
 
 export const THUMBNAIL_CATEGORIES = [
@@ -1564,7 +1607,6 @@ export interface ThumbnailProgressPayload {
   candidate?: ThumbnailCandidate
   jobState?: ThumbnailJobState
 }
-
 // ─── Resumable Render Engine V2 (all fields optional for backward compatibility) ──
 
 export type RenderResourceProfileId = 'balanced' | 'low-power' | 'fast'
