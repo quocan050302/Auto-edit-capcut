@@ -2270,3 +2270,108 @@ export interface GeneratedVisualAssetsManifest {
   scenes: Record<string, GeneratedVisualAssetRecord>
 }
 
+// ─── Retention Director Shared Types ──────────────────────────────────────────
+
+export type RetentionSceneRole =
+  | 'hook'
+  | 'setup'
+  | 'question'
+  | 'open-loop'
+  | 'problem'
+  | 'mechanism'
+  | 'proof'
+  | 'comparison'
+  | 'surprise'
+  | 'reveal'
+  | 're-hook'
+  | 'payoff'
+  | 'solution'
+  | 'bridge'
+  | 'recap'
+  | 'conclusion'
+
+export interface RetentionOpenLoop {
+  id: string
+  openedAtSceneIndex: number
+  payoffSceneIndex?: number
+  question: string
+  confidence: number
+  status: 'open' | 'resolved' | 'uncertain'
+  keywords: string[]
+}
+
+export interface RetentionMotif {
+  id: string
+  label: string
+  conceptKeywords: string[]
+  firstSeenSceneIndex: number
+  recurringSceneIndices: number[]
+}
+
+export interface RetentionScenePlan {
+  sceneIndex: number
+  sceneId: string
+  role: RetentionSceneRole
+  intensity: 'low' | 'medium' | 'high'
+  reason: string
+  noveltyScore: number
+  noveltyTarget: number
+  patternInterrupt: boolean
+  patternInterruptReason?: string
+  openLoopId?: string
+  payoffForLoopId?: string
+  avoidSpoiler?: boolean
+  motionEnergy: 'calm' | 'normal' | 'elevated'
+  beatPacing: 'slow' | 'normal' | 'fast'
+  overlayPriority: 'none' | 'low' | 'medium' | 'high'
+  proofPriority: 'normal' | 'high'
+  preferredVisualChange?: 'none' | 'crop' | 'motion' | 'proof' | 'overlay' | 'hard-cut'
+  notes: string[]
+}
+
+export interface RetentionPlan {
+  schemaVersion: number
+  generatedAt: string
+  inputHash: string
+  totalScenes: number
+  totalDuration: number
+  strategy: {
+    level: 'low' | 'balanced' | 'high'
+    targetRehookGapSecs: number
+    maxNoResetSecs: number
+    noveltyWindowScenes: number
+  }
+  openLoops: RetentionOpenLoop[]
+  motifs: RetentionMotif[]
+  scenes: RetentionScenePlan[]
+  summary: {
+    hooks: number
+    rehooks: number
+    payoffs: number
+    patternInterrupts: number
+    lowNoveltyScenes: number
+    openLoops: number
+  }
+}
+
+export interface RetentionSummary {
+  schemaVersion: number
+  sceneCount: number
+  durationSecs: number
+  retentionHealthScore: number
+  riskCounts: {
+    lowNovelty: number
+    longRehookGap: number
+    repeatedMotion: number
+    overedited: number
+  }
+  openLoops: {
+    detected: number
+    resolved: number
+    unresolved: number
+  }
+  patternInterrupts: number
+  averageNoveltyScore: number
+}
+
+

@@ -17,8 +17,10 @@ import {
   type SceneRetentionInput
 } from './retention/retention-engine'
 import { cropToZoomFilter } from './retention/visual-beat-engine'
-import { runRetentionQA } from './retention/retention-qa'
-import type { RetentionSettings, VisualBeat, ProofVisual } from './retention/retention-types'
+import { runRetentionQA, generateRetentionSummary, saveRetentionSummary } from './retention/retention-qa'
+import { ensureRetentionPlan } from './retention/retention-director'
+import { applyRetentionMotionHint } from './retention/retention-motion'
+import type { RetentionSettings, VisualBeat, ProofVisual, RetentionPlan, RetentionScenePlan } from './retention/retention-types'
 import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
 import { loadProductionSettings } from './production-intelligence/production-settings'
 import {
@@ -707,14 +709,50 @@ export async function renderVideo(params: {
     const sceneClips: string[] = []
     const { width, height } = resolution
 
-    // ── Retention Engine setup ─────────────────────────────────────────────────
+    // ── Retention Engine & Retention Director setup ───────────────────────────
     const retentionSettings: RetentionSettings = DEFAULT_RETENTION_SETTINGS
     const retCtx = createDefaultContext()
+
+    // Ensure or load Retention Plan (deterministic, whole-narrative analysis)
+    const retentionPlanMap = new Map<number, RetentionScenePlan>()
+    let retentionPlan: RetentionPlan | null = null
+    try {
+      const rawScenes = scenes.map((s, idx) => ({
+        sceneIndex: s.sceneIndex ?? idx,
+        sceneId: String(s.sceneIndex ?? idx),
+        duration: s.duration,
+        narrativeText: (s as any).narrativeText,
+        visualIntent: s.visualIntent,
+        energyLevel: (s as any).energyLevel,
+        shotType: (s as any).shotType,
+        isPatternInterrupt: (s as any).isPatternInterrupt,
+        isFirstInChapter: idx === 0 || (s as any).isFirstInChapter,
+        visualStrategy: visualPlanMap.get(s.sceneIndex)?.strategy,
+        category: visualPlanMap.get(s.sceneIndex)?.category,
+        motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+        localPath: s.localPath
+      }))
+
+      retentionPlan = await ensureRetentionPlan(projectDir, {
+        scenes: rawScenes,
+        level: retentionSettings.level
+      })
+
+      if (retentionPlan) {
+        for (const sp of retentionPlan.scenes) {
+          retentionPlanMap.set(sp.sceneIndex, sp)
+        }
+      }
+    } catch (err) {
+      logger.warn(`[RENDER] Failed to ensure retention plan (falling open to legacy): ${String(err)}`)
+      retentionPlan = null
+    }
 
     // Pre-compute retention decisions for all scenes (sequential context tracking)
     const retentionDecisions = new Map<number, import('./retention/retention-types').RetentionDecision>()
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i]
+      const retentionHint = retentionPlanMap.get(scene.sceneIndex) ?? retentionPlanMap.get(i)
       const sceneInput: SceneRetentionInput = {
         sceneId: String(scene.sceneIndex),
         sceneIndex: i,
@@ -723,16 +761,17 @@ export async function renderVideo(params: {
         shotType: (scene as any).shotType,
         narrativeText: (scene as any).narrativeText,
         visualIntent: scene.visualIntent,
-        isPatternInterrupt: (scene as any).isPatternInterrupt,
+        isPatternInterrupt: (scene as any).isPatternInterrupt || retentionHint?.patternInterrupt,
         localPath: scene.localPath,
         isNewChapter: i === 0 || (scene as any).isFirstInChapter,
+        retentionHint
       }
       const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings)
       retentionDecisions.set(i, decision)
       updateRetentionContext(retCtx, sceneInput, decision)
     }
 
-    // Run retention QA (flags only — does NOT block render)
+    // Run retention QA & generate retention summary (flags only — does NOT block render)
     try {
       const qaScenes = scenes.map((s, i) => ({
         sceneIndex: i,
@@ -742,18 +781,24 @@ export async function renderVideo(params: {
         shotType: (s as any).shotType,
         narrativeText: (s as any).narrativeText,
         visualIntent: s.visualIntent,
-        isPatternInterrupt: (s as any).isPatternInterrupt,
+        isPatternInterrupt: (s as any).isPatternInterrupt || retentionPlanMap.get(i)?.patternInterrupt,
         visualBeats: retentionDecisions.get(i)?.visualBeats,
+        motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+        category: visualPlanMap.get(s.sceneIndex)?.category
       }))
-      const qaFlags = runRetentionQA(qaScenes)
+      const qaFlags = runRetentionQA(qaScenes, retentionPlan)
       if (qaFlags.length > 0) {
         const qaPath = path.join(projectDir, 'analysis', 'retention-qa.json')
         fs.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), 'utf-8')
         logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`)
       }
+      const summary = generateRetentionSummary(qaScenes, retentionPlan, qaFlags)
+      saveRetentionSummary(projectDir, summary)
     } catch (err) {
       logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`)
     }
+
+    const recentAiMotionPresets: string[] = []
 
     for (let i = 0; i < scenes.length; i++) {
       const scene = scenes[i]
@@ -841,9 +886,13 @@ export async function renderVideo(params: {
 
         if (isAiStillImage) {
           // Camera motion spec for AI still images (Health or General)
-          const motionParam = visualScene?.motion || visualScene?.motionPreset || 'push-in-center'
-          const motionFilter = buildHealthMotionFilter(motionParam, width, height, scene.duration, fps)
+          const baseMotion = visualScene?.motion || visualScene?.motionPreset || 'push-in-center'
+          const retentionHint = retentionPlanMap.get(scene.sceneIndex) ?? retentionPlanMap.get(i)
+          const motionParam = applyRetentionMotionHint(baseMotion, retentionHint, recentAiMotionPresets)
           const presetName = typeof motionParam === 'object' ? motionParam.preset : motionParam
+          recentAiMotionPresets.push(presetName)
+
+          const motionFilter = buildHealthMotionFilter(motionParam as any, width, height, scene.duration, fps)
           logger.info(`[VisualMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`)
 
           await ffmpegRun([

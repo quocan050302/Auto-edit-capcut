@@ -27,6 +27,7 @@ import {
   type ManualAiHookLevel,
   type ManualAiStorytellingMode
 } from './manual-ai-types'
+import type { RetentionPlan, RetentionScenePlan } from '../../retention/retention-types'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -71,6 +72,7 @@ export interface PrepareVisualDirectorParams {
   apiKey?: string
   preferredModel?: string
   forceRegenerate?: boolean
+  retentionPlan?: RetentionPlan | null
   onProgress?: (msg: string, pct: number) => void
 }
 
@@ -726,6 +728,43 @@ export function applySmartOverlayPass(
   }
 }
 
+function applyRetentionAdvisoryToDirections(
+  directions: ManualAiSceneDirection[],
+  retentionPlan: RetentionPlan
+): void {
+  const planMap = new Map<number, RetentionScenePlan>()
+  for (const s of retentionPlan.scenes) {
+    planMap.set(s.sceneIndex, s)
+  }
+
+  for (const d of directions) {
+    const hint = planMap.get(d.sceneIndex)
+    if (!hint) continue
+
+    // 1. Avoid spoiler between open loop and payoff
+    if (hint.avoidSpoiler) {
+      const avoidMsg = 'premature visual reveal of later payoff or mechanism'
+      if (!d.avoid.includes(avoidMsg)) {
+        d.avoid.push(avoidMsg)
+      }
+    }
+
+    // 2. High intensity hook advisory
+    if (hint.role === 'hook' && hint.intensity === 'high') {
+      d.hookLevel = 'high'
+      d.sceneRole = 'hook'
+    } else if (hint.role === 'payoff') {
+      d.sceneRole = 'reveal'
+      if (
+        !d.viewerShouldNotice.toLowerCase().includes('payoff') &&
+        !d.viewerShouldNotice.toLowerCase().includes('reveal')
+      ) {
+        d.viewerShouldNotice = `${d.viewerShouldNotice} (clear payoff reveal)`
+      }
+    }
+  }
+}
+
 // ─── Main Coordinator: prepareManualAiVisualDirection ────────────────────────
 
 export async function prepareManualAiVisualDirection(
@@ -918,6 +957,10 @@ export async function prepareManualAiVisualDirection(
     }
 
     sceneDirectionsList = aiScenes.map((s) => directionsMap.get(s.sceneIndex)!)
+
+    if (params.retentionPlan) {
+      applyRetentionAdvisoryToDirections(sceneDirectionsList, params.retentionPlan)
+    }
 
     // Apply Smart Text Overlay sanitization and density pass
     applySmartOverlayPass(sceneDirectionsList, fullScriptText, profile)

@@ -95,6 +95,8 @@ export interface SceneRetentionInput {
   hasStrongCaption?: boolean
   // Audio coordination
   hasSfxInRange?: boolean
+  // Optional retention hint from Retention Director
+  retentionHint?: import('./retention-types').RetentionScenePlan
 }
 
 export function createDefaultContext(): RetentionContext {
@@ -110,6 +112,13 @@ export function createDefaultContext(): RetentionContext {
     consecutiveStrongEffect: 0,
     accumulatedVisualLoad: 0,
     sceneIndex: 0,
+    timeSinceLastRehook: 999,
+    timeSinceLastPatternInterrupt: 999,
+    recentNoveltyScores: [],
+    recentSceneRoles: [],
+    recentMotionPresets: [],
+    recentVisualCategories: [],
+    openLoopIds: [],
   }
 }
 
@@ -250,10 +259,30 @@ export function updateRetentionContext(
   ctx.timeSinceLastProofVisual += scene.duration
   ctx.timeSinceLastHumanShot += scene.duration
 
+  const hint = scene.retentionHint
+  if (hint?.role === 're-hook' || hint?.role === 'hook') {
+    ctx.timeSinceLastRehook = 0
+  } else {
+    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration
+  }
+
+  if (hint?.patternInterrupt || scene.isPatternInterrupt) {
+    ctx.timeSinceLastPatternInterrupt = 0
+  } else {
+    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration
+  }
+
+  if (hint?.noveltyScore !== undefined) {
+    ctx.recentNoveltyScores = [...(ctx.recentNoveltyScores || []), hint.noveltyScore].slice(-10)
+  }
+  if (hint?.role) {
+    ctx.recentSceneRoles = [...(ctx.recentSceneRoles || []), hint.role].slice(-10)
+  }
+
   if (decision.proofVisual) {
     ctx.timeSinceLastProofVisual = 0
   }
-  if (scene.isPatternInterrupt) {
+  if (scene.isPatternInterrupt || hint?.patternInterrupt) {
     ctx.timeSinceLastStrongEffect = 0
     ctx.previousPatternInterruptType = 'pattern_interrupt'
   }
@@ -261,3 +290,4 @@ export function updateRetentionContext(
     ctx.timeSinceLastStrongEffect = 0
   }
 }
+

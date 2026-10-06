@@ -58,6 +58,7 @@ import {
   type VisualDirectorBundle,
   type VisualDirectorMetrics
 } from './manual-ai/manual-ai-visual-director'
+import { ensureRetentionPlan } from '../retention/retention-director'
 
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -309,6 +310,27 @@ export async function runMixedVisualEngine(
     let directorBundle: VisualDirectorBundle | undefined
     try {
       const apiKey = resolveGeminiApiKey()
+
+      let retentionPlan = null
+      try {
+        const rawScenes = plan.scenes.map((s) => ({
+          sceneIndex: s.sceneIndex,
+          duration: s.duration,
+          narration: s.narration,
+          visualIntent: s.visualIntent,
+          shotType: s.shotType,
+          energyLevel: s.energyLevel,
+          visualStrategy: s.strategy,
+          category: s.category,
+          motionPreset: s.motionPreset
+        }))
+        retentionPlan = await ensureRetentionPlan(projectDir, {
+          scenes: rawScenes
+        })
+      } catch (err) {
+        logger.warn(`[MixedVisualEngine] Retention plan generation skipped (non-fatal): ${String(err)}`)
+      }
+
       directorBundle = await prepareManualAiVisualDirection({
         projectDir,
         plan,
@@ -317,6 +339,7 @@ export async function runMixedVisualEngine(
         scriptText,
         apiKey,
         preferredModel: options.geminiModel,
+        retentionPlan,
         onProgress: (msg, pct) => onProgress(msg, 0.04 + pct * 0.04)
       })
       visualDirectorMetrics = directorBundle?.metrics
