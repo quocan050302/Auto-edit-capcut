@@ -1341,7 +1341,8 @@ const MODEL_ROUTES = {
   stock_query: ["gemini-3.5-flash-lite", "gemini-3.5-flash"],
   retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   visual_truth: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
-  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  manual_ai_visual_director: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 };
 function getModelRoute(taskType, preferredModel) {
   const defaultRoute = [...MODEL_ROUTES[taskType]];
@@ -4330,7 +4331,7 @@ const CLAIM_EXTRACTION_VERSION = "1.0.0";
 function getClaimLedgerPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "claim-evidence-ledger.json");
 }
-function computeScriptHash(text) {
+function computeScriptHash$1(text) {
   return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
 }
 function computeGlobalContextHash(ctx) {
@@ -4520,7 +4521,7 @@ async function extractDocumentaryClaims(params) {
   const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
   const ledgerPath = getClaimLedgerPath(projectDir);
   const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
-  const scriptHash2 = computeScriptHash(fullText);
+  const scriptHash2 = computeScriptHash$1(fullText);
   const ctxHash = computeGlobalContextHash(globalContext);
   if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
     try {
@@ -6097,6 +6098,7 @@ const probeImageFileDimensions = probeImageFile;
 const MANUAL_AI_PROMPT_SCHEMA_VERSION = 1;
 const MANUAL_AI_MANIFEST_SCHEMA_VERSION = 1;
 const MANUAL_AI_SUPPORTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
+const MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION = 1;
 function resolutionDims(res) {
   if (res === "4k") return { width: 3840, height: 2160 };
   if (res === "2k") return { width: 2560, height: 1440 };
@@ -6113,6 +6115,12 @@ function getManualAiPromptJsonPath(projectDir) {
 }
 function getManualAiPromptTxtPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "manual-ai-prompts.txt");
+}
+function getManualAiVisualBriefPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-visual-brief.json");
+}
+function getManualAiSceneDirectionsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-scene-directions.json");
 }
 function getManualAiManifestPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "manual-ai-assets.json");
@@ -7449,7 +7457,7 @@ class HealthVisualPlanner {
     }
   }
 }
-function cleanText(text) {
+function cleanText$1(text) {
   return (text || "").replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
 function truncateWords(text, maxWords) {
@@ -7463,7 +7471,7 @@ function countWords(text) {
 function normWs$1(text) {
   return (text || "").replace(/\s+/g, " ").trim();
 }
-function sha256(parts) {
+function sha256$1(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
 function sanitizePromptLine(prompt) {
@@ -7560,27 +7568,156 @@ function pickMood(text) {
 const HEALTH_SAFETY = "Scientifically plausible anatomy with correct organ relationships, medical documentary quality, no fake diagnostic results, no exact molecular structures, no citations, no medical text inside the image.";
 function shortIdea(scene) {
   if (!scene) return "";
-  return truncateWords(cleanText(scene.visualIntent || scene.narration), 6);
+  return truncateWords(cleanText$1(scene.visualIntent || scene.narration), 6);
+}
+function calculatePromptQualityScore(params) {
+  const p = params.prompt.toLowerCase();
+  const n = `${params.narration} ${params.visualIntent || ""}`.toLowerCase();
+  const nWords = n.split(/\s+/).filter((w) => w.length > 3);
+  const matched = nWords.filter((w) => p.includes(w));
+  const groundingRatio = nWords.length > 0 ? matched.length / Math.min(nWords.length, 6) : 1;
+  const groundingScore = Math.min(25, Math.round(groundingRatio * 25));
+  const eventVerbs = [
+    "filtering",
+    "flowing",
+    "filling",
+    "contracting",
+    "narrowing",
+    "expanding",
+    "releasing",
+    "absorbing",
+    "accumulating",
+    "separating",
+    "slowing",
+    "accelerating",
+    "signaling",
+    "responding",
+    "circulating",
+    "descending",
+    "rising",
+    "rushing",
+    "pumping",
+    "clearing",
+    "moving",
+    "holding",
+    "walking",
+    "working",
+    "analyzing",
+    "demonstrating"
+  ];
+  const hasEventVerb = eventVerbs.some((v) => p.includes(v));
+  const visibleEventScore = hasEventVerb ? 25 : 12;
+  const hasShot = /shot|cutaway|angle|framing|composition|close-up|overview|macro/.test(p);
+  const hasLens = /mm|lens|focal|depth of field|rim light/.test(p);
+  const compScore = (hasShot ? 8 : 0) + (hasLens ? 7 : 0);
+  const hasHook = /hook|tension|comprehension|clarity|reveal|unmistakable|vital|crucial|understand/.test(p);
+  const hookScore = hasHook ? 15 : 10;
+  const hasLighting = /lighting|light|palette|glow|contrast|ambient/.test(p);
+  const continuityScore = hasLighting ? 10 : 5;
+  const hasRes = /16:9|1920x1080|2560x1440|3840x2160/.test(p);
+  const hasNegative = /only the exact specified|no text|no watermark|no logo/.test(p);
+  const safetyScore = (hasRes ? 5 : 0) + (hasNegative ? 5 : 0);
+  return Math.min(100, Math.max(0, groundingScore + visibleEventScore + compScore + hookScore + continuityScore + safetyScore));
 }
 function buildManualScenePrompt(params) {
-  const { scene, profile, globalContext, previousScene, nextScene, outputResolution } = params;
+  const { scene, profile, globalContext, previousScene, nextScene, outputResolution, sceneDirection } = params;
   const isHealth = profile === "health";
-  const narration = cleanText(scene.narration);
-  const intent = cleanText(scene.visualIntent);
+  const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
+  const narration = cleanText$1(scene.narration);
+  const intent = cleanText$1(scene.visualIntent);
   const groundingText = `${narration} ${intent}`;
   const niche = detectVisualNiche(groundingText, globalContext);
+  if (sceneDirection) {
+    const role = sceneDirection.sceneRole;
+    const hook = sceneDirection.hookLevel;
+    const isMechanism = ["mechanism", "cause-effect", "consequence", "reveal"].includes(role);
+    const isHighHook = hook === "high";
+    let subject2 = cleanText$1(sceneDirection.visualEvent?.subject || intent || narration);
+    subject2 = truncateWords(subject2, 24);
+    let action = cleanText$1(sceneDirection.visualEvent?.action);
+    if (!action && isHealth) {
+      action = "actively filtering and transporting biological fluid";
+    } else if (!action) {
+      action = "demonstrating dynamic documentary action";
+    }
+    let opening2;
+    if (isHealth) {
+      const cutawayType = isHighHook ? "macro cutaway" : isMechanism ? "detailed cutaway" : "visualization";
+      opening2 = `Premium cinematic medical documentary ${cutawayType} of ${subject2} ${action}`;
+    } else {
+      opening2 = `${NICHE_OPENING[niche]} ${subject2}, ${action}`;
+    }
+    const changeClause = sceneDirection.visualEvent?.change ? `with ${cleanText$1(sceneDirection.visualEvent.change)}` : "";
+    const causeClause = sceneDirection.visualEvent?.cause ? `visibly triggered by ${cleanText$1(sceneDirection.visualEvent.cause)}` : "";
+    const consequenceClause = sceneDirection.visualEvent?.consequence ? `resulting in ${cleanText$1(sceneDirection.visualEvent.consequence)}` : "";
+    const dynamics = [changeClause, causeClause, consequenceClause].filter(Boolean).join(", ");
+    const viewerNotice = cleanText$1(sceneDirection.viewerShouldNotice || narration);
+    const comprehensionClause = viewerNotice ? `The viewer should immediately understand that ${truncateWords(viewerNotice, 16)}.` : "";
+    const comp = sceneDirection.composition;
+    const subjectFraming = isMechanism ? "with the main subject occupying roughly 60-70% of the useful frame" : "with strong central presence";
+    const compositionClause = `Composition: ${comp.shotType || "close three-quarter view"}, ${subjectFraming}, ${comp.cameraAngle || "eye level"}, ${comp.lensFeel || (isHealth ? "85mm medical-documentary lens" : "50mm prime lens")}, ${comp.focalPriority || "precise focal priority"}.`;
+    const fg = cleanText$1(comp.foreground) || "dominant active subject";
+    const bg = cleanText$1(comp.background) || (isHealth ? "controlled dark navy background with gentle biological volumetric depth" : NICHE_BACKGROUND[niche]);
+    const depthClause = `Foreground: ${fg}. Background: ${bg}.`;
+    const lighting2 = cleanText$1(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche]);
+    const color = cleanText$1(sceneDirection.colorStrategy) || (isHealth ? "deep navy blue with warm tissue highlights" : "authentic documentary grade");
+    const lightClause = `Lighting and palette: ${lighting2}, ${color}.`;
+    const realismClause = isHealth ? "Realistic internal tissue, plausible organ and vessel relationships, directional biological visual flow, medical documentary realism, no gore, no fake diagnostic results, no anatomical labels." : "High-end cinematic documentary realism, natural candid behavior, believable real-world environment, balanced cinematic grade.";
+    const continuityNote = cleanText$1(sceneDirection.continuityNote);
+    const continuityClause2 = continuityNote ? `Continuity: ${continuityNote}.` : "";
+    let negativeSpaceClause = "";
+    let overlayDirective = "";
+    let overlayConstraint = "";
+    if (sceneDirection.textOverlay?.enabled && sceneDirection.textOverlay?.text) {
+      const pos = sceneDirection.textOverlay.position || "top-right";
+      const posDesc = pos.replace("-", " ");
+      negativeSpaceClause = `Reserve clean negative space in the ${posDesc} area.`;
+      overlayDirective = `Render exactly one editorial text overlay reading "${sceneDirection.textOverlay.text}" in large bold clean sans-serif typography, positioned in the ${posDesc} negative-space area, high-contrast white lettering with one restrained accent colour, perfectly legible, exact spelling, no additional words.`;
+      overlayConstraint = isHealth ? `Only the exact specified editorial overlay text is permitted. No other text, no captions, no anatomical labels, no UI, no watermark, no logo.` : `Only the exact specified editorial overlay text is permitted. No other text, no captions, no UI, no watermark, no logo.`;
+    } else {
+      if (comp.negativeSpace) {
+        negativeSpaceClause = `Composition balance: ${cleanText$1(comp.negativeSpace)}.`;
+      }
+      overlayConstraint = isHealth ? `No text overlay, no subtitles, no anatomical labels, no UI, no watermark, no logo.` : `No text overlay, no subtitles, no UI, no watermark, no logo.`;
+    }
+    const frameClause = `16:9 horizontal frame (${dims}).`;
+    const composeWithTarget = (includeDynamics, includeNotice, includeContinuity) => {
+      const parts = [
+        `${opening2}${dynamics && includeDynamics ? `, ${dynamics}` : ""}.`,
+        includeNotice ? comprehensionClause : "",
+        compositionClause,
+        depthClause,
+        lightClause,
+        realismClause,
+        includeContinuity ? continuityClause2 : "",
+        negativeSpaceClause,
+        overlayDirective,
+        overlayConstraint,
+        frameClause
+      ];
+      return sanitizePromptLine(parts.filter(Boolean).join(" "));
+    };
+    let prompt2 = composeWithTarget(true, true, true);
+    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(true, true, false);
+    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(false, true, false);
+    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(false, false, false);
+    return prompt2;
+  }
   const opening = isHealth ? "Premium cinematic medical documentary still of" : NICHE_OPENING[niche];
-  const subject = truncateWords(intent || narration, 28);
-  const narrationIdea = truncateWords(narration || intent, 22);
+  let subject = truncateWords(intent || narration, 28);
+  const narrationIdea = truncateWords(narration || intent, 24);
   const shot = pickShot(groundingText, scene.sceneIndex);
   const timeOfDay = pickTimeOfDay(groundingText);
   const mood = pickMood(groundingText);
   const lighting = isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche];
   const worldEnv = globalContext?.visualWorld?.environment?.[0];
-  const colorMood = cleanText(globalContext?.visualWorld?.colorMood);
-  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText(worldEnv) || NICHE_BACKGROUND[niche]}`;
+  const colorMood = cleanText$1(globalContext?.visualWorld?.colorMood);
+  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText$1(worldEnv) || NICHE_BACKGROUND[niche]}`;
+  if (isHealth && !/\b(filter|flow|fill|contract|narrow|expand|release|absorb|accumulat|separat|slow|accelerat|signal|respond|circulat|pump)\b/i.test(subject)) {
+    subject = `${subject}, actively demonstrating physiological biological processes`;
+  }
   const styleCore = isHealth ? `${getHealthCategoryDetails(scene.category || "conceptual")}. ${HEALTH_SAFETY}` : `${NICHE_STYLE_DIRECTIVES[niche]}.`;
-  const anchorSubject = cleanText(globalContext?.primarySubject);
+  const anchorSubject = cleanText$1(globalContext?.primarySubject);
   const worldParts = [
     anchorSubject ? `topic ${truncateWords(anchorSubject, 6)}` : "",
     colorMood ? `colour mood ${truncateWords(colorMood, 4)}` : ""
@@ -7593,7 +7730,6 @@ function buildManualScenePrompt(params) {
     nextIdea ? `leads into a scene about ${nextIdea}` : ""
   ].filter(Boolean);
   const continuityClause = continuityParts.length > 0 ? `Continuity: ${continuityParts.join(" and ")}; keep the same palette and documentary look.` : "";
-  const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
   const constraints = `16:9 horizontal frame (${dims}), photorealistic cinematic realism, no text, no subtitles, no labels, no watermark, no logo.`;
   const compose = (narrationWords, withWorld, withContinuity) => {
     const parts = [
@@ -7609,13 +7745,13 @@ function buildManualScenePrompt(params) {
     ];
     return sanitizePromptLine(parts.filter(Boolean).join(" "));
   };
-  let prompt = compose(22, true, true);
-  if (countWords(prompt) > 180) prompt = compose(22, true, false);
-  if (countWords(prompt) > 180) prompt = compose(14, false, false);
+  let prompt = compose(24, true, true);
+  if (countWords(prompt) > 200) prompt = compose(20, true, false);
+  if (countWords(prompt) > 200) prompt = compose(14, false, false);
   return prompt;
 }
 function computeManualPromptHash(params) {
-  return sha256([
+  return sha256$1([
     normWs$1(params.narration),
     normWs$1(params.visualIntent),
     params.profile,
@@ -7625,7 +7761,7 @@ function computeManualPromptHash(params) {
   ]);
 }
 function computeInputHash(params) {
-  return sha256([
+  return sha256$1([
     String(params.sceneIndex),
     normWs$1(params.narration),
     normWs$1(params.visualIntent),
@@ -7636,19 +7772,37 @@ function computeInputHash(params) {
   ]);
 }
 function buildManualAiPromptPack(params) {
-  const { plan, profile, globalContext, outputResolution } = params;
+  const { plan, profile, globalContext, outputResolution, sceneDirections } = params;
   const ordered = [...plan.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   const entries = [];
+  let directionsMap;
+  if (sceneDirections) {
+    if (sceneDirections instanceof Map) {
+      directionsMap = sceneDirections;
+    } else if (Array.isArray(sceneDirections)) {
+      directionsMap = new Map(sceneDirections.map((d) => [d.sceneIndex, d]));
+    }
+  }
   for (let i = 0; i < ordered.length; i++) {
     const scene = ordered[i];
     if (scene.strategy !== "ai-still") continue;
+    const sceneDirection = directionsMap?.get(scene.sceneIndex);
     const prompt = buildManualScenePrompt({
       scene,
       profile,
       globalContext,
       previousScene: ordered[i - 1],
       nextScene: ordered[i + 1],
-      outputResolution
+      outputResolution,
+      sceneDirection
+    });
+    const qualityScore = calculatePromptQualityScore({
+      prompt,
+      narration: scene.narration,
+      visualIntent: scene.visualIntent,
+      role: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      hasOverlay: sceneDirection?.textOverlay?.enabled
     });
     entries.push({
       sceneIndex: scene.sceneIndex,
@@ -7670,10 +7824,37 @@ function buildManualAiPromptPack(params) {
         outputResolution
       }),
       expectedFilename: expectedFilenameForScene(scene.sceneIndex),
-      status: "waiting-image"
+      status: "waiting-image",
+      sceneRole: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      visualEvent: sceneDirection?.visualEvent ? {
+        subject: sceneDirection.visualEvent.subject,
+        action: sceneDirection.visualEvent.action,
+        change: sceneDirection.visualEvent.change,
+        consequence: sceneDirection.visualEvent.consequence
+      } : void 0,
+      textOverlay: sceneDirection?.textOverlay ? {
+        enabled: sceneDirection.textOverlay.enabled,
+        text: sceneDirection.textOverlay.text,
+        purpose: sceneDirection.textOverlay.purpose,
+        position: sceneDirection.textOverlay.position,
+        emphasis: sceneDirection.textOverlay.emphasis,
+        reason: sceneDirection.textOverlay.reason
+      } : void 0,
+      directorSource: sceneDirection ? sceneDirection.confidence > 0.8 ? "ai" : "fallback" : void 0,
+      directorConfidence: sceneDirection?.confidence,
+      qualityScore
     });
   }
   entries.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  const totalPrompts = entries.length;
+  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords(e.prompt), 0) / totalPrompts) : 0;
+  const highHook = entries.filter((e) => e.hookLevel === "high").length;
+  const mediumHook = entries.filter((e) => e.hookLevel === "medium").length;
+  const lowHook = entries.filter((e) => e.hookLevel === "low").length;
+  logger.info(
+    `[ManualAI:Prompts] generated=${totalPrompts} avgWords=${avgWords} highHook=${highHook} mediumHook=${mediumHook} lowHook=${lowHook}`
+  );
   return {
     schemaVersion: MANUAL_AI_PROMPT_SCHEMA_VERSION,
     generatedAt: (params.now ?? /* @__PURE__ */ new Date()).toISOString(),
@@ -7708,7 +7889,7 @@ function formatManualAiPromptText(pack) {
   const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   return sorted.map((e) => `${formatSceneLabel(e.sceneIndex)} | ${sanitizePromptLine(e.prompt)}`).join("\n\n");
 }
-function writeFileAtomic(filePath, content) {
+function writeFileAtomic$1(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -7728,8 +7909,8 @@ function loadManualAiPromptPack(projectDir) {
   }
 }
 function saveManualAiPromptPackFiles(projectDir, pack) {
-  writeFileAtomic(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
+  writeFileAtomic$1(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$1(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
 }
 function readManualAiPromptText(projectDir) {
   const pack = loadManualAiPromptPack(projectDir);
@@ -7738,8 +7919,14 @@ function readManualAiPromptText(projectDir) {
 }
 function ensureManualAiPromptPack(params) {
   const t0 = Date.now();
-  const { projectDir, plan, profile, globalContext, outputResolution } = params;
-  const fresh = buildManualAiPromptPack({ plan, profile, globalContext, outputResolution });
+  const { projectDir, plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const fresh = buildManualAiPromptPack({
+    plan,
+    profile,
+    globalContext,
+    outputResolution,
+    sceneDirections
+  });
   const persisted = loadManualAiPromptPack(projectDir);
   let merged = fresh;
   if (persisted && persisted.schemaVersion === MANUAL_AI_PROMPT_SCHEMA_VERSION && persisted.profile === profile && persisted.outputResolution === outputResolution) {
@@ -18934,6 +19121,744 @@ function broadcastManualAiStatus(projectDir, status) {
   }
   return s;
 }
+function sha256(parts) {
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function cleanText(text) {
+  return (text || "").replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function extractNumbers(text) {
+  const matches = text.match(/\b\d+(?:[.,]\d+)?%?\b/g);
+  return matches ? matches.map((m) => m.replace(/,/g, "")) : [];
+}
+function writeFileAtomic(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function computeScriptHash(scriptText, profile, globalContext) {
+  const semanticParts = [
+    scriptText.trim(),
+    profile,
+    globalContext?.primarySubject || "",
+    globalContext?.centralThesis || "",
+    globalContext?.documentaryAngle || "",
+    globalContext?.visualWorld?.colorMood || "",
+    String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)
+  ];
+  return sha256(semanticParts);
+}
+function computeSceneDirectionsHash(briefHash, aiScenes) {
+  const sceneTokens = aiScenes.map(
+    (s) => `${s.sceneIndex}:${cleanText(s.narration)}:${cleanText(s.visualIntent)}`
+  );
+  return sha256([briefHash, ...sceneTokens, String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)]);
+}
+function buildFallbackVisualBrief(scriptHashVal, profile, globalContext, sampleNarration) {
+  const isHealth = profile === "health";
+  const subject = globalContext?.primarySubject || (isHealth ? "Human physiological mechanism" : "Documentary investigation");
+  const thesis = globalContext?.centralThesis || (isHealth ? "Unveiling the hidden internal processes of the human body" : "Exploring real-world mechanisms and consequences");
+  let storytellingMode = isHealth ? "mechanism-explainer" : "documentary";
+  const combinedText = `${sampleNarration || ""} ${thesis}`.toLowerCase();
+  if (combinedText.includes("why") || combinedText.includes("mechanism") || combinedText.includes("how")) {
+    storytellingMode = isHealth ? "mechanism-explainer" : "scientific-explainer";
+  } else if (combinedText.includes("warning") || combinedText.includes("danger") || combinedText.includes("risk")) {
+    storytellingMode = "warning";
+  } else if (combinedText.includes("myth") || combinedText.includes("lie") || combinedText.includes("wrong")) {
+    storytellingMode = "myth-busting";
+  } else if (combinedText.includes("compare") || combinedText.includes("vs") || combinedText.includes("difference")) {
+    storytellingMode = "comparison";
+  }
+  return {
+    schemaVersion: MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    scriptHash: scriptHashVal,
+    profile,
+    primaryNiche: isHealth ? "medical-documentary" : "editorial-documentary",
+    secondaryNiches: isHealth ? ["human-physiology", "biology"] : ["investigative-journalism"],
+    storytellingMode,
+    corePromise: isHealth ? "Reveal the hidden physiological mechanisms and biological cause-and-effect processes." : "Uncover the real-world forces, cause-and-effect relationships, and visible consequences.",
+    centralQuestion: isHealth ? `What unseen internal mechanism governs ${subject.toLowerCase()}?` : `What causes the observable phenomena behind ${subject.toLowerCase()}?`,
+    centralThesis: thesis,
+    audienceTakeaway: isHealth ? "Understand the internal biological chain reaction that explains symptoms and daily bodily function." : "Grasp the underlying systematic forces shaping real-world outcomes.",
+    emotionalArc: ["curiosity", "realization", "clarity", "empowerment"],
+    narrativeArc: [
+      { phase: "hook", purpose: "Establish visual tension and introduce the central question" },
+      { phase: "mechanism", purpose: "Reveal internal processes, active flows, and cause-effect chains" },
+      { phase: "consequence", purpose: "Demonstrate visible outcomes and lifestyle manifestations" },
+      { phase: "resolution", purpose: "Synthesize core takeaways and provide clarity" }
+    ],
+    visualStrategy: {
+      dominantStyle: isHealth ? "cinematic medical documentary" : "cinematic grounded documentary",
+      realismLevel: "photorealistic documentary realism",
+      cameraLanguage: isHealth ? "85mm macro lens, tight internal cutaways, three-quarter anatomical depth" : "35mm to 50mm documentary lenses at eye level with authentic framing",
+      lightingLanguage: isHealth ? "controlled cool rim lighting over dark navy background with gentle warm biological highlights" : "natural documentary light with balanced contrast and layered depth",
+      colorLanguage: isHealth ? "deep navy blue, biological crimson, subtle amber highlights" : "authentic documentary palette with natural contrast",
+      depthLanguage: "strong foreground subject separation with layered background context",
+      recurringMotifs: isHealth ? ["active directional flow", "organ filtration", "cellular transport"] : ["human movement", "environmental tension"],
+      avoidVisualCliches: isHealth ? ["static anatomical models in void", "flat textbook diagrams", "gory surgical scenes"] : ["generic stock photo posing", "blank office voids"]
+    },
+    hookStrategy: {
+      primaryHookType: "unseen-mechanism-reveal",
+      tensionSources: ["invisible biological events happening right now", "cause and consequence gap"],
+      curiosityPatterns: ["counterintuitive physiological fact", "visible transformation of common state"]
+    },
+    overlayStrategy: {
+      enabled: true,
+      targetDensity: 0.3,
+      maxDensity: 0.35,
+      maxWords: 5,
+      maxCharacters: 28,
+      avoidBottomCaptionArea: true
+    },
+    modelUsed: "local-fallback",
+    fallbackUsed: true
+  };
+}
+async function generateGlobalVisualBriefWithGemini(params) {
+  const { apiKey, preferredModel, scriptText, profile, globalContext, scenesSummary, scriptHashVal, onProgress } = params;
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) throw new Error("NO_API_KEY");
+  const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+  const candidateModels = getAvailableModelsForTask("manual_ai_visual_director", preferredModel);
+  const systemPrompt = `You are the Lead Visual Director for a high-end cinematic documentary.
+Analyze the ENTIRE script and produce a Global Visual Brief JSON object that guides all individual image prompts for AI Image Generation.
+The documentary profile is: "${profile}".
+
+CRITICAL VISUAL PHILOSOPHY:
+- DO NOT MERELY DRAW THE NOUN. Visualize ACTION, MECHANISM, VISIBLE CHANGE, CAUSE & EFFECT, and VISUAL TENSION.
+- HEALTH TOPICS: Focus on active internal mechanisms (filtration, filling, flow, constriction, dilation, cellular signaling). Scientifically plausible anatomy with correct organ relationships. No gore. No anatomical labels.
+- GENERAL TOPICS: Focus on narrative tension, human behavior, environmental context, candid actions. Avoid generic stock posing.
+- OVERLAY STRATEGY: Recommend selective smart text overlays (target ~25-35% of scenes) that enhance comprehension or hook curiosity. Overlays must be 2-5 words, max 28 chars, safe for video (avoid bottom 25% caption area). NO invented numbers or facts.
+- Return ONLY valid JSON matching the schema. No markdown, no commentary.`;
+  const userPrompt = `DOCUMENTARY CONTEXT:
+Profile: ${profile}
+Global Subject: ${globalContext?.primarySubject || "N/A"}
+Central Thesis: ${globalContext?.centralThesis || "N/A"}
+Documentary Angle: ${globalContext?.documentaryAngle || "N/A"}
+
+SCENES OVERVIEW:
+${scenesSummary.slice(0, 12e3)}
+
+FULL SCRIPT / NARRATION:
+---
+${scriptText.slice(0, 24e3)}
+---
+
+Produce a JSON object conforming EXACTLY to:
+{
+  "profile": "${profile}",
+  "primaryNiche": "e.g. medical-documentary or financial-documentary",
+  "secondaryNiches": ["string"],
+  "storytellingMode": "mechanism-explainer" | "investigative" | "warning" | "myth-busting" | "comparison" | "problem-solution" | "historical-narrative" | "financial-explainer" | "lifestyle-explainer" | "scientific-explainer" | "documentary" | "other",
+  "corePromise": "one clear sentence",
+  "centralQuestion": "the single compelling question the video answers",
+  "centralThesis": "core argument",
+  "audienceTakeaway": "what viewer understands by the end",
+  "emotionalArc": ["curiosity", "tension", "realization", "empowerment"],
+  "narrativeArc": [
+    { "phase": "hook", "purpose": "..." },
+    { "phase": "mechanism", "purpose": "..." },
+    { "phase": "consequence", "purpose": "..." },
+    { "phase": "resolution", "purpose": "..." }
+  ],
+  "visualStrategy": {
+    "dominantStyle": "string",
+    "realismLevel": "string",
+    "cameraLanguage": "string",
+    "lightingLanguage": "string",
+    "colorLanguage": "string",
+    "depthLanguage": "string",
+    "recurringMotifs": ["string"],
+    "avoidVisualCliches": ["string"]
+  },
+  "hookStrategy": {
+    "primaryHookType": "string",
+    "tensionSources": ["string"],
+    "curiosityPatterns": ["string"]
+  },
+  "overlayStrategy": {
+    "enabled": true,
+    "targetDensity": 0.30,
+    "maxDensity": 0.35,
+    "maxWords": 5,
+    "maxCharacters": 28,
+    "avoidBottomCaptionArea": true
+  }
+}`;
+  for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+    const model = candidateModels[mIdx];
+    try {
+      onProgress?.(`Analyzing full script for Global Visual Brief (${model})...`, 0.05);
+      const res = await ai.models.generateContent({
+        model,
+        contents: [
+          { role: "user", parts: [{ text: `${systemPrompt}
+
+${userPrompt}` }] }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
+          maxOutputTokens: 4096
+        }
+      });
+      const text = res.text?.trim();
+      if (!text) throw new Error("Empty response from model");
+      const parsed = JSON.parse(text);
+      if (!parsed.centralQuestion || !parsed.visualStrategy) {
+        throw new Error("Malformed Visual Brief JSON: missing required fields");
+      }
+      recordModelSuccess(model);
+      return {
+        schemaVersion: MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        scriptHash: scriptHashVal,
+        profile,
+        primaryNiche: parsed.primaryNiche || (profile === "health" ? "medical-documentary" : "documentary"),
+        secondaryNiches: Array.isArray(parsed.secondaryNiches) ? parsed.secondaryNiches : [],
+        storytellingMode: parsed.storytellingMode || (profile === "health" ? "mechanism-explainer" : "documentary"),
+        corePromise: parsed.corePromise || "",
+        centralQuestion: parsed.centralQuestion || "",
+        centralThesis: parsed.centralThesis || globalContext?.centralThesis || "",
+        audienceTakeaway: parsed.audienceTakeaway || "",
+        emotionalArc: Array.isArray(parsed.emotionalArc) ? parsed.emotionalArc : ["curiosity", "clarity"],
+        narrativeArc: Array.isArray(parsed.narrativeArc) ? parsed.narrativeArc : [],
+        visualStrategy: {
+          dominantStyle: parsed.visualStrategy?.dominantStyle || "cinematic documentary",
+          realismLevel: parsed.visualStrategy?.realismLevel || "photorealistic realism",
+          cameraLanguage: parsed.visualStrategy?.cameraLanguage || "50mm documentary lens",
+          lightingLanguage: parsed.visualStrategy?.lightingLanguage || "natural cinematic light",
+          colorLanguage: parsed.visualStrategy?.colorLanguage || "balanced documentary tones",
+          depthLanguage: parsed.visualStrategy?.depthLanguage || "layered depth with clear subject focus",
+          recurringMotifs: Array.isArray(parsed.visualStrategy?.recurringMotifs) ? parsed.visualStrategy.recurringMotifs : [],
+          avoidVisualCliches: Array.isArray(parsed.visualStrategy?.avoidVisualCliches) ? parsed.visualStrategy.avoidVisualCliches : []
+        },
+        hookStrategy: {
+          primaryHookType: parsed.hookStrategy?.primaryHookType || "curiosity-gap",
+          tensionSources: Array.isArray(parsed.hookStrategy?.tensionSources) ? parsed.hookStrategy.tensionSources : [],
+          curiosityPatterns: Array.isArray(parsed.hookStrategy?.curiosityPatterns) ? parsed.hookStrategy.curiosityPatterns : []
+        },
+        overlayStrategy: {
+          enabled: parsed.overlayStrategy?.enabled ?? true,
+          targetDensity: parsed.overlayStrategy?.targetDensity ?? 0.3,
+          maxDensity: parsed.overlayStrategy?.maxDensity ?? 0.35,
+          maxWords: parsed.overlayStrategy?.maxWords ?? 5,
+          maxCharacters: parsed.overlayStrategy?.maxCharacters ?? 28,
+          avoidBottomCaptionArea: parsed.overlayStrategy?.avoidBottomCaptionArea ?? true
+        },
+        modelUsed: model,
+        fallbackUsed: false
+      };
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(model, kind);
+      logger.warn(`[ManualAI:Director] Gemini model ${model} failed for Global Visual Brief (${kind}): ${message}`);
+    }
+  }
+  throw new Error("ALL_MODELS_FAILED");
+}
+function inferFallbackSceneRole(text, isOpening) {
+  const lower = text.toLowerCase();
+  if (isOpening) return "hook";
+  if (lower.includes("?")) return "question";
+  if (/\b(kidney|bladder|vessel|blood|cell|artery|vein|organ|filter|flow|fluid|hormone|enzyme|transport|absorb|expand|contract)\b/.test(lower)) {
+    return "mechanism";
+  }
+  if (/\b(because|cause|leads to|results in|trigger|reaction|consequence|due to)\b/.test(lower)) {
+    return "cause-effect";
+  }
+  if (/\b(danger|risk|warning|symptom|toxic|damage|threat|pain|problem|crisis)\b/.test(lower)) {
+    return "symptom";
+  }
+  if (/\b(percent|%|\b\d+\b|study|research|trial|evidence|data)\b/.test(lower)) {
+    return "statistic";
+  }
+  if (/\b(compare|contrast|unlike|whereas|different|versus|vs)\b/.test(lower)) {
+    return "comparison";
+  }
+  if (/\b(sleep|drink|water|night|morning|walk|lifestyle|habit|bed|daily|routine)\b/.test(lower)) {
+    return "lifestyle";
+  }
+  if (/\b(finally|remember|takeaway|summary|conclude|solution|protect|heal)\b/.test(lower)) {
+    return "solution";
+  }
+  return "setup";
+}
+function inferFallbackHookLevel(role, isOpening) {
+  if (isOpening || role === "hook" || role === "reveal") return "high";
+  if (role === "mechanism" || role === "cause-effect" || role === "statistic" || role === "question") return "medium";
+  return "low";
+}
+function extractActionVerb(text, isHealth) {
+  const match = text.match(/\b(filtering|flowing|filling|contracting|narrowing|expanding|releasing|absorbing|accumulating|separating|slowing|accelerating|signaling|responding|circulating|descending|rising|rushing|pumping|clearing|building)\b/i);
+  if (match) return match[1].toLowerCase();
+  return isHealth ? "actively filtering and transporting fluid" : "demonstrating concrete dynamic action";
+}
+function buildFallbackSceneDirection(scene, profile, isOpening) {
+  const isHealth = profile === "health";
+  const narration = cleanText(scene.narration);
+  const intent = cleanText(scene.visualIntent);
+  const combined = `${narration} ${intent}`;
+  const role = inferFallbackSceneRole(combined, isOpening);
+  const hook = inferFallbackHookLevel(role, isOpening);
+  const action = extractActionVerb(combined, isHealth);
+  const subject = intent || narration.slice(0, 80);
+  const numbers = extractNumbers(narration);
+  const eligibleForOverlay = (isOpening || role === "statistic" || role === "hook" || numbers.length > 0) && combined.length > 10;
+  let overlayText;
+  if (eligibleForOverlay) {
+    if (numbers.length > 0) {
+      overlayText = numbers[0];
+    } else if (isOpening && isHealth) {
+      overlayText = "YOUR BODY AT NIGHT";
+    } else if (role === "mechanism" && isHealth) {
+      overlayText = "INTERNAL MECHANISM";
+    }
+  }
+  return {
+    sceneIndex: scene.sceneIndex,
+    sceneRole: role,
+    hookLevel: hook,
+    coreMeaning: narration.slice(0, 100),
+    viewerShouldNotice: `The visual event of ${action}`,
+    curiosityGap: hook === "high" ? "What hidden process causes this visible reaction?" : void 0,
+    visualEvent: {
+      subject: subject.slice(0, 60),
+      action,
+      change: "visible dynamic transition and movement",
+      cause: "physiological biological activity",
+      consequence: "observable biological state"
+    },
+    composition: {
+      shotType: isHealth ? "close three-quarter cutaway" : "medium documentary framing",
+      cameraAngle: "straight-on eye level",
+      lensFeel: isHealth ? "85mm medical-documentary lens" : "50mm prime lens",
+      focalPriority: "dominant foreground subject with high clarity",
+      foreground: "main active subject occupying roughly 60% of useful frame",
+      background: isHealth ? "controlled deep navy gradient with soft atmospheric depth" : "natural contextual environment with layered depth",
+      negativeSpace: "clean upper-right area reserved for editorial balance"
+    },
+    lighting: isHealth ? "controlled cool rim light with soft biological volumetric fill" : "natural documentary lighting with balanced contrast",
+    colorStrategy: isHealth ? "deep navy blue with warm tissue accents" : "natural realistic documentary palette",
+    continuityNote: "maintain documentary realism and consistent color grading with adjacent scenes",
+    textOverlay: {
+      enabled: !!overlayText,
+      text: overlayText,
+      purpose: role === "statistic" ? "stat" : "hook",
+      position: "top-right",
+      emphasis: "medium",
+      reason: overlayText ? "Anchors viewer attention on key takeaway" : "Visual self-explanatory"
+    },
+    avoid: isHealth ? ["flat textbook diagrams", "static anatomical cards", "fake medical UI"] : ["generic stock poses"],
+    confidence: 0.75
+  };
+}
+async function analyzeSceneBatchWithGemini(params) {
+  const { apiKey, preferredModel, brief, batchScenes, prevContext, nextContext, profile } = params;
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) throw new Error("NO_API_KEY");
+  const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+  const candidateModels = getAvailableModelsForTask("manual_ai_visual_director", preferredModel);
+  const scenesPayload = batchScenes.map((s) => ({
+    sceneIndex: s.sceneIndex,
+    narration: cleanText(s.narration),
+    visualIntent: cleanText(s.visualIntent)
+  }));
+  const prevText = prevContext ? `SCENE ${prevContext.sceneIndex}: ${cleanText(prevContext.narration)}` : "None (start of video)";
+  const nextText = nextContext ? `SCENE ${nextContext.sceneIndex}: ${cleanText(nextContext.narration)}` : "None (end of video)";
+  const prompt = `You are the Lead Visual Director for a cinematic documentary (${profile}).
+GLOBAL VISUAL BRIEF:
+- Storytelling Mode: ${brief.storytellingMode}
+- Core Promise: ${brief.corePromise}
+- Central Question: ${brief.centralQuestion}
+- Visual Strategy: ${brief.visualStrategy.dominantStyle}, ${brief.visualStrategy.cameraLanguage}, ${brief.visualStrategy.lightingLanguage}
+- Avoid Visual Cliches: ${brief.visualStrategy.avoidVisualCliches.join(", ")}
+
+SURROUNDING CONTEXT:
+- Previous Scene: ${prevText}
+- Next Scene: ${nextText}
+
+BATCH SCENES TO DIRECT (respond for EACH of these ${scenesPayload.length} scenes):
+${JSON.stringify(scenesPayload, null, 2)}
+
+INSTRUCTIONS FOR EACH SCENE:
+1. sceneRole: select from hook | question | problem | symptom | setup | mechanism | cause-effect | reveal | evidence | statistic | comparison | definition | demonstration | consequence | solution | lifestyle | emotion | transition | recap
+2. hookLevel: low | medium | high (Scene 1, major reveals, surprising warnings = high; mechanisms = medium; lifestyle/setup = low)
+3. visualEvent: DO NOT JUST DRAW A NOUN. Subject + ACTION (must contain an active visible verb like filtering, flowing, filling, expanding, contracting, etc.) + change + cause/consequence.
+4. composition: shotType, cameraAngle, lensFeel, focalPriority, foreground, background, negativeSpace. For mechanisms, dominant subject occupies ~55-75% of useful frame.
+5. lighting & colorStrategy: specific, consistent with brief.
+6. textOverlay: Recommend an editorial text overlay ONLY if this scene is a Hook, Reveal, Statistic/Number, or complex Mechanism.
+   - Text must be 2-5 words, max 28 characters, in the PRIMARY LANGUAGE of the narration.
+   - If numbers/statistics are included, they MUST BE EXACTLY MENTIONED in the scene narration. NEVER invent numbers!
+   - Position: top-left | top-right | center-left | center-right (never bottom caption zone).
+   - If image is already visually clear or simple lifestyle, set enabled: false. Target ~25-35% of scenes enabled across the documentary.
+7. avoid: list specific visual cliches or static textbook errors to avoid.
+
+Return ONLY a valid JSON array of ${scenesPayload.length} objects matching the schema.`;
+  for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+    const model = candidateModels[mIdx];
+    try {
+      const res = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.25,
+          maxOutputTokens: 8192
+        }
+      });
+      const text = res.text?.trim();
+      if (!text) throw new Error("Empty response from model");
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) throw new Error("Response is not a JSON array");
+      const directions = [];
+      const byIndex = /* @__PURE__ */ new Map();
+      for (const item of parsed) {
+        if (typeof item?.sceneIndex === "number") {
+          byIndex.set(item.sceneIndex, item);
+        }
+      }
+      for (const s of batchScenes) {
+        const raw = byIndex.get(s.sceneIndex);
+        if (raw && raw.visualEvent && raw.composition) {
+          directions.push({
+            sceneIndex: s.sceneIndex,
+            sceneRole: raw.sceneRole || inferFallbackSceneRole(s.narration, s.sceneIndex === 1),
+            hookLevel: raw.hookLevel || "medium",
+            coreMeaning: raw.coreMeaning || cleanText(s.narration).slice(0, 100),
+            viewerShouldNotice: raw.viewerShouldNotice || "The visible action of the subject",
+            curiosityGap: raw.curiosityGap,
+            visualEvent: {
+              subject: raw.visualEvent.subject || cleanText(s.visualIntent || s.narration),
+              action: raw.visualEvent.action || extractActionVerb(s.narration, profile === "health"),
+              change: raw.visualEvent.change,
+              cause: raw.visualEvent.cause,
+              consequence: raw.visualEvent.consequence
+            },
+            composition: {
+              shotType: raw.composition.shotType || "medium documentary view",
+              cameraAngle: raw.composition.cameraAngle || "eye level",
+              lensFeel: raw.composition.lensFeel || "50mm prime",
+              focalPriority: raw.composition.focalPriority || "foreground subject",
+              foreground: raw.composition.foreground || "dominant subject",
+              background: raw.composition.background || "atmospheric background",
+              negativeSpace: raw.composition.negativeSpace
+            },
+            lighting: raw.lighting || "natural documentary lighting",
+            colorStrategy: raw.colorStrategy || "balanced documentary tones",
+            continuityNote: raw.continuityNote,
+            textOverlay: {
+              enabled: !!raw.textOverlay?.enabled,
+              text: raw.textOverlay?.text,
+              purpose: raw.textOverlay?.purpose || "hook",
+              position: raw.textOverlay?.position || "top-right",
+              emphasis: raw.textOverlay?.emphasis || "medium",
+              reason: raw.textOverlay?.reason || "Editorial clarity"
+            },
+            avoid: Array.isArray(raw.avoid) ? raw.avoid : [],
+            confidence: 0.9
+          });
+        } else {
+          directions.push(buildFallbackSceneDirection(s, profile, s.sceneIndex === 1));
+        }
+      }
+      recordModelSuccess(model);
+      return directions;
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(model, kind);
+      logger.warn(`[ManualAI:Director] Gemini model ${model} failed for scene batch (${kind}): ${message}`);
+    }
+  }
+  throw new Error("BATCH_ANALYSIS_FAILED");
+}
+function applySmartOverlayPass(directions, scriptText, profile) {
+  const total = directions.length;
+  if (total === 0) return;
+  const scriptLower = scriptText.toLowerCase();
+  const scriptNumbers = new Set(extractNumbers(scriptText));
+  for (const d of directions) {
+    if (!d.textOverlay.enabled || !d.textOverlay.text) {
+      d.textOverlay.enabled = false;
+      continue;
+    }
+    let text = d.textOverlay.text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length > 5) {
+      text = words.slice(0, 5).join(" ");
+    }
+    if (text.length > 28) {
+      const truncated = text.slice(0, 28).replace(/[,.:;\-\s]+$/, "");
+      text = truncated;
+    }
+    const finalWords = text.split(/\s+/).filter(Boolean);
+    if (finalWords.length === 0 || text.length < 2) {
+      d.textOverlay.enabled = false;
+      continue;
+    }
+    const upper = text.toUpperCase();
+    if (["HEALTH", "WARNING", "BODY", "IMPORTANT", "NOTE", "DANGER"].includes(upper)) {
+      d.textOverlay.enabled = false;
+      continue;
+    }
+    const overlayNums = extractNumbers(text);
+    if (overlayNums.length > 0) {
+      const sceneNums = extractNumbers(d.coreMeaning);
+      const numberValid = overlayNums.every(
+        (n) => sceneNums.includes(n) || scriptNumbers.has(n) || scriptLower.includes(n.toLowerCase())
+      );
+      if (!numberValid) {
+        logger.info(`[ManualAI:Overlay] Disabling overlay "${text}" for scene ${d.sceneIndex}: number not found in script`);
+        d.textOverlay.enabled = false;
+        continue;
+      }
+    }
+    const allowedPositions = ["top-left", "top-right", "center-left", "center-right"];
+    if (!d.textOverlay.position || !allowedPositions.includes(d.textOverlay.position)) {
+      d.textOverlay.position = "top-right";
+    }
+    d.textOverlay.text = text;
+  }
+  const maxAllowed = Math.max(1, Math.floor(total * 0.35));
+  const enabledDirections = directions.filter((d) => d.textOverlay.enabled);
+  if (enabledDirections.length > maxAllowed) {
+    const rolePriority = (role) => {
+      switch (role) {
+        case "hook":
+          return 10;
+        case "reveal":
+          return 9;
+        case "statistic":
+          return 8;
+        case "mechanism":
+          return 7;
+        case "cause-effect":
+          return 6;
+        case "comparison":
+          return 5;
+        case "definition":
+          return 4;
+        case "recap":
+          return 3;
+        default:
+          return 1;
+      }
+    };
+    enabledDirections.sort((a, b) => {
+      const pDiff = rolePriority(b.sceneRole) - rolePriority(a.sceneRole);
+      if (pDiff !== 0) return pDiff;
+      const hookScore = (h) => h === "high" ? 3 : h === "medium" ? 2 : 1;
+      return hookScore(b.hookLevel) - hookScore(a.hookLevel);
+    });
+    const keepers = new Set(enabledDirections.slice(0, maxAllowed).map((d) => d.sceneIndex));
+    for (const d of directions) {
+      if (d.textOverlay.enabled && !keepers.has(d.sceneIndex)) {
+        d.textOverlay.enabled = false;
+      }
+    }
+  }
+  for (let i = 0; i < directions.length - 2; i++) {
+    if (directions[i].textOverlay.enabled && directions[i + 1].textOverlay.enabled && directions[i + 2].textOverlay.enabled) {
+      const mid = directions[i + 1];
+      mid.textOverlay.enabled = false;
+    }
+  }
+}
+async function prepareManualAiVisualDirection(params) {
+  const { projectDir, plan, profile, globalContext, preferredModel, forceRegenerate = false, onProgress } = params;
+  const aiScenes = plan.scenes.filter((s) => s.strategy === "ai-still").sort((a, b) => a.sceneIndex - b.sceneIndex);
+  if (aiScenes.length === 0) {
+    const emptyBrief = buildFallbackVisualBrief("empty", profile, globalContext);
+    return {
+      brief: emptyBrief,
+      sceneDirections: /* @__PURE__ */ new Map(),
+      metrics: {
+        globalMs: 0,
+        sceneMs: 0,
+        cacheHit: true,
+        enrichedCount: 0,
+        fallbackCount: 0,
+        overlayCount: 0,
+        modelUsed: "none"
+      }
+    };
+  }
+  const fullScriptText = params.scriptText || plan.scenes.map((s) => cleanText(s.narration)).join(" ");
+  const scriptHashVal = computeScriptHash(fullScriptText, profile, globalContext);
+  const briefPath = getManualAiVisualBriefPath(projectDir);
+  const directionsPath = getManualAiSceneDirectionsPath(projectDir);
+  let brief = null;
+  let briefCacheHit = false;
+  let globalT0 = Date.now();
+  if (!forceRegenerate && fs__namespace.existsSync(briefPath)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(briefPath, "utf-8"));
+      if (cached.schemaVersion === MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION && cached.scriptHash === scriptHashVal && cached.profile === profile) {
+        brief = cached;
+        briefCacheHit = true;
+        logger.info(`[ManualAI:VisualDirector] Global visual brief cache hit (model=${cached.modelUsed})`);
+      }
+    } catch {
+    }
+  }
+  if (!brief) {
+    const scenesSummary = plan.scenes.map((s) => `Scene ${s.sceneIndex}: ${cleanText(s.narration).slice(0, 120)} | Intent: ${cleanText(s.visualIntent).slice(0, 80)}`).join("\n");
+    try {
+      if (params.apiKey) {
+        brief = await generateGlobalVisualBriefWithGemini({
+          apiKey: params.apiKey,
+          preferredModel,
+          scriptText: fullScriptText,
+          profile,
+          globalContext,
+          scenesSummary,
+          scriptHashVal,
+          onProgress
+        });
+      }
+    } catch (err) {
+      logger.warn(`[ManualAI:VisualDirector] AI Global Brief generation failed (${err}) — using local fallback brief`);
+    }
+    if (!brief) {
+      brief = buildFallbackVisualBrief(
+        scriptHashVal,
+        profile,
+        globalContext,
+        aiScenes[0]?.narration
+      );
+    }
+    writeFileAtomic(briefPath, JSON.stringify(brief, null, 2));
+  }
+  const globalMs = Date.now() - globalT0;
+  const briefHash = sha256([
+    brief.storytellingMode,
+    brief.corePromise,
+    brief.centralQuestion,
+    brief.centralThesis,
+    brief.visualStrategy.dominantStyle,
+    brief.modelUsed
+  ]);
+  const sceneInputHash = computeSceneDirectionsHash(briefHash, aiScenes);
+  let sceneDirectionsList = null;
+  let sceneCacheHit = false;
+  let sceneT0 = Date.now();
+  if (!forceRegenerate && fs__namespace.existsSync(directionsPath)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(directionsPath, "utf-8"));
+      if (cached.schemaVersion === MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION && cached.briefHash === briefHash && cached.inputHash === sceneInputHash && cached.totalAiScenes === aiScenes.length && Array.isArray(cached.directions) && cached.directions.length === aiScenes.length) {
+        sceneDirectionsList = cached.directions;
+        sceneCacheHit = true;
+        logger.info(`[ManualAI:VisualDirector] Scene directions cache hit (${cached.directions.length} scenes)`);
+      }
+    } catch {
+    }
+  }
+  let enrichedCount = 0;
+  let fallbackCount = 0;
+  if (!sceneDirectionsList) {
+    const directionsMap = /* @__PURE__ */ new Map();
+    const batchSize = 10;
+    const batches = [];
+    for (let i = 0; i < aiScenes.length; i += batchSize) {
+      batches.push(aiScenes.slice(i, i + batchSize));
+    }
+    const concurrency = 2;
+    for (let i = 0; i < batches.length; i += concurrency) {
+      const slice = batches.slice(i, i + concurrency);
+      await Promise.all(
+        slice.map(async (batch, sliceIdx) => {
+          const batchIndex = i + sliceIdx;
+          const firstScene = batch[0];
+          const lastScene = batch[batch.length - 1];
+          const prevCtx = plan.scenes.find((s) => s.sceneIndex === firstScene.sceneIndex - 1);
+          const nextCtx = plan.scenes.find((s) => s.sceneIndex === lastScene.sceneIndex + 1);
+          let batchDirections = null;
+          if (params.apiKey && !brief?.fallbackUsed) {
+            try {
+              onProgress?.(
+                `Building scene visual directions ${Math.min((batchIndex + 1) * batchSize, aiScenes.length)}/${aiScenes.length}...`,
+                0.2 + batchIndex / batches.length * 0.6
+              );
+              batchDirections = await analyzeSceneBatchWithGemini({
+                apiKey: params.apiKey,
+                preferredModel,
+                brief,
+                batchScenes: batch,
+                prevContext: prevCtx,
+                nextContext: nextCtx,
+                profile
+              });
+            } catch (err) {
+              logger.warn(`[ManualAI:VisualDirector] Batch ${batchIndex + 1} analysis failed (${err}); falling back locally for this batch`);
+            }
+          }
+          if (batchDirections && batchDirections.length === batch.length) {
+            for (const d of batchDirections) {
+              directionsMap.set(d.sceneIndex, d);
+              enrichedCount++;
+            }
+          } else {
+            for (const s of batch) {
+              const fb = buildFallbackSceneDirection(s, profile, s.sceneIndex === 1);
+              directionsMap.set(s.sceneIndex, fb);
+              fallbackCount++;
+            }
+          }
+        })
+      );
+    }
+    sceneDirectionsList = aiScenes.map((s) => directionsMap.get(s.sceneIndex));
+    applySmartOverlayPass(sceneDirectionsList, fullScriptText);
+    const overlayCount2 = sceneDirectionsList.filter((d) => d.textOverlay.enabled).length;
+    const artifact = {
+      schemaVersion: MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      briefHash,
+      inputHash: sceneInputHash,
+      totalAiScenes: aiScenes.length,
+      enrichedCount,
+      fallbackCount,
+      overlayCount: overlayCount2,
+      directions: sceneDirectionsList
+    };
+    writeFileAtomic(directionsPath, JSON.stringify(artifact, null, 2));
+  } else {
+    enrichedCount = sceneDirectionsList.filter((d) => d.confidence > 0.8).length;
+    fallbackCount = sceneDirectionsList.length - enrichedCount;
+  }
+  const sceneMs = Date.now() - sceneT0;
+  const overlayCount = sceneDirectionsList.filter((d) => d.textOverlay.enabled).length;
+  const overlayDensityPct = Math.round(overlayCount / aiScenes.length * 100);
+  logger.info(
+    `[ManualAI:VisualDirector] Global brief generated profile=${brief.profile} mode=${brief.storytellingMode} model=${brief.modelUsed}`
+  );
+  logger.info(
+    `[ManualAI:VisualDirector] Scene directions generated AI scenes=${aiScenes.length} AI enriched=${enrichedCount} fallback=${fallbackCount}`
+  );
+  logger.info(
+    `[ManualAI:Overlay] enabled=${overlayCount}/${aiScenes.length} density=${overlayDensityPct}%`
+  );
+  const resultMap = /* @__PURE__ */ new Map();
+  for (const d of sceneDirectionsList) {
+    resultMap.set(d.sceneIndex, d);
+  }
+  return {
+    brief,
+    sceneDirections: resultMap,
+    metrics: {
+      globalMs,
+      sceneMs,
+      cacheHit: briefCacheHit && sceneCacheHit,
+      enrichedCount,
+      fallbackCount,
+      overlayCount,
+      modelUsed: brief.modelUsed
+    }
+  };
+}
 function checkAborted$1(signal) {
   if (signal?.aborted) {
     throw new Error("Pipeline execution was cancelled.");
@@ -19089,15 +20014,52 @@ async function runMixedVisualEngine(params) {
   );
   let manualPack = null;
   let promptGenerationMs = 0;
+  let visualDirectorMetrics;
   if (promptMode) {
     logger.info(`[ManualAI] AI-owned scenes=${aiScenes.length}`);
-    onProgress("Generating AI image prompts...", 0.08);
+    onProgress("Analyzing script for visual direction...", 0.04);
+    let scriptText = null;
+    try {
+      const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
+      if (fs__namespace.existsSync(transcriptPath)) {
+        const tr = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+        scriptText = tr.fullText || tr.segments?.map((s) => s.text).join(" ") || null;
+      }
+      if (!scriptText && activeJsonPath) {
+        const proj = JSON.parse(fs__namespace.readFileSync(activeJsonPath, "utf-8"));
+        const sp = proj?.inputs?.scriptPath;
+        if (sp && fs__namespace.existsSync(sp)) {
+          scriptText = fs__namespace.readFileSync(sp, "utf-8");
+        }
+      }
+    } catch {
+    }
+    let directorBundle;
+    try {
+      const apiKey = resolveGeminiApiKey();
+      directorBundle = await prepareManualAiVisualDirection({
+        projectDir,
+        plan,
+        profile,
+        globalContext,
+        scriptText,
+        apiKey,
+        preferredModel: options.geminiModel,
+        onProgress: (msg, pct) => onProgress(msg, 0.04 + pct * 0.04)
+      });
+      visualDirectorMetrics = directorBundle?.metrics;
+    } catch (err) {
+      logger.warn(`[ManualAI:Director] AI enrichment unavailable (${err}) — using deterministic prompt fallback`);
+    }
+    onProgress(`Generating ${aiScenes.length} AI prompts...`, 0.08);
     const ensured = ensureManualAiPromptPack({
       projectDir,
       plan,
       profile,
       globalContext,
-      outputResolution: mix.imageOutputResolution || "1080p"
+      outputResolution: mix.imageOutputResolution || "1080p",
+      visualBrief: directorBundle?.brief,
+      sceneDirections: directorBundle?.sceneDirections
     });
     manualPack = ensured.pack;
     promptGenerationMs = ensured.generationMs;
@@ -19649,7 +20611,21 @@ async function runMixedVisualEngine(params) {
         manualWaitDurationMs: manualWaitMs,
         stockSceneCount: initialStockScenes.length,
         stockAcquisitionMs: stockBranchTimeMs,
-        stockCompletedWhileWaiting
+        stockCompletedWhileWaiting,
+        manualAiDirectorEnabled: !!visualDirectorMetrics,
+        manualAiDirectorModel: visualDirectorMetrics?.modelUsed,
+        manualAiDirectorGlobalMs: visualDirectorMetrics?.globalMs,
+        manualAiDirectorSceneMs: visualDirectorMetrics?.sceneMs,
+        manualAiDirectorCacheHit: visualDirectorMetrics?.cacheHit,
+        manualAiDirectorEnrichedCount: visualDirectorMetrics?.enrichedCount,
+        manualAiDirectorFallbackCount: visualDirectorMetrics?.fallbackCount,
+        manualAiOverlayCount: visualDirectorMetrics?.overlayCount,
+        manualAiAveragePromptWords: manualPack && manualPack.scenes.length > 0 ? Math.round(
+          manualPack.scenes.reduce(
+            (sum, s) => sum + s.prompt.split(/\s+/).filter(Boolean).length,
+            0
+          ) / manualPack.scenes.length
+        ) : 0
       }
     } : {}
   };

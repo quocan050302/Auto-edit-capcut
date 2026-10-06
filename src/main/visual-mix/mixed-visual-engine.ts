@@ -53,6 +53,11 @@ import {
   broadcastManualAiStatus,
   getManualAiStatus
 } from './manual-ai/manual-ai-broadcaster'
+import {
+  prepareManualAiVisualDirection,
+  type VisualDirectorBundle,
+  type VisualDirectorMetrics
+} from './manual-ai/manual-ai-visual-director'
 
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -278,15 +283,56 @@ export async function runMixedVisualEngine(
   // BEFORE any branch starts, so the user can start generating images immediately.
   let manualPack: ManualAiPromptPack | null = null
   let promptGenerationMs = 0
+  let visualDirectorMetrics: VisualDirectorMetrics | undefined
   if (promptMode) {
     logger.info(`[ManualAI] AI-owned scenes=${aiScenes.length}`)
-    onProgress('Generating AI image prompts...', 0.08)
+    onProgress('Analyzing script for visual direction...', 0.04)
+
+    let scriptText: string | null = null
+    try {
+      const transcriptPath = path.join(projectDir, 'analysis', 'transcript.json')
+      if (fs.existsSync(transcriptPath)) {
+        const tr = JSON.parse(fs.readFileSync(transcriptPath, 'utf-8'))
+        scriptText = tr.fullText || tr.segments?.map((s: any) => s.text).join(' ') || null
+      }
+      if (!scriptText && activeJsonPath) {
+        const proj = JSON.parse(fs.readFileSync(activeJsonPath, 'utf-8'))
+        const sp = proj?.inputs?.scriptPath
+        if (sp && fs.existsSync(sp)) {
+          scriptText = fs.readFileSync(sp, 'utf-8')
+        }
+      }
+    } catch {
+      /* non-fatal */
+    }
+
+    let directorBundle: VisualDirectorBundle | undefined
+    try {
+      const apiKey = resolveGeminiApiKey()
+      directorBundle = await prepareManualAiVisualDirection({
+        projectDir,
+        plan,
+        profile,
+        globalContext,
+        scriptText,
+        apiKey,
+        preferredModel: options.geminiModel,
+        onProgress: (msg, pct) => onProgress(msg, 0.04 + pct * 0.04)
+      })
+      visualDirectorMetrics = directorBundle?.metrics
+    } catch (err) {
+      logger.warn(`[ManualAI:Director] AI enrichment unavailable (${err}) — using deterministic prompt fallback`)
+    }
+
+    onProgress(`Generating ${aiScenes.length} AI prompts...`, 0.08)
     const ensured = ensureManualAiPromptPack({
       projectDir,
       plan,
       profile,
       globalContext,
-      outputResolution: mix.imageOutputResolution || '1080p'
+      outputResolution: mix.imageOutputResolution || '1080p',
+      visualBrief: directorBundle?.brief,
+      sceneDirections: directorBundle?.sceneDirections
     })
     manualPack = ensured.pack
     promptGenerationMs = ensured.generationMs
@@ -944,7 +990,24 @@ export async function runMixedVisualEngine(
             manualWaitDurationMs: manualWaitMs,
             stockSceneCount: initialStockScenes.length,
             stockAcquisitionMs: stockBranchTimeMs,
-            stockCompletedWhileWaiting
+            stockCompletedWhileWaiting,
+            manualAiDirectorEnabled: !!visualDirectorMetrics,
+            manualAiDirectorModel: visualDirectorMetrics?.modelUsed,
+            manualAiDirectorGlobalMs: visualDirectorMetrics?.globalMs,
+            manualAiDirectorSceneMs: visualDirectorMetrics?.sceneMs,
+            manualAiDirectorCacheHit: visualDirectorMetrics?.cacheHit,
+            manualAiDirectorEnrichedCount: visualDirectorMetrics?.enrichedCount,
+            manualAiDirectorFallbackCount: visualDirectorMetrics?.fallbackCount,
+            manualAiOverlayCount: visualDirectorMetrics?.overlayCount,
+            manualAiAveragePromptWords:
+              manualPack && manualPack.scenes.length > 0
+                ? Math.round(
+                    manualPack.scenes.reduce(
+                      (sum, s) => sum + s.prompt.split(/\s+/).filter(Boolean).length,
+                      0
+                    ) / manualPack.scenes.length
+                  )
+                : 0
           }
         }
       : {})

@@ -18,6 +18,152 @@ export const MANUAL_AI_MANIFEST_SCHEMA_VERSION = 1
 
 export const MANUAL_AI_SUPPORTED_EXTENSIONS: readonly string[] = ['.png', '.jpg', '.jpeg', '.webp']
 
+export const MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION = 1
+
+export type ManualAiStorytellingMode =
+  | 'mechanism-explainer'
+  | 'investigative'
+  | 'warning'
+  | 'myth-busting'
+  | 'comparison'
+  | 'problem-solution'
+  | 'historical-narrative'
+  | 'financial-explainer'
+  | 'lifestyle-explainer'
+  | 'scientific-explainer'
+  | 'documentary'
+  | 'other'
+
+export interface ManualAiVisualBrief {
+  schemaVersion: number
+  generatedAt: string
+  scriptHash: string
+  profile: 'health' | 'general'
+  primaryNiche: string
+  secondaryNiches: string[]
+  storytellingMode: ManualAiStorytellingMode
+  corePromise: string
+  centralQuestion: string
+  centralThesis: string
+  audienceTakeaway: string
+  emotionalArc: string[]
+  narrativeArc: Array<{
+    phase: string
+    purpose: string
+  }>
+  visualStrategy: {
+    dominantStyle: string
+    realismLevel: string
+    cameraLanguage: string
+    lightingLanguage: string
+    colorLanguage: string
+    depthLanguage: string
+    recurringMotifs: string[]
+    avoidVisualCliches: string[]
+  }
+  hookStrategy: {
+    primaryHookType: string
+    tensionSources: string[]
+    curiosityPatterns: string[]
+  }
+  overlayStrategy: {
+    enabled: boolean
+    targetDensity: number
+    maxDensity: number
+    maxWords: number
+    maxCharacters: number
+    avoidBottomCaptionArea: boolean
+  }
+  modelUsed: string
+  fallbackUsed: boolean
+}
+
+export type ManualAiSceneRole =
+  | 'hook'
+  | 'question'
+  | 'problem'
+  | 'symptom'
+  | 'setup'
+  | 'mechanism'
+  | 'cause-effect'
+  | 'reveal'
+  | 'evidence'
+  | 'statistic'
+  | 'comparison'
+  | 'definition'
+  | 'demonstration'
+  | 'consequence'
+  | 'solution'
+  | 'lifestyle'
+  | 'emotion'
+  | 'transition'
+  | 'recap'
+
+export type ManualAiHookLevel = 'low' | 'medium' | 'high'
+
+export interface ManualAiSceneDirection {
+  sceneIndex: number
+  sceneRole: ManualAiSceneRole
+  hookLevel: ManualAiHookLevel
+  coreMeaning: string
+  viewerShouldNotice: string
+  curiosityGap?: string
+  visualEvent: {
+    subject: string
+    action: string
+    change?: string
+    cause?: string
+    consequence?: string
+  }
+  composition: {
+    shotType: string
+    cameraAngle: string
+    lensFeel: string
+    focalPriority: string
+    foreground: string
+    background: string
+    negativeSpace?: string
+  }
+  lighting: string
+  colorStrategy: string
+  continuityNote?: string
+  textOverlay: {
+    enabled: boolean
+    text?: string
+    purpose?:
+      | 'hook'
+      | 'mechanism'
+      | 'stat'
+      | 'comparison'
+      | 'term'
+      | 'reveal'
+      | 'conclusion'
+    position?:
+      | 'top-left'
+      | 'top-right'
+      | 'center-left'
+      | 'center-right'
+    emphasis?:
+      | 'medium'
+      | 'high'
+    reason: string
+  }
+  avoid: string[]
+  confidence: number
+}
+
+export interface ManualAiSceneDirectionsArtifact {
+  schemaVersion: number
+  generatedAt: string
+  briefHash: string
+  inputHash: string
+  totalAiScenes: number
+  enrichedCount: number
+  fallbackCount: number
+  overlayCount: number
+  directions: ManualAiSceneDirection[]
+}
+
 export interface ManualAiPromptEntry {
   /** REAL project sceneIndex (never renumbered). */
   sceneIndex: number
@@ -30,6 +176,27 @@ export interface ManualAiPromptEntry {
   inputHash: string
   expectedFilename: string
   status: 'waiting-image'
+
+  /** Optional Visual Director metadata (backward compatible) */
+  sceneRole?: ManualAiSceneRole
+  hookLevel?: ManualAiHookLevel
+  visualEvent?: {
+    subject: string
+    action: string
+    change?: string
+    consequence?: string
+  }
+  textOverlay?: {
+    enabled: boolean
+    text?: string
+    purpose?: string
+    position?: string
+    emphasis?: string
+    reason?: string
+  }
+  directorSource?: 'ai' | 'fallback'
+  directorConfidence?: number
+  qualityScore?: number
 }
 
 export interface ManualAiPromptPack {
@@ -94,6 +261,14 @@ export function getManualAiPromptJsonPath(projectDir: string): string {
 
 export function getManualAiPromptTxtPath(projectDir: string): string {
   return path.join(projectDir, 'analysis', 'manual-ai-prompts.txt')
+}
+
+export function getManualAiVisualBriefPath(projectDir: string): string {
+  return path.join(projectDir, 'analysis', 'manual-ai-visual-brief.json')
+}
+
+export function getManualAiSceneDirectionsPath(projectDir: string): string {
+  return path.join(projectDir, 'analysis', 'manual-ai-scene-directions.json')
 }
 
 export function getManualAiManifestPath(projectDir: string): string {

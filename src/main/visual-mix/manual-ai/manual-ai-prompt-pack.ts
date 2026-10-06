@@ -18,7 +18,9 @@ import {
   getManualAiPromptJsonPath,
   getManualAiPromptTxtPath,
   type ManualAiPromptEntry,
-  type ManualAiPromptPack
+  type ManualAiPromptPack,
+  type ManualAiVisualBrief,
+  type ManualAiSceneDirection
 } from './manual-ai-types'
 
 // ─── Text helpers ────────────────────────────────────────────────────────────
@@ -180,6 +182,56 @@ export interface ManualPromptParams {
   previousScene?: VisualMixScenePlan
   nextScene?: VisualMixScenePlan
   outputResolution: AiImageOutputResolution
+  visualBrief?: ManualAiVisualBrief
+  sceneDirection?: ManualAiSceneDirection
+}
+
+export function calculatePromptQualityScore(params: {
+  prompt: string
+  narration: string
+  visualIntent?: string
+  role?: string
+  hookLevel?: string
+  hasOverlay?: boolean
+}): number {
+  const p = params.prompt.toLowerCase()
+  const n = `${params.narration} ${params.visualIntent || ''}`.toLowerCase()
+
+  // 1. Scene Grounding (0-25)
+  const nWords = n.split(/\s+/).filter((w) => w.length > 3)
+  const matched = nWords.filter((w) => p.includes(w))
+  const groundingRatio = nWords.length > 0 ? matched.length / Math.min(nWords.length, 6) : 1
+  const groundingScore = Math.min(25, Math.round(groundingRatio * 25))
+
+  // 2. Visible Event (0-25)
+  const eventVerbs = [
+    'filtering', 'flowing', 'filling', 'contracting', 'narrowing', 'expanding',
+    'releasing', 'absorbing', 'accumulating', 'separating', 'slowing', 'accelerating',
+    'signaling', 'responding', 'circulating', 'descending', 'rising', 'rushing',
+    'pumping', 'clearing', 'moving', 'holding', 'walking', 'working', 'analyzing', 'demonstrating'
+  ]
+  const hasEventVerb = eventVerbs.some((v) => p.includes(v))
+  const visibleEventScore = hasEventVerb ? 25 : 12
+
+  // 3. Composition Specificity (0-15)
+  const hasShot = /shot|cutaway|angle|framing|composition|close-up|overview|macro/.test(p)
+  const hasLens = /mm|lens|focal|depth of field|rim light/.test(p)
+  const compScore = (hasShot ? 8 : 0) + (hasLens ? 7 : 0)
+
+  // 4. Hook / Curiosity (0-15)
+  const hasHook = /hook|tension|comprehension|clarity|reveal|unmistakable|vital|crucial|understand/.test(p)
+  const hookScore = hasHook ? 15 : 10
+
+  // 5. Continuity & Lighting (0-10)
+  const hasLighting = /lighting|light|palette|glow|contrast|ambient/.test(p)
+  const continuityScore = hasLighting ? 10 : 5
+
+  // 6. Constraints & Safety (0-10)
+  const hasRes = /16:9|1920x1080|2560x1440|3840x2160/.test(p)
+  const hasNegative = /only the exact specified|no text|no watermark|no logo/.test(p)
+  const safetyScore = (hasRes ? 5 : 0) + (hasNegative ? 5 : 0)
+
+  return Math.min(100, Math.max(0, groundingScore + visibleEventScore + compScore + hookScore + continuityScore + safetyScore))
 }
 
 /**
@@ -188,17 +240,140 @@ export interface ManualPromptParams {
  * `scene.imagePrompt` stays the grounding style core and is never replaced.
  */
 export function buildManualScenePrompt(params: ManualPromptParams): string {
-  const { scene, profile, globalContext, previousScene, nextScene, outputResolution } = params
+  const { scene, profile, globalContext, previousScene, nextScene, outputResolution, visualBrief, sceneDirection } = params
   const isHealth = profile === 'health'
+  const dims = outputResolution === '4k' ? '3840x2160' : outputResolution === '2k' ? '2560x1440' : '1920x1080'
 
   const narration = cleanText(scene.narration)
   const intent = cleanText(scene.visualIntent)
   const groundingText = `${narration} ${intent}`
   const niche = detectVisualNiche(groundingText, globalContext)
 
+  // ─── Level B Director Composition (when SceneDirection is available) ────────
+  if (sceneDirection) {
+    const role = sceneDirection.sceneRole
+    const hook = sceneDirection.hookLevel
+    const isMechanism = ['mechanism', 'cause-effect', 'consequence', 'reveal'].includes(role)
+    const isHighHook = hook === 'high'
+
+    // 1. Opening & Subject & Event Action
+    let subject = cleanText(sceneDirection.visualEvent?.subject || intent || narration)
+    subject = truncateWords(subject, 24)
+
+    let action = cleanText(sceneDirection.visualEvent?.action)
+    if (!action && isHealth) {
+      action = 'actively filtering and transporting biological fluid'
+    } else if (!action) {
+      action = 'demonstrating dynamic documentary action'
+    }
+
+    let opening: string
+    if (isHealth) {
+      const cutawayType = isHighHook ? 'macro cutaway' : isMechanism ? 'detailed cutaway' : 'visualization'
+      opening = `Premium cinematic medical documentary ${cutawayType} of ${subject} ${action}`
+    } else {
+      opening = `${NICHE_OPENING[niche]} ${subject}, ${action}`
+    }
+
+    // 2. Visible change & Cause/Effect
+    const changeClause = sceneDirection.visualEvent?.change
+      ? `with ${cleanText(sceneDirection.visualEvent.change)}`
+      : ''
+    const causeClause = sceneDirection.visualEvent?.cause
+      ? `visibly triggered by ${cleanText(sceneDirection.visualEvent.cause)}`
+      : ''
+    const consequenceClause = sceneDirection.visualEvent?.consequence
+      ? `resulting in ${cleanText(sceneDirection.visualEvent.consequence)}`
+      : ''
+    const dynamics = [changeClause, causeClause, consequenceClause].filter(Boolean).join(', ')
+
+    // 3. Narrative comprehension & hook
+    const viewerNotice = cleanText(sceneDirection.viewerShouldNotice || narration)
+    const comprehensionClause = viewerNotice
+      ? `The viewer should immediately understand that ${truncateWords(viewerNotice, 16)}.`
+      : ''
+
+    // 4. Composition & Framing
+    const comp = sceneDirection.composition
+    const subjectFraming = isMechanism
+      ? 'with the main subject occupying roughly 60-70% of the useful frame'
+      : 'with strong central presence'
+    const compositionClause = `Composition: ${comp.shotType || 'close three-quarter view'}, ${subjectFraming}, ${comp.cameraAngle || 'eye level'}, ${comp.lensFeel || (isHealth ? '85mm medical-documentary lens' : '50mm prime lens')}, ${comp.focalPriority || 'precise focal priority'}.`
+
+    // 5. Depth, Foreground & Background
+    const fg = cleanText(comp.foreground) || 'dominant active subject'
+    const bg = cleanText(comp.background) || (isHealth ? 'controlled dark navy background with gentle biological volumetric depth' : NICHE_BACKGROUND[niche])
+    const depthClause = `Foreground: ${fg}. Background: ${bg}.`
+
+    // 6. Lighting & Color
+    const lighting = cleanText(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche])
+    const color = cleanText(sceneDirection.colorStrategy) || (isHealth ? 'deep navy blue with warm tissue highlights' : 'authentic documentary grade')
+    const lightClause = `Lighting and palette: ${lighting}, ${color}.`
+
+    // 7. Safety / Medical or Documentary realism
+    const realismClause = isHealth
+      ? 'Realistic internal tissue, plausible organ and vessel relationships, directional biological visual flow, medical documentary realism, no gore, no fake diagnostic results, no anatomical labels.'
+      : 'High-end cinematic documentary realism, natural candid behavior, believable real-world environment, balanced cinematic grade.'
+
+    // 8. Continuity
+    const continuityNote = cleanText(sceneDirection.continuityNote)
+    const continuityClause = continuityNote
+      ? `Continuity: ${continuityNote}.`
+      : ''
+
+    // 9. Negative Space & Text Overlay
+    let negativeSpaceClause = ''
+    let overlayDirective = ''
+    let overlayConstraint = ''
+
+    if (sceneDirection.textOverlay?.enabled && sceneDirection.textOverlay?.text) {
+      const pos = sceneDirection.textOverlay.position || 'top-right'
+      const posDesc = pos.replace('-', ' ')
+      negativeSpaceClause = `Reserve clean negative space in the ${posDesc} area.`
+      overlayDirective = `Render exactly one editorial text overlay reading "${sceneDirection.textOverlay.text}" in large bold clean sans-serif typography, positioned in the ${posDesc} negative-space area, high-contrast white lettering with one restrained accent colour, perfectly legible, exact spelling, no additional words.`
+      overlayConstraint = isHealth
+        ? `Only the exact specified editorial overlay text is permitted. No other text, no captions, no anatomical labels, no UI, no watermark, no logo.`
+        : `Only the exact specified editorial overlay text is permitted. No other text, no captions, no UI, no watermark, no logo.`
+    } else {
+      if (comp.negativeSpace) {
+        negativeSpaceClause = `Composition balance: ${cleanText(comp.negativeSpace)}.`
+      }
+      overlayConstraint = isHealth
+        ? `No text overlay, no subtitles, no anatomical labels, no UI, no watermark, no logo.`
+        : `No text overlay, no subtitles, no UI, no watermark, no logo.`
+    }
+
+    const frameClause = `16:9 horizontal frame (${dims}).`
+
+    const composeWithTarget = (includeDynamics: boolean, includeNotice: boolean, includeContinuity: boolean): string => {
+      const parts = [
+        `${opening}${dynamics && includeDynamics ? `, ${dynamics}` : ''}.`,
+        includeNotice ? comprehensionClause : '',
+        compositionClause,
+        depthClause,
+        lightClause,
+        realismClause,
+        includeContinuity ? continuityClause : '',
+        negativeSpaceClause,
+        overlayDirective,
+        overlayConstraint,
+        frameClause
+      ]
+      return sanitizePromptLine(parts.filter(Boolean).join(' '))
+    }
+
+    let prompt = composeWithTarget(true, true, true)
+    // Target: normal 130-200, high hook 160-230, hard max 260 words
+    if (countWords(prompt) > 250) prompt = composeWithTarget(true, true, false)
+    if (countWords(prompt) > 250) prompt = composeWithTarget(false, true, false)
+    if (countWords(prompt) > 250) prompt = composeWithTarget(false, false, false)
+    return prompt
+  }
+
+  // ─── Fallback Local Composer (when SceneDirection is absent) ────────────────
   const opening = isHealth ? 'Premium cinematic medical documentary still of' : NICHE_OPENING[niche]
-  const subject = truncateWords(intent || narration, 28)
-  const narrationIdea = truncateWords(narration || intent, 22)
+  let subject = truncateWords(intent || narration, 28)
+  const narrationIdea = truncateWords(narration || intent, 24)
 
   const shot = pickShot(groundingText, scene.sceneIndex)
   const timeOfDay = pickTimeOfDay(groundingText)
@@ -212,6 +387,11 @@ export function buildManualScenePrompt(params: ManualPromptParams): string {
   const background = isHealth
     ? 'clear foreground subject over a controlled dark navy gradient background with soft volumetric depth'
     : `clear foreground subject over a ${cleanText(worldEnv) || NICHE_BACKGROUND[niche]}`
+
+  // For health, make sure an active visible verb is present
+  if (isHealth && !/\b(filter|flow|fill|contract|narrow|expand|release|absorb|accumulat|separat|slow|accelerat|signal|respond|circulat|pump)\b/i.test(subject)) {
+    subject = `${subject}, actively demonstrating physiological biological processes`
+  }
 
   const styleCore = isHealth
     ? `${getHealthCategoryDetails((scene.category as HealthVisualCategory) || 'conceptual')}. ${HEALTH_SAFETY}`
@@ -235,7 +415,6 @@ export function buildManualScenePrompt(params: ManualPromptParams): string {
       ? `Continuity: ${continuityParts.join(' and ')}; keep the same palette and documentary look.`
       : ''
 
-  const dims = outputResolution === '4k' ? '3840x2160' : outputResolution === '2k' ? '2560x1440' : '1920x1080'
   const constraints = `16:9 horizontal frame (${dims}), photorealistic cinematic realism, no text, no subtitles, no labels, no watermark, no logo.`
 
   const compose = (narrationWords: number, withWorld: boolean, withContinuity: boolean): string => {
@@ -253,10 +432,10 @@ export function buildManualScenePrompt(params: ManualPromptParams): string {
     return sanitizePromptLine(parts.filter(Boolean).join(' '))
   }
 
-  // Keep roughly 80-180 words: shed the least valuable clauses first.
-  let prompt = compose(22, true, true)
-  if (countWords(prompt) > 180) prompt = compose(22, true, false)
-  if (countWords(prompt) > 180) prompt = compose(14, false, false)
+  // Target word count ~120-180 words, hard max 220 words
+  let prompt = compose(24, true, true)
+  if (countWords(prompt) > 200) prompt = compose(20, true, false)
+  if (countWords(prompt) > 200) prompt = compose(14, false, false)
   return prompt
 }
 
@@ -307,23 +486,48 @@ export function buildManualAiPromptPack(params: {
   profile: VisualMixProfile
   globalContext?: GlobalScriptContext
   outputResolution: AiImageOutputResolution
+  visualBrief?: ManualAiVisualBrief
+  sceneDirections?: Map<number, ManualAiSceneDirection> | ManualAiSceneDirection[]
   now?: Date
 }): ManualAiPromptPack {
-  const { plan, profile, globalContext, outputResolution } = params
+  const { plan, profile, globalContext, outputResolution, visualBrief, sceneDirections } = params
   const ordered = [...plan.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex)
   const entries: ManualAiPromptEntry[] = []
+
+  let directionsMap: Map<number, ManualAiSceneDirection> | undefined
+  if (sceneDirections) {
+    if (sceneDirections instanceof Map) {
+      directionsMap = sceneDirections
+    } else if (Array.isArray(sceneDirections)) {
+      directionsMap = new Map(sceneDirections.map((d) => [d.sceneIndex, d]))
+    }
+  }
 
   for (let i = 0; i < ordered.length; i++) {
     const scene = ordered[i]
     if (scene.strategy !== 'ai-still') continue
+
+    const sceneDirection = directionsMap?.get(scene.sceneIndex)
     const prompt = buildManualScenePrompt({
       scene,
       profile,
       globalContext,
       previousScene: ordered[i - 1],
       nextScene: ordered[i + 1],
-      outputResolution
+      outputResolution,
+      visualBrief,
+      sceneDirection
     })
+
+    const qualityScore = calculatePromptQualityScore({
+      prompt,
+      narration: scene.narration,
+      visualIntent: scene.visualIntent,
+      role: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      hasOverlay: sceneDirection?.textOverlay?.enabled
+    })
+
     entries.push({
       sceneIndex: scene.sceneIndex,
       sceneId: `scene_${scene.sceneIndex}`,
@@ -344,11 +548,40 @@ export function buildManualAiPromptPack(params: {
         outputResolution
       }),
       expectedFilename: expectedFilenameForScene(scene.sceneIndex),
-      status: 'waiting-image'
+      status: 'waiting-image',
+      sceneRole: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      visualEvent: sceneDirection?.visualEvent ? {
+        subject: sceneDirection.visualEvent.subject,
+        action: sceneDirection.visualEvent.action,
+        change: sceneDirection.visualEvent.change,
+        consequence: sceneDirection.visualEvent.consequence
+      } : undefined,
+      textOverlay: sceneDirection?.textOverlay ? {
+        enabled: sceneDirection.textOverlay.enabled,
+        text: sceneDirection.textOverlay.text,
+        purpose: sceneDirection.textOverlay.purpose,
+        position: sceneDirection.textOverlay.position,
+        emphasis: sceneDirection.textOverlay.emphasis,
+        reason: sceneDirection.textOverlay.reason
+      } : undefined,
+      directorSource: sceneDirection ? (sceneDirection.confidence > 0.8 ? 'ai' : 'fallback') : undefined,
+      directorConfidence: sceneDirection?.confidence,
+      qualityScore
     })
   }
 
   entries.sort((a, b) => a.sceneIndex - b.sceneIndex)
+
+  const totalPrompts = entries.length
+  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords(e.prompt), 0) / totalPrompts) : 0
+  const highHook = entries.filter((e) => e.hookLevel === 'high').length
+  const mediumHook = entries.filter((e) => e.hookLevel === 'medium').length
+  const lowHook = entries.filter((e) => e.hookLevel === 'low').length
+
+  logger.info(
+    `[ManualAI:Prompts] generated=${totalPrompts} avgWords=${avgWords} highHook=${highHook} mediumHook=${mediumHook} lowHook=${lowHook}`
+  )
 
   return {
     schemaVersion: MANUAL_AI_PROMPT_SCHEMA_VERSION,
@@ -452,11 +685,20 @@ export function ensureManualAiPromptPack(params: {
   profile: VisualMixProfile
   globalContext?: GlobalScriptContext
   outputResolution: AiImageOutputResolution
+  visualBrief?: ManualAiVisualBrief
+  sceneDirections?: Map<number, ManualAiSceneDirection> | ManualAiSceneDirection[]
 }): EnsurePromptPackResult {
   const t0 = Date.now()
-  const { projectDir, plan, profile, globalContext, outputResolution } = params
+  const { projectDir, plan, profile, globalContext, outputResolution, visualBrief, sceneDirections } = params
 
-  const fresh = buildManualAiPromptPack({ plan, profile, globalContext, outputResolution })
+  const fresh = buildManualAiPromptPack({
+    plan,
+    profile,
+    globalContext,
+    outputResolution,
+    visualBrief,
+    sceneDirections
+  })
   const persisted = loadManualAiPromptPack(projectDir)
 
   let merged = fresh

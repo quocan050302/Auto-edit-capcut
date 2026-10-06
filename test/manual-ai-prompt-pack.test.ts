@@ -9,6 +9,8 @@ import { VisualMixPlanner } from '../src/main/visual-mix/visual-mix-planner'
 import {
   assertManualAiPromptPack,
   buildManualAiPromptPack,
+  buildManualScenePrompt,
+  calculatePromptQualityScore,
   ensureManualAiPromptPack,
   formatManualAiPromptText,
   loadManualAiPromptPack,
@@ -215,6 +217,104 @@ async function main(): Promise<void> {
     assert.strictEqual(pack.scenes.length, 70)
     assertManualAiPromptPack(pack, plan70)
     assert.strictEqual(readJson(getManualAiPromptJsonPath(dir)).scenes.length, 70)
+  })
+
+  await it('overlay-enabled prompt contains exact phrase and permits only that text; overlay-disabled forbids all text', () => {
+    const dir = makeProject(4, { health: true })
+    const plan = planFor(dir, 1, 0, 'health')
+    const scene1 = plan.scenes[0]
+
+    // Scene with overlay enabled
+    const promptWithOverlay = buildManualScenePrompt({
+      scene: scene1,
+      profile: 'health',
+      outputResolution: '1080p',
+      sceneDirection: {
+        sceneIndex: scene1.sceneIndex,
+        sceneRole: 'mechanism',
+        hookLevel: 'high',
+        coreMeaning: 'kidneys actively filtering blood',
+        viewerShouldNotice: 'filtration pathway flow',
+        visualEvent: {
+          subject: 'human kidneys',
+          action: 'actively filtering arterial blood and separating waste',
+          change: 'waste descending toward ureters'
+        },
+        composition: {
+          shotType: 'close three-quarter cutaway',
+          cameraAngle: 'eye level',
+          lensFeel: '85mm medical-documentary lens',
+          focalPriority: 'dominant foreground organ',
+          foreground: 'human kidneys',
+          background: 'deep navy gradient'
+        },
+        lighting: 'cool rim light over dark navy',
+        colorStrategy: 'navy and biological crimson',
+        textOverlay: {
+          enabled: true,
+          text: 'BLADDER KEEPS FILLING',
+          position: 'top-right',
+          reason: 'Highlight nighttime filling process'
+        },
+        avoid: ['static textbook diagrams'],
+        confidence: 0.95
+      }
+    })
+
+    assert.ok(promptWithOverlay.includes('Render exactly one editorial text overlay reading "BLADDER KEEPS FILLING"'))
+    assert.ok(promptWithOverlay.includes('Only the exact specified editorial overlay text is permitted. No other text'))
+    assert.ok(!/\bno text\b/i.test(promptWithOverlay), 'Must not say generic "no text" when overlay is enabled')
+
+    // Scene with overlay disabled
+    const promptNoOverlay = buildManualScenePrompt({
+      scene: scene1,
+      profile: 'health',
+      outputResolution: '1080p',
+      sceneDirection: {
+        sceneIndex: scene1.sceneIndex,
+        sceneRole: 'setup',
+        hookLevel: 'low',
+        coreMeaning: 'quiet nighttime bedroom',
+        viewerShouldNotice: 'person asleep',
+        visualEvent: {
+          subject: 'person sleeping',
+          action: 'resting peacefully in dark bedroom'
+        },
+        composition: {
+          shotType: 'wide establishing shot',
+          cameraAngle: 'high angle',
+          lensFeel: '35mm lens',
+          focalPriority: 'sleeping subject',
+          foreground: 'bedside table',
+          background: 'dimly lit room'
+        },
+        lighting: 'cool moonlit ambience',
+        colorStrategy: 'deep blue and shadow',
+        textOverlay: {
+          enabled: false,
+          reason: 'Establishing scene'
+        },
+        avoid: ['bright lighting'],
+        confidence: 0.90
+      }
+    })
+
+    assert.ok(promptNoOverlay.includes('No text overlay, no subtitles, no anatomical labels'))
+    assert.ok(!promptNoOverlay.includes('Render exactly one editorial text overlay'))
+  })
+
+  await it('calculatePromptQualityScore scores grounding, visible events, and constraints', () => {
+    const prompt = 'Premium cinematic medical documentary cutaway of kidneys actively filtering arterial blood. Composition: close cutaway, 85mm lens. Lighting and palette: cool rim light. 16:9 horizontal frame (1920x1080). No text overlay, no watermark, no logo.'
+    const score = calculatePromptQualityScore({
+      prompt,
+      narration: 'Your kidneys continue filtering blood all night long.',
+      visualIntent: 'kidneys filtering blood',
+      role: 'mechanism',
+      hookLevel: 'high',
+      hasOverlay: false
+    })
+    assert.ok(score >= 70, `Score should be >= 70, got ${score}`)
+    assert.ok(score <= 100, `Score should be <= 100, got ${score}`)
   })
 
   cleanupFixtures()
