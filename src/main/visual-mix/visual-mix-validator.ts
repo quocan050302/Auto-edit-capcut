@@ -1,5 +1,6 @@
 import type {
   AiFailureBehavior,
+  AiImageMode,
   StockSceneAssignment,
   VisualMixConfig,
   VisualMixPlan
@@ -73,8 +74,15 @@ export function validateFinalVisualAssignments(params: {
   assignments: StockSceneAssignment[]
   config: Pick<VisualMixConfig, 'aiFailureBehavior'>
   approvedFallbackSceneIndices?: number[]
+  /**
+   * 'auto' (default): AI-owned scenes must be 'google-flow'.
+   * 'prompt': AI-owned scenes must be 'manual-ai' (never Stock, never silently Flow).
+   */
+  aiImageMode?: AiImageMode
 }): FinalAssignmentValidation {
   const behavior = resolveAiFailureBehavior(params.config)
+  const promptMode = params.aiImageMode === 'prompt'
+  const requiredAiProvider = promptMode ? 'manual-ai' : 'google-flow'
   const approved = new Set(params.approvedFallbackSceneIndices ?? [])
   const byScene = new Map<number, StockSceneAssignment>()
   for (const a of params.assignments) byScene.set(a.sceneIndex, a)
@@ -93,8 +101,10 @@ export function validateFinalVisualAssignments(params: {
         missingAi.push(scene.sceneIndex)
         continue
       }
-      if (provider !== 'google-flow') {
-        const fallbackApproved = behavior === 'stock-fallback' && approved.has(scene.sceneIndex)
+      if (provider !== requiredAiProvider) {
+        // Prompt mode is strict by default: a missing manual image never becomes Stock.
+        const fallbackApproved =
+          !promptMode && behavior === 'stock-fallback' && approved.has(scene.sceneIndex)
         if (!fallbackApproved) {
           violations.push({
             sceneIndex: scene.sceneIndex,
@@ -109,12 +119,15 @@ export function validateFinalVisualAssignments(params: {
         missingStock.push(scene.sceneIndex)
         continue
       }
-      if (provider === 'google-flow') {
+      if (provider === 'google-flow' || provider === 'manual-ai') {
         violations.push({
           sceneIndex: scene.sceneIndex,
           code: 'VISUAL_MIX_STOCK_OWNED_AI_ASSIGNMENT',
           provider,
-          message: `Scene ${scene.sceneIndex} is Stock-owned but assigned to a Google Flow image`
+          message:
+            provider === 'manual-ai'
+              ? `Scene ${scene.sceneIndex} is Stock-owned but assigned to a manual AI image`
+              : `Scene ${scene.sceneIndex} is Stock-owned but assigned to a Google Flow image`
         })
       }
     }

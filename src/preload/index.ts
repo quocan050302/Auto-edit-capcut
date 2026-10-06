@@ -36,7 +36,11 @@ import type {
   ThumbnailJobState,
   ThumbnailCandidate,
   ThumbnailPlan,
-  ThumbnailProgressPayload
+  ThumbnailProgressPayload,
+  ManualAiStatus,
+  ManualAiImportMapping,
+  ManualAiImportPlan,
+  ManualAiImportResult
 } from '../../shared/types'
 import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
@@ -414,6 +418,57 @@ const api = {
       ipcRenderer.on(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
       return () => {
         ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
+      }
+    }
+  },
+
+  manualAi: {
+    getStatus: (projectDir: string): Promise<ManualAiStatus | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_STATUS, { projectDir }),
+
+    getPromptText: (projectDir: string): Promise<{ success: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
+
+    exportTxt: (
+      projectDir: string
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, { projectDir }),
+
+    openPromptFile: (projectDir: string): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, { projectDir }),
+
+    selectImages: (
+      mode: 'files' | 'folder'
+    ): Promise<{ success: boolean; filePaths: string[]; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES, { mode }),
+
+    planImport: (params: {
+      projectDir: string
+      filePaths: string[]
+      replaceExisting?: boolean
+    }): Promise<{ success: boolean; plan?: ManualAiImportPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT, params),
+
+    commitImport: (params: {
+      projectDir: string
+      mappings: ManualAiImportMapping[]
+      replaceExisting?: boolean
+      allowLowResolution?: boolean
+    }): Promise<{ success: boolean; result?: ManualAiImportResult; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_COMMIT_IMPORT, params),
+
+    onStatusUpdated: (
+      callback: (payload: { projectDir: string; status: ManualAiStatus }) => void
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        payload: { projectDir: string; status: ManualAiStatus }
+      ): void => {
+        callback(payload)
+      }
+      ipcRenderer.on(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler)
+      return () => {
+        ipcRenderer.off(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler)
       }
     }
   },

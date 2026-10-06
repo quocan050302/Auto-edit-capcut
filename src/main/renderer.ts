@@ -31,6 +31,7 @@ import { runRenderPreflight } from './qa/render-preflight'
 import { runRenderPostflight } from './qa/render-postflight'
 import { buildHealthMotionFilter } from './health/health-motion'
 import type { HealthVisualScenePlan, HealthMotionPreset } from './health/health-visual-types'
+import { findMissingManualAiScenes } from './visual-mix/manual-ai/manual-ai-validator'
 
 // ffmpeg-static ships a pre-built ffmpeg binary
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -638,6 +639,17 @@ export async function renderVideo(params: {
       const fatalIssues = preflightReport.issues.filter((i) => i.severity === 'fatal')
       const msg = fatalIssues.map((i) => i.message).join('; ')
       throw new Error(`Render Preflight QA failed: ${msg}`)
+    }
+
+    // ── 3a-2. Manual AI (Prompt mode) guard ──────────────────────────────────
+    // The user chose to supply the AI images themselves. A missing image must STOP the render
+    // instead of silently becoming a black placeholder or Stock footage.
+    const missingManualAiScenes = findMissingManualAiScenes(projectDir)
+    if (missingManualAiScenes.length > 0) {
+      throw new Error(
+        `Manual AI images missing for scenes: ${missingManualAiScenes.join(', ')}. ` +
+          'Import the missing images (Production → Find Visuals → Import AI Images) before rendering.'
+      )
     }
 
     // ── 3b. Media Preflight ──────────────────────────────────────────────────

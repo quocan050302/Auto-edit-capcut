@@ -42,10 +42,16 @@ function providerBadge(provider: string): React.ReactElement {
     pexels: { bg: 'rgba(5, 193, 112, 0.15)', fg: '#05C170' },
     pixabay: { bg: 'rgba(43, 135, 217, 0.15)', fg: '#2B87D9' },
     'google-flow': { bg: 'rgba(139, 92, 246, 0.18)', fg: '#a78bfa' },
+    'manual-ai': { bg: 'rgba(236, 72, 153, 0.18)', fg: '#f472b6' },
     flow: { bg: 'rgba(139, 92, 246, 0.18)', fg: '#a78bfa' }
   }
   const c = colors[provider.toLowerCase()] ?? { bg: 'rgba(255,255,255,0.08)', fg: '#a0a0c0' }
-  const label = provider.toLowerCase() === 'google-flow' ? 'AI Still (Flow)' : provider
+  const label =
+    provider.toLowerCase() === 'google-flow'
+      ? 'AI Still (Flow)'
+      : provider.toLowerCase() === 'manual-ai'
+        ? 'AI Still (Manual)'
+        : provider
   return (
     <span
       style={{
@@ -692,7 +698,7 @@ function StoryboardSceneCard({
           </div>
 
           {sceneCandidates.length === 0 ? (
-            asset?.provider === 'google-flow' && asset.localPath ? (
+            (asset?.provider === 'google-flow' || asset?.provider === 'manual-ai') && asset.localPath ? (
               <div
                 style={{
                   display: 'flex',

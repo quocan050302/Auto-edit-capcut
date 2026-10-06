@@ -8,11 +8,13 @@ import type {
   VisualSourceMode,
   VisualMixConfig,
   AiImageOutputResolution,
-  AiFailureBehavior
+  AiFailureBehavior,
+  AiImageMode
 } from '../../../../shared/types'
 import {
   resolveVisualMixConfig,
   resolveContentProfileMode,
+  resolveAiImageMode,
   HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG,
   GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG
 } from '../../../../shared/types'
@@ -131,6 +133,8 @@ interface VisualSourceSectionProps {
   onSelectResolution?: (res: AiImageOutputResolution) => void
   aiFailureBehavior?: AiFailureBehavior
   onSelectFailureBehavior?: (behavior: AiFailureBehavior) => void
+  aiImageMode?: AiImageMode
+  onSelectAiImageMode?: (mode: AiImageMode) => void
   isAdvanced?: boolean
 }
 
@@ -147,6 +151,8 @@ function VisualSourceSection({
   onSelectResolution,
   aiFailureBehavior = 'strict',
   onSelectFailureBehavior,
+  aiImageMode = 'auto',
+  onSelectAiImageMode,
   isAdvanced
 }: VisualSourceSectionProps): React.ReactElement {
   const containerClass = isAdvanced ? 'panel' : 'setup-section'
@@ -276,7 +282,7 @@ function VisualSourceSection({
                     marginBottom: '4px'
                   }}
                 >
-                  AI Images (Google Flow)
+                  {aiImageMode === 'prompt' ? 'AI Images (Manual Prompts)' : 'AI Images (Google Flow)'}
                 </label>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <input
@@ -419,6 +425,60 @@ function VisualSourceSection({
               ))}
             </div>
 
+            {/* AI Image Mode: Auto (Google Flow) vs Prompt (manual import). Hidden when AI = 0%. */}
+            {currentAiPercent > 0 && (
+              <div
+                id={`ai-image-mode${idSuffix}`}
+                style={{ marginTop: '2px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}
+              >
+                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  AI Image Mode
+                </div>
+                <div className="content-type-grid">
+                  <button
+                    type="button"
+                    id={`ai-image-mode-auto${idSuffix}`}
+                    className={`content-type-card ${aiImageMode !== 'prompt' ? 'is-selected' : ''}`}
+                    onClick={() => onSelectAiImageMode?.('auto')}
+                    disabled={isRunning}
+                  >
+                    <div className="content-type-card__content">
+                      <div className="content-type-card__title">
+                        Auto
+                        {aiImageMode !== 'prompt' && (
+                          <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Selected</span>
+                        )}
+                      </div>
+                      <div className="content-type-card__subtitle">Generate AI images automatically</div>
+                      <div className="content-type-card__desc">
+                        Uses the current AI-image generation workflow (Google Flow).
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    id={`ai-image-mode-prompt${idSuffix}`}
+                    className={`content-type-card ${aiImageMode === 'prompt' ? 'is-selected' : ''}`}
+                    onClick={() => onSelectAiImageMode?.('prompt')}
+                    disabled={isRunning}
+                  >
+                    <div className="content-type-card__content">
+                      <div className="content-type-card__title">
+                        Prompt
+                        {aiImageMode === 'prompt' && (
+                          <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Selected</span>
+                        )}
+                      </div>
+                      <div className="content-type-card__subtitle">Generate prompts and import images manually</div>
+                      <div className="content-type-card__desc">
+                        Generate detailed prompts only. You create the images externally and import them back into the project.
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* AI Image Quality Selector (Section 12) */}
             <div style={{ marginTop: '2px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
               <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
@@ -454,7 +514,7 @@ function VisualSourceSection({
             </div>
 
             {/* AI Generation Failure handling (strict by default) */}
-            {currentAiPercent > 0 && (
+            {currentAiPercent > 0 && aiImageMode !== 'prompt' && (
               <details
                 id={`ai-failure-handling${idSuffix}`}
                 style={{ fontSize: '11px', color: 'var(--text-secondary)' }}
@@ -502,14 +562,28 @@ function VisualSourceSection({
                 </div>
               </details>
             )}
-            {currentAiPercent === 100 && aiFailureBehavior !== 'stock-fallback' && (
+            {currentAiPercent === 100 && aiImageMode !== 'prompt' && aiFailureBehavior !== 'stock-fallback' && (
               <div id={`ai-only-helper${idSuffix}`} style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                 100% AI mode — Stock fallback disabled by default.
               </div>
             )}
 
             {/* Google Flow status for Custom Mix */}
-            {currentAiPercent > 0 ? (
+            {currentAiPercent > 0 && aiImageMode === 'prompt' ? (
+              <div
+                id={`manual-prompt-mode-status${idSuffix}`}
+                style={{
+                  fontSize: '11px',
+                  color: 'var(--color-success, #10b981)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '2px'
+                }}
+              >
+                <span>● Manual Prompt Mode</span>
+                <span>✓ No Google Flow connection required</span>
+              </div>
+            ) : currentAiPercent > 0 ? (
               flowHealth.checking === false &&
               (flowHealth.reachable === false || flowHealth.extensionConnected === false) ? (
                 <div
@@ -588,6 +662,7 @@ export function InputPage({
   const isCustomMix = effectiveMix.mode === 'custom-mix'
   const currentAiPercent = Math.round(effectiveMix.aiImageRatio * 100)
   const currentStockPercent = 100 - currentAiPercent
+  const aiImageMode: AiImageMode = isCustomMix && currentAiPercent > 0 ? resolveAiImageMode(effectiveMix) : 'auto'
 
   // Flow health check for Custom Mix with AI ratio > 0
   const [flowHealth, setFlowHealth] = useState<{
@@ -600,7 +675,8 @@ export function InputPage({
   useEffect(() => {
     let cancelled = false
     const checkFlow = async (): Promise<void> => {
-      if (!isCustomMix || currentAiPercent <= 0) {
+      if (!isCustomMix || currentAiPercent <= 0 || aiImageMode === 'prompt') {
+        // Prompt mode never needs Google Flow: do not even probe FlowKit from Setup.
         setFlowHealth({ checking: false })
         return
       }
@@ -625,7 +701,7 @@ export function InputPage({
     return () => {
       cancelled = true
     }
-  }, [isCustomMix, currentAiPercent])
+  }, [isCustomMix, currentAiPercent, aiImageMode])
 
   async function handleSelectContentType(type: ContentType): Promise<void> {
     if (isRunning) return
@@ -657,6 +733,7 @@ export function InputPage({
       stockFootageRatio: stockRatio,
       imageOutputResolution: effectiveMix.imageOutputResolution,
       aiFailureBehavior: inputs.visualMixConfig?.aiFailureBehavior ?? 'strict',
+      aiImageMode: resolveAiImageMode(inputs.visualMixConfig),
       width: inputs.visualMixConfig?.width ?? 1920,
       height: inputs.visualMixConfig?.height ?? 1080,
       motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
@@ -675,6 +752,17 @@ export function InputPage({
     const nextConfig: VisualMixConfig = {
       ...effectiveMix,
       aiFailureBehavior: behavior
+    }
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSelectAiImageMode(mode: AiImageMode): Promise<void> {
+    if (isRunning) return
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      aiImageMode: mode
     }
     await onUpdateInputs({
       visualMixConfig: nextConfig
@@ -944,6 +1032,8 @@ export function InputPage({
           onSelectResolution={handleSelectResolution}
           aiFailureBehavior={effectiveMix.aiFailureBehavior}
           onSelectFailureBehavior={handleSelectFailureBehavior}
+          aiImageMode={aiImageMode}
+          onSelectAiImageMode={handleSelectAiImageMode}
           isAdvanced={false}
         />
 
@@ -1419,6 +1509,8 @@ export function InputPage({
         onSelectResolution={handleSelectResolution}
         aiFailureBehavior={effectiveMix.aiFailureBehavior}
         onSelectFailureBehavior={handleSelectFailureBehavior}
+        aiImageMode={aiImageMode}
+        onSelectAiImageMode={handleSelectAiImageMode}
         isAdvanced={true}
       />
 

@@ -6,6 +6,7 @@ import { StatusBanner } from './StatusBanner'
 import { PipelineTimeline } from './PipelineTimeline'
 import { LivePipelineInspector } from './LivePipelineInspector'
 import { getPageForPipelineStage } from '../navigation/pipelineStageNavigation'
+import { ManualAiPromptPanel } from './ManualAiPromptPanel'
 
 export interface ClientPipelineDashboardProps {
   project: ProjectState
@@ -616,6 +617,9 @@ export function ClientPipelineDashboard({
           </button>
         </div>
       </div>
+
+      {/* Prompt mode: prompt pack + manual AI image import (renders nothing in Auto / Default) */}
+      <ManualAiPromptPanel project={project} pipelineState={pipelineState} />
 
       {/* Production Intelligence: Visual Match & Evidence Coverage (Client Mode) */}
       {(visualTruthSummary.hasData || (claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0)) && (

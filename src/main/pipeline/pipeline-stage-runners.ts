@@ -16,6 +16,7 @@ import { renderVideo } from '../renderer'
 import { runHealthVisualEngine } from '../health/health-visual-engine'
 import { HealthSfxDirector, SfxDirectorSceneInput } from '../health/health-sfx-director'
 import type { HealthSfxCuePlan } from '../health/health-visual-types'
+import type { ManualAiWaitInfo } from '../../../shared/types'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
 import {
   isTranscriptionValid,
@@ -38,7 +39,16 @@ import type {
   RenderQaReport
 } from './pipeline-types'
 
-export type StageProgressCallback = (message: string, progress: number) => void
+/** Optional structured metadata attached to a progress event (null clears it). */
+export interface StageProgressMeta {
+  manualAiWait?: ManualAiWaitInfo | null
+}
+
+export type StageProgressCallback = (
+  message: string,
+  progress: number,
+  meta?: StageProgressMeta
+) => void
 
 export interface StageRunResult<T = unknown> {
   success: boolean

@@ -48,7 +48,7 @@ export function detectVisualNiche(
 
 export const detectNicheFromText = detectVisualNiche
 
-const NICHE_STYLE_DIRECTIVES: Record<GeneralVisualNiche, string> = {
+export const NICHE_STYLE_DIRECTIVES: Record<GeneralVisualNiche, string> = {
   history:
     'cinematic historical reconstruction, authentic period detail, natural dramatic documentary lighting, grounded atmosphere, archival richness',
   finance:

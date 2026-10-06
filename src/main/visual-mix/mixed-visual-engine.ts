@@ -10,8 +10,11 @@ import { runStockEngine } from '../stock/stock-engine'
 import { flowkitRuntimeManager } from '../thumbnail/flowkit-runtime-manager'
 import { googleFlowClient } from '../thumbnail/google-flow-client'
 import type {
+  AiImageMode,
   AiVisualFailureStage,
   AutoPipelineOptions,
+  ManualAiStatus,
+  ManualAiWaitInfo,
   StockSceneAssignment,
   StockAsset,
   StockRunParams,
@@ -21,6 +24,7 @@ import type {
   VisualMixScenePlan,
   GlobalScriptContext
 } from '../../../shared/types'
+import { resolveAiImageMode } from '../../../shared/types'
 import type { StageRunResult, StageProgressCallback } from '../pipeline/pipeline-stage-runners'
 import { VisualMixPlanner } from './visual-mix-planner'
 import { FlowImagePool, flowImagePool, GenerationPoolItem } from './flow-image-pool'
@@ -31,6 +35,16 @@ import {
   resolveAiFailureBehavior,
   validateFinalVisualAssignments
 } from './visual-mix-validator'
+import { ensureManualAiPromptPack } from './manual-ai/manual-ai-prompt-pack'
+import { manualAiAssetGate } from './manual-ai/manual-ai-gate'
+import {
+  buildManualAiWaitInfo,
+  countReadyStock,
+  describeManualAiWait,
+  filterPendingStockScenes,
+  syncManualAiAssignments
+} from './manual-ai/manual-ai-branch'
+import type { ManualAiPromptPack } from './manual-ai/manual-ai-types'
 
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -47,6 +61,8 @@ export interface MixedVisualEngineDeps {
   ) => Promise<StockRunResult>
   /** Skip the FlowKit/Google Flow readiness probe (tests with a mocked flow pool). */
   skipFlowReadiness?: boolean
+  /** Safety-net poll interval of the manual AI gate (Prompt mode). Default 3s; tests use small values. */
+  manualAiPollMs?: number
 }
 
 export interface MixedVisualEngineParams {
@@ -80,6 +96,9 @@ export async function runMixedVisualEngine(
   const failureBehavior = resolveAiFailureBehavior(mix)
   const requestedAiPercent = Math.round(mix.aiImageRatio * 100)
   const requestedStockPercent = Math.round(mix.stockFootageRatio * 100)
+  // Prompt mode only exists when there is an AI share; 0% AI always behaves like Auto (no AI work).
+  const aiImageMode: AiImageMode = targetAiRatio > 0 ? resolveAiImageMode(mix) : 'auto'
+  const promptMode = aiImageMode === 'prompt'
 
   // 1. Snapshot Visual Input
   const analysisDir = path.join(projectDir, 'analysis')
@@ -120,7 +139,11 @@ export async function runMixedVisualEngine(
   }
 
   // 3. Google Flow readiness check: ONLY if AI ratio > 0
-  if (targetAiRatio > 0 && !deps?.skipFlowReadiness) {
+  // Prompt mode NEVER touches FlowKit / Google Flow for scene visuals.
+  if (promptMode) {
+    logger.info('[ManualAI] Prompt mode active (Google Flow is not used for scene visuals)')
+  }
+  if (targetAiRatio > 0 && !promptMode && !deps?.skipFlowReadiness) {
     onProgress('Checking Google Flow readiness...', 0.02)
     try {
       const bridgeUrl = googleFlowClient.getBridgeUrl()
@@ -222,6 +245,7 @@ export async function runMixedVisualEngine(
     profileMode: options.contentProfileMode || 'auto',
     resolvedProfile: profile,
     contentType: profile,
+    aiImageMode,
     totalScenes
   }
   fs.writeFileSync(
@@ -240,21 +264,43 @@ export async function runMixedVisualEngine(
     `[VisualMixOwnership] aiSceneIndices=${aiScenes.length} stockSceneIndices=${stockSceneIndices.length}`
   )
 
+  // 5b. Prompt mode: build (or reuse) the persisted prompt pack for EXACTLY the AI-owned scenes
+  // BEFORE any branch starts, so the user can start generating images immediately.
+  let manualPack: ManualAiPromptPack | null = null
+  let promptGenerationMs = 0
+  if (promptMode) {
+    logger.info(`[ManualAI] AI-owned scenes=${aiScenes.length}`)
+    onProgress('Generating AI image prompts...', 0.08)
+    const ensured = ensureManualAiPromptPack({
+      projectDir,
+      plan,
+      profile,
+      globalContext,
+      outputResolution: mix.imageOutputResolution || '1080p'
+    })
+    manualPack = ensured.pack
+    promptGenerationMs = ensured.generationMs
+    logger.info(
+      `[ManualAI] Prompt pack ${ensured.reused ? 'reused' : 'generated'}: ${manualPack.scenes.length} prompts (${promptGenerationMs}ms)`
+    )
+  }
+
   // 6. Initialize VisualAssignmentStore (single serialized writer of stock-assignments.json)
   const store = new VisualAssignmentStore(projectDir)
 
   // Reconcile assignments against the CURRENT plan. The plan is authoritative: stale assignments
   // from previous runs with a different mix must never stay active. Files stay on disk (cache),
   // but unused cached file != active assignment.
+  const requiredAiProvider = promptMode ? 'manual-ai' : 'google-flow'
   for (const s of initialStockScenes) {
     const existing = store.get(s.sceneIndex)
-    if (existing?.asset?.provider === 'google-flow') {
+    if (existing?.asset?.provider === 'google-flow' || existing?.asset?.provider === 'manual-ai') {
       store.delete(s.sceneIndex)
     }
   }
   for (const s of aiScenes) {
     const existing = store.get(s.sceneIndex)
-    if (existing && existing.asset?.provider !== 'google-flow') {
+    if (existing && existing.asset?.provider !== requiredAiProvider) {
       logger.info(
         `[VisualMixReconcile] scene=${s.sceneIndex} is AI-owned; deactivating stale ${existing.asset?.provider ?? 'unknown'} assignment`
       )
@@ -474,6 +520,15 @@ export async function runMixedVisualEngine(
 
     const stockProgressBridge: StageProgressCallback = (msg, pct) => {
       checkAborted(signal)
+      if (promptMode && !isFallback) {
+        const info = currentWaitInfo()
+        if (info) {
+          onProgress(`${describeManualAiWait(info)} · Stock: ${msg}`, combinedProgress(info), {
+            manualAiWait: info
+          })
+          return
+        }
+      }
       onProgress(msg, 0.55 + pct * 0.40)
     }
 
@@ -532,8 +587,123 @@ export async function runMixedVisualEngine(
     return { assigned: sinkAssigned, failed: sinkFailed }
   }
 
+  // ─── Prompt mode: Branch A = prompt pack + manual image gate (no FlowKit, no Flow calls) ───
+  let lastManualStatus: ManualAiStatus | null = null
+  let manualWaitMs = 0
+  let manualReadyAtStart = 0
+  let stockCompletedWhileWaiting = false
+
+  function currentWaitInfo(): ManualAiWaitInfo | null {
+    if (!lastManualStatus) return null
+    return buildManualAiWaitInfo({
+      status: lastManualStatus,
+      stockExpected: initialStockScenes.length,
+      stockReady: countReadyStock(store, initialStockScenes)
+    })
+  }
+
+  function combinedProgress(info: ManualAiWaitInfo): number {
+    const total = info.expected + info.stockExpected
+    const done = info.ready + info.stockReady
+    return 0.1 + (total > 0 ? done / total : 1) * 0.85
+  }
+
+  const publishWait = (): void => {
+    const info = currentWaitInfo()
+    if (!info) return
+    const finished = info.ready >= info.expected && info.stockReady >= info.stockExpected
+    onProgress(describeManualAiWait(info), combinedProgress(info), {
+      manualAiWait: finished ? null : info
+    })
+  }
+
+  const runManualAiBranch = async (gateSignal: AbortSignal): Promise<void> => {
+    const pack = manualPack as ManualAiPromptPack
+    const t0 = Date.now()
+    const evaluateAndSync = async (): Promise<ManualAiStatus> => {
+      const res = await syncManualAiAssignments({
+        projectDir,
+        pack,
+        aiScenes,
+        store,
+        isHealth
+      })
+      lastManualStatus = res.status
+      return res.status
+    }
+
+    const first = await evaluateAndSync()
+    manualReadyAtStart = first.ready
+    logger.info(
+      `[ManualAI] Waiting for ${first.expected - first.ready} images (ready ${first.ready}/${first.expected})`
+    )
+    publishWait()
+
+    let lastLoggedReady = first.ready
+    await manualAiAssetGate.waitUntilReady({
+      projectDir,
+      signal: gateSignal,
+      pollIntervalMs: deps?.manualAiPollMs,
+      isReady: async () => (await evaluateAndSync()).allReady,
+      onEvaluate: () => {
+        if (lastManualStatus && lastManualStatus.ready !== lastLoggedReady) {
+          lastLoggedReady = lastManualStatus.ready
+          logger.info(`[ManualAI] Ready ${lastManualStatus.ready}/${lastManualStatus.expected}`)
+        }
+        publishWait()
+      }
+    })
+    manualWaitMs = Date.now() - t0
+    logger.info(`[ManualAI] All ${pack.scenes.length} images ready`)
+  }
+
   // Launch AI and Stock branches in parallel
-  const [aiRes] = await Promise.all([runAiBranch(), runStockBranch(stockSceneIndices, false)])
+  let aiRes: Awaited<ReturnType<typeof runAiBranch>>
+  if (promptMode) {
+    // Prompt mode is strict: ONLY Stock-owned scenes that are not already cached reach the Stock
+    // engine. AI-owned scenes wait for manual images and are never replaced by footage.
+    const pendingStock = filterPendingStockScenes(store, initialStockScenes)
+    const stockTargets = pendingStock.map((s) => s.sceneIndex)
+    logger.info(
+      `[ManualAI] Stock-owned scenes=${initialStockScenes.length} cached=${initialStockScenes.length - pendingStock.length} pending=${stockTargets.length}`
+    )
+
+    const gateAbort = new AbortController()
+    const forwardAbort = (): void => gateAbort.abort()
+    signal?.addEventListener('abort', forwardAbort, { once: true })
+    try {
+      await Promise.all([
+        runManualAiBranch(gateAbort.signal),
+        runStockBranch(stockTargets, false).then(() => {
+          const info = currentWaitInfo()
+          if (info && info.ready < info.expected) {
+            stockCompletedWhileWaiting = true
+            logger.info(
+              `[ManualAI] Stock branch ${info.stockReady}/${info.stockExpected} completed while waiting`
+            )
+          }
+          publishWait()
+        })
+      ])
+    } finally {
+      // Never leave the gate subscribed (e.g. when the Stock branch throws or the user cancels).
+      gateAbort.abort()
+      signal?.removeEventListener('abort', forwardAbort)
+    }
+    aiBranchTimeMs = manualWaitMs
+    aiRes = {
+      newlyGenerated: 0,
+      cached: manualReadyAtStart,
+      failedScenes: [],
+      failures: [],
+      totalGenMs: 0,
+      totalExpMs: 0,
+      totalNormMs: 0
+    }
+    logger.info('[ManualAI] Resuming pipeline')
+  } else {
+    ;[aiRes] = await Promise.all([runAiBranch(), runStockBranch(stockSceneIndices, false)])
+  }
 
   checkAborted(signal)
 
@@ -596,7 +766,8 @@ export async function runMixedVisualEngine(
     plan,
     assignments: store.getAll(),
     config: mix,
-    approvedFallbackSceneIndices: approvedFallbackIndices
+    approvedFallbackSceneIndices: approvedFallbackIndices,
+    aiImageMode
   })
 
   const completion = checkVisualCompletion(projectDir)
@@ -605,6 +776,7 @@ export async function runMixedVisualEngine(
   let completedAiCount = 0
   let completedStockCount = 0
   let googleFlowCount = 0
+  let manualAiCount = 0
   let pexelsCount = 0
   let pixabayCount = 0
   let localCount = 0
@@ -616,6 +788,9 @@ export async function runMixedVisualEngine(
     if (provider === 'google-flow') {
       completedAiCount++
       googleFlowCount++
+    } else if (provider === 'manual-ai') {
+      completedAiCount++
+      manualAiCount++
     } else if (provider === 'pexels') {
       completedStockCount++
       pexelsCount++
@@ -641,7 +816,7 @@ export async function runMixedVisualEngine(
 
   // 10. Write visual-performance-report.json
   let flowThrottleInfo = { maxConcurrent: 1, minIntervalS: 3, cooldownActive: false }
-  if (!deps?.skipFlowReadiness && aiScenes.length > 0) {
+  if (!deps?.skipFlowReadiness && !promptMode && aiScenes.length > 0) {
     try {
       const t = await googleFlowClient.getFlowThrottle()
       flowThrottleInfo = {
@@ -658,6 +833,7 @@ export async function runMixedVisualEngine(
     aiRes.failures.filter((f) => f.stage === stage).length
 
   const perfReport = {
+    aiImageMode,
     resolvedProfile: profile,
     failureBehavior,
     requestedRatio: { ai: requestedAiPercent, stock: requestedStockPercent },
@@ -671,6 +847,7 @@ export async function runMixedVisualEngine(
     finalRatio: { ai: completedAiCount, stock: completedStockCount },
     providerCounts: {
       googleFlow: googleFlowCount,
+      manualAi: manualAiCount,
       pexels: pexelsCount,
       pixabay: pixabayCount,
       local: localCount
@@ -702,7 +879,23 @@ export async function runMixedVisualEngine(
       totalAiExportTimeMs: aiRes.totalExpMs,
       totalAiNormalizationTimeMs: aiRes.totalNormMs
     },
-    flowThrottleSettings: flowThrottleInfo
+    flowThrottleSettings: flowThrottleInfo,
+    ...(promptMode
+      ? {
+          manualAi: {
+            aiImageMode,
+            promptCount: manualPack?.scenes.length ?? 0,
+            promptGenerationMs,
+            manualExpected: aiScenes.length,
+            manualImported: manualAiCount,
+            // Human wait time (NOT compute): time spent waiting for the user's manual images.
+            manualWaitDurationMs: manualWaitMs,
+            stockSceneCount: initialStockScenes.length,
+            stockAcquisitionMs: stockBranchTimeMs,
+            stockCompletedWhileWaiting
+          }
+        }
+      : {})
   }
   fs.writeFileSync(
     path.join(analysisDir, 'visual-performance-report.json'),
@@ -748,7 +941,9 @@ export async function runMixedVisualEngine(
 
   if (needsAttention) {
     let errorMsg: string
-    if (failedAiFinal.length > 0 && failureBehavior === 'strict') {
+    if (promptMode && failedAiFinal.length > 0) {
+      errorMsg = `Manual AI images missing for scenes: ${failedAiFinal.join(', ')}. Import the missing images and run production again.`
+    } else if (failedAiFinal.length > 0 && failureBehavior === 'strict') {
       const disconnected = aiRes.failures.some((f) => /FLOW_EXTENSION_DISCONNECTED/.test(f.reason))
       const head = disconnected
         ? 'Google Flow disconnected while generating AI visuals. Stock fallback is disabled because selected mix is strict. Completed AI images are preserved.'
@@ -775,7 +970,7 @@ export async function runMixedVisualEngine(
 
   const completionMsg = `${isHealth ? 'Health' : 'Mixed'} visuals completed — ${completion.totalScenes}/${completion.totalScenes} scenes ready · ${completedAiCount} AI stills · ${completedStockCount} stock`
   logger.info(`[MixedVisualEngine] ${completionMsg}`)
-  onProgress(completionMsg, 1.0)
+  onProgress(completionMsg, 1.0, promptMode ? { manualAiWait: null } : undefined)
 
   return {
     success: true,

@@ -7,7 +7,7 @@ import {
   PIPELINE_SCHEMA_VERSION,
   PIPELINE_EXECUTION_STAGES
 } from './pipeline-types'
-import { resolveVisualMixConfig, resolveContentProfileMode } from '../../../shared/types'
+import { resolveVisualMixConfig, resolveContentProfileMode, resolveAiImageMode } from '../../../shared/types'
 import type {
   AutoPipelineState,
   AutoPipelineOptions,
@@ -485,14 +485,25 @@ export function determineInvalidatedStages(
     contentType: newContentType
   }) : undefined
 
-  const oldVisualConfigStr = JSON.stringify(oldState.options.visualMixConfig ?? oldState.options.healthVisualConfig)
-  const newVisualConfigStr = JSON.stringify(newOptions.visualMixConfig ?? newOptions.healthVisualConfig)
+  // 'auto' is the default: strip it so projects saved before AI Image Mode existed compare equal.
+  const stripDefaultAiMode = (cfg: unknown): unknown => {
+    if (!cfg || typeof cfg !== 'object' || !('aiImageMode' in (cfg as object))) return cfg
+    const { aiImageMode, ...rest } = cfg as { aiImageMode?: string }
+    return aiImageMode === 'prompt' ? { ...rest, aiImageMode } : rest
+  }
+  const oldVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
+  )
+  const newVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
+  )
   const visualConfigChanged =
     oldVisualConfigStr !== newVisualConfigStr ||
     oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio ||
     oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio ||
     oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution ||
-    oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior
+    oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior ||
+    resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig)
 
   if (visualConfigChanged) {
     invalidated.add('stock-search')

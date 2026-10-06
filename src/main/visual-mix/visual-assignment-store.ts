@@ -3,6 +3,12 @@ import * as path from 'path'
 import { logger } from '../logger'
 import type { StockSceneAssignment } from '../../../shared/types'
 
+const AI_PROVIDERS = new Set(['google-flow', 'manual-ai'])
+
+function isAiProvider(provider: string | undefined): boolean {
+  return !!provider && AI_PROVIDERS.has(provider)
+}
+
 /**
  * Concurrency-safe, atomic Visual Assignment Store (Section 28 & 29).
  * Manages the unified visual assignments (AI stills + stock footage)
@@ -59,13 +65,13 @@ export class VisualAssignmentStore {
     const existing = this.assignments.get(sceneIndex)
 
     if (
-      (isStockCaller || (assignment.asset && assignment.asset.provider !== 'google-flow')) &&
-      existing?.asset?.provider === 'google-flow' &&
-      existing.status === 'assigned'
+      (isStockCaller || (assignment.asset && !isAiProvider(assignment.asset.provider))) &&
+      isAiProvider(existing?.asset?.provider) &&
+      existing?.status === 'assigned'
     ) {
-      if (existing.asset.localPath && fs.existsSync(existing.asset.localPath)) {
+      if (existing.asset?.localPath && fs.existsSync(existing.asset.localPath)) {
         logger.info(
-          `[VisualAssignmentStore] Preserving valid Google Flow AI assignment for scene ${sceneIndex} against stock overwrite.`
+          `[VisualAssignmentStore] Preserving valid ${existing.asset.provider} AI assignment for scene ${sceneIndex} against stock overwrite.`
         )
         return false
       }

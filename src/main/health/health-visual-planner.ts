@@ -133,7 +133,7 @@ export function classifySceneSemantics(
 
 // ─── Prompt Builder ──────────────────────────────────────────────────────────
 
-const BASE_MEDICAL_STYLE =
+export const BASE_MEDICAL_STYLE =
   'Premium cinematic medical documentary visualization, clean professional educational composition, scientifically plausible human anatomy, clear focal subject, high visual clarity, controlled dark navy / neutral background, realistic dimensional lighting, high detail, 16:9 horizontal composition, no text, no labels, no watermark, no logo.'
 
 export function buildHealthImagePrompt(
@@ -151,6 +151,13 @@ export function buildHealthImagePrompt(
     cleanedSubject = cleanedSubject.slice(0, 200).trim()
   }
 
+  const specificDetails = getHealthCategoryDetails(category)
+
+  return `${cleanedSubject}, ${specificDetails}, ${BASE_MEDICAL_STYLE}`
+}
+
+/** Category-specific wording shared by the automatic prompt builder and the manual prompt pack. */
+export function getHealthCategoryDetails(category: HealthVisualCategory): string {
   let specificDetails = ''
   switch (category) {
     case 'anatomy':
@@ -171,7 +178,7 @@ export function buildHealthImagePrompt(
       break
   }
 
-  return `${cleanedSubject}, ${specificDetails}, ${BASE_MEDICAL_STYLE}`
+  return specificDetails
 }
 
 export function pickMotionPreset(

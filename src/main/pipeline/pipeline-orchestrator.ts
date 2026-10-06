@@ -52,7 +52,8 @@ import {
   runPreflightStage,
   runRenderStage,
   runPostflightStage,
-  type StageRunResult
+  type StageRunResult,
+  type StageProgressMeta
 } from './pipeline-stage-runners'
 
 interface ActivePipelineInstance {
@@ -783,7 +784,11 @@ class PipelineOrchestrator {
         const stageStartTime = Date.now()
 
         // Progress callback với guard chống ghi đè late progress event
-        const onProgress = (message: string, progress: number): void => {
+        const onProgress = (
+          message: string,
+          progress: number,
+          meta?: StageProgressMeta
+        ): void => {
           if (signal.aborted) return
           // Late event guard: bỏ qua nếu stage đã hoàn tất hoặc runId đã thay đổi
           if (state.runId !== currentRunId || state.stages[stage]?.status === 'completed') {
@@ -792,6 +797,10 @@ class PipelineOrchestrator {
           }
           state.stages[stage].message = message
           state.stages[stage].progress = Math.min(Math.max(progress, 0), 1)
+          if (meta && 'manualAiWait' in meta) {
+            if (meta.manualAiWait) state.stages[stage].manualAiWait = meta.manualAiWait
+            else delete state.stages[stage].manualAiWait
+          }
           state.version = (state.version ?? 0) + 1
           state.updatedAt = new Date().toISOString()
           if (state.lease) {
@@ -858,6 +867,7 @@ class PipelineOrchestrator {
         }
 
         // Xử lý kết quả stage
+        if (state.stages[stage]) delete state.stages[stage].manualAiWait
         if (stageResult.needsAttention) {
           logger.warn(`[Pipeline] Stage ${stage} requires user attention: ${stageResult.error}`)
           state.stages[stage].status = 'warning'

@@ -134,6 +134,19 @@ export type AiImageOutputResolution = '1080p' | '2k' | '4k'
  */
 export type AiFailureBehavior = 'strict' | 'stock-fallback'
 
+/**
+ * How the AI-image portion of Custom Mix is acquired.
+ * - 'auto' (default): generate AI stills automatically through Google Flow / FlowKit.
+ * - 'prompt': generate detailed per-scene prompts only; the user creates the images
+ *   externally and imports them back. FlowKit is never contacted for scene visuals.
+ */
+export type AiImageMode = 'auto' | 'prompt'
+
+/** Old projects without the property resolve to 'auto'. */
+export function resolveAiImageMode(config?: { aiImageMode?: AiImageMode } | null): AiImageMode {
+  return config?.aiImageMode === 'prompt' ? 'prompt' : 'auto'
+}
+
 export type AiVisualFailureStage =
   | 'generation'
   | 'export'
@@ -148,6 +161,8 @@ export interface VisualMixConfig {
   imageOutputResolution: AiImageOutputResolution
   /** Defaults to 'strict' when missing (old projects never opt into Stock fallback implicitly). */
   aiFailureBehavior?: AiFailureBehavior
+  /** Defaults to 'auto' when missing (old projects keep generating AI images automatically). */
+  aiImageMode?: AiImageMode
   motionEnabled: boolean
   requestedGenerationConcurrency: number
   exportConcurrency: number
@@ -313,6 +328,7 @@ export function normalizeVisualMixConfig(
     stockFootageRatio: stockRatio,
     imageOutputResolution,
     aiFailureBehavior: config?.aiFailureBehavior === 'stock-fallback' ? 'stock-fallback' : 'strict',
+    aiImageMode: resolveAiImageMode(config),
     motionEnabled: config?.motionEnabled ?? true,
     requestedGenerationConcurrency,
     exportConcurrency,
@@ -382,6 +398,101 @@ export function resolveVisualMixConfig(options?: {
   }
 
   return { ...DEFAULT_VISUAL_MIX_CONFIG }
+}
+
+// ─── Manual AI Image (Prompt mode) shared types ──────────────────────────────
+
+export type ManualAiSceneStatus = 'waiting-image' | 'ready' | 'stale' | 'low-resolution'
+
+export interface ManualAiSceneRow {
+  sceneIndex: number
+  sceneId: string
+  prompt: string
+  promptHash: string
+  expectedFilename: string
+  status: ManualAiSceneStatus
+  localPath?: string
+  width?: number
+  height?: number
+  importedAt?: string
+}
+
+export interface ManualAiStatus {
+  imageMode: AiImageMode
+  hasPromptPack: boolean
+  profile?: VisualMixProfile
+  outputResolution?: AiImageOutputResolution
+  promptFilePath?: string
+  expected: number
+  ready: number
+  missingSceneIndices: number[]
+  /** Scenes whose imported image no longer matches the current prompt (narration changed). */
+  staleSceneIndices: number[]
+  lowResolutionSceneIndices: number[]
+  allReady: boolean
+  rows: ManualAiSceneRow[]
+}
+
+/** Live wait metadata attached to the running stock-search stage. */
+export interface ManualAiWaitInfo {
+  expected: number
+  ready: number
+  missingSceneIndices: number[]
+  promptFilePath: string
+  stockExpected: number
+  stockReady: number
+}
+
+export type ManualAiRejectionCode =
+  | 'NO_PROMPT_PACK'
+  | 'UNSUPPORTED_TYPE'
+  | 'UNREADABLE'
+  | 'NO_SCENE_NUMBER'
+  | 'UNKNOWN_SCENE'
+  | 'NOT_AI_OWNED'
+  | 'DUPLICATE_SCENE'
+  | 'ALREADY_IMPORTED'
+  | 'LOW_RESOLUTION'
+  | 'NORMALIZE_FAILED'
+
+export interface ManualAiImportMapping {
+  filePath: string
+  fileName: string
+  sceneIndex: number
+  via: 'filename' | 'natural-sort'
+}
+
+export interface ManualAiImportRejection {
+  filePath: string
+  fileName: string
+  sceneIndex?: number
+  code: ManualAiRejectionCode
+  message: string
+  width?: number
+  height?: number
+}
+
+export interface ManualAiImportPlan {
+  mappings: ManualAiImportMapping[]
+  rejections: ManualAiImportRejection[]
+  /** True when the mapping was guessed (natural-sort) and must be confirmed by the user. */
+  needsConfirmation: boolean
+  missingCount: number
+}
+
+export interface ManualAiImportedItem {
+  sceneIndex: number
+  fileName: string
+  localPath: string
+  width: number
+  height: number
+  warnings: string[]
+}
+
+export interface ManualAiImportResult {
+  imported: ManualAiImportedItem[]
+  rejections: ManualAiImportRejection[]
+  status: ManualAiStatus
 }
 
 export interface ProjectInputs {
@@ -619,7 +730,7 @@ export interface ContextScoreBreakdown {
 
 // ─── Stock Media Types ────────────────────────────────────────────────────────
 
-export type StockProvider = 'pexels' | 'pixabay' | 'google-flow'
+export type StockProvider = 'pexels' | 'pixabay' | 'google-flow' | 'manual-ai'
 export type StockMediaType = 'video' | 'photo'
 
 /** A single candidate returned from a stock media API search */
@@ -1317,6 +1428,16 @@ export const IPC_CHANNELS = {
   PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
   PIPELINE_RECOVER: 'pipeline:recover',
 
+  // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
+  MANUAL_AI_GET_STATUS: 'manual-ai:get-status',
+  MANUAL_AI_GET_PROMPT_TEXT: 'manual-ai:get-prompt-text',
+  MANUAL_AI_EXPORT_TXT: 'manual-ai:export-txt',
+  MANUAL_AI_OPEN_PROMPT_FILE: 'manual-ai:open-prompt-file',
+  MANUAL_AI_SELECT_IMAGES: 'manual-ai:select-images',
+  MANUAL_AI_PLAN_IMPORT: 'manual-ai:plan-import',
+  MANUAL_AI_COMMIT_IMPORT: 'manual-ai:commit-import',
+  MANUAL_AI_STATUS_UPDATED: 'manual-ai:status-updated',
+
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: 'research:sidecar-status',
   RESEARCH_SIDECAR_RESTART: 'research:sidecar-restart',
@@ -1518,6 +1639,8 @@ export interface PipelineStageState {
   warning?: string
   error?: string
   artifactPath?: string
+  /** Present while Prompt-mode AI images are being awaited (not an error state). */
+  manualAiWait?: ManualAiWaitInfo
   stats?: {
     totalScenes?: number
     processedScenes?: number
