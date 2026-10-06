@@ -20,6 +20,7 @@ import type { ManualAiWaitInfo } from '../../../shared/types'
 import { startCoordinatedRender } from '../render-cache/render-service'
 import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
 import { cleanupOrphanOutputPartials } from '../render-cache/render-cache-manager'
+import { ensureRetentionPlan } from '../retention/retention-director'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
 import {
   isTranscriptionValid,
@@ -612,6 +613,78 @@ export async function runAudioSearchStage(
     }
   }
 
+  // Section 64 & 65: Repair mode — If valid music exists but Health SFX are missing or 0 approved,
+  // do NOT redownload music; repair only the missing Health SFX.
+  const existingPlan = loadAudioPlan(options.projectDir)
+  const hasValidMusic = existingPlan
+    ? existingPlan.sections.some((s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath))
+    : false
+
+  if (hasValidMusic && isHealthAudio) {
+    const healthPlanPath = path.join(options.projectDir, 'analysis', 'health-visual-plan.json')
+    if (fs.existsSync(healthPlanPath)) {
+      try {
+        const healthPlan = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+        const sfxCues = new Map<number, HealthSfxCuePlan>()
+        const sfxScenes: SfxDirectorSceneInput[] = []
+        for (const sc of healthPlan.scenes || []) {
+          if (sc.sfxCue) {
+            sfxCues.set(sc.sceneIndex, sc.sfxCue)
+            sfxScenes.push({
+              sceneIndex: sc.sceneIndex,
+              startTime: sc.startTime,
+              endTime: sc.endTime,
+              duration: sc.duration,
+              category: sc.category,
+              narration: sc.narration,
+              visualIntent: sc.visualIntent,
+              motionPreset: sc.motionPreset
+            })
+          }
+        }
+
+        if (sfxCues.size > 0) {
+          onProgress('Repairing and resolving Health cinematic SFX...', 0.50)
+          let retentionPlan: any = null
+          try {
+            retentionPlan = await ensureRetentionPlan(options.projectDir)
+          } catch {
+            // ignore
+          }
+
+          await HealthSfxDirector.repairMissingHealthSfx(
+            options.projectDir,
+            sfxCues,
+            sfxScenes,
+            options.openverseToken,
+            retentionPlan
+          )
+        }
+
+        const repairedPlan = loadAudioPlan(options.projectDir)
+        if (repairedPlan) {
+          const downloadedMusicCount = repairedPlan.sections.filter(
+            (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+          ).length
+          onProgress(`Using existing music with resolved Health SFX (${downloadedMusicCount} tracks)`, 1.0)
+          return {
+            success: true,
+            cached: true,
+            artifactPath: audioPlanPath,
+            data: repairedPlan,
+            stats: {
+              sectionsCount: repairedPlan.sections.length,
+              downloadedMusicCount,
+              sfxCount: repairedPlan.sfxAssignments?.length ?? 0
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[HealthSFX] Failed repairing Health SFX: ${err}`)
+      }
+    }
+  }
+
   onProgress('Searching and downloading background music & SFX...', 0.05)
   checkAborted(signal)
 
@@ -649,12 +722,20 @@ export async function runAudioSearchStage(
           }
         }
         if (sfxCues.size > 0) {
-          onProgress('Planning and downloading Health cinematic SFX...', 0.90)
+          onProgress('Planning and resolving Health cinematic SFX...', 0.90)
+          let retentionPlan: any = null
+          try {
+            retentionPlan = await ensureRetentionPlan(options.projectDir)
+          } catch {
+            // ignore
+          }
+
           await HealthSfxDirector.applyHealthSfxToAudioPlan(
             options.projectDir,
             sfxCues,
             sfxScenes,
-            options.openverseToken
+            options.openverseToken,
+            retentionPlan
           )
         }
       } catch (err) {

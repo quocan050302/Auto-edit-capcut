@@ -262,6 +262,12 @@ export function isAudioValid(projectDir: string, requireMusic?: boolean, content
           const hasSfxCues = (healthPlan.scenes || []).some((s: any) => s.sfxCue)
           if (hasSfxCues) {
             if (!plan.healthSfx?.enabled) return false
+            // Section 63: If old audio-plan says healthSfx.enabled=true but approved SFX count = 0,
+            // do not treat as valid so resolver can retry filling missing Health SFX.
+            const hasApprovedHealthSfx = (plan.sfxAssignments || []).some(
+              (a) => a.approved && a.approvedLocalPath && fs.existsSync(a.approvedLocalPath)
+            )
+            if (!hasApprovedHealthSfx) return false
             const expectedHash = computeHealthMotionHash(healthPlan)
             if (plan.healthSfx.planHash !== expectedHash) return false
           }
