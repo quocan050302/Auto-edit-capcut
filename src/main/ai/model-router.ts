@@ -18,6 +18,7 @@ export type AiTaskType =
   | "retention_qa"
   | "visual_truth"
   | "claim_analysis"
+  | "manual_ai_visual_director"
 
 export const MODEL_ROUTES: Record<AiTaskType, string[]> = {
   planning: ["gemini-3.8-flash", "gemini-3.5-flash"],
@@ -26,7 +27,8 @@ export const MODEL_ROUTES: Record<AiTaskType, string[]> = {
   stock_query: ["gemini-3.5-flash-lite", "gemini-3.5-flash"],
   retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   visual_truth: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
-  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  manual_ai_visual_director: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 }
 
 export const STOCK_QUERY_RETRY_POLICY = {

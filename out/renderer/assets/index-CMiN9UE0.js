@@ -7724,6 +7724,212 @@ function FeatureCard({
     /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.6 }, children: desc })
   ] });
 }
+function resolveContentProfileMode(options) {
+  if (options?.contentProfileMode) {
+    return options.contentProfileMode;
+  }
+  if (options?.contentType === "health") {
+    return "health";
+  }
+  if (options?.contentType === "default") {
+    return "general";
+  }
+  return "auto";
+}
+function resolveAiImageMode(config) {
+  return config?.aiImageMode === "prompt" ? "prompt" : "auto";
+}
+const DEFAULT_VISUAL_MIX_CONFIG = {
+  mode: "legacy",
+  aiImageRatio: 0,
+  stockFootageRatio: 1,
+  imageOutputResolution: "1080p",
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+};
+const HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG = {
+  mode: "custom-mix",
+  aiImageRatio: 0.8,
+  stockFootageRatio: 0.2,
+  imageOutputResolution: "1080p",
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+};
+const GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG = {
+  mode: "custom-mix",
+  aiImageRatio: 0.5,
+  stockFootageRatio: 0.5,
+  imageOutputResolution: "1080p",
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+};
+function normalizeVisualMixConfig(config, modeOverride) {
+  const mode = modeOverride ?? config?.mode ?? "legacy";
+  const imageOutputResolution = config?.imageOutputResolution === "4k" ? "4k" : config?.imageOutputResolution === "2k" ? "2k" : "1080p";
+  const resDims = imageOutputResolution === "4k" ? { width: 3840, height: 2160 } : imageOutputResolution === "2k" ? { width: 2560, height: 1440 } : { width: 1920, height: 1080 };
+  const requestedGenerationConcurrency = Math.max(
+    1,
+    Math.min(6, config?.requestedGenerationConcurrency ?? config?.generationConcurrency ?? 2)
+  );
+  const exportConcurrency = Math.max(
+    1,
+    Math.min(4, config?.exportConcurrency ?? config?.postProcessConcurrency ?? 2)
+  );
+  const normalizeConcurrency = Math.max(
+    1,
+    Math.min(4, config?.normalizeConcurrency ?? config?.postProcessConcurrency ?? 2)
+  );
+  const stockSearchConcurrency = Math.max(
+    1,
+    Math.min(8, config?.stockSearchConcurrency ?? 4)
+  );
+  const stockDownloadConcurrency = Math.max(
+    1,
+    Math.min(6, config?.stockDownloadConcurrency ?? 3)
+  );
+  if (mode === "legacy") {
+    return {
+      mode: "legacy",
+      aiImageRatio: 0,
+      stockFootageRatio: 1,
+      imageOutputResolution,
+      motionEnabled: config?.motionEnabled ?? true,
+      requestedGenerationConcurrency,
+      exportConcurrency,
+      normalizeConcurrency,
+      stockSearchConcurrency,
+      stockDownloadConcurrency,
+      generationConcurrency: requestedGenerationConcurrency,
+      postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+      width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+      height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
+    };
+  }
+  let rawAi = config?.aiImageRatio;
+  let rawStock = config?.stockFootageRatio;
+  if (rawAi === void 0 && rawStock === void 0) {
+    rawAi = 0.5;
+    rawStock = 0.5;
+  } else if (rawAi !== void 0 && rawStock === void 0) {
+    const clampedAi = Math.max(0, Math.min(1, rawAi));
+    rawAi = Math.round(clampedAi * 1e3) / 1e3;
+    rawStock = Math.round((1 - rawAi) * 1e3) / 1e3;
+  } else if (rawAi === void 0 && rawStock !== void 0) {
+    const clampedStock = Math.max(0, Math.min(1, rawStock));
+    rawStock = Math.round(clampedStock * 1e3) / 1e3;
+    rawAi = Math.round((1 - rawStock) * 1e3) / 1e3;
+  } else {
+    const clampedAi = Math.max(0, Math.min(1, rawAi));
+    const clampedStock = Math.max(0, Math.min(1, rawStock));
+    const sum = clampedAi + clampedStock;
+    if (sum === 0) {
+      rawAi = 0;
+      rawStock = 1;
+    } else if (Math.abs(sum - 1) < 1e-4) {
+      rawAi = Math.round(clampedAi * 1e3) / 1e3;
+      rawStock = Math.round((1 - rawAi) * 1e3) / 1e3;
+    } else {
+      rawAi = Math.round(clampedAi / sum * 1e3) / 1e3;
+      rawStock = Math.round((1 - rawAi) * 1e3) / 1e3;
+    }
+  }
+  const aiRatio = Math.max(0, Math.min(1, Math.round(rawAi * 1e3) / 1e3));
+  const stockRatio = Math.max(0, Math.min(1, Math.round((1 - aiRatio) * 1e3) / 1e3));
+  return {
+    mode: "custom-mix",
+    aiImageRatio: aiRatio,
+    stockFootageRatio: stockRatio,
+    imageOutputResolution,
+    aiFailureBehavior: config?.aiFailureBehavior === "stock-fallback" ? "stock-fallback" : "strict",
+    aiImageMode: resolveAiImageMode(config),
+    motionEnabled: config?.motionEnabled ?? true,
+    requestedGenerationConcurrency,
+    exportConcurrency,
+    normalizeConcurrency,
+    stockSearchConcurrency,
+    stockDownloadConcurrency,
+    generationConcurrency: requestedGenerationConcurrency,
+    postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+    width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+    height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
+  };
+}
+function resolveVisualMixConfig(options) {
+  if (!options) {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG };
+  }
+  const isHealth = (options.contentType ?? "default") === "health";
+  if (options.visualMixConfig) {
+    const mode = options.visualSourceMode ?? options.visualMixConfig.mode ?? "custom-mix";
+    return normalizeVisualMixConfig(options.visualMixConfig, mode);
+  }
+  if (options.visualSourceMode === "legacy") {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG };
+  }
+  if (options.visualSourceMode === "custom-mix") {
+    if (isHealth) {
+      if (options.healthVisualConfig) {
+        return normalizeVisualMixConfig(
+          {
+            mode: "custom-mix",
+            aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+            stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+            imageOutputResolution: "1080p",
+            motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+          },
+          "custom-mix"
+        );
+      }
+      return { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG };
+    }
+    return { ...GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG };
+  }
+  if (isHealth && options.healthVisualConfig) {
+    return normalizeVisualMixConfig(
+      {
+        mode: "custom-mix",
+        aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+        stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+        imageOutputResolution: "1080p",
+        motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+      },
+      "custom-mix"
+    );
+  }
+  return { ...DEFAULT_VISUAL_MIX_CONFIG };
+}
+const THUMBNAIL_CATEGORIES = [
+  "US Grocery",
+  "Preparedness",
+  "Hutterite Documentary",
+  "Hidden Cost Documentary",
+  "Streamer Reaction",
+  "Custom"
+];
 function usePipeline(projectDir) {
   const [pipelineState, setPipelineState] = reactExports.useState(null);
   const [isLoading, setIsLoading] = reactExports.useState(false);
@@ -9105,6 +9311,529 @@ function FileRow({
     )
   ] });
 }
+function VisualSourceSection({
+  isCustomMix,
+  currentAiPercent,
+  currentStockPercent,
+  imageOutputResolution = "1080p",
+  flowHealth,
+  isRunning,
+  onSelectMode,
+  onSetAiRatio,
+  onSetStockRatio,
+  onSelectResolution,
+  aiFailureBehavior = "strict",
+  onSelectFailureBehavior,
+  aiImageMode = "auto",
+  onSelectAiImageMode,
+  isAdvanced
+}) {
+  const containerClass = isAdvanced ? "panel" : "setup-section";
+  const idSuffix = isAdvanced ? "-adv" : "";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: containerClass, style: { marginBottom: "16px" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: isAdvanced ? "panel-header" : "setup-section__header", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("h2", { className: isAdvanced ? "panel-title" : "setup-section__title", children: "Visual Source" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "p",
+          {
+            className: isAdvanced ? "" : "setup-section__desc",
+            style: isAdvanced ? { fontSize: "12px", color: "var(--text-secondary)" } : void 0,
+            children: "Choose where scene visuals come from — standard stock or AI-generated visual mix"
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-primary", children: isCustomMix ? "Custom Mix" : "Default Workflow" })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: isAdvanced ? "panel-body" : "", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-grid", style: { marginBottom: "12px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: `visual-mode-legacy${idSuffix}`,
+            className: `content-type-card ${!isCustomMix ? "is-selected" : ""}`,
+            onClick: () => onSelectMode("legacy"),
+            disabled: isRunning,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__icon", children: "🎞️" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__title", children: [
+                  "Default Workflow",
+                  !isCustomMix && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-brand)" }, children: "● Active" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__subtitle", children: "Stock Footage" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "Use current stock footage production flow (Pexels / Pixabay / local assets). No Google Flow scene images." })
+              ] })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: `visual-mode-custom-mix${idSuffix}`,
+            className: `content-type-card ${isCustomMix ? "is-selected" : ""}`,
+            onClick: () => onSelectMode("custom-mix"),
+            disabled: isRunning,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__icon", children: "🎨" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__title", children: [
+                  "Custom Mix",
+                  isCustomMix && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-brand)" }, children: "● Active" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__subtitle", children: "AI Stills + Real Footage" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "Combine AI-generated stills with real footage." })
+              ] })
+            ]
+          }
+        )
+      ] }),
+      !isCustomMix ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          style: {
+            padding: "10px 14px",
+            borderRadius: "var(--radius-sm, 6px)",
+            background: "rgba(255, 255, 255, 0.03)",
+            border: "1px solid rgba(255, 255, 255, 0.08)",
+            fontSize: "12px",
+            color: "var(--text-secondary)"
+          },
+          children: "✓ Uses existing production flow: Pexels / Pixabay / local assets. No Google Flow scene images will be generated."
+        }
+      ) : /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        "div",
+        {
+          style: {
+            padding: "14px 16px",
+            borderRadius: "var(--radius-md, 8px)",
+            background: "rgba(255, 255, 255, 0.03)",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+            display: "flex",
+            flexDirection: "column",
+            gap: "12px"
+          },
+          children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }, children: "Visual Mix" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: [
+                "Total: ",
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "100%" })
+              ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+                  gap: "16px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 6px)",
+                        background: "rgba(99, 102, 241, 0.08)",
+                        border: "1px solid rgba(99, 102, 241, 0.25)"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "label",
+                          {
+                            htmlFor: `input-ai-image-ratio${idSuffix}`,
+                            style: {
+                              display: "block",
+                              fontSize: "11px",
+                              fontWeight: 600,
+                              color: "var(--color-brand, #818cf8)",
+                              marginBottom: "4px"
+                            },
+                            children: aiImageMode === "prompt" ? "AI Images (Manual Prompts)" : "AI Images (Google Flow)"
+                          }
+                        ),
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "input",
+                            {
+                              id: `input-ai-image-ratio${idSuffix}`,
+                              type: "number",
+                              min: 0,
+                              max: 100,
+                              step: 5,
+                              value: currentAiPercent,
+                              onChange: (e) => onSetAiRatio(Number(e.target.value)),
+                              disabled: isRunning,
+                              style: {
+                                width: "80px",
+                                padding: "6px 10px",
+                                borderRadius: "4px",
+                                border: "1px solid rgba(255, 255, 255, 0.15)",
+                                background: "rgba(0, 0, 0, 0.4)",
+                                color: "#fff",
+                                fontSize: "16px",
+                                fontWeight: 700
+                              }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "14px", fontWeight: 600, color: "#fff" }, children: "%" })
+                        ] })
+                      ]
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      style: {
+                        padding: "10px 12px",
+                        borderRadius: "var(--radius-sm, 6px)",
+                        background: "rgba(14, 165, 233, 0.08)",
+                        border: "1px solid rgba(14, 165, 233, 0.25)"
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx(
+                          "label",
+                          {
+                            htmlFor: `input-stock-footage-ratio${idSuffix}`,
+                            style: {
+                              display: "block",
+                              fontSize: "11px",
+                              fontWeight: 600,
+                              color: "#38bdf8",
+                              marginBottom: "4px"
+                            },
+                            children: "Real Footage"
+                          }
+                        ),
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "input",
+                            {
+                              id: `input-stock-footage-ratio${idSuffix}`,
+                              type: "number",
+                              min: 0,
+                              max: 100,
+                              step: 5,
+                              value: currentStockPercent,
+                              onChange: (e) => onSetStockRatio(Number(e.target.value)),
+                              disabled: isRunning,
+                              style: {
+                                width: "80px",
+                                padding: "6px 10px",
+                                borderRadius: "4px",
+                                border: "1px solid rgba(255, 255, 255, 0.15)",
+                                background: "rgba(0, 0, 0, 0.4)",
+                                color: "#fff",
+                                fontSize: "16px",
+                                fontWeight: 700
+                              }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "14px", fontWeight: 600, color: "#fff" }, children: "%" })
+                        ] })
+                      ]
+                    }
+                  )
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    height: "10px",
+                    width: "100%",
+                    borderRadius: "5px",
+                    overflow: "hidden",
+                    display: "flex",
+                    background: "rgba(255, 255, 255, 0.1)"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "div",
+                      {
+                        style: {
+                          width: `${currentAiPercent}%`,
+                          background: "linear-gradient(90deg, #6366f1, #8b5cf6)",
+                          transition: "width 0.2s ease"
+                        }
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "div",
+                      {
+                        style: {
+                          width: `${currentStockPercent}%`,
+                          background: "linear-gradient(90deg, #0284c7, #0ea5e9)",
+                          transition: "width 0.2s ease"
+                        }
+                      }
+                    )
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    justifyContent: "space-between",
+                    fontSize: "11px",
+                    color: "var(--text-secondary)"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                      "AI Images: ",
+                      currentAiPercent,
+                      "%"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                      "Real Footage: ",
+                      currentStockPercent,
+                      "%"
+                    ] })
+                  ]
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Presets:" }),
+              [
+                { label: "100 / 0", ai: 100 },
+                { label: "80 / 20", ai: 80 },
+                { label: "70 / 30", ai: 70 },
+                { label: "50 / 50", ai: 50 },
+                { label: "30 / 70", ai: 30 },
+                { label: "0 / 100", ai: 0 }
+              ].map((preset) => /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: `preset-${preset.ai}-${100 - preset.ai}${idSuffix}`,
+                  className: "btn btn-secondary btn-sm",
+                  style: {
+                    padding: "2px 8px",
+                    fontSize: "11px",
+                    background: currentAiPercent === preset.ai ? "var(--color-brand)" : void 0,
+                    color: currentAiPercent === preset.ai ? "#fff" : void 0
+                  },
+                  onClick: () => onSetAiRatio(preset.ai),
+                  disabled: isRunning,
+                  children: preset.label
+                },
+                preset.label
+              ))
+            ] }),
+            currentAiPercent > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                id: `ai-image-mode${idSuffix}`,
+                style: { marginTop: "2px", paddingTop: "8px", borderTop: "1px solid rgba(255, 255, 255, 0.08)" },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }, children: "AI Image Mode" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-grid", children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        id: `ai-image-mode-auto${idSuffix}`,
+                        className: `content-type-card ${aiImageMode !== "prompt" ? "is-selected" : ""}`,
+                        onClick: () => onSelectAiImageMode?.("auto"),
+                        disabled: isRunning,
+                        children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__title", children: [
+                            "Auto",
+                            aiImageMode !== "prompt" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-brand)" }, children: "● Selected" })
+                          ] }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__subtitle", children: "Generate AI images automatically" }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "Uses the current AI-image generation workflow (Google Flow)." })
+                        ] })
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        id: `ai-image-mode-prompt${idSuffix}`,
+                        className: `content-type-card ${aiImageMode === "prompt" ? "is-selected" : ""}`,
+                        onClick: () => onSelectAiImageMode?.("prompt"),
+                        disabled: isRunning,
+                        children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__title", children: [
+                            "Prompt",
+                            aiImageMode === "prompt" && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "var(--color-brand)" }, children: "● Selected" })
+                          ] }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__subtitle", children: "Generate prompts and import images manually" }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "Generate detailed prompts only. You create the images externally and import them back into the project." })
+                        ] })
+                      }
+                    )
+                  ] })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { marginTop: "2px", paddingTop: "8px", borderTop: "1px solid rgba(255, 255, 255, 0.08)" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "6px" }, children: "AI Image Quality:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap" }, children: ["1080p", "2k", "4k"].map((res) => {
+                const isSelected = (imageOutputResolution || "1080p") === res;
+                return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "button",
+                  {
+                    type: "button",
+                    id: `quality-opt-${res}${idSuffix}`,
+                    className: `btn btn-sm ${isSelected ? "btn-primary" : "btn-secondary"}`,
+                    style: {
+                      padding: "3px 10px",
+                      fontSize: "11px",
+                      fontWeight: isSelected ? 600 : 400
+                    },
+                    onClick: () => onSelectResolution?.(res),
+                    disabled: isRunning,
+                    children: [
+                      isSelected ? "● " : "",
+                      res === "1080p" ? "1080p — Recommended" : res.toUpperCase()
+                    ]
+                  },
+                  res
+                );
+              }) }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginTop: "4px", fontStyle: "italic" }, children: [
+                (imageOutputResolution || "1080p") === "1080p" && "1080p: Best for faster long-form production",
+                (imageOutputResolution || "1080p") === "2k" && "2K: Higher-resolution still output",
+                (imageOutputResolution || "1080p") === "4k" && "4K: Highest quality, slower generation/export"
+              ] })
+            ] }),
+            currentAiPercent > 0 && aiImageMode !== "prompt" && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "details",
+              {
+                id: `ai-failure-handling${idSuffix}`,
+                style: { fontSize: "11px", color: "var(--text-secondary)" },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("summary", { style: { cursor: "pointer", fontWeight: 600 }, children: [
+                    "Failure handling — ",
+                    aiFailureBehavior === "stock-fallback" ? "Allow Stock fallback" : "Keep selected mix"
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "6px", marginTop: "8px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600 }, children: "AI Generation Failure" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", gap: "6px", alignItems: "flex-start", cursor: "pointer" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          type: "radio",
+                          id: `ai-failure-strict${idSuffix}`,
+                          name: `ai-failure-behavior${idSuffix}`,
+                          checked: aiFailureBehavior !== "stock-fallback",
+                          onChange: () => onSelectFailureBehavior?.("strict"),
+                          disabled: isRunning
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Keep selected mix — Recommended" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+                        "Retry AI and pause if an AI visual cannot be generated."
+                      ] })
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "flex", gap: "6px", alignItems: "flex-start", cursor: "pointer" }, children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          type: "radio",
+                          id: `ai-failure-stock-fallback${idSuffix}`,
+                          name: `ai-failure-behavior${idSuffix}`,
+                          checked: aiFailureBehavior === "stock-fallback",
+                          onChange: () => onSelectFailureBehavior?.("stock-fallback"),
+                          disabled: isRunning
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Allow Stock fallback" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("br", {}),
+                        "Replace failed AI visuals with Pexels/Pixabay footage."
+                      ] })
+                    ] }),
+                    aiFailureBehavior === "stock-fallback" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: `ai-failure-warning${idSuffix}`, style: { color: "#fbbf24" }, children: "⚠️ AI failures may increase the final footage percentage." })
+                  ] })
+                ]
+              }
+            ),
+            currentAiPercent === 100 && aiImageMode !== "prompt" && aiFailureBehavior !== "stock-fallback" && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: `ai-only-helper${idSuffix}`, style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "100% AI mode — Stock fallback disabled by default." }),
+            currentAiPercent > 0 && aiImageMode === "prompt" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                id: `manual-prompt-mode-status${idSuffix}`,
+                style: {
+                  fontSize: "11px",
+                  color: "var(--color-success, #10b981)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "2px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "● Manual Prompt Mode" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "✓ No Google Flow connection required" })
+                ]
+              }
+            ) : currentAiPercent > 0 ? flowHealth.checking === false && (flowHealth.reachable === false || flowHealth.extensionConnected === false) ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  marginTop: "6px",
+                  padding: "8px 12px",
+                  background: "rgba(239, 68, 68, 0.1)",
+                  border: "1px solid rgba(239, 68, 68, 0.3)",
+                  borderRadius: "var(--radius-sm, 6px)",
+                  fontSize: "11px",
+                  color: "#f87171",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: "8px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    "⚠️ ",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Google Flow / FlowKit is not ready:" }),
+                    " Health mode requires Google Flow / FlowKit connection. Open Google Flow in Chrome and ensure the FlowKit extension is connected."
+                  ] }),
+                  window.api?.thumbnail?.openFlowTab && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "button",
+                    {
+                      type: "button",
+                      className: "btn btn-secondary btn-sm",
+                      style: { flexShrink: 0, fontSize: "11px", padding: "3px 8px" },
+                      onClick: () => window.api.thumbnail.openFlowTab(),
+                      children: "Open Google Flow"
+                    }
+                  )
+                ]
+              }
+            ) : /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  fontSize: "11px",
+                  color: "var(--color-success, #10b981)",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "6px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "●" }),
+                  " AI Images — Google Flow: Ready"
+                ]
+              }
+            ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "No Google Flow images required (100% stock footage)." })
+          ]
+        }
+      )
+    ] })
+  ] });
+}
 function InputPage({
   project,
   onUpdateInputs,
@@ -9115,6 +9844,127 @@ function InputPage({
   const { inputs } = project;
   const { isSimpleMode, setInterfaceMode } = useUiPreferences();
   const [workflowMode, setWorkflowMode] = reactExports.useState("auto");
+  const effectiveMix = resolveVisualMixConfig({
+    visualSourceMode: inputs.visualSourceMode,
+    visualMixConfig: inputs.visualMixConfig,
+    contentType: inputs.contentType
+  });
+  const isCustomMix = effectiveMix.mode === "custom-mix";
+  const currentAiPercent = Math.round(effectiveMix.aiImageRatio * 100);
+  const currentStockPercent = 100 - currentAiPercent;
+  const aiImageMode = isCustomMix && currentAiPercent > 0 ? resolveAiImageMode(effectiveMix) : "auto";
+  const [flowHealth, setFlowHealth] = reactExports.useState({ checking: false });
+  reactExports.useEffect(() => {
+    let cancelled = false;
+    const checkFlow = async () => {
+      if (!isCustomMix || currentAiPercent <= 0 || aiImageMode === "prompt") {
+        setFlowHealth({ checking: false });
+        return;
+      }
+      try {
+        setFlowHealth((prev) => ({ ...prev, checking: true }));
+        const h = await window.api?.thumbnail?.checkFlowHealth?.();
+        if (!cancelled && h) {
+          setFlowHealth({
+            reachable: Boolean(h.reachable),
+            extensionConnected: Boolean(h.extensionConnected),
+            signedIn: Boolean(h.signedIn),
+            checking: false
+          });
+        }
+      } catch {
+        if (!cancelled) {
+          setFlowHealth({ reachable: false, extensionConnected: false, checking: false });
+        }
+      }
+    };
+    checkFlow();
+    return () => {
+      cancelled = true;
+    };
+  }, [isCustomMix, currentAiPercent, aiImageMode]);
+  async function handleSelectContentProfileMode(mode) {
+    if (isRunning) return;
+    const legacyType = mode === "health" ? "health" : "default";
+    await onUpdateInputs({
+      contentProfileMode: mode,
+      contentType: legacyType
+    });
+  }
+  async function handleSelectVisualSourceMode(mode) {
+    if (isRunning) return;
+    const baseAi = inputs.visualMixConfig?.aiImageRatio ?? (inputs.contentType === "health" ? 0.8 : 0.5);
+    const aiRatio = mode === "legacy" ? 0 : baseAi;
+    const stockRatio = mode === "legacy" ? 1 : Math.round((1 - aiRatio) * 1e3) / 1e3;
+    const nextConfig = {
+      mode,
+      aiImageRatio: aiRatio,
+      stockFootageRatio: stockRatio,
+      imageOutputResolution: effectiveMix.imageOutputResolution,
+      aiFailureBehavior: inputs.visualMixConfig?.aiFailureBehavior ?? "strict",
+      aiImageMode: resolveAiImageMode(inputs.visualMixConfig),
+      width: inputs.visualMixConfig?.width ?? 1920,
+      height: inputs.visualMixConfig?.height ?? 1080,
+      motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
+      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 2,
+      postProcessConcurrency: inputs.visualMixConfig?.postProcessConcurrency ?? 2
+    };
+    await onUpdateInputs({
+      visualSourceMode: mode,
+      visualMixConfig: nextConfig
+    });
+  }
+  async function handleSelectFailureBehavior(behavior) {
+    if (isRunning) return;
+    const nextConfig = {
+      ...effectiveMix,
+      aiFailureBehavior: behavior
+    };
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    });
+  }
+  async function handleSelectAiImageMode(mode) {
+    if (isRunning) return;
+    const nextConfig = {
+      ...effectiveMix,
+      aiImageMode: mode
+    };
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    });
+  }
+  async function handleSelectResolution(resolution) {
+    if (isRunning) return;
+    const nextConfig = {
+      ...effectiveMix,
+      imageOutputResolution: resolution
+    };
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    });
+  }
+  async function handleSetAiRatio(aiPercent) {
+    if (isRunning) return;
+    const clampedAi = Math.max(0, Math.min(100, Math.round(isNaN(aiPercent) ? 0 : aiPercent)));
+    const clampedStock = 100 - clampedAi;
+    const nextConfig = {
+      ...effectiveMix,
+      mode: "custom-mix",
+      aiImageRatio: clampedAi / 100,
+      stockFootageRatio: clampedStock / 100,
+      imageOutputResolution: effectiveMix.imageOutputResolution
+    };
+    await onUpdateInputs({
+      visualSourceMode: "custom-mix",
+      visualMixConfig: nextConfig
+    });
+  }
+  async function handleSetStockRatio(stockPercent) {
+    if (isRunning) return;
+    const clampedStock = Math.max(0, Math.min(100, Math.round(isNaN(stockPercent) ? 0 : stockPercent)));
+    await handleSetAiRatio(100 - clampedStock);
+  }
   const [whisperModel, setWhisperModel] = reactExports.useState("base");
   const [requireBgMusic, setRequireBgMusic] = reactExports.useState(false);
   const [autoStartOnReady, setAutoStartOnReady] = reactExports.useState(false);
@@ -9148,7 +9998,8 @@ function InputPage({
     if (workflowMode !== "auto" || !autoStartOnReady || !isAutoReady || isRunning) {
       return;
     }
-    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}`;
+    const currentProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs);
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`;
     if (lastAutoStartedFingerprintRef.current === currentFp) {
       return;
     }
@@ -9166,18 +10017,54 @@ function InputPage({
         clearTimeout(debounceTimerRef.current);
       }
     };
-  }, [workflowMode, autoStartOnReady, isAutoReady, inputs.scriptPath, inputs.voiceoverPath, isRunning]);
+  }, [
+    workflowMode,
+    autoStartOnReady,
+    isAutoReady,
+    inputs.scriptPath,
+    inputs.voiceoverPath,
+    inputs.contentType,
+    inputs.contentProfileMode,
+    effectiveMix.mode,
+    effectiveMix.aiImageRatio,
+    isRunning
+  ]);
   async function handleStartAutoPipeline() {
     if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return;
     setIsStarting(true);
     try {
+      const resolvedMix = resolveVisualMixConfig({
+        visualSourceMode: inputs.visualSourceMode,
+        visualMixConfig: inputs.visualMixConfig,
+        contentType: inputs.contentType
+      });
+      const resolvedProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs);
+      console.log(
+        `[Setup] Starting pipeline:
+profileMode=${resolvedProfileMode}
+visualSource=${resolvedMix.mode}
+AI=${Math.round(resolvedMix.aiImageRatio * 100)}%
+Stock=${Math.round(resolvedMix.stockFootageRatio * 100)}%
+resolution=${resolvedMix.imageOutputResolution}`
+      );
       const ok2 = await startPipeline({
         projectDir: project.projectDir,
         scriptPath: inputs.scriptPath,
         voiceoverPath: inputs.voiceoverPath,
         whisperModel,
         requireBackgroundMusic: requireBgMusic,
-        autoStartOnReady
+        autoStartOnReady,
+        contentType: inputs.contentType ?? (resolvedProfileMode === "health" ? "health" : "default"),
+        contentProfileMode: resolvedProfileMode,
+        visualSourceMode: resolvedMix.mode,
+        visualMixConfig: resolvedMix,
+        healthVisualConfig: (inputs.contentType === "health" || resolvedProfileMode === "health") && resolvedMix.mode === "custom-mix" ? {
+          aiRatio: resolvedMix.aiImageRatio,
+          stockRatio: resolvedMix.stockFootageRatio,
+          width: resolvedMix.width,
+          height: resolvedMix.height,
+          motionEnabled: resolvedMix.motionEnabled
+        } : void 0
       });
       if (ok2 && onNavigate && isSimpleMode) {
         onNavigate("production");
@@ -9247,6 +10134,26 @@ function InputPage({
           /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "status-banner__message", children: "New files will not take effect until current pipeline is cancelled or restarted." })
         ] })
       ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        VisualSourceSection,
+        {
+          isCustomMix,
+          currentAiPercent,
+          currentStockPercent,
+          imageOutputResolution: effectiveMix.imageOutputResolution,
+          flowHealth,
+          isRunning,
+          onSelectMode: handleSelectVisualSourceMode,
+          onSetAiRatio: handleSetAiRatio,
+          onSetStockRatio: handleSetStockRatio,
+          onSelectResolution: handleSelectResolution,
+          aiFailureBehavior: effectiveMix.aiFailureBehavior,
+          onSelectFailureBehavior: handleSelectFailureBehavior,
+          aiImageMode,
+          onSelectAiImageMode: handleSelectAiImageMode,
+          isAdvanced: false
+        }
+      ),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setup-section", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setup-section__header", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
@@ -9606,6 +10513,88 @@ function InputPage({
           /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Input files changed while pipeline is running:" }),
           " New files will not take effect until current pipeline is cancelled or restarted."
         ]
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title-icon", children: /* @__PURE__ */ jsxRuntimeExports.jsx("svg", { width: "12", height: "12", viewBox: "0 0 20 20", fill: "var(--brand-primary)", children: /* @__PURE__ */ jsxRuntimeExports.jsx("path", { fillRule: "evenodd", d: "M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z", clipRule: "evenodd" }) }) }),
+          "Content Profile"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-primary", children: (inputs.contentProfileMode ?? "auto") === "auto" ? "Auto Detect" : inputs.contentProfileMode === "health" ? "Health (Override)" : "General (Override)" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-body", children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-grid", style: { gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "content-profile-auto-adv",
+            className: `content-type-card ${(inputs.contentProfileMode ?? "auto") === "auto" ? "is-selected" : ""}`,
+            onClick: () => handleSelectContentProfileMode("auto"),
+            disabled: isRunning,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__icon", children: "🤖" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__title", children: "Auto Detect (Default)" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "Automatically detects medical vs general documentary from script" })
+              ] })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "content-profile-general-adv",
+            className: `content-type-card ${inputs.contentProfileMode === "general" ? "is-selected" : ""}`,
+            onClick: () => handleSelectContentProfileMode("general"),
+            disabled: isRunning,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__icon", children: "🎬" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__title", children: "General Documentary" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "General documentary still prompts (no medical anatomy/SFX)" })
+              ] })
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "button",
+          {
+            type: "button",
+            id: "content-profile-health-adv",
+            className: `content-type-card ${inputs.contentProfileMode === "health" ? "is-selected" : ""}`,
+            onClick: () => handleSelectContentProfileMode("health"),
+            disabled: isRunning,
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__icon", children: "🩺" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "content-type-card__content", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__title", children: "Health Explainer" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "content-type-card__desc", children: "Enforces anatomical realism, scientific prompts & Health SFX" })
+              ] })
+            ]
+          }
+        )
+      ] }) })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      VisualSourceSection,
+      {
+        isCustomMix,
+        currentAiPercent,
+        currentStockPercent,
+        imageOutputResolution: effectiveMix.imageOutputResolution,
+        flowHealth,
+        isRunning,
+        onSelectMode: handleSelectVisualSourceMode,
+        onSetAiRatio: handleSetAiRatio,
+        onSetStockRatio: handleSetStockRatio,
+        onSelectResolution: handleSelectResolution,
+        aiFailureBehavior: effectiveMix.aiFailureBehavior,
+        onSelectFailureBehavior: handleSelectFailureBehavior,
+        aiImageMode,
+        onSelectAiImageMode: handleSelectAiImageMode,
+        isAdvanced: true
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
@@ -10636,6 +11625,58 @@ function LivePipelineInspector({
                 " critical/high importance claims need documentary sources"
               ] })
             ] }),
+            effectiveStage === "stock-search" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "live-inspector-card", style: { borderColor: "rgba(99,102,241,0.3)" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "live-inspector-card-header", children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "live-inspector-card-label", style: { color: "var(--color-brand)" }, children: "🎬 Visual Acquisition Strategy" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "inspector-badge inspector-badge--completed", children: stageData?.stats?.detectedProfile || (pipelineState?.options?.contentType === "health" ? "Health Explainer" : "General Documentary") })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px", marginTop: "8px", fontSize: "11px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", color: "var(--text-secondary)" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Requested Visual Mix:" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { style: { color: "var(--text-primary)" }, children: [
+                    "AI Images: ",
+                    typeof stageData?.stats?.requestedAiPercent === "number" ? stageData.stats.requestedAiPercent : Math.round((pipelineState?.options?.visualMixConfig?.aiImageRatio ?? 0.8) * 100),
+                    "% · Real Footage: ",
+                    typeof stageData?.stats?.requestedStockPercent === "number" ? stageData.stats.requestedStockPercent : Math.round((pipelineState?.options?.visualMixConfig?.stockFootageRatio ?? 0.2) * 100),
+                    "%"
+                  ] })
+                ] }),
+                stageData?.stats?.failureBehavior !== void 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", color: "var(--text-secondary)" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Failure behavior:" }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: stageData.stats.failureBehavior === "stock-fallback" ? "Allow Stock fallback" : "Keep selected mix" })
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginTop: "4px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-void)", padding: "6px 8px", borderRadius: "4px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: "9px", display: "block" }, children: "AI IMAGES" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { children: [
+                      stageData?.stats?.aiGeneratedScenes !== void 0 ? `${stageData.stats.aiGeneratedScenes} / ${stageData.stats.targetAiScenes ?? stageData.stats.aiGeneratedScenes}` : "Generating",
+                      " ready"
+                    ] })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-void)", padding: "6px 8px", borderRadius: "4px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--text-muted)", fontSize: "9px", display: "block" }, children: "REAL FOOTAGE" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { children: [
+                      stageData?.stats?.stockScenes !== void 0 ? `${stageData.stats.stockScenes} / ${stageData.stats.targetStockScenes ?? stageData.stats.stockScenes}` : "Searching",
+                      " ready"
+                    ] })
+                  ] })
+                ] }),
+                typeof stageData?.stats?.aiFallbackToStock === "number" && stageData.stats.aiFallbackToStock > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "10px", color: "#f59e0b" }, children: [
+                  "⚡ ",
+                  stageData.stats.aiFallbackToStock,
+                  " AI scene",
+                  stageData.stats.aiFallbackToStock > 1 ? "s" : "",
+                  " fell back to stock footage"
+                ] }),
+                typeof stageData?.stats?.failedAiScenes === "number" && stageData.stats.failedAiScenes > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "ai-visuals-need-attention", style: { fontSize: "10px", color: "#f87171" }, children: [
+                  "AI Visuals Need Attention — ",
+                  stageData.stats.failedAiScenes,
+                  " failed",
+                  Array.isArray(stageData.stats.failedAiSceneIndices) ? ` (scenes ${stageData.stats.failedAiSceneIndices.join(", ")})` : "",
+                  ". Re-run the stage to retry only the failed AI visuals."
+                ] })
+              ] })
+            ] }),
             effectiveStage === "stock-search" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "live-inspector-card", style: { borderColor: "rgba(34,197,94,0.3)" }, children: [
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "live-inspector-card-header", children: [
                 /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "live-inspector-card-label", style: { color: "#22c55e" }, children: "🎯 Visual Truth Reranker" }),
@@ -10719,6 +11760,535 @@ function LivePipelineInspector({
         ]
       }
     )
+  ] });
+}
+const MAX_MISSING_PREVIEW = 40;
+function copyToClipboard(text) {
+  try {
+    if (navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+  }
+  try {
+    const ta2 = document.createElement("textarea");
+    ta2.value = text;
+    ta2.style.position = "fixed";
+    ta2.style.opacity = "0";
+    document.body.appendChild(ta2);
+    ta2.select();
+    const ok2 = document.execCommand("copy");
+    document.body.removeChild(ta2);
+    return ok2;
+  } catch {
+    return false;
+  }
+}
+function formatMissing(indices) {
+  if (indices.length === 0) return "—";
+  const shown = indices.slice(0, MAX_MISSING_PREVIEW).join(", ");
+  return indices.length > MAX_MISSING_PREVIEW ? `${shown}, … (+${indices.length - MAX_MISSING_PREVIEW})` : shown;
+}
+const cardStyle = {
+  marginTop: "16px",
+  padding: "16px 20px",
+  borderRadius: "var(--radius-lg, 12px)",
+  border: "1px solid rgba(129, 140, 248, 0.35)",
+  background: "linear-gradient(135deg, rgba(99, 102, 241, 0.10), rgba(14, 165, 233, 0.06))",
+  display: "flex",
+  flexDirection: "column",
+  gap: "12px"
+};
+const statBoxStyle = {
+  flex: "1 1 160px",
+  padding: "10px 14px",
+  borderRadius: "8px",
+  background: "rgba(0, 0, 0, 0.25)",
+  border: "1px solid rgba(255, 255, 255, 0.08)"
+};
+function ManualAiPromptPanel({ project, pipelineState }) {
+  const projectDir = project.projectDir;
+  const mix = resolveVisualMixConfig({
+    visualSourceMode: project.inputs.visualSourceMode,
+    visualMixConfig: project.inputs.visualMixConfig,
+    contentType: project.inputs.contentType
+  });
+  const isPromptMode = mix.mode === "custom-mix" && mix.aiImageRatio > 0 && resolveAiImageMode(mix) === "prompt";
+  const hasBridge = typeof window !== "undefined" && Boolean(window.api?.manualAi);
+  const [status, setStatus] = reactExports.useState(null);
+  const [notice, setNotice] = reactExports.useState(null);
+  const [busy, setBusy] = reactExports.useState(false);
+  const [plan, setPlan] = reactExports.useState(null);
+  const [pendingRejections, setPendingRejections] = reactExports.useState([]);
+  const [showImportMenu, setShowImportMenu] = reactExports.useState(false);
+  const [showPrompts, setShowPrompts] = reactExports.useState(false);
+  const lastVersion = reactExports.useRef(void 0);
+  const bridgeLoggedRef = reactExports.useRef(false);
+  reactExports.useEffect(() => {
+    if (!hasBridge && !bridgeLoggedRef.current) {
+      bridgeLoggedRef.current = true;
+      console.error(
+        "[ManualAI] window.api.manualAi is unavailable. The preload bundle may be stale or not loaded."
+      );
+    }
+  }, [hasBridge]);
+  const refresh = reactExports.useCallback(async () => {
+    if (!projectDir) return;
+    if (!window.api?.manualAi) {
+      return;
+    }
+    try {
+      const s = await window.api.manualAi.getStatus(projectDir);
+      setStatus(s);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error("[ManualAI] getStatus failed:", msg);
+      setNotice(`Unable to read Manual AI status: ${msg}`);
+    }
+  }, [projectDir]);
+  reactExports.useEffect(() => {
+    if (!isPromptMode || !projectDir) return;
+    void refresh();
+    const off = window.api?.manualAi?.onStatusUpdated?.((payload) => {
+      if (payload.projectDir === projectDir) {
+        setStatus(payload.status);
+      }
+    });
+    return () => {
+      off?.();
+    };
+  }, [isPromptMode, projectDir, refresh]);
+  reactExports.useEffect(() => {
+    if (!isPromptMode || !projectDir) return;
+    const v2 = pipelineState?.version;
+    if (v2 !== lastVersion.current) {
+      lastVersion.current = v2;
+      void refresh();
+    }
+  }, [isPromptMode, projectDir, pipelineState?.version, refresh]);
+  const stockStage = pipelineState?.stages?.["stock-search"];
+  const waitInfo = stockStage?.manualAiWait;
+  const effectiveExpected = status?.expected ?? waitInfo?.expected ?? 0;
+  const effectiveReady = status?.ready ?? waitInfo?.ready ?? 0;
+  const effectivePromptFilePath = status?.promptFilePath ?? waitInfo?.promptFilePath;
+  const effectiveHasPromptPack = Boolean(status?.hasPromptPack || waitInfo?.promptFilePath);
+  const effectiveAllReady = Boolean(
+    status?.allReady || effectiveExpected > 0 && effectiveReady >= effectiveExpected
+  );
+  const effectiveMissingCount = Math.max(0, effectiveExpected - effectiveReady);
+  const stockExpected = waitInfo?.stockExpected ?? 0;
+  const stockReady = waitInfo?.stockReady ?? 0;
+  const showStock = Boolean(waitInfo);
+  const missing = status?.missingSceneIndices?.length ? status.missingSceneIndices : waitInfo?.missingSceneIndices ?? [];
+  const staleCount = status?.staleSceneIndices?.length ?? 0;
+  const rows = reactExports.useMemo(() => status?.rows ?? [], [status]);
+  reactExports.useEffect(() => {
+    if (!isPromptMode || !projectDir || !hasBridge) return;
+    if (effectiveAllReady) return;
+    const isWaiting = Boolean(waitInfo && !effectiveAllReady);
+    if (!isWaiting) return;
+    const timer = setInterval(() => {
+      void refresh();
+    }, 2500);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [isPromptMode, projectDir, hasBridge, effectiveAllReady, Boolean(waitInfo), refresh]);
+  if (!isPromptMode) return null;
+  if (!hasBridge) {
+    return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-prompt-panel", style: cardStyle, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)" }, children: "AI Prompt Images" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "#f87171", marginTop: "4px" }, children: "Manual AI bridge unavailable. The Electron preload bundle may be stale or not loaded. Restart the application after rebuilding preload." })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "span",
+        {
+          id: "manual-ai-status-pill",
+          style: {
+            padding: "4px 12px",
+            borderRadius: "999px",
+            fontSize: "12px",
+            fontWeight: 600,
+            background: "rgba(239, 68, 68, 0.15)",
+            color: "#f87171"
+          },
+          children: "Bridge Unavailable"
+        }
+      )
+    ] }) });
+  }
+  async function handleCopyAll() {
+    if (!window.api?.manualAi) return;
+    const res = await window.api.manualAi.getPromptText(projectDir);
+    if (!res.success || !res.text) {
+      setNotice(res.error || "No prompt pack exists yet.");
+      return;
+    }
+    setNotice(
+      copyToClipboard(res.text) ? `Copied ${effectiveExpected} prompts to clipboard.` : "Could not access the clipboard."
+    );
+  }
+  async function handleExport() {
+    if (!window.api?.manualAi) return;
+    const res = await window.api.manualAi.exportTxt(projectDir);
+    if (res.canceled) return;
+    setNotice(res.success ? `Exported to ${res.filePath}` : res.error || "Export failed.");
+  }
+  async function handleOpenFile() {
+    if (!window.api?.manualAi) return;
+    const res = await window.api.manualAi.openPromptFile(projectDir);
+    if (!res.success) setNotice(res.error || "Could not open the prompt file.");
+  }
+  async function commit(mappings, opts = {}) {
+    if (!window.api?.manualAi) return;
+    setBusy(true);
+    try {
+      const res = await window.api.manualAi.commitImport({ projectDir, mappings, ...opts });
+      if (!res.success || !res.result) {
+        setNotice(res.error || "Import failed.");
+        return;
+      }
+      setStatus(res.result.status);
+      setPendingRejections((prev) => [
+        ...prev.filter((r2) => !mappings.some((m2) => m2.filePath === r2.filePath)),
+        ...res.result.rejections
+      ]);
+      const n2 = res.result.imported.length;
+      setNotice(
+        `${n2} image${n2 === 1 ? "" : "s"} imported · ${res.result.status.ready}/${res.result.status.expected} ready` + (res.result.rejections.length > 0 ? ` · ${res.result.rejections.length} need attention` : "")
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function handleSelect(mode) {
+    if (!window.api?.manualAi) return;
+    setShowImportMenu(false);
+    setNotice(null);
+    const picked = await window.api.manualAi.selectImages(mode);
+    if (!picked.success) {
+      setNotice(picked.error || "Could not open the file picker.");
+      return;
+    }
+    if (picked.filePaths.length === 0) {
+      if (!picked.canceled) setNotice("No supported images (PNG, JPG, JPEG, WEBP) found.");
+      return;
+    }
+    const planned = await window.api.manualAi.planImport({ projectDir, filePaths: picked.filePaths });
+    if (!planned.success || !planned.plan) {
+      setNotice(planned.error || "Could not analyse the selected files.");
+      return;
+    }
+    setPendingRejections(planned.plan.rejections);
+    if (planned.plan.needsConfirmation) {
+      setPlan(planned.plan);
+      return;
+    }
+    setPlan(null);
+    if (planned.plan.mappings.length > 0) await commit(planned.plan.mappings);
+    else setNotice("Nothing could be imported. See the messages below.");
+  }
+  const rejectionAction = (r2) => {
+    if (r2.sceneIndex === void 0) return null;
+    const mapping = {
+      filePath: r2.filePath,
+      fileName: r2.fileName,
+      sceneIndex: r2.sceneIndex,
+      via: "filename"
+    };
+    if (r2.code === "LOW_RESOLUTION") {
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          className: "btn btn-secondary btn-sm",
+          disabled: busy,
+          onClick: () => void commit([mapping], { allowLowResolution: true }),
+          children: "Use Anyway"
+        }
+      );
+    }
+    if (r2.code === "ALREADY_IMPORTED") {
+      return /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          className: "btn btn-secondary btn-sm",
+          disabled: busy,
+          onClick: () => void commit([mapping], { replaceExisting: true }),
+          children: "Replace"
+        }
+      );
+    }
+    return null;
+  };
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "manual-ai-prompt-panel", style: cardStyle, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "15px", fontWeight: 700, color: "var(--text-primary)" }, children: "AI Prompt Images" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: [
+          "AI Image Mode: ",
+          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Prompt" }),
+          " ·",
+          " ",
+          effectiveHasPromptPack ? `${effectiveExpected} prompts ready` : "Prompts are generated when Find Visuals starts"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "span",
+        {
+          id: "manual-ai-status-pill",
+          style: {
+            padding: "4px 12px",
+            borderRadius: "999px",
+            fontSize: "12px",
+            fontWeight: 600,
+            background: effectiveAllReady ? "rgba(34, 197, 94, 0.15)" : !effectiveHasPromptPack ? "rgba(148, 163, 184, 0.15)" : "rgba(251, 191, 36, 0.15)",
+            color: effectiveAllReady ? "#4ade80" : !effectiveHasPromptPack ? "#94a3b8" : "#fbbf24"
+          },
+          children: !effectiveHasPromptPack ? "Waiting for prompts" : effectiveAllReady ? "All AI images ready ✓" : `Waiting for ${effectiveMissingCount} AI image${effectiveMissingCount === 1 ? "" : "s"}`
+        }
+      )
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "12px", flexWrap: "wrap" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: statBoxStyle, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Prompts" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-prompts-count", style: { fontSize: "15px", fontWeight: 700 }, children: effectiveHasPromptPack ? `${effectiveExpected} / ${effectiveExpected} generated ✓` : "0 / 0 generated" })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: statBoxStyle, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "AI Images" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "manual-ai-imported-count", style: { fontSize: "15px", fontWeight: 700 }, children: [
+          effectiveReady,
+          " / ",
+          effectiveExpected,
+          " imported"
+        ] })
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: statBoxStyle, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Real Footage" }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-stock-count", style: { fontSize: "15px", fontWeight: 700 }, children: showStock ? `${stockReady} / ${stockExpected} ready${stockReady >= stockExpected && stockExpected > 0 ? " ✓" : ""}` : "—" })
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", position: "relative" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          id: "manual-ai-copy-all",
+          className: "btn btn-secondary btn-sm",
+          disabled: !effectiveHasPromptPack,
+          onClick: () => void handleCopyAll(),
+          children: "Copy All Prompts"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          id: "manual-ai-export-txt",
+          className: "btn btn-secondary btn-sm",
+          disabled: !effectiveHasPromptPack,
+          onClick: () => void handleExport(),
+          children: "Export TXT"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          id: "manual-ai-open-file",
+          className: "btn btn-secondary btn-sm",
+          disabled: !effectiveHasPromptPack || !effectivePromptFilePath,
+          onClick: () => void handleOpenFile(),
+          children: "Open Prompt File"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          id: "manual-ai-import",
+          className: "btn btn-primary btn-sm",
+          disabled: !effectiveHasPromptPack || effectiveExpected === 0 || busy,
+          onClick: () => setShowImportMenu((v2) => !v2),
+          children: "Import AI Images"
+        }
+      ),
+      showImportMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            id: "manual-ai-import-files",
+            className: "btn btn-secondary btn-sm",
+            onClick: () => void handleSelect("files"),
+            children: "Select Images…"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            id: "manual-ai-import-folder",
+            className: "btn btn-secondary btn-sm",
+            onClick: () => void handleSelect("folder"),
+            children: "Select Folder…"
+          }
+        )
+      ] })
+    ] }),
+    notice && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-notice", style: { fontSize: "12px", color: "#93c5fd" }, children: notice }),
+    plan && plan.needsConfirmation && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        id: "manual-ai-confirm-mapping",
+        style: {
+          padding: "10px 12px",
+          borderRadius: "8px",
+          background: "rgba(0,0,0,0.3)",
+          border: "1px solid rgba(251,191,36,0.4)"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "#fbbf24", marginBottom: "6px" }, children: "These files have no scene numbers. Confirm the proposed mapping (natural filename order → missing AI scenes):" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { maxHeight: "160px", overflowY: "auto", fontSize: "12px", fontFamily: "monospace" }, children: plan.mappings.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            m2.fileName,
+            " → Scene ",
+            m2.sceneIndex
+          ] }, m2.filePath)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginTop: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-primary btn-sm",
+                disabled: busy,
+                onClick: () => {
+                  const mappings = plan.mappings;
+                  setPlan(null);
+                  void commit(mappings);
+                },
+                children: "Confirm mapping"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("button", { type: "button", className: "btn btn-secondary btn-sm", onClick: () => setPlan(null), children: "Cancel" })
+          ] })
+        ]
+      }
+    ),
+    pendingRejections.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { id: "manual-ai-rejections", style: { fontSize: "12px", display: "flex", flexDirection: "column", gap: "4px" }, children: [
+      pendingRejections.map((r2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", alignItems: "center", color: "#fbbf24" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+          "⚠ ",
+          r2.fileName,
+          ": ",
+          r2.message
+        ] }),
+        rejectionAction(r2)
+      ] }, `${r2.filePath}-${r2.code}`)),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", marginTop: "4px" }, children: [
+        pendingRejections.some((r2) => r2.code === "LOW_RESOLUTION") && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-secondary btn-sm",
+            style: { fontSize: "11px", padding: "2px 8px" },
+            disabled: busy,
+            onClick: () => {
+              const mappings = pendingRejections.filter((r2) => r2.code === "LOW_RESOLUTION" && r2.sceneIndex !== void 0).map((r2) => ({
+                filePath: r2.filePath,
+                fileName: r2.fileName,
+                sceneIndex: r2.sceneIndex,
+                via: "filename"
+              }));
+              if (mappings.length > 0) void commit(mappings, { allowLowResolution: true });
+            },
+            children: "Accept All"
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            className: "btn btn-secondary btn-sm",
+            style: { fontSize: "11px", padding: "2px 8px" },
+            onClick: () => setPendingRejections([]),
+            children: "Dismiss"
+          }
+        )
+      ] })
+    ] }),
+    effectiveHasPromptPack && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Missing scenes:" }),
+      " ",
+      formatMissing(missing),
+      staleCount > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "#fbbf24", marginTop: "2px" }, children: [
+        status?.staleSceneIndices.slice(0, 10).map((i) => `Scene ${i}`).join(", "),
+        staleCount > 10 ? "…" : "",
+        " image needs regeneration because the prompt changed."
+      ] })
+    ] }),
+    effectiveHasPromptPack && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          className: "btn btn-secondary btn-sm",
+          style: { fontSize: "11px" },
+          onClick: () => setShowPrompts((v2) => !v2),
+          children: showPrompts ? "Hide prompts" : "Show prompts & expected filenames"
+        }
+      ),
+      showPrompts && /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "div",
+        {
+          id: "manual-ai-prompt-list",
+          style: {
+            marginTop: "8px",
+            maxHeight: "320px",
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px"
+          },
+          children: rows.map((r2) => /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              style: {
+                padding: "8px 10px",
+                borderRadius: "6px",
+                background: "rgba(0,0,0,0.25)",
+                fontSize: "12px"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: "8px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("strong", { children: [
+                    "Scene ",
+                    r2.sceneIndex
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontFamily: "monospace" }, children: [
+                    "Expected file: ",
+                    r2.expectedFilename
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "span",
+                    {
+                      style: {
+                        color: r2.status === "ready" ? "#4ade80" : r2.status === "stale" ? "#fbbf24" : "var(--text-secondary)"
+                      },
+                      children: r2.status === "ready" ? "Ready" : r2.status === "stale" ? "Stale" : "Waiting"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "4px", color: "var(--text-secondary)", lineHeight: 1.4 }, children: r2.prompt })
+              ]
+            },
+            r2.sceneIndex
+          ))
+        }
+      )
+    ] })
   ] });
 }
 function fmtStopwatch(secs) {
@@ -11101,6 +12671,24 @@ function ClientPipelineDashboard({
             " ",
             currentPhaseTitle
           ] }),
+          pipelineState?.stages?.["stock-search"]?.stats?.detectedProfile ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "production-meta-item", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Profile:" }),
+            " ",
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                style: {
+                  padding: "2px 8px",
+                  borderRadius: "999px",
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  background: "rgba(99, 102, 241, 0.15)",
+                  color: "#818cf8"
+                },
+                children: String(pipelineState.stages["stock-search"].stats.detectedProfile)
+              }
+            )
+          ] }) : null,
           /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "production-meta-item", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Elapsed:" }),
             " ",
@@ -11185,6 +12773,7 @@ function ClientPipelineDashboard({
         )
       ] })
     ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(ManualAiPromptPanel, { project, pipelineState }),
     (visualTruthSummary.hasData || claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0) && /* @__PURE__ */ jsxRuntimeExports.jsx(
       "div",
       {
@@ -15444,9 +17033,13 @@ function fmt$2(secs) {
 function providerBadge(provider) {
   const colors = {
     pexels: { bg: "rgba(5, 193, 112, 0.15)", fg: "#05C170" },
-    pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9" }
+    pixabay: { bg: "rgba(43, 135, 217, 0.15)", fg: "#2B87D9" },
+    "google-flow": { bg: "rgba(139, 92, 246, 0.18)", fg: "#a78bfa" },
+    "manual-ai": { bg: "rgba(236, 72, 153, 0.18)", fg: "#f472b6" },
+    flow: { bg: "rgba(139, 92, 246, 0.18)", fg: "#a78bfa" }
   };
   const c = colors[provider.toLowerCase()] ?? { bg: "rgba(255,255,255,0.08)", fg: "#a0a0c0" };
+  const label = provider.toLowerCase() === "google-flow" ? "AI Still (Flow)" : provider.toLowerCase() === "manual-ai" ? "AI Still (Manual)" : provider;
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     "span",
     {
@@ -15460,7 +17053,7 @@ function providerBadge(provider) {
         letterSpacing: "0.05em",
         textTransform: "uppercase"
       },
-      children: provider
+      children: label
     }
   );
 }
@@ -16062,7 +17655,44 @@ function StoryboardSceneCard({
               "Candidate Storyboard ",
               sceneCandidates.length > 0 ? `(${sceneCandidates.length} evaluated)` : ""
             ] }),
-            sceneCandidates.length === 0 ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+            sceneCandidates.length === 0 ? (asset?.provider === "google-flow" || asset?.provider === "manual-ai") && asset.localPath ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  display: "flex",
+                  gap: "14px",
+                  alignItems: "center",
+                  background: "var(--bg-void)",
+                  border: "1px solid rgba(139, 92, 246, 0.25)",
+                  borderRadius: "var(--radius-sm)",
+                  padding: "10px 14px"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "img",
+                    {
+                      src: `file://${asset.localPath}`,
+                      alt: "AI Still Preview",
+                      style: {
+                        width: "160px",
+                        height: "90px",
+                        objectFit: "cover",
+                        borderRadius: "4px",
+                        border: "1px solid var(--border-subtle)",
+                        background: "#090a0f"
+                      },
+                      onError: (e) => {
+                        e.target.style.display = "none";
+                      }
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }, children: "✨ AI Still · Google Flow (1920×1080)" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-muted)" }, children: asset.localPath })
+                  ] })
+                ]
+              }
+            ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
               "div",
               {
                 style: {
@@ -19599,14 +21229,6 @@ const ThumbnailStudioPage = ({
     }
   );
 };
-const THUMBNAIL_CATEGORIES = [
-  "US Grocery",
-  "Preparedness",
-  "Hutterite Documentary",
-  "Hidden Cost Documentary",
-  "Streamer Reaction",
-  "Custom"
-];
 const SUPPORTED_VARIABLES = [
   { tag: "{{SCRIPT}}", label: "Full Script (Required)", required: true },
   { tag: "{{VIDEO_TITLE}}", label: "Video Title", required: false },

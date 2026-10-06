@@ -121,6 +121,7 @@ export async function transcribeAudio(
     let resultData: TranscriptResult | null = null
     let stderr = ''
     let stdoutBuffer = ''  // accumulate chunks; result JSON can be very large
+    let lastScriptError = ''  // script reports errors as JSON on stdout, stderr is often empty
 
     proc.stdout.on('data', (chunk: Buffer) => {
       stdoutBuffer += chunk.toString()
@@ -142,6 +143,7 @@ export async function transcribeAudio(
             resultData = msg as TranscriptResult
           } else if (msg.type === 'error') {
             logger.error(`[WHISPER] Script error: ${msg.message}`)
+            lastScriptError = String(msg.message ?? '')
           }
         } catch {
           // non-JSON line — log for debugging
@@ -164,7 +166,8 @@ export async function transcribeAudio(
     proc.on('close', (code) => {
       if (code !== 0) {
         logger.error(`Transcription process exited ${code}`, { stderr: stderr.slice(0, 500) })
-        reject(new Error(`Transcription failed (exit ${code}): ${stderr.slice(0, 300)}`))
+        const detail = stderr.trim() ? stderr.slice(0, 300) : lastScriptError.slice(0, 300)
+        reject(new Error(`Transcription failed (exit ${code}): ${detail}`))
         return
       }
       if (!resultData) {

@@ -8,8 +8,10 @@ import type {
   RenderQaReport,
   StockSceneAssignment,
   AutoPipelineOptions,
+  ContentType,
   RenderRecoveryInfo
 } from '../../../shared/types'
+import { computeHealthMotionHash } from '../health/health-visual-cache'
 import { inspectRenderRecovery } from '../render-cache/render-recovery'
 
 export interface StockCompletionResult {
@@ -228,7 +230,17 @@ export function checkStockCompletion(projectDir: string): StockCompletionResult 
   }
 }
 
-export function isAudioValid(projectDir: string, requireMusic?: boolean): boolean {
+/**
+ * Provider-agnostic completion check for Custom Mix (Google Flow AI, Pexels, Pixabay, local).
+ * A scene is complete when it has one assigned, existing media file - regardless of provider.
+ * It never implies that missing scenes should be repaired with Stock.
+ * Legacy flow keeps using checkStockCompletion().
+ */
+export function checkVisualCompletion(projectDir: string): StockCompletionResult {
+  return checkStockCompletion(projectDir)
+}
+
+export function isAudioValid(projectDir: string, requireMusic?: boolean, contentType?: ContentType): boolean {
   const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
   if (!fs.existsSync(audioPlanPath)) return false
 
@@ -239,8 +251,26 @@ export function isAudioValid(projectDir: string, requireMusic?: boolean): boolea
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
       )
-      return hasDownloadedMusic
+      if (!hasDownloadedMusic) return false
     }
+
+    if (contentType === 'health') {
+      const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
+      if (fs.existsSync(healthPlanPath)) {
+        try {
+          const healthPlan = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+          const hasSfxCues = (healthPlan.scenes || []).some((s: any) => s.sfxCue)
+          if (hasSfxCues) {
+            if (!plan.healthSfx?.enabled) return false
+            const expectedHash = computeHealthMotionHash(healthPlan)
+            if (plan.healthSfx.planHash !== expectedHash) return false
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     return true
   } catch {
     return false

@@ -12,6 +12,7 @@ import { registerStockHandlers } from './ipc/stock.ipc'
 import { registerAudioHandlers } from './ipc/audio.ipc'
 import { registerCaptionHandlers } from './ipc/captions.ipc'
 import { registerPipelineHandlers } from './ipc/pipeline.ipc'
+import { registerManualAiHandlers } from './ipc/manual-ai.ipc'
 import { registerResearchHandlers } from './ipc/research.ipc'
 import { researchSidecar } from './research/research-sidecar'
 import { registerThumbnailHandlers } from './ipc/thumbnail.ipc'
@@ -99,6 +100,7 @@ app.whenReady().then(() => {
   registerAudioHandlers(ipcMain)
   registerCaptionHandlers(ipcMain)
   registerPipelineHandlers(ipcMain)
+  registerManualAiHandlers(ipcMain)
   registerResearchHandlers(ipcMain)
   registerThumbnailHandlers(ipcMain)
 

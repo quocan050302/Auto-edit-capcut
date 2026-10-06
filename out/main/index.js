@@ -40,6 +40,204 @@ const cp__namespace = /* @__PURE__ */ _interopNamespaceDefault(cp);
 const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
+function resolveContentProfileMode(options) {
+  if (options?.contentProfileMode) {
+    return options.contentProfileMode;
+  }
+  if (options?.contentType === "health") {
+    return "health";
+  }
+  if (options?.contentType === "default") {
+    return "general";
+  }
+  return "auto";
+}
+function resolveAiImageMode(config) {
+  return config?.aiImageMode === "prompt" ? "prompt" : "auto";
+}
+const DEFAULT_VISUAL_MIX_CONFIG = {
+  mode: "legacy",
+  aiImageRatio: 0,
+  stockFootageRatio: 1,
+  imageOutputResolution: "1080p",
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+};
+const HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG = {
+  mode: "custom-mix",
+  aiImageRatio: 0.8,
+  stockFootageRatio: 0.2,
+  imageOutputResolution: "1080p",
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+};
+const GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG = {
+  mode: "custom-mix",
+  aiImageRatio: 0.5,
+  stockFootageRatio: 0.5,
+  imageOutputResolution: "1080p",
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+};
+function normalizeVisualMixConfig(config, modeOverride) {
+  const mode = modeOverride ?? config?.mode ?? "legacy";
+  const imageOutputResolution = config?.imageOutputResolution === "4k" ? "4k" : config?.imageOutputResolution === "2k" ? "2k" : "1080p";
+  const resDims = imageOutputResolution === "4k" ? { width: 3840, height: 2160 } : imageOutputResolution === "2k" ? { width: 2560, height: 1440 } : { width: 1920, height: 1080 };
+  const requestedGenerationConcurrency = Math.max(
+    1,
+    Math.min(6, config?.requestedGenerationConcurrency ?? config?.generationConcurrency ?? 2)
+  );
+  const exportConcurrency = Math.max(
+    1,
+    Math.min(4, config?.exportConcurrency ?? config?.postProcessConcurrency ?? 2)
+  );
+  const normalizeConcurrency = Math.max(
+    1,
+    Math.min(4, config?.normalizeConcurrency ?? config?.postProcessConcurrency ?? 2)
+  );
+  const stockSearchConcurrency = Math.max(
+    1,
+    Math.min(8, config?.stockSearchConcurrency ?? 4)
+  );
+  const stockDownloadConcurrency = Math.max(
+    1,
+    Math.min(6, config?.stockDownloadConcurrency ?? 3)
+  );
+  if (mode === "legacy") {
+    return {
+      mode: "legacy",
+      aiImageRatio: 0,
+      stockFootageRatio: 1,
+      imageOutputResolution,
+      motionEnabled: config?.motionEnabled ?? true,
+      requestedGenerationConcurrency,
+      exportConcurrency,
+      normalizeConcurrency,
+      stockSearchConcurrency,
+      stockDownloadConcurrency,
+      generationConcurrency: requestedGenerationConcurrency,
+      postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+      width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+      height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
+    };
+  }
+  let rawAi = config?.aiImageRatio;
+  let rawStock = config?.stockFootageRatio;
+  if (rawAi === void 0 && rawStock === void 0) {
+    rawAi = 0.5;
+    rawStock = 0.5;
+  } else if (rawAi !== void 0 && rawStock === void 0) {
+    const clampedAi = Math.max(0, Math.min(1, rawAi));
+    rawAi = Math.round(clampedAi * 1e3) / 1e3;
+    rawStock = Math.round((1 - rawAi) * 1e3) / 1e3;
+  } else if (rawAi === void 0 && rawStock !== void 0) {
+    const clampedStock = Math.max(0, Math.min(1, rawStock));
+    rawStock = Math.round(clampedStock * 1e3) / 1e3;
+    rawAi = Math.round((1 - rawStock) * 1e3) / 1e3;
+  } else {
+    const clampedAi = Math.max(0, Math.min(1, rawAi));
+    const clampedStock = Math.max(0, Math.min(1, rawStock));
+    const sum = clampedAi + clampedStock;
+    if (sum === 0) {
+      rawAi = 0;
+      rawStock = 1;
+    } else if (Math.abs(sum - 1) < 1e-4) {
+      rawAi = Math.round(clampedAi * 1e3) / 1e3;
+      rawStock = Math.round((1 - rawAi) * 1e3) / 1e3;
+    } else {
+      rawAi = Math.round(clampedAi / sum * 1e3) / 1e3;
+      rawStock = Math.round((1 - rawAi) * 1e3) / 1e3;
+    }
+  }
+  const aiRatio = Math.max(0, Math.min(1, Math.round(rawAi * 1e3) / 1e3));
+  const stockRatio = Math.max(0, Math.min(1, Math.round((1 - aiRatio) * 1e3) / 1e3));
+  return {
+    mode: "custom-mix",
+    aiImageRatio: aiRatio,
+    stockFootageRatio: stockRatio,
+    imageOutputResolution,
+    aiFailureBehavior: config?.aiFailureBehavior === "stock-fallback" ? "stock-fallback" : "strict",
+    aiImageMode: resolveAiImageMode(config),
+    motionEnabled: config?.motionEnabled ?? true,
+    requestedGenerationConcurrency,
+    exportConcurrency,
+    normalizeConcurrency,
+    stockSearchConcurrency,
+    stockDownloadConcurrency,
+    generationConcurrency: requestedGenerationConcurrency,
+    postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+    width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+    height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
+  };
+}
+function resolveVisualMixConfig(options) {
+  if (!options) {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG };
+  }
+  const isHealth = (options.contentType ?? "default") === "health";
+  if (options.visualMixConfig) {
+    const mode = options.visualSourceMode ?? options.visualMixConfig.mode ?? "custom-mix";
+    return normalizeVisualMixConfig(options.visualMixConfig, mode);
+  }
+  if (options.visualSourceMode === "legacy") {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG };
+  }
+  if (options.visualSourceMode === "custom-mix") {
+    if (isHealth) {
+      if (options.healthVisualConfig) {
+        return normalizeVisualMixConfig(
+          {
+            mode: "custom-mix",
+            aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+            stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+            imageOutputResolution: "1080p",
+            motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+          },
+          "custom-mix"
+        );
+      }
+      return { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG };
+    }
+    return { ...GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG };
+  }
+  if (isHealth && options.healthVisualConfig) {
+    return normalizeVisualMixConfig(
+      {
+        mode: "custom-mix",
+        aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+        stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+        imageOutputResolution: "1080p",
+        motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+      },
+      "custom-mix"
+    );
+  }
+  return { ...DEFAULT_VISUAL_MIX_CONFIG };
+}
 const DEFAULT_VISUAL_TRUTH_WEIGHTS = {
   metadataRelevance: 0.25,
   visualVerification: 0.3,
@@ -182,6 +380,15 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
+  MANUAL_AI_GET_STATUS: "manual-ai:get-status",
+  MANUAL_AI_GET_PROMPT_TEXT: "manual-ai:get-prompt-text",
+  MANUAL_AI_EXPORT_TXT: "manual-ai:export-txt",
+  MANUAL_AI_OPEN_PROMPT_FILE: "manual-ai:open-prompt-file",
+  MANUAL_AI_SELECT_IMAGES: "manual-ai:select-images",
+  MANUAL_AI_PLAN_IMPORT: "manual-ai:plan-import",
+  MANUAL_AI_COMMIT_IMPORT: "manual-ai:commit-import",
+  MANUAL_AI_STATUS_UPDATED: "manual-ai:status-updated",
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
@@ -579,7 +786,8 @@ const MODEL_ROUTES = {
   stock_query: ["gemini-3.5-flash-lite", "gemini-3.5-flash"],
   retention_qa: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
   visual_truth: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
-  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
+  claim_analysis: ["gemini-3.5-flash", "gemini-3.5-flash-lite"],
+  manual_ai_visual_director: ["gemini-3.5-flash", "gemini-3.5-flash-lite"]
 };
 function getModelRoute(taskType, preferredModel) {
   const defaultRoute = [...MODEL_ROUTES[taskType]];
@@ -1580,6 +1788,7 @@ function probeImageFile(filePath) {
     fs__namespace.closeSync(fd);
   }
 }
+const probeImageFileDimensions = probeImageFile;
 const DEFAULT_FLOWKIT_BRIDGE_URL = "http://127.0.0.1:8100";
 class GoogleFlowClient {
   bridgeUrl;
@@ -1684,6 +1893,7 @@ class GoogleFlowClient {
       reference_media_ids: []
     };
     logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`);
+    const callerHeader = request.caller ? `long-form-video-factory/${request.caller}` : "long-form-video-factory/thumbnail-studio";
     let resp;
     try {
       resp = await this.fetchWithTimeout(
@@ -1692,7 +1902,7 @@ class GoogleFlowClient {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-flowkit-caller": "long-form-video-factory/thumbnail-studio"
+            "x-flowkit-caller": callerHeader
           },
           body: JSON.stringify(payload)
         },
@@ -1738,10 +1948,76 @@ class GoogleFlowClient {
     }
     throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`);
   }
+  async getFlowThrottle() {
+    try {
+      const resp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: "GET" }, 3e3);
+      if (resp.ok) {
+        const data = await resp.json();
+        const throttle = data?.generation_throttle;
+        const maxConc = typeof throttle?.max_concurrent === "number" ? throttle.max_concurrent : 1;
+        const minInt = typeof throttle?.min_interval_s === "number" ? throttle.min_interval_s : 3;
+        const cooldown = Boolean(throttle?.cooldown_active);
+        const cooldownRem = typeof throttle?.cooldown_remaining_s === "number" ? throttle.cooldown_remaining_s : 0;
+        return {
+          maxConcurrent: maxConc,
+          minIntervalS: minInt,
+          cooldownActive: cooldown,
+          cooldownRemainingS: cooldownRem
+        };
+      }
+    } catch {
+    }
+    return {
+      maxConcurrent: 1,
+      minIntervalS: 3,
+      cooldownActive: false,
+      cooldownRemainingS: 0
+    };
+  }
   async exportImage(request) {
     const destDir = path__namespace.dirname(request.destinationPath);
     if (!fs__namespace.existsSync(destDir)) {
       fs__namespace.mkdirSync(destDir, { recursive: true });
+    }
+    const pref = request.preferredQuality || (request.quality === "2k" ? "2k" : "4k");
+    if (pref === "2k") {
+      const result2k = await this.tryExportAtQuality(request.mediaId, request.projectId, "2k", request.destinationPath);
+      if (result2k.success && result2k.buffer) {
+        fs__namespace.writeFileSync(request.destinationPath, result2k.buffer);
+        const dims = probeImageDimensions(result2k.buffer);
+        const stats = fs__namespace.statSync(request.destinationPath);
+        return {
+          filePath: request.destinationPath,
+          fileSize: stats.size,
+          width: dims?.width || 2560,
+          height: dims?.height || 1440,
+          actualQuality: "2k-fallback"
+        };
+      }
+      if (request.fallbackToOriginalUrl) {
+        logger.warn(`[GoogleFlowClient] Direct 2K export failed (${result2k.error}). Falling back to original image download from fifeUrl...`);
+        try {
+          const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: "GET" }, 3e4);
+          if (origResp.ok) {
+            const arrayBuf = await origResp.arrayBuffer();
+            const buf = Buffer.from(arrayBuf);
+            fs__namespace.writeFileSync(request.destinationPath, buf);
+            const dims = probeImageDimensions(buf);
+            const stats = fs__namespace.statSync(request.destinationPath);
+            return {
+              filePath: request.destinationPath,
+              fileSize: stats.size,
+              width: dims?.width || 1376,
+              height: dims?.height || 768,
+              actualQuality: "original-fallback",
+              is4kPlanGated: true
+            };
+          }
+        } catch (fifeErr) {
+          logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`);
+        }
+      }
+      throw new Error(`FLOW_EXPORT_FAILED: Failed to export 2K image for media ${request.mediaId}: ${result2k.error || "Unknown error"}`);
     }
     let result = await this.tryExportAtQuality(request.mediaId, request.projectId, "4k", request.destinationPath);
     if (result.success && result.buffer) {
@@ -2682,9 +2958,9 @@ class ThumbnailCancelledError extends Error {
   }
 }
 function abortableDelay(ms, signal) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject2) => {
     if (signal.aborted) {
-      reject(new ThumbnailCancelledError());
+      reject2(new ThumbnailCancelledError());
       return;
     }
     const timer = setTimeout(() => {
@@ -2693,7 +2969,7 @@ function abortableDelay(ms, signal) {
     }, ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(new ThumbnailCancelledError());
+      reject2(new ThumbnailCancelledError());
     };
     signal.addEventListener("abort", onAbort, { once: true });
   });
@@ -4031,6 +4307,61 @@ function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
     invalidated.add("rendering");
     invalidated.add("postflight");
   }
+  const oldProfileMode = resolveContentProfileMode(oldState.options);
+  const newProfileMode = resolveContentProfileMode(newOptions);
+  const oldContentType = oldState.options.contentType ?? "default";
+  const newContentType = newOptions.contentType ?? "default";
+  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
+    invalidated.add("stock-search");
+    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === "health" ? "custom-mix" : "legacy");
+  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === "health" ? "custom-mix" : "legacy");
+  if (oldVisualMode !== newVisualMode) {
+    invalidated.add("stock-search");
+    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: oldState.options.visualSourceMode,
+    visualMixConfig: oldState.options.visualMixConfig,
+    contentType: oldContentType
+  }) : void 0;
+  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: newOptions.visualSourceMode,
+    visualMixConfig: newOptions.visualMixConfig,
+    contentType: newContentType
+  }) : void 0;
+  const stripDefaultAiMode = (cfg) => {
+    if (!cfg || typeof cfg !== "object" || !("aiImageMode" in cfg)) return cfg;
+    const { aiImageMode, ...rest } = cfg;
+    return aiImageMode === "prompt" ? { ...rest, aiImageMode } : rest;
+  };
+  const oldVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
+  );
+  const newVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
+  );
+  const visualConfigChanged = oldVisualConfigStr !== newVisualConfigStr || oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio || oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio || oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution || oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior || resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig);
+  if (visualConfigChanged) {
+    invalidated.add("stock-search");
+    if (oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
   if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
     invalidated.add("audio-search");
     invalidated.add("preflight");
@@ -4054,6 +4385,73 @@ function applyInvalidation(state2, invalidatedStages) {
       };
     }
   }
+}
+const HEALTH_SCHEMA_VERSION = 1;
+const DEFAULT_HEALTH_CONFIG = {
+  aiRatio: 0.8,
+  stockRatio: 0.2,
+  width: 1920,
+  height: 1080,
+  motionEnabled: true
+};
+function getHealthManifestPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "health-generated-assets.json");
+}
+function computeHealthConfigHash(config) {
+  const merged = { ...DEFAULT_HEALTH_CONFIG, ...config };
+  return crypto__namespace.createHash("md5").update(JSON.stringify(merged)).digest("hex");
+}
+function computeHealthGenerationHash(sceneIndex, narration, visualIntent, imagePrompt, config) {
+  const width = config?.width ?? DEFAULT_HEALTH_CONFIG.width;
+  const height = config?.height ?? DEFAULT_HEALTH_CONFIG.height;
+  const payload = [
+    String(sceneIndex),
+    (narration || "").trim().toLowerCase(),
+    (visualIntent || "").trim().toLowerCase(),
+    (imagePrompt || "").trim(),
+    `${width}x${height}`,
+    "GEM_PIX_2",
+    "health"
+  ].join("||");
+  return crypto__namespace.createHash("sha256").update(payload).digest("hex");
+}
+function computeHealthMotionHash(plan) {
+  const parts = (plan.scenes || []).map((s) => {
+    const motionStr = s.motion ? `${s.motion.preset}:${s.motion.intensity}:${s.motion.zoomEnd}` : s.motionPreset || "none";
+    const sfxStr = s.sfxCue ? `${s.sfxCue.type}:${s.sfxCue.volumeDb}` : "none";
+    return `${s.sceneIndex}:${s.category}:${motionStr}:${sfxStr}`;
+  });
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function loadHealthGeneratedManifest(projectDir) {
+  const manifestPath = getHealthManifestPath(projectDir);
+  if (fs__namespace.existsSync(manifestPath)) {
+    try {
+      const data = JSON.parse(fs__namespace.readFileSync(manifestPath, "utf-8"));
+      if (data && typeof data === "object" && data.scenes) {
+        return data;
+      }
+    } catch (err) {
+      logger.warn(`[HealthVisualCache] Failed to parse ${manifestPath}: ${err}`);
+    }
+  }
+  return {
+    schemaVersion: HEALTH_SCHEMA_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    configHash: computeHealthConfigHash(),
+    scenes: {}
+  };
+}
+function saveHealthGeneratedManifest(projectDir, manifest) {
+  const manifestPath = getHealthManifestPath(projectDir);
+  const dir = path__namespace.dirname(manifestPath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const tmpPath = `${manifestPath}.tmp.${Date.now()}`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs__namespace.renameSync(tmpPath, manifestPath);
 }
 const ffmpegStaticPath = require("ffmpeg-static");
 function getFfmpegBinary() {
@@ -4199,17 +4597,17 @@ function parseProgressBlock(block) {
     done: block["progress"] === "end"
   };
 }
-function ffmpegRun$3(args, options = {}) {
+function ffmpegRun$4(args, options = {}) {
   const { signal } = options;
   if (signal?.aborted) return Promise.reject(new RenderCancelledError());
   const finalArgs = buildFfmpegArgs(args, options);
   const throttleMs = options.progressThrottleMs ?? 500;
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject2) => {
     let proc;
     try {
       proc = cp.spawn(getFfmpegBinary(), finalArgs, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
     } catch (err) {
-      reject(err);
+      reject2(err);
       return;
     }
     const entry = { proc, jobId: options.jobId, phase: options.phase, startedAt: Date.now() };
@@ -4264,19 +4662,19 @@ function ffmpegRun$3(args, options = {}) {
     };
     proc.on("error", (err) => {
       cleanup();
-      reject(err);
+      reject2(err);
     });
     proc.on("close", (code, sig) => {
       cleanup();
       if (aborted || signal?.aborted) {
-        reject(new RenderCancelledError());
+        reject2(new RenderCancelledError());
         return;
       }
       if (code === 0) {
         resolve();
         return;
       }
-      reject(new Error(`FFmpeg exited ${code ?? sig}: ${stderr.tail(6)}`));
+      reject2(new Error(`FFmpeg exited ${code ?? sig}: ${stderr.tail(6)}`));
     });
   });
 }
@@ -4777,7 +5175,7 @@ async function probeVideoToolbox(force = false) {
   }
   const tmp = path__namespace.join(os__namespace.tmpdir(), `vt-probe-${process.pid}-${Date.now()}.mp4`);
   try {
-    await ffmpegRun$3([
+    await ffmpegRun$4([
       "-y",
       "-f",
       "lavfi",
@@ -5184,8 +5582,8 @@ async function probeVideoDuration(filePath) {
     return null;
   }
 }
-function ffmpegRun$2(args, options) {
-  return ffmpegRun$3(args, options ?? {});
+function ffmpegRun$3(args, options) {
+  return ffmpegRun$4(args, options ?? {});
 }
 function planTransitionSegments(scenes, transitions, fps, maxScenesPerSegment) {
   const count = scenes.length;
@@ -5311,7 +5709,7 @@ ${filterComplex}`);
       "+faststart",
       rawVideoPath
     ];
-    await ffmpegRun$2(args, params.ffmpegOptions);
+    await ffmpegRun$3(args, params.ffmpegOptions);
   } else {
     const segments = planTransitionSegments(scenes, transitions, fps, maxPer);
     logger.info(`[Transitions] Segmented assembly: ${segments.length} segments (≤${maxPer + 1} inputs each)`);
@@ -5325,7 +5723,7 @@ ${filterComplex}`);
         const inputArgs = [];
         for (let i = seg.firstScene; i <= seg.lastScene; i++) inputArgs.push("-i", sceneClips[i]);
         const filterComplex = buildSegmentFilterGraph(scenes, transitions, seg, fps);
-        await ffmpegRun$2([
+        await ffmpegRun$3([
           "-y",
           ...inputArgs,
           "-filter_complex",
@@ -5349,7 +5747,7 @@ ${filterComplex}`);
       "utf-8"
     );
     try {
-      await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", rawVideoPath], params.ffmpegOptions);
+      await ffmpegRun$3(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", rawVideoPath], params.ffmpegOptions);
     } finally {
       try {
         fs__namespace.unlinkSync(listPath);
@@ -5681,6 +6079,14 @@ function resolveVisualBeats(scene, ctx, level) {
     const seed = seedInt(scene.sceneIndex, 2);
     targetBeats = seed < 60 ? 1 : 2;
   }
+  const hint = scene.retentionHint;
+  if (hint) {
+    if (hint.beatPacing === "fast" && isLongEnough) {
+      targetBeats = Math.min(cfg.maxBeatsPerScene, Math.max(targetBeats, 2));
+    } else if (hint.beatPacing === "slow") {
+      targetBeats = duration >= 9 ? Math.min(targetBeats, 2) : 1;
+    }
+  }
   targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
   if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
     targetBeats = Math.min(targetBeats, 1);
@@ -5702,11 +6108,12 @@ function resolveVisualBeats(scene, ctx, level) {
     } else if (i === 1) {
       const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
       if (cfg.proofVisualAllowed && hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+        const maxPvDur = hint?.proofPriority === "high" ? 3.5 : 2.5;
         const pv = detectProofVisual(
           scene.narrativeText,
           sceneId,
           relStart,
-          Math.min(beatDuration, 2.5)
+          Math.min(beatDuration, maxPvDur)
         );
         if (pv) {
           proofVisualFound = pv;
@@ -5726,7 +6133,8 @@ function resolveVisualBeats(scene, ctx, level) {
       }
     } else {
       const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
-      if (scene.isPatternInterrupt && timeSinceInterrupt >= cfg.patternInterruptCooldown) {
+      const shouldTriggerInterrupt = (scene.isPatternInterrupt || hint?.patternInterrupt) && timeSinceInterrupt >= cfg.patternInterruptCooldown;
+      if (shouldTriggerInterrupt) {
         beatType = "pattern_interrupt";
         beatPurpose = "reset_attention";
       } else {
@@ -5784,7 +6192,14 @@ function createDefaultContext() {
     consecutiveSameShot: 0,
     consecutiveStrongEffect: 0,
     accumulatedVisualLoad: 0,
-    sceneIndex: 0
+    sceneIndex: 0,
+    timeSinceLastRehook: 999,
+    timeSinceLastPatternInterrupt: 999,
+    recentNoveltyScores: [],
+    recentSceneRoles: [],
+    recentMotionPresets: [],
+    recentVisualCategories: [],
+    openLoopIds: []
   };
 }
 function resolveSceneRetention(scene, ctx, settings) {
@@ -5875,10 +6290,27 @@ function updateRetentionContext(ctx, scene, decision) {
   ctx.timeSinceLastStrongEffect += scene.duration;
   ctx.timeSinceLastProofVisual += scene.duration;
   ctx.timeSinceLastHumanShot += scene.duration;
+  const hint = scene.retentionHint;
+  if (hint?.role === "re-hook" || hint?.role === "hook") {
+    ctx.timeSinceLastRehook = 0;
+  } else {
+    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration;
+  }
+  if (hint?.patternInterrupt || scene.isPatternInterrupt) {
+    ctx.timeSinceLastPatternInterrupt = 0;
+  } else {
+    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
+  }
+  if (hint?.noveltyScore !== void 0) {
+    ctx.recentNoveltyScores = [...ctx.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
+  }
+  if (hint?.role) {
+    ctx.recentSceneRoles = [...ctx.recentSceneRoles || [], hint.role].slice(-10);
+  }
   if (decision.proofVisual) {
     ctx.timeSinceLastProofVisual = 0;
   }
-  if (scene.isPatternInterrupt) {
+  if (scene.isPatternInterrupt || hint?.patternInterrupt) {
     ctx.timeSinceLastStrongEffect = 0;
     ctx.previousPatternInterruptType = "pattern_interrupt";
   }
@@ -5899,7 +6331,7 @@ const PROOF_REGEX = /\$[\d,]+|\d+\.?\d*\s*%|\b(1[0-9]{3}|20[0-9]{2})\b|\d{1,3}(,
 function makeFlag(sceneId, flagType, severity, description, suggestion) {
   return { sceneId, flagType, severity, description, suggestion };
 }
-function runRetentionQA(scenes) {
+function runRetentionQA(scenes, retentionPlan) {
   const flags = [];
   for (const scene of scenes) {
     const sceneId = scene.sceneId ?? String(scene.sceneIndex);
@@ -5983,6 +6415,89 @@ function runRetentionQA(scenes) {
       noResetSeconds = 0;
     }
   }
+  if (retentionPlan) {
+    const plans = retentionPlan.scenes || [];
+    for (let i = 2; i < plans.length; i++) {
+      const p0 = plans[i - 2];
+      const p1 = plans[i - 1];
+      const p2 = plans[i];
+      if (p0.noveltyScore < 0.4 && p1.noveltyScore < 0.4 && p2.noveltyScore < 0.4) {
+        flags.push(makeFlag(
+          p2.sceneId,
+          "LOW_NOVELTY_STREAK",
+          "warning",
+          `Low novelty streak across 3 consecutive scenes (${p0.noveltyScore.toFixed(2)}, ${p1.noveltyScore.toFixed(2)}, ${p2.noveltyScore.toFixed(2)})`,
+          "Vary camera motion, apply detail crop, or introduce a proof visual"
+        ));
+      }
+    }
+    const motionHistory = [];
+    for (const sc of scenes) {
+      const motion = sc.motionPreset || sc.motion?.preset;
+      if (motion) {
+        motionHistory.push({ sceneId: sc.sceneId ?? String(sc.sceneIndex), motion });
+      }
+    }
+    for (let i = 2; i < motionHistory.length; i++) {
+      const m0 = motionHistory[i - 2].motion;
+      const m1 = motionHistory[i - 1].motion;
+      const m2 = motionHistory[i].motion;
+      if (m0 && m1 === m0 && m2 === m0) {
+        flags.push(makeFlag(
+          motionHistory[i].sceneId,
+          "REPEATED_MOTION",
+          "warning",
+          `3 consecutive AI still scenes use identical motion preset "${m0}"`,
+          "Use alternate motion preset or subtle pan to increase visual variety"
+        ));
+      }
+    }
+    for (let i = 2; i < scenes.length; i++) {
+      const c0 = scenes[i - 2].category;
+      const c1 = scenes[i - 1].category;
+      const c2 = scenes[i].category;
+      if (c0 && c1 === c0 && c2 === c0 && c0 !== "conceptual") {
+        flags.push(makeFlag(
+          scenes[i].sceneId ?? String(scenes[i].sceneIndex),
+          "REPEATED_VISUAL_CATEGORY",
+          "info",
+          `3 consecutive scenes share the same visual category "${c0}"`,
+          "Ensure camera angles or framing vary between scenes"
+        ));
+      }
+    }
+    for (const loop of retentionPlan.openLoops || []) {
+      if (loop.status === "open" && loop.confidence >= 0.85) {
+        flags.push(makeFlag(
+          String(loop.openedAtSceneIndex),
+          "OPEN_LOOP_UNRESOLVED",
+          "info",
+          `Open loop "${loop.question}" has no identified payoff scene`,
+          "Consider addressing or answering the open question in a later scene"
+        ));
+      }
+    }
+    const targetGap = retentionPlan.strategy?.targetRehookGapSecs || 35;
+    let timeSinceLastRehook = 0;
+    for (const p of plans) {
+      const sc = scenes.find((s) => s.sceneIndex === p.sceneIndex);
+      const dur = sc?.duration || 4;
+      if (p.role === "hook" || p.role === "re-hook" || p.role === "surprise" || p.patternInterrupt) {
+        if (timeSinceLastRehook > targetGap * 1.5) {
+          flags.push(makeFlag(
+            p.sceneId,
+            "REHOOK_GAP_TOO_LONG",
+            "warning",
+            `Re-hook gap of ${Math.round(timeSinceLastRehook)}s exceeded recommended target (${targetGap}s)`,
+            "Add an engaging narrative question or pattern interrupt earlier"
+          ));
+        }
+        timeSinceLastRehook = 0;
+      } else {
+        timeSinceLastRehook += dur;
+      }
+    }
+  }
   const bySeverity = {
     error: flags.filter((f) => f.severity === "error").length,
     warning: flags.filter((f) => f.severity === "warning").length,
@@ -5992,6 +6507,853 @@ function runRetentionQA(scenes) {
     `[RetentionQA] ${flags.length} flags: ${bySeverity.error} errors, ${bySeverity.warning} warnings, ${bySeverity.info} info`
   );
   return flags;
+}
+function generateRetentionSummary(scenes, retentionPlan, flags = []) {
+  let totalDuration = 0;
+  for (const s of scenes) {
+    totalDuration += s.duration || 0;
+  }
+  const lowNoveltyFlags = flags.filter((f) => f.flagType === "LOW_NOVELTY_STREAK").length;
+  const longRehookFlags = flags.filter((f) => f.flagType === "REHOOK_GAP_TOO_LONG").length;
+  const repeatedMotionFlags = flags.filter((f) => f.flagType === "REPEATED_MOTION").length;
+  const overeditedFlags = flags.filter((f) => f.flagType === "OVEREDITED" || f.flagType === "EFFECT_OVERLOAD").length;
+  const detectedLoops = retentionPlan?.openLoops?.length || 0;
+  const resolvedLoops = retentionPlan?.openLoops?.filter((l) => l.status === "resolved").length || 0;
+  const unresolvedLoops = detectedLoops - resolvedLoops;
+  const patternInterrupts = retentionPlan?.summary?.patternInterrupts ?? scenes.filter((s) => s.isPatternInterrupt).length;
+  let avgNovelty = 0.7;
+  if (retentionPlan?.scenes && retentionPlan.scenes.length > 0) {
+    const sum = retentionPlan.scenes.reduce((acc, sp) => acc + (sp.noveltyScore || 0), 0);
+    avgNovelty = Math.round(sum / retentionPlan.scenes.length * 100) / 100;
+  }
+  let healthScore = 100;
+  healthScore -= lowNoveltyFlags * 5;
+  healthScore -= longRehookFlags * 5;
+  healthScore -= repeatedMotionFlags * 3;
+  healthScore -= unresolvedLoops * 4;
+  healthScore -= overeditedFlags * 4;
+  healthScore = Math.max(40, Math.min(100, healthScore));
+  return {
+    schemaVersion: 1,
+    sceneCount: scenes.length,
+    durationSecs: Math.round(totalDuration * 10) / 10,
+    retentionHealthScore: healthScore,
+    riskCounts: {
+      lowNovelty: lowNoveltyFlags,
+      longRehookGap: longRehookFlags,
+      repeatedMotion: repeatedMotionFlags,
+      overedited: overeditedFlags
+    },
+    openLoops: {
+      detected: detectedLoops,
+      resolved: resolvedLoops,
+      unresolved: unresolvedLoops
+    },
+    patternInterrupts,
+    averageNoveltyScore: avgNovelty
+  };
+}
+function saveRetentionSummary(projectDir, summary) {
+  try {
+    const summaryPath = path__namespace.join(projectDir, "analysis", "retention-summary.json");
+    const dir = path__namespace.dirname(summaryPath);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    fs__namespace.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf-8");
+    logger.info(`[RetentionQA] Retention summary saved to retention-summary.json (score=${summary.retentionHealthScore})`);
+  } catch (err) {
+    logger.warn(`[RetentionQA] Failed to save retention summary: ${String(err)}`);
+  }
+}
+const STOP_WORDS = /* @__PURE__ */ new Set([
+  "a",
+  "an",
+  "the",
+  "in",
+  "on",
+  "at",
+  "of",
+  "for",
+  "with",
+  "by",
+  "about",
+  "against",
+  "between",
+  "into",
+  "through",
+  "during",
+  "before",
+  "after",
+  "above",
+  "below",
+  "to",
+  "from",
+  "up",
+  "down",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "and",
+  "but",
+  "if",
+  "or",
+  "because",
+  "as",
+  "until",
+  "while",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "its",
+  "show",
+  "showing",
+  "shot",
+  "view",
+  "close",
+  "up",
+  "scene",
+  "visual",
+  "cinematic",
+  "high",
+  "quality",
+  "you",
+  "your",
+  "we",
+  "our",
+  "us",
+  "they",
+  "them",
+  "their",
+  "he",
+  "him",
+  "his",
+  "she",
+  "her",
+  "now",
+  "right",
+  "here",
+  "there",
+  "just",
+  "even",
+  "also",
+  "any",
+  "all",
+  "some",
+  "many",
+  "much",
+  "more",
+  "most",
+  "very",
+  "really",
+  "however",
+  "furthermore",
+  "what",
+  "why",
+  "how",
+  "when",
+  "where",
+  "which",
+  "who",
+  "whose",
+  "whom",
+  "can",
+  "could",
+  "will",
+  "would",
+  "should",
+  "may",
+  "might",
+  "must",
+  "without",
+  "well",
+  "like"
+]);
+function extractNormalizedKeywords(text) {
+  if (!text || typeof text !== "string") return [];
+  const tokens = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+  return Array.from(new Set(tokens));
+}
+function classifySubjectType(visualIntent, category, narrativeText) {
+  const combined = `${category || ""} ${visualIntent || ""} ${narrativeText || ""}`.toLowerCase();
+  if (combined.includes("anatomy") || combined.includes("organ") || combined.includes("kidney") || combined.includes("heart") || combined.includes("liver") || combined.includes("artery") || combined.includes("blood") || combined.includes("cell") || combined.includes("neuron") || combined.includes("tissue") || combined.includes("vessel") || combined.includes("microscopic")) {
+    return "anatomy";
+  }
+  if (combined.includes("person") || combined.includes("doctor") || combined.includes("patient") || combined.includes("man") || combined.includes("woman") || combined.includes("face") || combined.includes("hand") || combined.includes("worker") || combined.includes("lifestyle") || combined.includes("human")) {
+    return "human";
+  }
+  if (combined.includes("data") || combined.includes("chart") || combined.includes("graph") || combined.includes("study") || combined.includes("stat") || combined.includes("evidence") || combined.includes("percentage") || combined.includes("number")) {
+    return "data";
+  }
+  if (combined.includes("landscape") || combined.includes("hospital") || combined.includes("clinic") || combined.includes("room") || combined.includes("city") || combined.includes("outdoor") || combined.includes("nature") || combined.includes("environment")) {
+    return "environment";
+  }
+  if (combined.includes("pill") || combined.includes("bottle") || combined.includes("food") || combined.includes("equipment") || combined.includes("machine") || combined.includes("tool") || combined.includes("object")) {
+    return "object";
+  }
+  if (combined.includes("conceptual") || combined.includes("mechanism")) {
+    return "conceptual";
+  }
+  return "unknown";
+}
+function computeKeywordJaccard(kw1, kw2) {
+  if (kw1.length === 0 || kw2.length === 0) return 0;
+  const set1 = new Set(kw1);
+  const set2 = new Set(kw2);
+  let intersection = 0;
+  for (const w of set1) {
+    if (set2.has(w)) intersection++;
+  }
+  const union = set1.size + set2.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+function computeSignatureSimilarity(current, previous, isIntentionalMotif = false) {
+  let sim = 0;
+  if (current.visualSource && previous.visualSource && current.visualSource === previous.visualSource) {
+    sim += 0.15;
+  }
+  if (current.shotType && previous.shotType && current.shotType.toLowerCase() === previous.shotType.toLowerCase()) {
+    sim += 0.2;
+  }
+  const sameCategory = Boolean(
+    current.category && previous.category && current.category.toLowerCase() === previous.category.toLowerCase()
+  );
+  const sameSubject = Boolean(
+    current.subjectType && previous.subjectType && current.subjectType !== "unknown" && current.subjectType === previous.subjectType
+  );
+  let categorySim = sameCategory ? 0.3 : sameSubject ? 0.2 : 0;
+  if (isIntentionalMotif && (sameCategory || sameSubject)) {
+    categorySim *= 0.4;
+  }
+  sim += categorySim;
+  const kwOverlap = computeKeywordJaccard(current.visualIntentKeywords, previous.visualIntentKeywords);
+  sim += kwOverlap * (isIntentionalMotif ? 0.12 : 0.25);
+  if (current.motionPreset && previous.motionPreset && current.motionPreset === previous.motionPreset) {
+    sim += 0.1;
+  }
+  return Math.min(0.88, Math.max(0, sim));
+}
+function computeNoveltyScore(current, recentHistory, motifsOrWindowSize = [], windowSizeOpt = 4) {
+  if (recentHistory.length === 0) {
+    return 1;
+  }
+  let motifs = [];
+  let windowSize = 4;
+  if (typeof motifsOrWindowSize === "number") {
+    windowSize = motifsOrWindowSize;
+  } else if (Array.isArray(motifsOrWindowSize)) {
+    motifs = motifsOrWindowSize;
+    windowSize = windowSizeOpt;
+  }
+  const window = recentHistory.slice(-windowSize);
+  const weights = [0.45, 0.25, 0.18, 0.12].slice(0, window.length);
+  let totalWeight = 0;
+  let weightedDistanceSum = 0;
+  let highSimStreak = 0;
+  for (let idx = 0; idx < window.length; idx++) {
+    const prev = window[window.length - 1 - idx];
+    const weight = weights[idx] || 0.1;
+    const isMotif = Boolean(
+      current.motifId && prev.motifId && current.motifId === prev.motifId || current.motifId && motifs.some((m) => m.id === current.motifId && m.recurringSceneIndices.includes(prev.sceneIndex)) || current.motifId && (prev.category === current.category || prev.visualIntentKeywords.some((kw) => current.motifId?.includes(kw)))
+    );
+    const similarity = computeSignatureSimilarity(current, prev, isMotif);
+    if (similarity >= 0.5) {
+      highSimStreak++;
+    }
+    const distance = 1 - similarity;
+    weightedDistanceSum += distance * weight;
+    totalWeight += weight;
+  }
+  let score = totalWeight > 0 ? weightedDistanceSum / totalWeight : 1;
+  if (highSimStreak >= 2) {
+    const fatiguePenalty = (highSimStreak - 1) * 0.04;
+    score = Math.max(0.01, score - fatiguePenalty);
+  }
+  return Math.round(score * 100) / 100;
+}
+function isLowNoveltyStreak(noveltyScores, minStreakOrThreshold = 3, thresholdOrMinStreak) {
+  let minStreak = 3;
+  let threshold = 0.4;
+  {
+    {
+      threshold = minStreakOrThreshold;
+      minStreak = thresholdOrMinStreak;
+    }
+  }
+  if (noveltyScores.length < minStreak) return false;
+  const lastN = noveltyScores.slice(-minStreak);
+  return lastN.every((s) => s < threshold);
+}
+const RETENTION_PLAN_SCHEMA_VERSION = 1;
+function sha256$3(text) {
+  return crypto__namespace.createHash("sha256").update(text).digest("hex");
+}
+function writeFileAtomic$2(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function getSceneText(scene) {
+  return (scene.narrativeText || scene.narration || "").trim();
+}
+const QUESTION_STARTERS = /^(why|how|what|could|can|is\s+it\s+true|where|when|which|who|what\s+if)\b/i;
+const TEASER_PATTERNS = [
+  /\bthe\s+real\s+(reason|problem|truth|cause)\b/i,
+  /\bthere\s+is\s+another\s+(reason|problem|factor)\b/i,
+  /\bwhat\s+happens\s+next\b/i,
+  /\blater\s+(we('ll| will)|in\s+this)\b/i,
+  /\bas\s+we('ll| will)\s+(see|discover|learn|find\s+out)\b/i,
+  /\bthe\s+truth\s+is\s+far\s+more\b/i,
+  /\bwait\s+until\s+you\s+(see|hear|discover)\b/i,
+  /\bthe\s+secret\s+behind\b/i
+];
+const PAYOFF_SIGNALS = [
+  /\bthe\s+reason\b.*\b(is|was)\b/i,
+  /\bthis\s+happens\s+because\b/i,
+  /\bthe\s+answer\b.*\b(is|comes\s+down\s+to|lies\s+in)\b/i,
+  /\bit\s+turns\s+out\b/i,
+  /\bhere('s| is)\s+why\b/i,
+  /\bthat('s| is)\s+why\b/i,
+  /\bnow\s+we\s+(understand|know)\b/i,
+  /\bresearchers\s+(discovered|found|proved)\b/i,
+  /\bthe\s+solution\s+(is|was)\b/i
+];
+function detectOpenLoops(scenes) {
+  const loops = [];
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const text = getSceneText(scene);
+    if (!text || text.length < 10) continue;
+    const hasQuestionMark = text.includes("?");
+    const isQuestionSentence = QUESTION_STARTERS.test(text);
+    const hasTeaserPhrase = TEASER_PATTERNS.some((p) => p.test(text));
+    if (!hasQuestionMark && !isQuestionSentence && !hasTeaserPhrase) {
+      continue;
+    }
+    if (i === 0 && !hasTeaserPhrase) {
+      continue;
+    }
+    const isPureDeclarative = !hasQuestionMark && !hasTeaserPhrase && !isQuestionSentence;
+    if (isPureDeclarative) continue;
+    const keywords = extractNormalizedKeywords(text).filter(
+      (k) => !["why", "how", "what", "when", "where", "next", "reason", "happen"].includes(k)
+    );
+    if (keywords.length === 0) continue;
+    const loopId = `loop_${i + 1}`;
+    loops.push({
+      id: loopId,
+      openedAtSceneIndex: scene.sceneIndex,
+      question: text.slice(0, 120),
+      confidence: hasTeaserPhrase || hasQuestionMark ? 0.9 : 0.75,
+      status: "open",
+      keywords
+    });
+  }
+  for (const loop of loops) {
+    let bestPayoffIndex;
+    let maxOverlap = 0;
+    for (let j = 0; j < scenes.length; j++) {
+      const candidate = scenes[j];
+      if (candidate.sceneIndex <= loop.openedAtSceneIndex) continue;
+      const candidateText = getSceneText(candidate).toLowerCase();
+      const hasPayoffSignal = PAYOFF_SIGNALS.some((p) => p.test(candidateText));
+      const candidateKeywords = extractNormalizedKeywords(candidateText);
+      let overlapCount = 0;
+      for (const kw of loop.keywords) {
+        const matches = candidateKeywords.some(
+          (ck) => ck === kw || ck.length >= 4 && kw.length >= 4 && (ck.startsWith(kw) || kw.startsWith(ck))
+        );
+        if (matches) {
+          overlapCount++;
+        }
+      }
+      const distance = candidate.sceneIndex - loop.openedAtSceneIndex;
+      if (hasPayoffSignal) {
+        if (overlapCount >= 1 || distance <= 4) {
+          if (overlapCount >= maxOverlap) {
+            maxOverlap = overlapCount;
+            bestPayoffIndex = candidate.sceneIndex;
+          }
+        }
+      } else if (overlapCount >= 2 && distance > 1) {
+        if (overlapCount > maxOverlap) {
+          maxOverlap = overlapCount;
+          bestPayoffIndex = candidate.sceneIndex;
+        }
+      }
+    }
+    if (bestPayoffIndex !== void 0) {
+      loop.payoffSceneIndex = bestPayoffIndex;
+      loop.status = "resolved";
+    }
+  }
+  return loops;
+}
+function detectMotifs(scenes) {
+  const keywordSceneMap = /* @__PURE__ */ new Map();
+  for (const s of scenes) {
+    const text = `${s.visualIntent || ""} ${getSceneText(s)}`;
+    const kws = extractNormalizedKeywords(text);
+    for (const kw of kws) {
+      if (kw.length < 4) continue;
+      const list = keywordSceneMap.get(kw) || [];
+      list.push(s.sceneIndex);
+      keywordSceneMap.set(kw, list);
+    }
+  }
+  const motifs = [];
+  for (const [kw, indices] of keywordSceneMap.entries()) {
+    const uniqueIndices = Array.from(new Set(indices));
+    if (uniqueIndices.length >= 3 && uniqueIndices.length <= scenes.length * 0.6) {
+      motifs.push({
+        id: `motif_${kw}`,
+        label: kw,
+        conceptKeywords: [kw],
+        firstSeenSceneIndex: uniqueIndices[0],
+        recurringSceneIndices: uniqueIndices
+      });
+    }
+  }
+  motifs.sort((a, b) => b.recurringSceneIndices.length - a.recurringSceneIndices.length);
+  return motifs.slice(0, 5);
+}
+const PROOF_KEYWORDS = /\b(percent|%|\$|study|studies|trial|trials|data|researchers|university|published|patients|statistics|proven|evidence|hospital|dr\.|doctor|clinical)\b/i;
+const MECHANISM_KEYWORDS = /\b(pathway|process|filters|absorbs|produces|mechanism|triggers|causes|functions|cells|vessels|bloodstream|molecules|artery|system|organ|tissue)\b/i;
+const COMPARISON_KEYWORDS = /\b(compared\s+to|unlike|versus|vs|in\s+contrast|differently|while|on\s+the\s+other\s+hand|standard|traditional)\b/i;
+const SURPRISE_KEYWORDS = /\b(unexpectedly|surprisingly|strange|shocking|twist|catch|ironically|little\s+known|hidden|secret)\b/i;
+const SOLUTION_KEYWORDS = /\b(solution|prevent|treat|treatment|protocol|action|step|remedy|cure|how\s+to|takeaway)\b/i;
+const BRIDGE_KEYWORDS = /\b(meanwhile|moving\s+on|next|furthermore|now\s+let's|turning\s+to)\b/i;
+const RECAP_KEYWORDS = /\b(to\s+summarize|in\s+summary|we\s+have\s+seen|remember|recap)\b/i;
+const CONCLUSION_KEYWORDS = /\b(finally|in\s+conclusion|ultimately|final\s+thought|takeaway|in\s+the\s+end)\b/i;
+function classifySceneRole(scene, totalScenes, elapsedSecs, openLoop, isPayoffScene, arrayIndex) {
+  const text = getSceneText(scene).toLowerCase();
+  (scene.visualIntent || "").toLowerCase();
+  const isFirst = arrayIndex !== void 0 ? arrayIndex === 0 : scene.sceneIndex <= 1;
+  if (isFirst) {
+    return { role: "hook", reason: "Opening hook: establish strong core intrigue" };
+  }
+  if (isPayoffScene) {
+    return { role: "payoff", reason: "Resolves previously established open loop question" };
+  }
+  if (openLoop && openLoop.openedAtSceneIndex === scene.sceneIndex) {
+    return { role: "open-loop", reason: `Introduces open loop: "${openLoop.question}"` };
+  }
+  const isLast = arrayIndex !== void 0 ? arrayIndex === totalScenes - 1 : scene.sceneIndex >= totalScenes;
+  if (isLast || CONCLUSION_KEYWORDS.test(text)) {
+    return { role: "conclusion", reason: "Final takeaway / conclusion of narrative" };
+  }
+  if (RECAP_KEYWORDS.test(text)) {
+    return { role: "recap", reason: "Synthesizes previous insights" };
+  }
+  if (SOLUTION_KEYWORDS.test(text)) {
+    return { role: "solution", reason: "Presents actionable remedy or solution" };
+  }
+  if (SURPRISE_KEYWORDS.test(text)) {
+    return { role: "surprise", reason: "Presents counter-intuitive or surprising fact" };
+  }
+  if (PROOF_KEYWORDS.test(text) || /\b\d+(\.\d+)?%|\$\d+|\b\d{1,3}(,\d{3})+\b/.test(text)) {
+    return { role: "proof", reason: "Narrative presents factual data, study, or statistics" };
+  }
+  if (COMPARISON_KEYWORDS.test(text)) {
+    return { role: "comparison", reason: "Compares alternatives, contrast, or duality" };
+  }
+  if (MECHANISM_KEYWORDS.test(text)) {
+    return { role: "mechanism", reason: "Explains internal workings or biological mechanism" };
+  }
+  if (scene.sceneIndex <= 2) {
+    return { role: "setup", reason: "Establishes foundational context" };
+  }
+  if (BRIDGE_KEYWORDS.test(text)) {
+    return { role: "bridge", reason: "Narrative bridge between topics" };
+  }
+  if (text.includes("problem") || text.includes("danger") || text.includes("risk") || text.includes("fail")) {
+    return { role: "problem", reason: "Highlights conflict, obstacle, or risk" };
+  }
+  return { role: "setup", reason: "Narrative context" };
+}
+function analyzeRetentionPlan(rawScenes, options = {}) {
+  const level = options.level || "balanced";
+  const targetRehookGapSecs = options.targetRehookGapSecs || (level === "high" ? 25 : level === "low" ? 50 : 35);
+  const maxNoResetSecs = options.maxNoResetSecs || (level === "high" ? 30 : level === "low" ? 60 : 42);
+  const noveltyWindowScenes = options.noveltyWindowScenes || 4;
+  const totalScenes = rawScenes.length;
+  let totalDuration = 0;
+  for (const s of rawScenes) {
+    totalDuration += s.duration || 0;
+  }
+  const openLoops = detectOpenLoops(rawScenes);
+  const payoffSceneSet = /* @__PURE__ */ new Set();
+  const loopByOpenedScene = /* @__PURE__ */ new Map();
+  for (const l of openLoops) {
+    loopByOpenedScene.set(l.openedAtSceneIndex, l);
+    if (l.payoffSceneIndex !== void 0) {
+      payoffSceneSet.add(l.payoffSceneIndex);
+    }
+  }
+  const motifs = detectMotifs(rawScenes);
+  const motifSceneMap = /* @__PURE__ */ new Map();
+  for (const m of motifs) {
+    for (const scIdx of m.recurringSceneIndices) {
+      if (!motifSceneMap.has(scIdx)) {
+        motifSceneMap.set(scIdx, m.id);
+      }
+    }
+  }
+  const signatures = [];
+  const scenePlans = [];
+  const recentNoveltyScores = [];
+  let elapsedSecs = 0;
+  let timeSinceLastReset = 0;
+  let timeSinceLastPatternInterrupt = 999;
+  let hookCount = 0;
+  let rehookCount = 0;
+  let payoffCount = 0;
+  let interruptCount = 0;
+  let lowNoveltyCount = 0;
+  for (let i = 0; i < rawScenes.length; i++) {
+    const scene = rawScenes[i];
+    const sceneId = scene.sceneId || String(scene.sceneIndex);
+    const duration = scene.duration || 4;
+    const openLoop = loopByOpenedScene.get(scene.sceneIndex);
+    const isPayoff = payoffSceneSet.has(scene.sceneIndex);
+    let { role, reason } = classifySceneRole(
+      scene,
+      totalScenes,
+      elapsedSecs,
+      openLoop,
+      isPayoff,
+      i
+    );
+    const canBeRehook = role !== "hook" && role !== "payoff" && role !== "conclusion" && role !== "recap" && timeSinceLastReset >= targetRehookGapSecs;
+    if (canBeRehook) {
+      const text = getSceneText(scene).toLowerCase();
+      const hasTurnSignal = text.includes("?") || text.startsWith("now") || text.startsWith("here") || text.startsWith("wait") || text.startsWith("notice") || text.startsWith("surprisingly") || text.startsWith("what about") || SURPRISE_KEYWORDS.test(text) || COMPARISON_KEYWORDS.test(text);
+      if (hasTurnSignal || timeSinceLastReset >= maxNoResetSecs) {
+        role = "re-hook";
+        reason = `Re-hook: attention refreshed after ${Math.round(timeSinceLastReset)}s neutral stretch`;
+        rehookCount++;
+        timeSinceLastReset = 0;
+      }
+    }
+    if (role === "hook") hookCount++;
+    if (role === "payoff") payoffCount++;
+    const sceneText = getSceneText(scene);
+    const kws = extractNormalizedKeywords(`${scene.visualIntent || ""} ${sceneText}`);
+    const subject = classifySubjectType(scene.visualIntent, scene.category, sceneText);
+    const sig = {
+      sceneIndex: scene.sceneIndex,
+      sceneId,
+      visualSource: scene.visualStrategy || (scene.localPath?.includes("generated") ? "ai-still" : "stock"),
+      shotType: scene.shotType || "medium",
+      energyLevel: scene.energyLevel || "medium",
+      visualIntentKeywords: kws,
+      category: scene.category,
+      motionPreset: scene.motionPreset,
+      subjectType: subject,
+      role,
+      motifId: motifSceneMap.get(scene.sceneIndex)
+    };
+    const noveltyScore = computeNoveltyScore(sig, signatures, motifs, noveltyWindowScenes);
+    signatures.push(sig);
+    recentNoveltyScores.push(noveltyScore);
+    if (noveltyScore < 0.4) {
+      lowNoveltyCount++;
+    }
+    const hasLowNoveltyStreak = isLowNoveltyStreak(recentNoveltyScores, 0.4, 3);
+    const interruptCooldown = level === "high" ? 15 : level === "low" ? 45 : 25;
+    let shouldInterrupt = false;
+    let interruptReason;
+    if (timeSinceLastPatternInterrupt >= interruptCooldown) {
+      if (role === "surprise") {
+        shouldInterrupt = true;
+        interruptReason = "Narrative surprise pivot";
+      } else if (role === "re-hook") {
+        shouldInterrupt = true;
+        interruptReason = "Re-hook attention refresh";
+      } else if (hasLowNoveltyStreak) {
+        shouldInterrupt = true;
+        interruptReason = "Low novelty streak across consecutive scenes";
+      } else if (timeSinceLastReset >= maxNoResetSecs) {
+        shouldInterrupt = true;
+        interruptReason = `Reset attention after ${Math.round(timeSinceLastReset)}s neutral stretch`;
+      } else if (scene.isPatternInterrupt) {
+        shouldInterrupt = true;
+        interruptReason = "Edit plan designated pattern interrupt";
+      }
+    }
+    if (shouldInterrupt) {
+      interruptCount++;
+      timeSinceLastPatternInterrupt = 0;
+      timeSinceLastReset = 0;
+    } else {
+      timeSinceLastPatternInterrupt += duration;
+    }
+    const isResetEvent = role === "hook" || role === "re-hook" || role === "surprise" || role === "payoff" || shouldInterrupt;
+    if (isResetEvent) {
+      timeSinceLastReset = 0;
+    } else {
+      timeSinceLastReset += duration;
+    }
+    let avoidSpoiler = false;
+    for (const l of openLoops) {
+      if (l.payoffSceneIndex !== void 0 && scene.sceneIndex > l.openedAtSceneIndex && scene.sceneIndex < l.payoffSceneIndex) {
+        avoidSpoiler = true;
+        break;
+      }
+    }
+    let intensity = "medium";
+    if (role === "hook" || role === "surprise" || role === "payoff") {
+      intensity = "high";
+    } else if (role === "bridge" || role === "conclusion" || role === "recap") {
+      intensity = "low";
+    }
+    let beatPacing = "normal";
+    if (role === "hook" || role === "re-hook" || role === "surprise") {
+      beatPacing = "fast";
+    } else if (role === "proof" || role === "payoff" || role === "bridge" || role === "conclusion") {
+      beatPacing = "slow";
+    }
+    let preferredVisualChange = "none";
+    if (shouldInterrupt) {
+      if (role === "proof") preferredVisualChange = "proof";
+      else if (role === "re-hook" || role === "surprise") preferredVisualChange = "motion";
+      else if (hasLowNoveltyStreak) preferredVisualChange = "crop";
+      else preferredVisualChange = "hard-cut";
+    }
+    let overlayPriority = "none";
+    if (role === "proof") overlayPriority = "high";
+    else if (role === "hook" || role === "payoff" || role === "surprise") overlayPriority = "medium";
+    else if (role === "re-hook") overlayPriority = "low";
+    const proofPriority = role === "proof" || role === "payoff" && PROOF_KEYWORDS.test(getSceneText(scene)) ? "high" : "normal";
+    const motionEnergy = role === "hook" || role === "re-hook" || role === "surprise" ? "elevated" : role === "proof" || role === "bridge" || role === "conclusion" ? "calm" : "normal";
+    scenePlans.push({
+      sceneIndex: scene.sceneIndex,
+      sceneId,
+      role,
+      intensity,
+      reason,
+      noveltyScore,
+      noveltyTarget: 0.5,
+      patternInterrupt: shouldInterrupt,
+      patternInterruptReason: interruptReason,
+      openLoopId: openLoop?.id,
+      payoffForLoopId: isPayoff ? openLoops.find((l) => l.payoffSceneIndex === scene.sceneIndex)?.id : void 0,
+      avoidSpoiler,
+      motionEnergy,
+      beatPacing,
+      overlayPriority,
+      proofPriority,
+      preferredVisualChange,
+      notes: [
+        `role=${role}`,
+        `novelty=${noveltyScore.toFixed(2)}`,
+        `resetTime=${Math.round(timeSinceLastReset)}s`
+      ]
+    });
+    elapsedSecs += duration;
+  }
+  const hashPayload = JSON.stringify({
+    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
+    level,
+    totalScenes,
+    scenes: rawScenes.map((s) => ({
+      i: s.sceneIndex,
+      dur: s.duration,
+      text: getSceneText(s),
+      intent: s.visualIntent,
+      e: s.energyLevel,
+      sh: s.shotType
+    }))
+  });
+  const inputHash = sha256$3(hashPayload);
+  return {
+    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    inputHash,
+    totalScenes,
+    totalDuration: Math.round(totalDuration * 100) / 100,
+    strategy: {
+      level,
+      targetRehookGapSecs,
+      maxNoResetSecs,
+      noveltyWindowScenes
+    },
+    openLoops,
+    motifs,
+    scenes: scenePlans,
+    summary: {
+      hooks: hookCount,
+      rehooks: rehookCount,
+      payoffs: payoffCount,
+      patternInterrupts: interruptCount,
+      lowNoveltyScenes: lowNoveltyCount,
+      openLoops: openLoops.length
+    }
+  };
+}
+function getRetentionPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "retention-plan.json");
+}
+function loadRetentionPlan(projectDir) {
+  try {
+    const p = getRetentionPlanPath(projectDir);
+    if (!fs__namespace.existsSync(p)) return null;
+    const content = fs__namespace.readFileSync(p, "utf-8");
+    return JSON.parse(content);
+  } catch (err) {
+    logger.warn(`[RetentionDirector] Failed to load retention plan: ${String(err)}`);
+    return null;
+  }
+}
+function saveRetentionPlan(projectDir, plan) {
+  const p = getRetentionPlanPath(projectDir);
+  writeFileAtomic$2(p, JSON.stringify(plan, null, 2));
+  logger.info(
+    `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
+  );
+}
+async function ensureRetentionPlan(projectDir, options) {
+  try {
+    let scenes = options?.scenes;
+    if (!scenes || scenes.length === 0) {
+      const editPlanPath = path__namespace.join(projectDir, "edit-plan", "master-edit-plan.json");
+      if (fs__namespace.existsSync(editPlanPath)) {
+        try {
+          const raw = JSON.parse(fs__namespace.readFileSync(editPlanPath, "utf-8"));
+          scenes = raw.scenes || [];
+        } catch {
+        }
+      }
+    }
+    if (!scenes || scenes.length === 0) {
+      logger.info("[RetentionDirector] No scenes provided or found in edit-plan. Skipping retention plan.");
+      return null;
+    }
+    let globalContext;
+    const globalContextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+    if (fs__namespace.existsSync(globalContextPath)) {
+      try {
+        globalContext = JSON.parse(fs__namespace.readFileSync(globalContextPath, "utf-8"));
+      } catch {
+      }
+    }
+    const cached = loadRetentionPlan(projectDir);
+    if (cached && !options?.force) {
+      if (cached.totalScenes === scenes.length) {
+        return cached;
+      }
+    }
+    const plan = analyzeRetentionPlan(scenes, {
+      level: options?.level || "balanced",
+      globalContext
+    });
+    saveRetentionPlan(projectDir, plan);
+    return plan;
+  } catch (err) {
+    logger.warn(`[RetentionDirector] Failed to ensure retention plan (falling open): ${String(err)}`);
+    return null;
+  }
+}
+const SAFE_PRESET_VARIATIONS = {
+  "push-in-center": ["slow-push-in", "push-in-left", "pan-left", "micro-drift"],
+  "slow-push-in": ["push-in-center", "micro-drift", "pan-right", "still-hold"],
+  "pan-left": ["pan-right", "push-in-center", "slow-push-in", "micro-drift"],
+  "pan-right": ["pan-left", "push-in-center", "slow-push-out", "micro-drift"],
+  "micro-drift": ["slow-push-in", "pan-left", "still-hold", "push-in-center"],
+  "slow-push-out": ["micro-drift", "pan-right", "still-hold", "slow-push-in"],
+  "push-out-center": ["slow-push-out", "micro-drift", "pan-left", "still-hold"],
+  "pan-up": ["pan-down", "push-in-center", "micro-drift", "slow-push-in"],
+  "pan-down": ["pan-up", "slow-push-in", "pan-right", "micro-drift"],
+  "still-hold": ["micro-drift", "slow-push-in", "pan-left"]
+};
+function pickAlternativePreset(repeatedPreset, role) {
+  const alternatives = SAFE_PRESET_VARIATIONS[repeatedPreset] || ["slow-push-in", "pan-left", "micro-drift"];
+  if (role === "proof" || role === "payoff") {
+    if (alternatives.includes("slow-push-in")) return "slow-push-in";
+    if (alternatives.includes("still-hold")) return "still-hold";
+    if (alternatives.includes("micro-drift")) return "micro-drift";
+  }
+  if (role === "hook" || role === "re-hook" || role === "surprise") {
+    if (alternatives.includes("push-in-center")) return "push-in-center";
+    if (alternatives.includes("push-in-left")) return "push-in-left";
+    if (alternatives.includes("pan-right")) return "pan-right";
+  }
+  return alternatives[0] || "micro-drift";
+}
+function applyRetentionMotionHint(baseMotion, retentionHint, recentMotionHistory = []) {
+  if (!retentionHint) {
+    return baseMotion;
+  }
+  try {
+    const isSpecObject = typeof baseMotion === "object" && baseMotion !== null && "preset" in baseMotion;
+    let currentPreset = isSpecObject ? baseMotion.preset : baseMotion;
+    const isGenericDefault = currentPreset === "push-in-center" || currentPreset === "slow-push-in";
+    if (isGenericDefault) {
+      switch (retentionHint.role) {
+        case "hook":
+        case "surprise":
+          currentPreset = "push-in-center";
+          break;
+        case "mechanism":
+          currentPreset = "pan-left";
+          break;
+        case "proof":
+          currentPreset = "still-hold";
+          break;
+        case "payoff":
+          currentPreset = "slow-push-in";
+          break;
+        case "bridge":
+        case "recap":
+        case "conclusion":
+          currentPreset = "micro-drift";
+          break;
+        case "re-hook":
+          currentPreset = "pan-right";
+          break;
+      }
+    }
+    if (recentMotionHistory.length >= 2) {
+      const lastTwo = recentMotionHistory.slice(-2);
+      if (lastTwo[0] === currentPreset && lastTwo[1] === currentPreset) {
+        const alt = pickAlternativePreset(currentPreset, retentionHint.role);
+        logger.info(
+          `[RetentionMotion] Scene ${retentionHint.sceneIndex}: repeated motion '${currentPreset}' detected, switching to '${alt}' for novelty`
+        );
+        currentPreset = alt;
+      }
+    }
+    if (isSpecObject) {
+      const spec = baseMotion;
+      let intensity = spec.intensity;
+      if (retentionHint.motionEnergy === "elevated" && intensity === "subtle") {
+        intensity = "medium";
+      } else if (retentionHint.motionEnergy === "calm" && intensity === "medium") {
+        intensity = "subtle";
+      }
+      return {
+        ...spec,
+        preset: currentPreset,
+        intensity
+      };
+    }
+    return currentPreset;
+  } catch (err) {
+    logger.warn(`[RetentionMotion] Failed to apply hint: ${String(err)}, using base motion`);
+    return baseMotion;
+  }
 }
 const DEFAULT_RETENTION_SETTINGS = {
   enabled: true,
@@ -6046,7 +7408,7 @@ function atomicReadJson(filePath, defaultValue) {
     return defaultValue;
   }
 }
-const readJsonSafe = atomicReadJson;
+const readJsonSafe$1 = atomicReadJson;
 function getProjectSettingsPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "production-settings.json");
 }
@@ -6154,7 +7516,7 @@ const CLAIM_EXTRACTION_VERSION = "1.0.0";
 function getClaimLedgerPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "claim-evidence-ledger.json");
 }
-function computeScriptHash(text) {
+function computeScriptHash$1(text) {
   return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
 }
 function computeGlobalContextHash(ctx) {
@@ -6344,11 +7706,11 @@ async function extractDocumentaryClaims(params) {
   const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
   const ledgerPath = getClaimLedgerPath(projectDir);
   const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
-  const scriptHash2 = computeScriptHash(fullText);
+  const scriptHash2 = computeScriptHash$1(fullText);
   const ctxHash = computeGlobalContextHash(globalContext);
   if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
     try {
-      const existing = readJsonSafe(ledgerPath, null);
+      const existing = readJsonSafe$1(ledgerPath, null);
       if (existing && existing.claims && existing.scriptHash === scriptHash2 && existing.globalContextHash === ctxHash) {
         logger.info(`[ClaimLedger] Using cached Claim & Evidence Ledger (${existing.claims.length} claims)`);
         onProgress?.(`Loaded cached Claim Ledger (${existing.claims.length} claims)`, 1);
@@ -6481,7 +7843,7 @@ Respond with STRICT JSON matching this schema:
 }
 function addEvidenceSource(projectDir, source) {
   const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe(ledgerPath, null);
+  const ledger = readJsonSafe$1(ledgerPath, null);
   if (!ledger) {
     return { success: false, error: "Claim ledger does not exist." };
   }
@@ -6497,7 +7859,7 @@ function addEvidenceSource(projectDir, source) {
 }
 function linkSourceToClaim(projectDir, claimId, sourceId, newStatus) {
   const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe(ledgerPath, null);
+  const ledger = readJsonSafe$1(ledgerPath, null);
   if (!ledger) {
     return { success: false, error: "Claim ledger does not exist." };
   }
@@ -6524,7 +7886,7 @@ function linkSourceToClaim(projectDir, claimId, sourceId, newStatus) {
 }
 function unlinkSourceFromClaim(projectDir, claimId, sourceId) {
   const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe(ledgerPath, null);
+  const ledger = readJsonSafe$1(ledgerPath, null);
   if (!ledger) {
     return { success: false, error: "Claim ledger does not exist." };
   }
@@ -6543,7 +7905,7 @@ function unlinkSourceFromClaim(projectDir, claimId, sourceId) {
 }
 function updateClaimStatus(projectDir, claimId, status, warningText) {
   const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe(ledgerPath, null);
+  const ledger = readJsonSafe$1(ledgerPath, null);
   if (!ledger) {
     return { success: false, error: "Claim ledger does not exist." };
   }
@@ -6570,7 +7932,7 @@ function escapeCsvField(val) {
 function exportClaimManifests(projectDir, exportDir) {
   try {
     const ledgerPath = getClaimLedgerPath(projectDir);
-    const ledger = readJsonSafe(ledgerPath, null);
+    const ledger = readJsonSafe$1(ledgerPath, null);
     if (!ledger) {
       return { success: false, error: "Claim ledger not found for export." };
     }
@@ -6939,7 +8301,7 @@ function generateVisualGrammarPlan(params) {
   const prodSettings = params.settings ?? loadProductionSettings(projectDir);
   const flattened = flattenEditPlanScenes(editPlan);
   const claimLedgerPath = getClaimLedgerPath(projectDir);
-  const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe(claimLedgerPath, null) : null;
+  const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe$1(claimLedgerPath, null) : null;
   const claimsByScene = /* @__PURE__ */ new Map();
   if (claimLedger?.claims) {
     for (const c of claimLedger.claims) {
@@ -7028,7 +8390,7 @@ function generateVisualGrammarPlan(params) {
 function loadVisualGrammarPlan(projectDir) {
   const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
   if (!fs__namespace.existsSync(planPath)) return null;
-  return readJsonSafe(planPath, null);
+  return readJsonSafe$1(planPath, null);
 }
 const ffmpegStatic$1 = require("ffmpeg-static");
 const ffprobeStatic$1 = require("ffprobe-static");
@@ -7220,7 +8582,7 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
     }
     const tileFilter = extractedFiles.length >= 5 ? "tile=5x1" : `tile=${extractedFiles.length}x1`;
     const concatInputArgs = extractedFiles.flatMap((f) => ["-i", f]);
-    await new Promise((resolve, reject) => {
+    await new Promise((resolve, reject2) => {
       const p = cp.spawn(
         ffmpegStatic$1,
         [
@@ -7236,10 +8598,10 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
         if (code === 0 && fs__namespace.existsSync(outputPath) && fs__namespace.statSync(outputPath).size > 0) {
           resolve();
         } else {
-          reject(new Error(`FFmpeg contact sheet tile exited with ${code}`));
+          reject2(new Error(`FFmpeg contact sheet tile exited with ${code}`));
         }
       });
-      p.on("error", reject);
+      p.on("error", reject2);
     });
     fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
     return true;
@@ -7396,6 +8758,2219 @@ function buildReport$1(expectedDuration, actualDuration, totalScenes, issues) {
     issues
   };
 }
+function buildHealthMotionFilter(presetOrSpec, width, height, duration, fps) {
+  const spec = typeof presetOrSpec === "string" ? resolvePresetDefaults(presetOrSpec, duration) : presetOrSpec;
+  if (spec.preset === "none") {
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+  }
+  const frames = Math.max(1, Math.round(duration * fps));
+  const PI = "3.14159265";
+  let tExpr;
+  switch (spec.ease) {
+    case "linear":
+      tExpr = `(on/${frames})`;
+      break;
+    case "ease-out":
+      tExpr = `sin((${PI}/2)*(on/${frames}))`;
+      break;
+    case "ease-in-out":
+    default:
+      tExpr = `((1-cos(${PI}*on/${frames}))/2)`;
+      break;
+  }
+  const zStart = spec.zoomStart;
+  const zEnd = spec.zoomEnd;
+  const zRange = (zEnd - zStart).toFixed(6);
+  let zExpr;
+  let xExpr;
+  let yExpr;
+  switch (spec.preset) {
+    case "gentle-pulse": {
+      zExpr = `(1.025+0.02*sin(2*${PI}*on/${frames}))`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "still-hold": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "pan-left": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*(0.75-0.50*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "pan-right": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*(0.25+0.50*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "pan-up": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*(0.75-0.50*${tExpr}))`;
+      break;
+    }
+    case "pan-down": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*(0.25+0.50*${tExpr}))`;
+      break;
+    }
+    case "drift-up-left": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.70-0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.70-0.40*${tExpr}))`;
+      break;
+    }
+    case "drift-up-right": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.30+0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.70-0.40*${tExpr}))`;
+      break;
+    }
+    case "drift-down-left": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.70-0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.30+0.40*${tExpr}))`;
+      break;
+    }
+    case "drift-down-right": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.30+0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.30+0.40*${tExpr}))`;
+      break;
+    }
+    case "push-out-center":
+    case "slow-push-out": {
+      zExpr = `(${zEnd.toFixed(4)}-(${zEnd - zStart})*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "push-in-left":
+    case "focus-left": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*0.30)`;
+      yExpr = `((ih-ih/zoom)*0.50)`;
+      break;
+    }
+    case "push-in-right":
+    case "focus-right": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*0.70)`;
+      yExpr = `((ih-ih/zoom)*0.50)`;
+      break;
+    }
+    case "micro-drift": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.40+0.20*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.40+0.20*${tExpr}))`;
+      break;
+    }
+    case "push-in-center":
+    case "slow-push-in":
+    default: {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+  }
+  return `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=1:s=${width}x${height}:fps=${fps}`;
+}
+function resolvePresetDefaults(preset, duration) {
+  const isShort = duration < 2.5;
+  const isLong = duration > 5;
+  const intensity = isShort ? "very-subtle" : isLong ? "medium" : "subtle";
+  const zoomStart = 1;
+  const zoomEnd = isShort ? 1.03 : isLong ? 1.08 : 1.06;
+  switch (preset) {
+    case "push-in-left":
+    case "focus-left":
+      return {
+        preset,
+        intensity,
+        focusX: 0.3,
+        focusY: 0.5,
+        zoomStart: 1.01,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Focus push toward viewer left"
+      };
+    case "push-in-right":
+    case "focus-right":
+      return {
+        preset,
+        intensity,
+        focusX: 0.7,
+        focusY: 0.5,
+        zoomStart: 1.01,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Focus push toward viewer right"
+      };
+    case "push-out-center":
+    case "slow-push-out":
+      return {
+        preset: "push-out-center",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Calm perspective push out from center"
+      };
+    case "pan-left":
+      return {
+        preset: "pan-left",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth horizontal pan right to left"
+      };
+    case "pan-right":
+      return {
+        preset: "pan-right",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth horizontal pan left to right"
+      };
+    case "pan-up":
+      return {
+        preset: "pan-up",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth upward vertical pan"
+      };
+    case "pan-down":
+      return {
+        preset: "pan-down",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth downward vertical pan"
+      };
+    case "drift-up-left":
+    case "drift-up-right":
+    case "drift-down-left":
+    case "drift-down-right":
+      return {
+        preset,
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.01,
+        zoomEnd: isShort ? 1.03 : 1.06,
+        ease: "ease-in-out",
+        reason: `Subtle directional diagonal drift (${preset})`
+      };
+    case "gentle-pulse":
+      return {
+        preset: "gentle-pulse",
+        intensity: "subtle",
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.025,
+        zoomEnd: 1.045,
+        ease: "ease-in-out",
+        reason: "Smooth organic biological pulsation"
+      };
+    case "still-hold":
+      return {
+        preset: "still-hold",
+        intensity: "very-subtle",
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.02,
+        zoomEnd: 1.02,
+        ease: "linear",
+        reason: "Calm still hold with micro-scale overscan"
+      };
+    case "none":
+      return {
+        preset: "none",
+        intensity: "very-subtle",
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1,
+        zoomEnd: 1,
+        ease: "linear",
+        reason: "Static image without camera motion"
+      };
+    case "slow-push-in":
+    case "push-in-center":
+    default:
+      return {
+        preset: "push-in-center",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Documentary push-in on focal subject"
+      };
+  }
+}
+const MANUAL_AI_PROMPT_SCHEMA_VERSION = 1;
+const MANUAL_AI_MANIFEST_SCHEMA_VERSION = 1;
+const MANUAL_AI_SUPPORTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
+const MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION = 1;
+function resolutionDims(res) {
+  if (res === "4k") return { width: 3840, height: 2160 };
+  if (res === "2k") return { width: 2560, height: 1440 };
+  return { width: 1920, height: 1080 };
+}
+function expectedFilenameForScene(sceneIndex) {
+  return `S${String(sceneIndex).padStart(4, "0")}.png`;
+}
+function getManualAiAssetsDir(projectDir) {
+  return path__namespace.join(projectDir, "assets", "generated", "manual-ai");
+}
+function getManualAiPromptJsonPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-prompts.json");
+}
+function getManualAiPromptTxtPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-prompts.txt");
+}
+function getManualAiVisualBriefPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-visual-brief.json");
+}
+function getManualAiSceneDirectionsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-scene-directions.json");
+}
+function getManualAiManifestPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-assets.json");
+}
+function getVisualMixPlanFilePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "visual-mix-plan.json");
+}
+const queues = /* @__PURE__ */ new Map();
+function queueKey(projectDir) {
+  return path__namespace.resolve(projectDir);
+}
+function emptyManifest() {
+  return {
+    schemaVersion: MANUAL_AI_MANIFEST_SCHEMA_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    expected: 0,
+    ready: 0,
+    missing: 0,
+    scenes: {}
+  };
+}
+function loadManualAiManifest(projectDir) {
+  const p = getManualAiManifestPath(projectDir);
+  if (!fs__namespace.existsSync(p)) return emptyManifest();
+  try {
+    const parsed = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    if (parsed && typeof parsed === "object" && parsed.scenes && typeof parsed.scenes === "object") {
+      return parsed;
+    }
+  } catch (err) {
+    logger.warn(`[ManualAI] Failed to read ${p}: ${err}`);
+  }
+  return emptyManifest();
+}
+function writeManifestAtomic(projectDir, manifest) {
+  const p = getManualAiManifestPath(projectDir);
+  const dir = path__namespace.dirname(p);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const tmp = `${p}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
+  fs__namespace.renameSync(tmp, p);
+}
+function updateManualAiManifest(projectDir, mutator, counts) {
+  const key2 = queueKey(projectDir);
+  const previous = queues.get(key2) ?? Promise.resolve();
+  const next = previous.catch(() => void 0).then(() => {
+    const manifest = loadManualAiManifest(projectDir);
+    mutator(manifest);
+    if (counts) {
+      const c = counts(manifest);
+      manifest.expected = c.expected;
+      manifest.ready = c.ready;
+      manifest.missing = Math.max(0, c.expected - c.ready);
+    }
+    writeManifestAtomic(projectDir, manifest);
+    return manifest;
+  });
+  queues.set(key2, next);
+  return next;
+}
+function upsertManualAiRecord(projectDir, record, counts) {
+  return updateManualAiManifest(
+    projectDir,
+    (m) => {
+      m.scenes[String(record.sceneIndex)] = record;
+    },
+    counts
+  );
+}
+function resolveManualAiAssetPath(projectDir, localPath) {
+  return path__namespace.isAbsolute(localPath) ? localPath : path__namespace.join(projectDir, localPath);
+}
+const HISTORY_KEYWORDS = /\b(century|ancient|empire|war|battle|reign|dynasty|soldier|medieval|revolution|colony|settler|settlement|historic|historical|heritage|monarch|king|queen|emperor|castle|monastery|traditional|vintage|archive|era|treaty|conquest|founding|pioneer)\b/i;
+const FINANCE_KEYWORDS = /\b(finance|financial|money|bank|banking|stock|market|trade|trading|crypto|bitcoin|currency|inflation|economy|economic|invest|investment|investor|dollar|wealth|capital|fund|asset|ledger|real\s*estate|corporate|commerce|startup)\b/i;
+const FOOD_KEYWORDS = /\b(food|culinary|chef|cooking|recipe|dish|cuisine|kitchen|ingredient|vegetable|fruit|spice|baking|bread|pastry|flavor|restaurant|meal|dining|taste|coffee|wine|brewery|harvest)\b/i;
+const TECH_KEYWORDS = /\b(technology|tech|software|hardware|computer|digital|internet|cyber|ai|algorithm|robot|robotics|space|satellite|quantum|chip|semiconductor|server|network|data\s*center|futuristic|engineering|code|circuit)\b/i;
+const TRAVEL_KEYWORDS = /\b(travel|destination|journey|explore|exploration|tourist|tourism|landscape|mountain|ocean|island|valley|desert|coast|cultural|monument|landmark|scenic|architecture|temple|ruins|expedition)\b/i;
+const NATURE_KEYWORDS = /\b(wildlife|animal|forest|jungle|tree|river|ecosystem|species|flora|fauna|oceanic|marine|arctic|glacier|volcano|creature|habitat|biodiversity|planet|earth|safari)\b/i;
+function detectVisualNiche(text, globalContext) {
+  if (globalContext) {
+    const globalText = `${globalContext.primarySubject || ""} ${globalContext.centralThesis || ""} ${globalContext.visualWorld?.documentaryStyle || ""}`.toLowerCase();
+    if (HISTORY_KEYWORDS.test(globalText)) return "history";
+    if (FINANCE_KEYWORDS.test(globalText)) return "finance";
+    if (FOOD_KEYWORDS.test(globalText)) return "food";
+    if (TECH_KEYWORDS.test(globalText)) return "technology";
+    if (TRAVEL_KEYWORDS.test(globalText)) return "travel";
+    if (NATURE_KEYWORDS.test(globalText)) return "nature";
+  }
+  const sceneLower = (text || "").toLowerCase();
+  if (HISTORY_KEYWORDS.test(sceneLower)) return "history";
+  if (FINANCE_KEYWORDS.test(sceneLower)) return "finance";
+  if (FOOD_KEYWORDS.test(sceneLower)) return "food";
+  if (TECH_KEYWORDS.test(sceneLower)) return "technology";
+  if (TRAVEL_KEYWORDS.test(sceneLower)) return "travel";
+  if (NATURE_KEYWORDS.test(sceneLower)) return "nature";
+  return "documentary";
+}
+const NICHE_STYLE_DIRECTIVES = {
+  history: "cinematic historical reconstruction, authentic period detail, natural dramatic documentary lighting, grounded atmosphere, archival richness",
+  finance: "premium editorial documentary visual, clean sophisticated lighting, sleek architectural realism, high-end business editorial aesthetic",
+  food: "high-end food documentary photography, appetizing natural textures, clean culinary composition, soft directional lighting, rich sensory detail",
+  technology: "modern technological documentary visualization, sleek contemporary detail, professional ambient lighting, clean cinematic realism",
+  travel: "cinematic location photography, authentic cultural landscape, sweeping atmosphere, golden hour natural light, rich depth of field",
+  nature: "cinematic natural history photography, rich environmental depth, authentic natural lighting, National Geographic editorial quality",
+  documentary: "realistic cinematic documentary still, clear visual storytelling, high detail, professional natural lighting, cinematic 35mm film still aesthetic"
+};
+const UNIVERSAL_NEGATIVE_CONSTRAINTS = "16:9 horizontal composition, clear focal subject, high detail, no text, no readable labels, no watermark, no logo, no UI elements, no blurry foreground occlusions.";
+function buildGeneralImagePrompt(params) {
+  const { narration, visualIntent, globalContext } = params;
+  let rawSubject = (visualIntent || narration || "").replace(/["'`]/g, "").replace(/[^\w\s,.-]/g, " ").replace(/\s+/g, " ").trim();
+  if (rawSubject.length > 220) {
+    rawSubject = rawSubject.slice(0, 220).trim();
+  }
+  const combinedContext = `${narration || ""} ${visualIntent || ""}`;
+  const niche = detectVisualNiche(combinedContext, globalContext);
+  const styleDirective = NICHE_STYLE_DIRECTIVES[niche];
+  let contextualAnchor = "";
+  if (globalContext?.primarySubject && !rawSubject.toLowerCase().includes(globalContext.primarySubject.toLowerCase())) {
+    contextualAnchor = `context: ${globalContext.primarySubject.slice(0, 50)}, `;
+  }
+  return `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`;
+}
+const HEART_PULSE_REGEX = /\b(heart|cardiac|pulse|pulsat|beat|rhythm|blood\s*pressure|arterial\s*pulse|systol|diastol)\b/i;
+const DOWNWARD_REGEX = /\b(down|downward|digest|digestive|stomach|gut|intestine|colon|waste|excret|sink|lower|absorb|drop)\b/i;
+const UPWARD_REGEX = /\b(up|upward|brain|cortex|head|neuron|wake|waking|rise|rising|increas|elevat|ascend|signal|energy)\b/i;
+const FLOW_TRANSPORT_REGEX = /\b(flow|blood\s*flow|bloodstream|vessel|artery|vein|circulat|transport|deliver|travel|distribut|flush|glucose\s*move)\b/i;
+const LEFT_SIDE_REGEX = /\b(left|left\s*side|spleen|pancreas|stomach\s*cavity)\b/i;
+const RIGHT_SIDE_REGEX = /\b(right|right\s*side|liver|gallbladder|ascending\s*colon)\b/i;
+const EVIDENCE_REGEX$1 = /\b(study|studies|research|scientist|clinical|trial|evidence|paper|journal|data|statistic|reveal|found)\b/i;
+class HealthMotionDirector {
+  /**
+   * Plans a deterministic, context-aware motion specification for a Health AI still scene.
+   */
+  static planSceneMotion(input) {
+    const { sceneIndex, category, duration, recentPresets = [] } = input;
+    const text = `${input.narration || ""} ${input.visualIntent || ""}`.toLowerCase();
+    const isShort = duration < 2.5;
+    const isLong = duration > 5;
+    const candidates = [];
+    if (HEART_PULSE_REGEX.test(text) && !isShort) {
+      candidates.push("gentle-pulse");
+    }
+    if (DOWNWARD_REGEX.test(text)) {
+      candidates.push("pan-down", "drift-down-right", "drift-down-left");
+    }
+    if (UPWARD_REGEX.test(text)) {
+      candidates.push("pan-up", "drift-up-right", "drift-up-left");
+    }
+    if (FLOW_TRANSPORT_REGEX.test(text)) {
+      if (sceneIndex % 2 === 0) {
+        candidates.push("pan-right", "drift-up-right", "pan-left");
+      } else {
+        candidates.push("pan-left", "drift-down-left", "pan-right");
+      }
+    }
+    if (RIGHT_SIDE_REGEX.test(text)) {
+      candidates.push("push-in-right", "focus-right");
+    } else if (LEFT_SIDE_REGEX.test(text)) {
+      candidates.push("push-in-left", "focus-left");
+    }
+    switch (category) {
+      case "anatomy":
+        if (sceneIndex % 3 === 0) {
+          candidates.push("push-in-center", "push-in-left", "push-in-right");
+        } else if (sceneIndex % 3 === 1) {
+          candidates.push("push-in-right", "focus-right", "push-in-center");
+        } else {
+          candidates.push("push-in-left", "focus-left", "push-out-center");
+        }
+        break;
+      case "mechanism":
+        if (sceneIndex % 4 === 0) {
+          candidates.push("pan-right", "drift-up-right", "push-in-right");
+        } else if (sceneIndex % 4 === 1) {
+          candidates.push("drift-up-left", "pan-left", "push-in-left");
+        } else if (sceneIndex % 4 === 2) {
+          candidates.push("pan-down", "drift-down-right", "push-in-center");
+        } else {
+          candidates.push("drift-down-left", "pan-right", "drift-up-right");
+        }
+        break;
+      case "evidence":
+        if (EVIDENCE_REGEX$1.test(text) || sceneIndex % 2 === 0) {
+          candidates.push("push-out-center", "still-hold", "pan-right");
+        } else {
+          candidates.push("still-hold", "push-in-center", "push-out-center");
+        }
+        break;
+      case "conceptual":
+        if (sceneIndex % 3 === 0) {
+          candidates.push("pan-left", "drift-up-right", "push-in-center");
+        } else if (sceneIndex % 3 === 1) {
+          candidates.push("pan-right", "drift-down-left", "push-out-center");
+        } else {
+          candidates.push("drift-up-left", "pan-right", "push-in-right");
+        }
+        break;
+      default:
+        candidates.push("push-in-center", "pan-right", "pan-left", "push-out-center");
+        break;
+    }
+    if (isShort) {
+      candidates.unshift("still-hold", "push-in-center");
+    }
+    const selectedPreset = this.selectVariedPreset(candidates, recentPresets, sceneIndex);
+    const spec = resolvePresetDefaults(selectedPreset, duration);
+    if (isShort) {
+      spec.intensity = "very-subtle";
+      spec.zoomEnd = Math.min(spec.zoomEnd, 1.03);
+      spec.reason = `Short scene (${duration.toFixed(1)}s): reduced intensity to avoid abrupt motion`;
+    } else if (isLong) {
+      spec.intensity = "medium";
+      spec.zoomEnd = Math.max(spec.zoomEnd, 1.07);
+    }
+    logger.info(
+      `[HealthMotion] Scene ${sceneIndex} ${category} -> ${spec.preset}, intensity=${spec.intensity} (${spec.reason})`
+    );
+    return spec;
+  }
+  /**
+   * Enforces variation rules:
+   *  - No preset used > 2 consecutive scenes (Rule 1)
+   *  - Avoid reuse within previous 3 scenes if alternatives exist (Rule 2)
+   */
+  static selectVariedPreset(candidates, recentPresets, sceneIndex) {
+    const last1 = recentPresets[recentPresets.length - 1];
+    const last2 = recentPresets[recentPresets.length - 2];
+    const last3 = recentPresets[recentPresets.length - 3];
+    const forbidden = [];
+    if (last1 && last2 && last1 === last2) {
+      forbidden.push(last1);
+    }
+    const viable = candidates.filter((c) => !forbidden.includes(c));
+    const searchPool = viable.length > 0 ? viable : candidates;
+    const preferred = searchPool.filter((c) => c !== last1 && c !== last2 && c !== last3);
+    if (preferred.length > 0) {
+      return preferred[0];
+    }
+    const notLast1 = searchPool.filter((c) => c !== last1);
+    if (notLast1.length > 0) {
+      return notLast1[0];
+    }
+    return searchPool[sceneIndex % searchPool.length] || "push-in-center";
+  }
+}
+const OV_HOST = "api.openverse.org";
+function httpsGet(url2, headers, timeoutMs = 12e3) {
+  return new Promise((resolve, reject2) => {
+    const u = new URL(url2);
+    const req = https__namespace.request(
+      {
+        hostname: u.hostname,
+        path: u.pathname + u.search,
+        method: "GET",
+        headers,
+        timeout: timeoutMs
+      },
+      (res) => {
+        const chunks = [];
+        res.on("data", (d) => chunks.push(d));
+        res.on("end", () => {
+          const body = Buffer.concat(chunks).toString("utf-8");
+          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+            reject2(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 300)}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(body));
+          } catch {
+            reject2(new Error(`JSON parse error: ${body.slice(0, 200)}`));
+          }
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      reject2(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+    req.on("error", (err) => reject2(new Error(`Request error: ${err.message}`)));
+    req.end();
+  });
+}
+async function openverseSearchAudio(query, category, limit = 6, accessToken) {
+  const params = {
+    q: query,
+    page_size: String(Math.min(limit, 20)),
+    license_type: "commercial",
+    mature: "false"
+  };
+  if (category) params.category = category;
+  const qs = new URLSearchParams(params);
+  const headers = {
+    Accept: "application/json",
+    "User-Agent": "VideoFactory/1.0 (AI video editor)"
+  };
+  if (accessToken) headers["Authorization"] = `Bearer ${accessToken}`;
+  const url2 = `https://${OV_HOST}/v1/audio/?${qs.toString()}`;
+  logger.info(`[Openverse] ${category ?? "any"} search: "${query}"`);
+  let data;
+  try {
+    data = await httpsGet(url2, headers, 12e3);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.warn(`[Openverse] Search "${query}" failed: ${msg}`);
+    return [];
+  }
+  logger.info(`[Openverse] "${query}" -> ${data.result_count ?? 0} results`);
+  return (data.results ?? []).map((item) => ({
+    assetId: item.id,
+    provider: "openverse",
+    audioType: category === "sound_effects" ? "sfx" : "music",
+    title: item.title ?? "Unknown",
+    creator: item.creator ?? "Unknown",
+    creatorUrl: item.creator_url,
+    downloadUrl: item.url,
+    thumbnailUrl: item.thumbnail ?? "",
+    durationSecs: item.duration ?? 0,
+    tags: item.tags?.map((t) => t.name) ?? [],
+    license: item.license,
+    licenseUrl: item.license_url ?? `https://creativecommons.org/licenses/${item.license}/${item.license_version ?? "4.0"}/`,
+    pageUrl: item.foreign_landing_url,
+    filetype: item.filetype ?? "mp3",
+    searchQuery: query
+  }));
+}
+function flattenScenes(plan) {
+  return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+}
+function groupScenesIntoSections(plan) {
+  const sections = [];
+  for (const ch of plan.chapters) {
+    const scenes = (ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+    if (scenes.length === 0) continue;
+    const startTime = Math.min(...scenes.map((s) => s.startTime));
+    const endTime = Math.max(...scenes.map((s) => s.endTime));
+    const narrativeSummary = scenes.map((s) => s.narrativeText ?? s.visualIntent ?? "").filter(Boolean).join(". ").slice(0, 300);
+    sections.push({
+      sectionLabel: ch.title ?? `Section ${sections.length + 1}`,
+      mood: ch.mood ?? "neutral",
+      narrativeSummary,
+      scenes,
+      startTime,
+      endTime
+    });
+  }
+  if (sections.length === 0) {
+    const allScenes = flattenScenes(plan);
+    if (allScenes.length > 0) {
+      sections.push({
+        sectionLabel: "Main",
+        mood: "neutral",
+        narrativeSummary: allScenes.map((s) => s.narrativeText ?? "").filter(Boolean).join(". ").slice(0, 300),
+        scenes: allScenes,
+        startTime: allScenes[0].startTime,
+        endTime: allScenes[allScenes.length - 1].endTime
+      });
+    }
+  }
+  return sections;
+}
+function buildMusicQuery(mood, _narrativeSummary, _sectionLabel) {
+  const moodMap = {
+    tense: ["dramatic tension", "suspense", "thriller"],
+    emotional: ["emotional piano", "sad piano", "cinematic emotional"],
+    inspirational: ["uplifting", "motivational", "inspiring"],
+    peaceful: ["calm ambient", "peaceful", "relaxing"],
+    dramatic: ["cinematic epic", "dramatic orchestral", "epic"],
+    melancholic: ["melancholic", "sad ambient", "nostalgic"],
+    hopeful: ["hopeful", "uplifting acoustic", "positive"],
+    neutral: ["ambient", "background music", "instrumental"],
+    action: ["action", "driving", "energetic"],
+    mysterious: ["mysterious", "dark ambient", "eerie"]
+  };
+  const queries = moodMap[mood.toLowerCase()] ?? moodMap.neutral;
+  return queries;
+}
+function buildSfxQuery(visualIntent) {
+  const text = (visualIntent ?? "").toLowerCase();
+  const patterns = [
+    [/crowd|audience|people|group/i, "crowd ambience"],
+    [/rain|storm|thunder/i, "rain storm sound"],
+    [/ocean|sea|wave|beach/i, "ocean waves"],
+    [/forest|bird|nature|park/i, "forest nature ambience"],
+    [/city|traffic|urban|street/i, "city street ambience"],
+    [/wind|breeze/i, "wind sound effect"],
+    [/fire|flame/i, "fire crackling"],
+    [/music|concert|instrument/i, "live music crowd"],
+    [/whisper|quiet|silence/i, "subtle ambient"],
+    [/footstep|walk|run/i, "footsteps walking"],
+    [/door|enter|exit/i, "door sound effect"],
+    [/phone|call|ring/i, "phone notification"],
+    [/car|vehicle|drive/i, "car engine driving"],
+    [/explosion|crash|impact/i, "impact crash sound"],
+    [/water|river|stream/i, "flowing water stream"]
+  ];
+  for (const [pattern, sfxQuery] of patterns) {
+    if (pattern.test(text)) return sfxQuery;
+  }
+  return null;
+}
+async function downloadAudio(asset, audioDir, timeoutMs = 45e3) {
+  const ext = (asset.filetype ?? path.extname(asset.downloadUrl).slice(1)) || "mp3";
+  const filename = `${asset.audioType}_${asset.assetId.replace(/[^a-z0-9]/gi, "_").slice(0, 40)}.${ext}`;
+  const destPath = path.join(audioDir, filename);
+  if (fs__namespace.existsSync(destPath) && fs__namespace.statSync(destPath).size > 0) return destPath;
+  const fetchUrl = (url2, redirectsLeft = 8) => new Promise((resolve, reject2) => {
+    const u = new URL(url2);
+    const protocol = u.protocol === "https:" ? https__namespace : http__namespace;
+    const req = protocol.request(
+      {
+        hostname: u.hostname,
+        port: u.port || (u.protocol === "https:" ? 443 : 80),
+        path: u.pathname + u.search,
+        method: "GET",
+        headers: { "User-Agent": "VideoFactory/1.0" },
+        timeout: timeoutMs
+      },
+      (res) => {
+        const loc = res.headers.location;
+        if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && loc) {
+          res.resume();
+          if (redirectsLeft <= 0) {
+            reject2(new Error("Too many redirects"));
+            return;
+          }
+          const nextUrl = loc.startsWith("http") ? loc : `${u.protocol}//${u.host}${loc}`;
+          fetchUrl(nextUrl, redirectsLeft - 1).then(resolve).catch(reject2);
+          return;
+        }
+        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+          res.resume();
+          reject2(new Error(`HTTP ${res.statusCode} downloading ${url2}`));
+          return;
+        }
+        const tmp = destPath + ".tmp";
+        const out = fs__namespace.createWriteStream(tmp);
+        res.pipe(out);
+        out.on("finish", () => {
+          const size = fs__namespace.existsSync(tmp) ? fs__namespace.statSync(tmp).size : 0;
+          if (size < 1024) {
+            fs__namespace.unlinkSync(tmp);
+            reject2(new Error(`Downloaded file too small (${size} bytes) — likely an error page`));
+            return;
+          }
+          fs__namespace.rename(tmp, destPath, (err) => {
+            if (err) reject2(err);
+            else resolve(destPath);
+          });
+        });
+        out.on("error", (err) => {
+          try {
+            fs__namespace.unlinkSync(tmp);
+          } catch {
+          }
+          reject2(err);
+        });
+        res.on("error", (err) => {
+          try {
+            fs__namespace.unlinkSync(tmp);
+          } catch {
+          }
+          reject2(err);
+        });
+      }
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      reject2(new Error(`Download timed out after ${timeoutMs}ms: ${url2}`));
+    });
+    req.on("error", reject2);
+    req.end();
+  });
+  return fetchUrl(asset.downloadUrl);
+}
+async function runAudioDirector(projectDir, onProgress = () => {
+}, openverseToken) {
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    return { success: false, error: "No edit plan found. Run AI Planning first.", sections: [], sfxAssignments: [] };
+  }
+  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const audioDir = path.join(projectDir, "assets", "audio");
+  fs__namespace.mkdirSync(audioDir, { recursive: true });
+  onProgress("Analysing narrative structure…", 0.05);
+  const rawSections = groupScenesIntoSections(plan);
+  logger.info(`[AudioDirector] Found ${rawSections.length} narrative sections`);
+  const sections = [];
+  const sfxAssignments = [];
+  for (let i = 0; i < rawSections.length; i++) {
+    const sec = rawSections[i];
+    const pct = 0.08 + i / rawSections.length * 0.5;
+    onProgress(`[${i + 1}/${rawSections.length}] Music search: "${sec.sectionLabel}"`, pct);
+    const queries = buildMusicQuery(sec.mood, sec.narrativeSummary, sec.sectionLabel);
+    const sectionDuration = sec.endTime - sec.startTime;
+    const pickBest = (results) => {
+      if (results.length === 0) return null;
+      const sorted = results.sort((a, b) => {
+        const aDiff = Math.abs((a.durationSecs || 120) - sectionDuration);
+        const bDiff = Math.abs((b.durationSecs || 120) - sectionDuration);
+        return aDiff - bDiff;
+      });
+      return sorted[0];
+    };
+    let musicResult = null;
+    for (const q of queries) {
+      const results = await openverseSearchAudio(q, "music", 6, openverseToken);
+      const best = pickBest(results);
+      if (best) {
+        musicResult = { ...best, searchQuery: q };
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (music category): ${best.title}`);
+        break;
+      }
+    }
+    if (!musicResult) {
+      for (const q of queries) {
+        const results = await openverseSearchAudio(q, void 0, 6, openverseToken);
+        const best = pickBest(results);
+        if (best) {
+          musicResult = { ...best, searchQuery: q };
+          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (no category): ${best.title}`);
+          break;
+        }
+      }
+    }
+    if (!musicResult) {
+      const results = await openverseSearchAudio("ambient background music", void 0, 6, openverseToken);
+      const best = pickBest(results);
+      if (best) {
+        musicResult = { ...best, searchQuery: "ambient background music" };
+        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> fallback generic: ${best.title}`);
+      }
+    }
+    if (!musicResult) {
+      logger.warn(`[AudioDirector] Section "${sec.sectionLabel}": no music found after all passes`);
+    }
+    const section = {
+      sectionId: `section_${i}`,
+      sectionLabel: sec.sectionLabel,
+      mood: sec.mood,
+      startTime: sec.startTime,
+      endTime: sec.endTime,
+      durationSecs: sec.endTime - sec.startTime,
+      sceneIndexes: sec.scenes.map((s) => s.sceneIndex),
+      musicCandidate: musicResult,
+      approved: false,
+      status: musicResult ? "found" : "failed"
+    };
+    sections.push(section);
+  }
+  const allScenes = flattenScenes(plan);
+  let sfxCount = 0;
+  for (let i = 0; i < allScenes.length; i++) {
+    const scene = allScenes[i];
+    const sfxQuery = buildSfxQuery(scene.visualIntent ?? scene.narrativeText ?? "");
+    if (!sfxQuery) continue;
+    const pct = 0.6 + i / allScenes.length * 0.3;
+    onProgress(`[SFX] Scene ${scene.sceneIndex}: ${sfxQuery}`, pct);
+    try {
+      const results = await openverseSearchAudio(sfxQuery, "sound_effects", 3, openverseToken);
+      if (results.length > 0) {
+        sfxAssignments.push({
+          sceneIndex: scene.sceneIndex,
+          startTime: scene.startTime,
+          endTime: scene.endTime,
+          sfxQuery,
+          sfxCandidate: results[0],
+          approved: false,
+          volumeDb: -12,
+          fadeInSecs: 0.5,
+          fadeOutSecs: 0.5
+        });
+        sfxCount++;
+      }
+    } catch {
+    }
+  }
+  const foundSections = sections.filter((s) => s.status === "found" && s.musicCandidate);
+  for (let i = 0; i < foundSections.length; i++) {
+    const sec = foundSections[i];
+    sec.approved = true;
+    const pct = 0.62 + i / Math.max(foundSections.length, 1) * 0.3;
+    onProgress(`Downloading music [${i + 1}/${foundSections.length}]: ${sec.sectionLabel}…`, pct);
+    try {
+      const localPath = await downloadAudio(sec.musicCandidate, audioDir);
+      sec.approvedLocalPath = localPath;
+      sec.approvedFilename = path.basename(localPath);
+      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} -> ${localPath}`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[AudioDirector] Download failed for ${sec.sectionLabel}: ${msg}`);
+    }
+  }
+  const audioPlan = {
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sections,
+    sfxAssignments
+  };
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(audioPlan, null, 2), "utf-8");
+  const downloadedCount = sections.filter((s) => s.approvedLocalPath).length;
+  onProgress(`Complete — ${sections.filter((s) => s.status === "found").length}/${sections.length} music found, ${downloadedCount} downloaded, ${sfxCount} SFX`, 1);
+  return {
+    success: true,
+    sections,
+    sfxAssignments
+  };
+}
+async function downloadApprovedAudio(projectDir, plan, onProgress = () => {
+}) {
+  const audioDir = path.join(projectDir, "assets", "audio");
+  fs__namespace.mkdirSync(audioDir, { recursive: true });
+  const total = plan.sections.filter((s) => s.approved && s.musicCandidate).length + plan.sfxAssignments.filter((s) => s.approved && s.sfxCandidate).length;
+  let done = 0;
+  for (const section of plan.sections) {
+    if (!section.approved || !section.musicCandidate) continue;
+    try {
+      onProgress(`Downloading music: ${section.sectionLabel}`, done / total);
+      const localPath = await downloadAudio(section.musicCandidate, audioDir);
+      section.approvedLocalPath = localPath;
+      section.approvedFilename = path.basename(localPath);
+      done++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[AudioDirector] Failed to download music for ${section.sectionLabel}: ${msg}`);
+    }
+  }
+  for (const sfx of plan.sfxAssignments) {
+    if (!sfx.approved || !sfx.sfxCandidate) continue;
+    try {
+      onProgress(`Downloading SFX: Scene ${sfx.sceneIndex}`, done / total);
+      const localPath = await downloadAudio(sfx.sfxCandidate, audioDir);
+      sfx.approvedLocalPath = localPath;
+      sfx.approvedFilename = path.basename(localPath);
+      done++;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[AudioDirector] Failed to download SFX for scene ${sfx.sceneIndex}: ${msg}`);
+    }
+  }
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+  return plan;
+}
+function loadAudioPlan(projectDir) {
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  if (!fs__namespace.existsSync(audioPlanPath)) return null;
+  try {
+    return JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function saveAudioPlan(projectDir, plan) {
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+}
+const HEALTH_SFX_QUERIES = {
+  none: [],
+  "soft-whoosh": ["soft whoosh", "gentle swoosh", "air whoosh"],
+  "reverse-whoosh": ["reverse whoosh", "reverse swoosh"],
+  "air-swish": ["soft swish", "air swish"],
+  "digital-scan": ["digital scan", "scanner sweep", "soft sci fi scan"],
+  "soft-pulse": ["soft pulse tone", "subtle pulse ambient"],
+  heartbeat: ["soft heartbeat", "heart beat"],
+  "soft-impact": ["soft impact", "cinematic soft hit"],
+  "clock-tick": ["single clock tick", "soft clock tick"],
+  "subtle-riser": ["soft riser", "subtle cinematic riser"]
+};
+const HEALTH_SFX_PARAMS = {
+  none: { volumeDb: -99, duration: 0 },
+  "soft-whoosh": { volumeDb: -24, duration: 0.75 },
+  "reverse-whoosh": { volumeDb: -25, duration: 0.85 },
+  "air-swish": { volumeDb: -25, duration: 0.65 },
+  "digital-scan": { volumeDb: -26, duration: 1.1 },
+  "soft-pulse": { volumeDb: -26, duration: 1.2 },
+  heartbeat: { volumeDb: -25, duration: 1.4 },
+  "soft-impact": { volumeDb: -22, duration: 0.6 },
+  "clock-tick": { volumeDb: -26, duration: 0.5 },
+  "subtle-riser": { volumeDb: -25, duration: 1.5 }
+};
+class HealthSfxDirector {
+  static getCachePath(projectDir) {
+    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
+  }
+  static getAudioDir(projectDir) {
+    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
+  }
+  static loadCacheManifest(projectDir) {
+    const p = this.getCachePath(projectDir);
+    if (fs__namespace.existsSync(p)) {
+      try {
+        return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+      } catch {
+      }
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      entries: {}
+    };
+  }
+  static saveCacheManifest(projectDir, manifest) {
+    const p = this.getCachePath(projectDir);
+    const dir = path__namespace.dirname(p);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const tmp = `${p}.tmp.${Date.now()}`;
+    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
+    fs__namespace.renameSync(tmp, p);
+  }
+  /**
+   * Plans subtle, context-matched SFX cues for Health AI scenes,
+   * enforcing density targets (25-35%), cooldowns (5-7s), and variety.
+   */
+  static planSfxCues(scenes) {
+    const cueMap = /* @__PURE__ */ new Map();
+    if (scenes.length === 0) return cueMap;
+    let lastSfxTime = -999;
+    let lastStrongSfxTime = -999;
+    const recentTypes = [];
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      const text = `${scene.narration || ""} ${scene.visualIntent || ""}`.toLowerCase();
+      if (scene.duration < 2) continue;
+      if (/\b(warning|danger|fatal|emergency|poison|severe|lethal|overdose)\b/i.test(text)) {
+        continue;
+      }
+      const timeSinceLast = scene.startTime - lastSfxTime;
+      if (timeSinceLast < 5) {
+        continue;
+      }
+      let candidateType = "none";
+      let reason = "";
+      let strength = "subtle";
+      if (i === 0 && /\b(discover|secret|truth|journey|revealed|hidden)\b/i.test(text)) {
+        candidateType = "subtle-riser";
+        reason = "Cinematic opener hook";
+        strength = "accent";
+      } else if (/\b(heart|cardiac|pulse|beat|blood\s*pressure)\b/i.test(text)) {
+        candidateType = "heartbeat";
+        reason = "Biological pulse matching cardiac visual";
+      } else if (/\b(clock|circadian|hour|morning|night|rhythm|wake|time)\b/i.test(text)) {
+        candidateType = "clock-tick";
+        reason = "Subtle clock cue for circadian timing";
+      } else if (scene.category === "evidence" && /\b(found|discovered|showed|proved|evidence|breakthrough)\b/i.test(text)) {
+        candidateType = "soft-impact";
+        reason = "Understated impact for clinical evidence reveal";
+        strength = "accent";
+      } else if (scene.category === "mechanism" && /\b(receptor|glucose|insulin|enzyme|pathway|synthesis|scan|signal)\b/i.test(text)) {
+        candidateType = "digital-scan";
+        reason = "Subtle scanner sweep for biological mechanism";
+      } else if (scene.motionPreset.startsWith("pan-")) {
+        candidateType = "air-swish";
+        reason = "Gentle air swish matching camera pan";
+      } else if (scene.motionPreset.startsWith("push-out")) {
+        candidateType = "reverse-whoosh";
+        reason = "Reverse whoosh matching camera push-out";
+      } else if (scene.motionPreset.startsWith("push-in") || scene.motionPreset.startsWith("focus-")) {
+        candidateType = "soft-whoosh";
+        reason = "Soft whoosh accentuating focus push-in";
+      }
+      if (candidateType === "none") continue;
+      if (strength === "accent") {
+        if (scene.startTime - lastStrongSfxTime < 12) {
+          continue;
+        }
+      }
+      const last1 = recentTypes[recentTypes.length - 1];
+      const last2 = recentTypes[recentTypes.length - 2];
+      if (candidateType === last1 && candidateType === last2) {
+        if (scene.motionPreset.startsWith("pan-") && last1 !== "air-swish") {
+          candidateType = "air-swish";
+          reason = "Air swish variation for camera pan";
+        } else if ((scene.motionPreset.startsWith("push-in") || scene.motionPreset.startsWith("focus-")) && last1 !== "soft-whoosh") {
+          candidateType = "soft-whoosh";
+          reason = "Soft whoosh variation for camera push-in";
+        } else if (scene.motionPreset.startsWith("push-out") && last1 !== "reverse-whoosh") {
+          candidateType = "reverse-whoosh";
+          reason = "Reverse whoosh variation for camera push-out";
+        } else if (candidateType === "digital-scan" && last1 !== "soft-pulse") {
+          candidateType = "soft-pulse";
+          reason = "Soft pulse variation for biological mechanism";
+        } else {
+          continue;
+        }
+      }
+      const params = HEALTH_SFX_PARAMS[candidateType];
+      const cue = {
+        sceneIndex: scene.sceneIndex,
+        type: candidateType,
+        queryCandidates: HEALTH_SFX_QUERIES[candidateType],
+        relativeStart: 0.15,
+        duration: Math.min(params.duration, scene.duration - 0.3),
+        volumeDb: params.volumeDb,
+        reason,
+        strength
+      };
+      cueMap.set(scene.sceneIndex, cue);
+      lastSfxTime = scene.startTime + cue.relativeStart;
+      if (strength === "accent") {
+        lastStrongSfxTime = lastSfxTime;
+      }
+      recentTypes.push(candidateType);
+      logger.info(
+        `[HealthSFX] Scene ${scene.sceneIndex} -> ${candidateType} @ +${cue.relativeStart}s (${cue.volumeDb}dB)`
+      );
+    }
+    logger.info(`[HealthSFX] ${cueMap.size} cues planned for ${scenes.length} scenes`);
+    return cueMap;
+  }
+  /**
+   * Downloads and caches Openverse audio files for each unique SFX type,
+   * returning local file paths for each type.
+   */
+  static async resolveAndDownloadSfxTypes(projectDir, types, openverseToken) {
+    const sfxDir = this.getAudioDir(projectDir);
+    if (!fs__namespace.existsSync(sfxDir)) fs__namespace.mkdirSync(sfxDir, { recursive: true });
+    const manifest = this.loadCacheManifest(projectDir);
+    const resolved = /* @__PURE__ */ new Map();
+    for (const type of types) {
+      if (type === "none") continue;
+      const cached = manifest.entries[type];
+      if (cached && fs__namespace.existsSync(cached.localPath) && fs__namespace.statSync(cached.localPath).size > 1024) {
+        logger.info(`[HealthSFX] Reusing cached SFX for ${type}: ${cached.localPath}`);
+        resolved.set(type, cached.localPath);
+        continue;
+      }
+      const queries = HEALTH_SFX_QUERIES[type] || [type];
+      let candidate = null;
+      let usedQuery = queries[0];
+      for (const q of queries) {
+        try {
+          const results = await openverseSearchAudio(q, "sound_effects", 5, openverseToken);
+          const shortClips = results.filter((r) => (r.durationSecs || 1) < 5);
+          if (shortClips.length > 0) {
+            candidate = shortClips[0];
+            usedQuery = q;
+            break;
+          } else if (results.length > 0) {
+            candidate = results[0];
+            usedQuery = q;
+            break;
+          }
+        } catch (err) {
+          logger.warn(`[HealthSFX] Openverse search failed for query "${q}": ${err}`);
+        }
+      }
+      if (!candidate) {
+        logger.warn(`[HealthSFX] No suitable Openverse SFX found for type ${type}`);
+        continue;
+      }
+      try {
+        const localPath = await downloadAudio(candidate, sfxDir);
+        resolved.set(type, localPath);
+        manifest.entries[type] = {
+          assetId: candidate.id,
+          sfxType: type,
+          query: usedQuery,
+          localPath,
+          license: candidate.license,
+          creator: candidate.creator,
+          pageUrl: candidate.foreignLandingUrl,
+          downloadedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        this.saveCacheManifest(projectDir, manifest);
+        logger.info(`[HealthSFX] Downloaded and cached ${type} -> ${localPath}`);
+      } catch (err) {
+        logger.warn(`[HealthSFX] Failed to download SFX for ${type}: ${err}`);
+      }
+    }
+    return resolved;
+  }
+  /**
+   * Applies planned Health SFX cues to the project's audio plan,
+   * setting approved: true and approvedLocalPath for Auto Production.
+   */
+  static async applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken) {
+    const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+    let plan = {
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      sections: [],
+      sfxAssignments: []
+    };
+    if (fs__namespace.existsSync(audioPlanPath)) {
+      try {
+        plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+      } catch {
+      }
+    }
+    const uniqueTypes = Array.from(new Set(Array.from(cues.values()).map((c) => c.type)));
+    const downloadedMap = await this.resolveAndDownloadSfxTypes(projectDir, uniqueTypes, openverseToken);
+    const healthSfxAssignments = [];
+    const sceneMap = new Map(scenes.map((s) => [s.sceneIndex, s]));
+    for (const [sceneIndex, cue] of cues.entries()) {
+      const scene = sceneMap.get(sceneIndex);
+      if (!scene) continue;
+      const localPath = downloadedMap.get(cue.type);
+      const sfxStart = scene.startTime + cue.relativeStart;
+      const sfxEnd = Math.min(scene.endTime, sfxStart + cue.duration);
+      const assignment = {
+        sceneIndex,
+        startTime: sfxStart,
+        endTime: sfxEnd,
+        sfxQuery: cue.type,
+        sfxCandidate: localPath ? {
+          id: `health-sfx-${cue.type}`,
+          title: `Health SFX (${cue.type})`,
+          creator: "Openverse Health Audio",
+          foreignLandingUrl: "",
+          downloadUrl: "",
+          durationSecs: cue.duration,
+          license: "CC"
+        } : void 0,
+        approved: !!localPath,
+        approvedLocalPath: localPath,
+        volumeDb: cue.volumeDb,
+        fadeInSecs: 0.05,
+        fadeOutSecs: 0.15
+      };
+      healthSfxAssignments.push(assignment);
+    }
+    const nonHealthSfx = (plan.sfxAssignments || []).filter(
+      (a) => !cues.has(a.sceneIndex) && !a.sfxQuery.startsWith("soft-") && !a.sfxQuery.startsWith("air-")
+    );
+    plan.sfxAssignments = [...healthSfxAssignments, ...nonHealthSfx].sort((a, b) => a.startTime - b.startTime);
+    const hashPayload = Array.from(cues.entries()).map(([idx, c]) => `${idx}:${c.type}:${c.relativeStart}:${c.volumeDb}`).join("|");
+    const planHash = crypto__namespace.createHash("md5").update(hashPayload).digest("hex");
+    plan.healthSfx = {
+      enabled: true,
+      planHash,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      cueCount: healthSfxAssignments.filter((a) => a.approved).length
+    };
+    const dir = path__namespace.dirname(audioPlanPath);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
+    logger.info(`[HealthSFX] Successfully integrated ${plan.healthSfx.cueCount} approved SFX into audio-plan.json`);
+    return plan;
+  }
+}
+const ANATOMY_REGEX = /\b(liver|stomach|gut|intestine|colon|kidney|heart|brain|lung|pancreas|organ|cell|cellular|tissue|blood\s*flow|bloodstream|vessel|artery|vein|neuron|synapse|digestive|immune|microbiome|bacteria|pathogen|antibody|hormone|enzyme|receptor|insulin|glucose|mitochondria|dna|gene|biology|anatomical|anatomy|arteries|veins|synapses|neurons)\b/i;
+const MECHANISM_REGEX = /\b(mechanism|physiology|biological|pathway|absorption|metabolism|circadian|clock|inflammation|oxidation|synthesis|breakdown|secretion|cascade|reaction|osmosis|filtering|barrier|toxic|detox|function|physiological|biochemical|molecule|cellular\s*level|molecular)\b/i;
+const LIFESTYLE_REGEX = /\b(walk|walking|sleep|sleeping|bed|wake|waking|run|running|jog|jogging|exercise|exercising|gym|workout|lift|lifting|stretch|stretching|cook|cooking|eat|eating|drink|drinking|kitchen|meal|plate|table|grocery|store|supermarket|person|people|man|woman|human|face|smile|smiling|laugh|laughing|stress|stressed|work|working|desk|office|morning|evening|routine|lifestyle|park|nature|sunlight|fresh\s*air)\b/i;
+const FOOD_REGEX = /\b(salad|vegetable|fruit|apple|berry|berries|snack|sugar|fat|oil|meat|fish|water|tea|coffee|recipe|diet|nutrition|breakfast|lunch|dinner)\b/i;
+const EXERCISE_REGEX = /\b(exercise|gym|workout|running|jogging|walking|stretching|training|fitness|cardio|weights)\b/i;
+const EVIDENCE_REGEX = /\b(study|studies|research|scientist|scientists|researcher|researchers|university|clinical|trial|trials|evidence|paper|journal|published|findings|data|statistics|laboratory)\b/i;
+function classifySceneSemantics(scene, totalScenes) {
+  const text = `${scene.narrativeText || ""} ${scene.visualIntent || ""}`.toLowerCase();
+  const isAnatomy = ANATOMY_REGEX.test(text);
+  const isMechanism = MECHANISM_REGEX.test(text);
+  const isLifestyle = LIFESTYLE_REGEX.test(text);
+  const isFood = FOOD_REGEX.test(text);
+  const isExercise = EXERCISE_REGEX.test(text);
+  const isEvidence = EVIDENCE_REGEX.test(text);
+  if (isAnatomy) {
+    return {
+      category: "anatomy",
+      scientificAccuracy: "anatomical",
+      aiSuitabilityScore: 95,
+      stockSuitabilityScore: 15,
+      reasoning: "Detailed anatomical/organ subject best communicated via 3D medical visual"
+    };
+  }
+  if (isMechanism && !isLifestyle) {
+    return {
+      category: "mechanism",
+      scientificAccuracy: "mechanistic",
+      aiSuitabilityScore: 90,
+      stockSuitabilityScore: 20,
+      reasoning: "Microscopic or biological mechanism requires conceptual explanatory visual"
+    };
+  }
+  if (isLifestyle || isExercise || isFood && !isMechanism) {
+    const category = isExercise ? "exercise" : isFood ? "food" : "lifestyle";
+    return {
+      category,
+      scientificAccuracy: "conceptual",
+      aiSuitabilityScore: 25,
+      stockSuitabilityScore: 90,
+      reasoning: "Real person, exercise, food or lifestyle footage is best portrayed with real stock footage"
+    };
+  }
+  if (isEvidence) {
+    return {
+      category: "evidence",
+      scientificAccuracy: "conceptual",
+      aiSuitabilityScore: 70,
+      stockSuitabilityScore: 50,
+      reasoning: "Scientific study reference; visual conceptual background"
+    };
+  }
+  const isHook = scene.sceneIndex === 1;
+  return {
+    category: "conceptual",
+    scientificAccuracy: "conceptual",
+    aiSuitabilityScore: isHook ? 85 : 75,
+    stockSuitabilityScore: isHook ? 40 : 45,
+    reasoning: "Health concept visual explanation"
+  };
+}
+const BASE_MEDICAL_STYLE = "Premium cinematic medical documentary visualization, clean professional educational composition, scientifically plausible human anatomy, clear focal subject, high visual clarity, controlled dark navy / neutral background, realistic dimensional lighting, high detail, 16:9 horizontal composition, no text, no labels, no watermark, no logo.";
+function buildHealthImagePrompt(narration, visualIntent, category) {
+  let cleanedSubject = (visualIntent || narration || "").replace(/[^\w\s,.-]/g, " ").replace(/\s+/g, " ").trim();
+  if (cleanedSubject.length > 200) {
+    cleanedSubject = cleanedSubject.slice(0, 200).trim();
+  }
+  const specificDetails = getHealthCategoryDetails(category);
+  return `${cleanedSubject}, ${specificDetails}, ${BASE_MEDICAL_STYLE}`;
+}
+function getHealthCategoryDetails(category) {
+  let specificDetails = "";
+  switch (category) {
+    case "anatomy":
+      specificDetails = "detailed anatomical focus showing clean realistic organ structures and biological tissues";
+      break;
+    case "mechanism":
+      specificDetails = "conceptual visualization of physiological processes, microscopic biological depth, dynamic bio-lighting";
+      break;
+    case "evidence":
+      specificDetails = "cinematic laboratory science aesthetic, clean clinical glassware, conceptual scientific discovery, dark elegant mood";
+      break;
+    default:
+      specificDetails = "cinematic medical education perspective, clean visual focus on health and wellness science";
+      break;
+  }
+  return specificDetails;
+}
+class HealthVisualPlanner {
+  config;
+  constructor(config) {
+    this.config = config;
+  }
+  createPlan(editPlan, projectDir) {
+    const rawScenes = (editPlan.scenes || []).map((s, idx) => ({
+      sceneIndex: s.sceneIndex ?? idx + 1,
+      narrativeText: s.narrativeText ?? s.narration ?? "",
+      visualIntent: s.visualIntent ?? s.visualDescription ?? "",
+      startTime: s.startTime ?? 0,
+      endTime: s.endTime ?? 5,
+      duration: s.duration ?? (s.endTime ?? 5) - (s.startTime ?? 0),
+      searchQueries: s.searchQueries
+    }));
+    return HealthVisualPlanner.buildPlan(projectDir || "", rawScenes, this.config);
+  }
+  static getPlanPath(projectDir) {
+    return path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
+  }
+  static loadPlan(projectDir) {
+    const p = this.getPlanPath(projectDir);
+    if (fs__namespace.existsSync(p)) {
+      try {
+        return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  static buildPlan(projectDir, rawScenes, config) {
+    const aiRatio = config?.aiRatio ?? DEFAULT_HEALTH_CONFIG.aiRatio;
+    const stockRatio = config?.stockRatio ?? DEFAULT_HEALTH_CONFIG.stockRatio;
+    const totalScenes = rawScenes.length;
+    logger.info(`[HealthVisual] Building plan for ${totalScenes} scenes`);
+    if (totalScenes === 0) {
+      return {
+        schemaVersion: HEALTH_SCHEMA_VERSION,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        targetAiRatio: aiRatio,
+        targetStockRatio: stockRatio,
+        totalScenes: 0,
+        targetAiScenes: 0,
+        targetStockScenes: 0,
+        scenes: []
+      };
+    }
+    const targetAiScenes = Math.max(0, Math.min(totalScenes, Math.round(totalScenes * aiRatio)));
+    const targetStockScenes = totalScenes - targetAiScenes;
+    logger.info(`[HealthVisual] Target ratio: AI=${targetAiScenes}, Stock=${targetStockScenes}`);
+    const classified = rawScenes.map((scene) => {
+      const cls = classifySceneSemantics(scene);
+      return {
+        scene,
+        cls,
+        diff: cls.aiSuitabilityScore - cls.stockSuitabilityScore
+      };
+    });
+    const rankedIndices = [...classified].sort((a, b) => {
+      if (b.diff !== a.diff) {
+        return b.diff - a.diff;
+      }
+      return a.scene.sceneIndex - b.scene.sceneIndex;
+    }).map((item) => item.scene.sceneIndex);
+    const selectedAiIndices = new Set(rankedIndices.slice(0, targetAiScenes));
+    const strategyMap = /* @__PURE__ */ new Map();
+    for (const item of classified) {
+      strategyMap.set(
+        item.scene.sceneIndex,
+        selectedAiIndices.has(item.scene.sceneIndex) ? "ai-still" : "stock"
+      );
+    }
+    for (let i = 0; i < rawScenes.length; i++) {
+      const idx = rawScenes[i].sceneIndex;
+      const currentStrategy = strategyMap.get(idx);
+      if (currentStrategy === "stock" && i >= 2) {
+        const prev1 = strategyMap.get(rawScenes[i - 1].sceneIndex);
+        const prev2 = strategyMap.get(rawScenes[i - 2].sceneIndex);
+        if (prev1 === "stock" && prev2 === "stock") {
+          const swapCandidate = classified.find(
+            (c) => strategyMap.get(c.scene.sceneIndex) === "ai-still" && c.cls.category !== "anatomy" && c.scene.sceneIndex > idx
+          );
+          if (swapCandidate && classified[i].cls.category !== "lifestyle") {
+            strategyMap.set(idx, "ai-still");
+            strategyMap.set(swapCandidate.scene.sceneIndex, "stock");
+          }
+        }
+      }
+    }
+    const recentPresets = [];
+    const aiScenesForSfx = [];
+    const scenePlans = classified.map(({ scene, cls }) => {
+      const strategy = strategyMap.get(scene.sceneIndex) || "stock";
+      const narration = scene.narrativeText || "";
+      const visualIntent = scene.visualIntent || narration;
+      let motionSpec;
+      let motionPreset = "push-in-center";
+      let imagePrompt;
+      let stockQueries;
+      let generationHash;
+      if (strategy === "ai-still") {
+        motionSpec = HealthMotionDirector.planSceneMotion({
+          sceneIndex: scene.sceneIndex,
+          category: cls.category,
+          narration,
+          visualIntent,
+          duration: scene.duration,
+          scientificAccuracy: cls.scientificAccuracy,
+          recentPresets
+        });
+        motionPreset = motionSpec.preset;
+        recentPresets.push(motionPreset);
+        aiScenesForSfx.push({
+          sceneIndex: scene.sceneIndex,
+          startTime: scene.startTime,
+          endTime: scene.endTime,
+          duration: scene.duration,
+          category: cls.category,
+          narration,
+          visualIntent,
+          motionPreset
+        });
+        imagePrompt = buildHealthImagePrompt(narration, visualIntent, cls.category);
+        generationHash = computeHealthGenerationHash(
+          scene.sceneIndex,
+          narration,
+          visualIntent,
+          imagePrompt,
+          config
+        );
+      } else {
+        stockQueries = scene.searchQueries && scene.searchQueries.length > 0 ? scene.searchQueries : [visualIntent.slice(0, 60), cls.category, "medical health"];
+      }
+      logger.info(
+        `[HealthVisual] Scene ${scene.sceneIndex} classified ${cls.category} -> ${strategy} (${cls.reasoning})`
+      );
+      return {
+        sceneIndex: scene.sceneIndex,
+        narration,
+        visualIntent,
+        strategy,
+        category: cls.category,
+        reasoning: cls.reasoning,
+        scientificAccuracy: cls.scientificAccuracy,
+        imagePrompt,
+        stockQueries,
+        motionPreset,
+        motion: motionSpec,
+        generationHash,
+        startTime: scene.startTime,
+        endTime: scene.endTime,
+        duration: scene.duration
+      };
+    });
+    const sfxCues = HealthSfxDirector.planSfxCues(aiScenesForSfx);
+    for (const sp of scenePlans) {
+      if (sfxCues.has(sp.sceneIndex)) {
+        sp.sfxCue = sfxCues.get(sp.sceneIndex);
+      }
+    }
+    const finalPlan = {
+      schemaVersion: HEALTH_SCHEMA_VERSION,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      targetAiRatio: aiRatio,
+      targetStockRatio: stockRatio,
+      totalScenes,
+      targetAiScenes,
+      targetStockScenes,
+      scenes: scenePlans
+    };
+    if (projectDir && projectDir.trim().length > 0) {
+      const motionDistribution = {};
+      let maxConsecutive = 0;
+      let currConsecutive = 0;
+      let lastPreset = "";
+      for (const p of recentPresets) {
+        motionDistribution[p] = (motionDistribution[p] || 0) + 1;
+        if (p === lastPreset) {
+          currConsecutive++;
+        } else {
+          lastPreset = p;
+          currConsecutive = 1;
+        }
+        if (currConsecutive > maxConsecutive) {
+          maxConsecutive = currConsecutive;
+        }
+      }
+      const sfxDistribution = {};
+      for (const cue of sfxCues.values()) {
+        sfxDistribution[cue.type] = (sfxDistribution[cue.type] || 0) + 1;
+      }
+      const report = {
+        totalAiScenes: recentPresets.length,
+        motionDistribution,
+        sfxCueCount: sfxCues.size,
+        sfxDistribution,
+        maxConsecutiveSameMotion: maxConsecutive,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      const reportPath = path__namespace.join(projectDir, "analysis", "health-motion-report.json");
+      try {
+        fs__namespace.writeFileSync(reportPath, JSON.stringify(report, null, 2), "utf-8");
+      } catch (err) {
+        logger.warn(`[HealthVisual] Failed to write motion report: ${err}`);
+      }
+      const planPath = this.getPlanPath(projectDir);
+      const dir = path__namespace.dirname(planPath);
+      if (!fs__namespace.existsSync(dir)) {
+        fs__namespace.mkdirSync(dir, { recursive: true });
+      }
+      const tmpPath = `${planPath}.tmp.${Date.now()}`;
+      fs__namespace.writeFileSync(tmpPath, JSON.stringify(finalPlan, null, 2), "utf-8");
+      fs__namespace.renameSync(tmpPath, planPath);
+    }
+    return finalPlan;
+  }
+  static loadScenesFromEditPlan(projectDir) {
+    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+    if (!fs__namespace.existsSync(planPath)) {
+      return [];
+    }
+    try {
+      const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+      const entries = flattenEditPlanScenes(plan);
+      return entries.map((e) => ({
+        sceneIndex: e.scene.sceneIndex,
+        sceneId: e.sceneId,
+        narrativeText: e.scene.narrativeText,
+        visualIntent: e.scene.visualIntent,
+        startTime: e.scene.startTime,
+        endTime: e.scene.endTime,
+        duration: e.scene.duration,
+        searchQueries: e.scene.searchQueries
+      }));
+    } catch (err) {
+      logger.error(`[HealthVisualPlanner] Failed to load edit plan: ${err}`);
+      return [];
+    }
+  }
+}
+function cleanText$1(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function truncateWords(text, maxWords) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return words.slice(0, maxWords).join(" ").replace(/[,.;:\-]+$/, "");
+}
+function countWords(text) {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+function normWs$1(text) {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+function sha256$2(parts) {
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function sanitizePromptLine(prompt) {
+  return (prompt || "").replace(/[\r\n\u2028\u2029]+/g, " ").replace(/\|/g, "/").replace(/\s+/g, " ").trim();
+}
+const SHOT_WIDE = {
+  composition: "wide establishing composition with the subject in the left third and generous negative space on the right",
+  camera: "24mm full-frame lens at eye level"
+};
+const SHOT_MEDIUM = {
+  composition: "medium composition centered on the subject with shallow depth of field",
+  camera: "50mm lens at eye level"
+};
+const SHOT_LOW = {
+  composition: "low-angle three-quarter view that emphasises scale and presence",
+  camera: "35mm lens from a low camera position"
+};
+const SHOT_HIGH = {
+  composition: "high-angle overview with clear leading lines toward the subject",
+  camera: "35mm lens from an elevated camera position"
+};
+const SHOT_MACRO = {
+  composition: "tight detail framing with a softly blurred background",
+  camera: "100mm macro lens at close range"
+};
+const SHOT_SYMMETRIC = {
+  composition: "symmetrical frontal composition with strong central focus",
+  camera: "50mm lens centered on the subject"
+};
+const SHOT_ROTATION = [
+  SHOT_WIDE,
+  SHOT_MEDIUM,
+  SHOT_LOW,
+  SHOT_SYMMETRIC,
+  SHOT_HIGH,
+  SHOT_MACRO
+];
+function pickShot(text, sceneIndex) {
+  if (/\b(overview|vast|landscape|world|global|city|skyline|horizon|panorama)\b/i.test(text)) return SHOT_WIDE;
+  if (/\b(cell|cells|micro|microscopic|molecule|texture|detail|close|hand|hands|tissue)\b/i.test(text)) return SHOT_MACRO;
+  if (/\b(towering|massive|giant|rise|rising|power|powerful|dominate)\b/i.test(text)) return SHOT_LOW;
+  return SHOT_ROTATION[(Math.max(1, sceneIndex) - 1) % SHOT_ROTATION.length];
+}
+const HEALTH_LIGHTING = [
+  "soft directional key light with a cool rim light separating the subject from a deep navy backdrop",
+  "clean diffused clinical lighting with gentle highlights and a subtle volumetric glow",
+  "low-contrast soft light with realistic dimensional falloff and gentle shadows"
+];
+const NICHE_LIGHTING = {
+  history: "low golden-hour sun with long soft shadows and atmospheric haze",
+  finance: "crisp architectural daylight with refined contrast and clean reflections",
+  food: "soft window light with gentle highlights and appetizing texture detail",
+  technology: "cool ambient light with subtle accent glow and clean specular highlights",
+  travel: "warm natural light with rich depth and sweeping atmosphere",
+  nature: "natural diffused light with rich environmental depth",
+  documentary: "natural cinematic light with balanced contrast"
+};
+const NICHE_OPENING = {
+  history: "Premium cinematic historical reconstruction still of",
+  finance: "Premium editorial financial documentary still of",
+  food: "High-end food documentary photograph of",
+  technology: "Modern technical documentary visualization still of",
+  travel: "Cinematic location documentary photograph of",
+  nature: "Cinematic natural-history documentary photograph of",
+  documentary: "Realistic cinematic documentary still of"
+};
+const NICHE_BACKGROUND = {
+  history: "period-accurate environment with layered atmospheric depth",
+  finance: "clean modern urban or office environment with soft depth",
+  food: "tidy culinary setting with softly defocused kitchen details",
+  technology: "sleek contemporary environment with softly defocused equipment",
+  travel: "authentic location with layered depth and natural scale cues",
+  nature: "natural habitat with layered foliage and atmospheric depth",
+  documentary: "believable real-world environment with soft layered depth"
+};
+function pickTimeOfDay(text) {
+  if (/\b(night|midnight|sleep|sleeping|asleep|bedtime|dark|moon)\b/i.test(text)) return "night-time with cool moonlit tones";
+  if (/\b(morning|dawn|sunrise|wake|waking|breakfast)\b/i.test(text)) return "early morning light";
+  if (/\b(evening|sunset|dusk)\b/i.test(text)) return "golden-hour evening light";
+  return "";
+}
+function pickMood(text) {
+  if (/\b(danger|risk|warning|toxic|crisis|collapse|damage|threat|decline|disease|harm)\b/i.test(text)) {
+    return "tense, cautionary mood";
+  }
+  if (/\b(hope|benefit|improve|healthy|recover|success|restore|strong|protect)\b/i.test(text)) {
+    return "hopeful, reassuring mood";
+  }
+  if (/\b(mystery|secret|hidden|unknown|discover|reveal|unexpected)\b/i.test(text)) {
+    return "intriguing, quietly mysterious mood";
+  }
+  return "calm, authoritative documentary mood";
+}
+const HEALTH_SAFETY = "Scientifically plausible anatomy with correct organ relationships, medical documentary quality, no fake diagnostic results, no exact molecular structures, no citations, no medical text inside the image.";
+function shortIdea(scene) {
+  if (!scene) return "";
+  return truncateWords(cleanText$1(scene.visualIntent || scene.narration), 6);
+}
+function calculatePromptQualityScore(params) {
+  const p = params.prompt.toLowerCase();
+  const n = `${params.narration} ${params.visualIntent || ""}`.toLowerCase();
+  const nWords = n.split(/\s+/).filter((w) => w.length > 3);
+  const matched = nWords.filter((w) => p.includes(w));
+  const groundingRatio = nWords.length > 0 ? matched.length / Math.min(nWords.length, 6) : 1;
+  const groundingScore = Math.min(25, Math.round(groundingRatio * 25));
+  const eventVerbs = [
+    "filtering",
+    "flowing",
+    "filling",
+    "contracting",
+    "narrowing",
+    "expanding",
+    "releasing",
+    "absorbing",
+    "accumulating",
+    "separating",
+    "slowing",
+    "accelerating",
+    "signaling",
+    "responding",
+    "circulating",
+    "descending",
+    "rising",
+    "rushing",
+    "pumping",
+    "clearing",
+    "moving",
+    "holding",
+    "walking",
+    "working",
+    "analyzing",
+    "demonstrating"
+  ];
+  const hasEventVerb = eventVerbs.some((v) => p.includes(v));
+  const visibleEventScore = hasEventVerb ? 25 : 12;
+  const hasShot = /shot|cutaway|angle|framing|composition|close-up|overview|macro/.test(p);
+  const hasLens = /mm|lens|focal|depth of field|rim light/.test(p);
+  const compScore = (hasShot ? 8 : 0) + (hasLens ? 7 : 0);
+  const hasHook = /hook|tension|comprehension|clarity|reveal|unmistakable|vital|crucial|understand/.test(p);
+  const hookScore = hasHook ? 15 : 10;
+  const hasLighting = /lighting|light|palette|glow|contrast|ambient/.test(p);
+  const continuityScore = hasLighting ? 10 : 5;
+  const hasRes = /16:9|1920x1080|2560x1440|3840x2160/.test(p);
+  const hasNegative = /only the exact specified|no text|no watermark|no logo/.test(p);
+  const safetyScore = (hasRes ? 5 : 0) + (hasNegative ? 5 : 0);
+  return Math.min(100, Math.max(0, groundingScore + visibleEventScore + compScore + hookScore + continuityScore + safetyScore));
+}
+function buildManualScenePrompt(params) {
+  const { scene, profile, globalContext, previousScene, nextScene, outputResolution, sceneDirection } = params;
+  const isHealth = profile === "health";
+  const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
+  const narration = cleanText$1(scene.narration);
+  const intent = cleanText$1(scene.visualIntent);
+  const groundingText = `${narration} ${intent}`;
+  const niche = detectVisualNiche(groundingText, globalContext);
+  if (sceneDirection) {
+    const role = sceneDirection.sceneRole;
+    const hook = sceneDirection.hookLevel;
+    const isMechanism = ["mechanism", "cause-effect", "consequence", "reveal"].includes(role);
+    const isHighHook = hook === "high";
+    let subject2 = cleanText$1(sceneDirection.visualEvent?.subject || intent || narration);
+    subject2 = truncateWords(subject2, 24);
+    let action = cleanText$1(sceneDirection.visualEvent?.action);
+    if (!action && isHealth) {
+      action = "actively filtering and transporting biological fluid";
+    } else if (!action) {
+      action = "demonstrating dynamic documentary action";
+    }
+    let opening2;
+    if (isHealth) {
+      const cutawayType = isHighHook ? "macro cutaway" : isMechanism ? "detailed cutaway" : "visualization";
+      opening2 = `Premium cinematic medical documentary ${cutawayType} of ${subject2} ${action}`;
+    } else {
+      opening2 = `${NICHE_OPENING[niche]} ${subject2}, ${action}`;
+    }
+    const changeClause = sceneDirection.visualEvent?.change ? `with ${cleanText$1(sceneDirection.visualEvent.change)}` : "";
+    const causeClause = sceneDirection.visualEvent?.cause ? `visibly triggered by ${cleanText$1(sceneDirection.visualEvent.cause)}` : "";
+    const consequenceClause = sceneDirection.visualEvent?.consequence ? `resulting in ${cleanText$1(sceneDirection.visualEvent.consequence)}` : "";
+    const dynamics = [changeClause, causeClause, consequenceClause].filter(Boolean).join(", ");
+    const viewerNotice = cleanText$1(sceneDirection.viewerShouldNotice || narration);
+    const comprehensionClause = viewerNotice ? `The viewer should immediately understand that ${truncateWords(viewerNotice, 16)}.` : "";
+    const comp = sceneDirection.composition;
+    const subjectFraming = isMechanism ? "with the main subject occupying roughly 60-70% of the useful frame" : "with strong central presence";
+    const compositionClause = `Composition: ${comp.shotType || "close three-quarter view"}, ${subjectFraming}, ${comp.cameraAngle || "eye level"}, ${comp.lensFeel || (isHealth ? "85mm medical-documentary lens" : "50mm prime lens")}, ${comp.focalPriority || "precise focal priority"}.`;
+    const fg = cleanText$1(comp.foreground) || "dominant active subject";
+    const bg = cleanText$1(comp.background) || (isHealth ? "controlled dark navy background with gentle biological volumetric depth" : NICHE_BACKGROUND[niche]);
+    const depthClause = `Foreground: ${fg}. Background: ${bg}.`;
+    const lighting2 = cleanText$1(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche]);
+    const color = cleanText$1(sceneDirection.colorStrategy) || (isHealth ? "deep navy blue with warm tissue highlights" : "authentic documentary grade");
+    const lightClause = `Lighting and palette: ${lighting2}, ${color}.`;
+    const realismClause = isHealth ? "Realistic internal tissue, plausible organ and vessel relationships, directional biological visual flow, medical documentary realism, no gore, no fake diagnostic results, no anatomical labels." : "High-end cinematic documentary realism, natural candid behavior, believable real-world environment, balanced cinematic grade.";
+    const continuityNote = cleanText$1(sceneDirection.continuityNote);
+    const continuityClause2 = continuityNote ? `Continuity: ${continuityNote}.` : "";
+    let negativeSpaceClause = "";
+    let overlayDirective = "";
+    let overlayConstraint = "";
+    if (sceneDirection.textOverlay?.enabled && sceneDirection.textOverlay?.text) {
+      const pos = sceneDirection.textOverlay.position || "top-right";
+      const posDesc = pos.replace("-", " ");
+      negativeSpaceClause = `Reserve clean negative space in the ${posDesc} area.`;
+      overlayDirective = `Render exactly one editorial text overlay reading "${sceneDirection.textOverlay.text}" in large bold clean sans-serif typography, positioned in the ${posDesc} negative-space area, high-contrast white lettering with one restrained accent colour, perfectly legible, exact spelling, no additional words.`;
+      overlayConstraint = isHealth ? `Only the exact specified editorial overlay text is permitted. No other text, no captions, no anatomical labels, no UI, no watermark, no logo.` : `Only the exact specified editorial overlay text is permitted. No other text, no captions, no UI, no watermark, no logo.`;
+    } else {
+      if (comp.negativeSpace) {
+        negativeSpaceClause = `Composition balance: ${cleanText$1(comp.negativeSpace)}.`;
+      }
+      overlayConstraint = isHealth ? `No text overlay, no subtitles, no anatomical labels, no UI, no watermark, no logo.` : `No text overlay, no subtitles, no UI, no watermark, no logo.`;
+    }
+    const frameClause = `16:9 horizontal frame (${dims}).`;
+    const composeWithTarget = (includeDynamics, includeNotice, includeContinuity) => {
+      const parts = [
+        `${opening2}${dynamics && includeDynamics ? `, ${dynamics}` : ""}.`,
+        includeNotice ? comprehensionClause : "",
+        compositionClause,
+        depthClause,
+        lightClause,
+        realismClause,
+        includeContinuity ? continuityClause2 : "",
+        negativeSpaceClause,
+        overlayDirective,
+        overlayConstraint,
+        frameClause
+      ];
+      return sanitizePromptLine(parts.filter(Boolean).join(" "));
+    };
+    let prompt2 = composeWithTarget(true, true, true);
+    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(true, true, false);
+    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(false, true, false);
+    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(false, false, false);
+    return prompt2;
+  }
+  const opening = isHealth ? "Premium cinematic medical documentary still of" : NICHE_OPENING[niche];
+  let subject = truncateWords(intent || narration, 28);
+  const narrationIdea = truncateWords(narration || intent, 24);
+  const shot = pickShot(groundingText, scene.sceneIndex);
+  const timeOfDay = pickTimeOfDay(groundingText);
+  const mood = pickMood(groundingText);
+  const lighting = isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche];
+  const worldEnv = globalContext?.visualWorld?.environment?.[0];
+  const colorMood = cleanText$1(globalContext?.visualWorld?.colorMood);
+  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText$1(worldEnv) || NICHE_BACKGROUND[niche]}`;
+  if (isHealth && !/\b(filter|flow|fill|contract|narrow|expand|release|absorb|accumulat|separat|slow|accelerat|signal|respond|circulat|pump)\b/i.test(subject)) {
+    subject = `${subject}, actively demonstrating physiological biological processes`;
+  }
+  const styleCore = isHealth ? `${getHealthCategoryDetails(scene.category || "conceptual")}. ${HEALTH_SAFETY}` : `${NICHE_STYLE_DIRECTIVES[niche]}.`;
+  const anchorSubject = cleanText$1(globalContext?.primarySubject);
+  const worldParts = [
+    anchorSubject ? `topic ${truncateWords(anchorSubject, 6)}` : "",
+    colorMood ? `colour mood ${truncateWords(colorMood, 4)}` : ""
+  ].filter(Boolean);
+  const worldClause = worldParts.length > 0 ? `Consistent visual world: ${worldParts.join(", ")}.` : "";
+  const prevIdea = shortIdea(previousScene);
+  const nextIdea = shortIdea(nextScene);
+  const continuityParts = [
+    prevIdea ? `follows a scene about ${prevIdea}` : "",
+    nextIdea ? `leads into a scene about ${nextIdea}` : ""
+  ].filter(Boolean);
+  const continuityClause = continuityParts.length > 0 ? `Continuity: ${continuityParts.join(" and ")}; keep the same palette and documentary look.` : "";
+  const constraints = `16:9 horizontal frame (${dims}), photorealistic cinematic realism, no text, no subtitles, no labels, no watermark, no logo.`;
+  const compose = (narrationWords, withWorld, withContinuity) => {
+    const parts = [
+      `${opening} ${subject}.`,
+      narrationIdea ? `It visualizes the narration idea: ${truncateWords(narrationIdea, narrationWords)}.` : "",
+      `Composition: ${shot.composition}, ${shot.camera}.`,
+      `Foreground and background: ${background}.`,
+      `Lighting and mood: ${lighting}${timeOfDay ? `, ${timeOfDay}` : ""}, ${mood}.`,
+      styleCore,
+      withWorld ? worldClause : "",
+      withContinuity ? continuityClause : "",
+      constraints
+    ];
+    return sanitizePromptLine(parts.filter(Boolean).join(" "));
+  };
+  let prompt = compose(24, true, true);
+  if (countWords(prompt) > 200) prompt = compose(20, true, false);
+  if (countWords(prompt) > 200) prompt = compose(14, false, false);
+  return prompt;
+}
+function computeManualPromptHash(params) {
+  return sha256$2([
+    normWs$1(params.narration),
+    normWs$1(params.visualIntent),
+    params.profile,
+    params.prompt,
+    params.outputResolution,
+    String(MANUAL_AI_PROMPT_SCHEMA_VERSION)
+  ]);
+}
+function computeInputHash(params) {
+  return sha256$2([
+    String(params.sceneIndex),
+    normWs$1(params.narration),
+    normWs$1(params.visualIntent),
+    normWs$1(params.basePrompt),
+    params.profile,
+    params.outputResolution,
+    String(MANUAL_AI_PROMPT_SCHEMA_VERSION)
+  ]);
+}
+function buildManualAiPromptPack(params) {
+  const { plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const ordered = [...plan.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
+  const entries = [];
+  let directionsMap;
+  if (sceneDirections) {
+    if (sceneDirections instanceof Map) {
+      directionsMap = sceneDirections;
+    } else if (Array.isArray(sceneDirections)) {
+      directionsMap = new Map(sceneDirections.map((d) => [d.sceneIndex, d]));
+    }
+  }
+  for (let i = 0; i < ordered.length; i++) {
+    const scene = ordered[i];
+    if (scene.strategy !== "ai-still") continue;
+    const sceneDirection = directionsMap?.get(scene.sceneIndex);
+    const prompt = buildManualScenePrompt({
+      scene,
+      profile,
+      globalContext,
+      previousScene: ordered[i - 1],
+      nextScene: ordered[i + 1],
+      outputResolution,
+      sceneDirection
+    });
+    const qualityScore = calculatePromptQualityScore({
+      prompt,
+      narration: scene.narration,
+      visualIntent: scene.visualIntent,
+      role: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      hasOverlay: sceneDirection?.textOverlay?.enabled
+    });
+    entries.push({
+      sceneIndex: scene.sceneIndex,
+      sceneId: `scene_${scene.sceneIndex}`,
+      prompt,
+      promptHash: computeManualPromptHash({
+        narration: scene.narration,
+        visualIntent: scene.visualIntent,
+        profile,
+        prompt,
+        outputResolution
+      }),
+      inputHash: computeInputHash({
+        sceneIndex: scene.sceneIndex,
+        narration: scene.narration,
+        visualIntent: scene.visualIntent,
+        basePrompt: scene.imagePrompt || "",
+        profile,
+        outputResolution
+      }),
+      expectedFilename: expectedFilenameForScene(scene.sceneIndex),
+      status: "waiting-image",
+      sceneRole: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      visualEvent: sceneDirection?.visualEvent ? {
+        subject: sceneDirection.visualEvent.subject,
+        action: sceneDirection.visualEvent.action,
+        change: sceneDirection.visualEvent.change,
+        consequence: sceneDirection.visualEvent.consequence
+      } : void 0,
+      textOverlay: sceneDirection?.textOverlay ? {
+        enabled: sceneDirection.textOverlay.enabled,
+        text: sceneDirection.textOverlay.text,
+        purpose: sceneDirection.textOverlay.purpose,
+        position: sceneDirection.textOverlay.position,
+        emphasis: sceneDirection.textOverlay.emphasis,
+        reason: sceneDirection.textOverlay.reason
+      } : void 0,
+      directorSource: sceneDirection ? sceneDirection.confidence > 0.8 ? "ai" : "fallback" : void 0,
+      directorConfidence: sceneDirection?.confidence,
+      qualityScore
+    });
+  }
+  entries.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  const totalPrompts = entries.length;
+  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords(e.prompt), 0) / totalPrompts) : 0;
+  const highHook = entries.filter((e) => e.hookLevel === "high").length;
+  const mediumHook = entries.filter((e) => e.hookLevel === "medium").length;
+  const lowHook = entries.filter((e) => e.hookLevel === "low").length;
+  logger.info(
+    `[ManualAI:Prompts] generated=${totalPrompts} avgWords=${avgWords} highHook=${highHook} mediumHook=${mediumHook} lowHook=${lowHook}`
+  );
+  return {
+    schemaVersion: MANUAL_AI_PROMPT_SCHEMA_VERSION,
+    generatedAt: (params.now ?? /* @__PURE__ */ new Date()).toISOString(),
+    profile,
+    totalProjectScenes: plan.totalScenes,
+    expectedAiImages: plan.targetAiScenes,
+    imageMode: "prompt",
+    outputResolution,
+    scenes: entries
+  };
+}
+function assertManualAiPromptPack(pack, plan) {
+  const aiIndices = new Set(plan.scenes.filter((s) => s.strategy === "ai-still").map((s) => s.sceneIndex));
+  const seen = /* @__PURE__ */ new Set();
+  let duplicates = 0;
+  let notOwned = 0;
+  for (const e of pack.scenes) {
+    if (seen.has(e.sceneIndex)) duplicates++;
+    seen.add(e.sceneIndex);
+    if (!aiIndices.has(e.sceneIndex)) notOwned++;
+  }
+  if (pack.scenes.length !== plan.targetAiScenes || seen.size !== aiIndices.size || duplicates > 0 || notOwned > 0) {
+    throw new Error(
+      `MANUAL_AI_PROMPT_COUNT_MISMATCH expected=${plan.targetAiScenes} actual=${pack.scenes.length} unique=${seen.size} duplicates=${duplicates} notAiOwned=${notOwned}`
+    );
+  }
+}
+function formatSceneLabel(sceneIndex) {
+  return `SCENE ${String(sceneIndex).padStart(3, "0")}`;
+}
+function formatManualAiPromptText(pack) {
+  const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
+  return sorted.map((e) => `${formatSceneLabel(e.sceneIndex)} | ${sanitizePromptLine(e.prompt)}`).join("\n\n");
+}
+function writeFileAtomic$1(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function loadManualAiPromptPack(projectDir) {
+  const p = getManualAiPromptJsonPath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    const parsed = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    if (!parsed || !Array.isArray(parsed.scenes)) return null;
+    return parsed;
+  } catch (err) {
+    logger.warn(`[ManualAI] Failed to read prompt pack ${p}: ${err}`);
+    return null;
+  }
+}
+function saveManualAiPromptPackFiles(projectDir, pack) {
+  writeFileAtomic$1(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$1(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
+}
+function readManualAiPromptText(projectDir) {
+  const pack = loadManualAiPromptPack(projectDir);
+  if (!pack) return null;
+  return formatManualAiPromptText(pack);
+}
+function ensureManualAiPromptPack(params) {
+  const t0 = Date.now();
+  const { projectDir, plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const fresh = buildManualAiPromptPack({
+    plan,
+    profile,
+    globalContext,
+    outputResolution,
+    sceneDirections
+  });
+  const persisted = loadManualAiPromptPack(projectDir);
+  let merged = fresh;
+  if (persisted && persisted.schemaVersion === MANUAL_AI_PROMPT_SCHEMA_VERSION && persisted.profile === profile && persisted.outputResolution === outputResolution) {
+    const byScene = new Map(persisted.scenes.map((e) => [e.sceneIndex, e]));
+    const scenes = fresh.scenes.map((e) => {
+      const old = byScene.get(e.sceneIndex);
+      return old && old.inputHash === e.inputHash ? { ...old, expectedFilename: e.expectedFilename, status: "waiting-image" } : e;
+    });
+    merged = { ...fresh, generatedAt: persisted.generatedAt, scenes };
+  }
+  assertManualAiPromptPack(merged, plan);
+  const txtPath = getManualAiPromptTxtPath(projectDir);
+  const unchanged = !!persisted && fs__namespace.existsSync(txtPath) && persisted.profile === merged.profile && persisted.outputResolution === merged.outputResolution && persisted.totalProjectScenes === merged.totalProjectScenes && persisted.expectedAiImages === merged.expectedAiImages && JSON.stringify(persisted.scenes) === JSON.stringify(merged.scenes);
+  if (!unchanged) {
+    merged = persisted && merged.generatedAt === persisted.generatedAt ? { ...merged, generatedAt: (/* @__PURE__ */ new Date()).toISOString() } : merged;
+    saveManualAiPromptPackFiles(projectDir, merged);
+  }
+  return { pack: unchanged ? persisted : merged, reused: unchanged, generationMs: Date.now() - t0 };
+}
+function isSupportedImageExtension(filePath) {
+  return MANUAL_AI_SUPPORTED_EXTENSIONS.includes(path__namespace.extname(filePath).toLowerCase());
+}
+function validateImageFile(filePath, target) {
+  const base = { ok: false, lowResolution: false, warnings: [] };
+  if (!isSupportedImageExtension(filePath)) {
+    return { ...base, code: "UNSUPPORTED_TYPE", message: `Unsupported file type "${path__namespace.extname(filePath) || "none"}". Use PNG, JPG, JPEG or WEBP.` };
+  }
+  let size = 0;
+  try {
+    size = fs__namespace.statSync(filePath).size;
+  } catch {
+    return { ...base, code: "UNREADABLE", message: "File does not exist or cannot be read." };
+  }
+  if (size <= 0) {
+    return { ...base, code: "UNREADABLE", message: "File is empty." };
+  }
+  const dims = probeImageFileDimensions(filePath);
+  if (!dims || !(dims.width > 0) || !(dims.height > 0)) {
+    return { ...base, code: "UNREADABLE", message: "Image is corrupted or has no readable dimensions." };
+  }
+  const warnings = [];
+  const ratio = dims.width / dims.height;
+  if (Math.abs(ratio - 16 / 9) / (16 / 9) > 0.02) {
+    warnings.push("ASPECT_RATIO_NOT_16_9");
+  }
+  return {
+    ok: true,
+    width: dims.width,
+    height: dims.height,
+    lowResolution: dims.width < target.width || dims.height < target.height,
+    warnings
+  };
+}
+function fileHasContent$1(p) {
+  try {
+    return fs__namespace.statSync(p).size > 0;
+  } catch {
+    return false;
+  }
+}
+function evaluateManualAiStatus(params) {
+  const { projectDir, pack } = params;
+  const imageMode = params.imageMode ?? "prompt";
+  if (!pack) {
+    return {
+      imageMode,
+      hasPromptPack: false,
+      expected: 0,
+      ready: 0,
+      missingSceneIndices: [],
+      staleSceneIndices: [],
+      lowResolutionSceneIndices: [],
+      allReady: false,
+      rows: []
+    };
+  }
+  const manifest = params.manifest ?? loadManualAiManifest(projectDir);
+  const rows = [];
+  const missing = [];
+  const stale = [];
+  const lowRes = [];
+  let ready = 0;
+  const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
+  for (const entry of sorted) {
+    const record = manifest.scenes[String(entry.sceneIndex)];
+    const localPath = record ? resolveManualAiAssetPath(projectDir, record.localPath) : void 0;
+    const fileOk = !!localPath && fileHasContent$1(localPath);
+    let status = "waiting-image";
+    if (record && fileOk) {
+      if (record.promptHash === entry.promptHash) {
+        status = "ready";
+        ready++;
+        if (record.lowResolution) lowRes.push(entry.sceneIndex);
+      } else {
+        status = "stale";
+        stale.push(entry.sceneIndex);
+        missing.push(entry.sceneIndex);
+      }
+    } else {
+      missing.push(entry.sceneIndex);
+    }
+    rows.push({
+      sceneIndex: entry.sceneIndex,
+      sceneId: entry.sceneId,
+      prompt: entry.prompt,
+      promptHash: entry.promptHash,
+      expectedFilename: entry.expectedFilename,
+      status,
+      localPath: record && fileOk ? localPath : void 0,
+      width: record?.width,
+      height: record?.height,
+      importedAt: record?.importedAt
+    });
+  }
+  const expected = sorted.length;
+  return {
+    imageMode,
+    hasPromptPack: true,
+    profile: pack.profile,
+    outputResolution: pack.outputResolution,
+    promptFilePath: getManualAiPromptTxtPath(projectDir),
+    expected,
+    ready,
+    missingSceneIndices: missing,
+    staleSceneIndices: stale,
+    lowResolutionSceneIndices: lowRes,
+    allReady: expected > 0 && ready === expected,
+    rows
+  };
+}
+function evaluateManualAiStatusForProject(projectDir, imageMode = "prompt") {
+  const norm2 = projectDir ? path__namespace.normalize(path__namespace.resolve(projectDir)) : "";
+  return evaluateManualAiStatus({ projectDir: norm2, pack: loadManualAiPromptPack(norm2), imageMode });
+}
+function readJsonSafe(p) {
+  try {
+    if (!fs__namespace.existsSync(p)) return null;
+    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function findMissingManualAiScenes(projectDir) {
+  const snapshot = readJsonSafe(
+    path__namespace.join(projectDir, "analysis", "visual-input-snapshot.json")
+  );
+  if (snapshot?.aiImageMode !== "prompt") return [];
+  const stateFile = [
+    path__namespace.join(projectDir, "project-state.json"),
+    path__namespace.join(projectDir, "project.json")
+  ].find((p) => fs__namespace.existsSync(p));
+  if (stateFile) {
+    const proj = readJsonSafe(stateFile);
+    const inputs = proj?.inputs;
+    if (inputs) {
+      if (inputs.visualSourceMode !== "custom-mix") return [];
+      if (resolveAiImageMode(inputs.visualMixConfig) !== "prompt") return [];
+    }
+  }
+  const plan = readJsonSafe(getVisualMixPlanFilePath(projectDir));
+  const aiScenes = (plan?.scenes ?? []).filter((s) => s.strategy === "ai-still").map((s) => s.sceneIndex);
+  if (aiScenes.length === 0) return [];
+  const assignmentsRaw = readJsonSafe(path__namespace.join(projectDir, "analysis", "stock-assignments.json"));
+  const assignments = Array.isArray(assignmentsRaw) ? assignmentsRaw : [];
+  const byScene = new Map(assignments.map((a) => [a.sceneIndex, a]));
+  const missing = [];
+  for (const idx of [...aiScenes].sort((a, b) => a - b)) {
+    const a = byScene.get(idx);
+    const ok = !!a && a.status === "assigned" && a.asset?.provider === "manual-ai" && !!a.asset.localPath && fileHasContent$1(resolveManualAiAssetPath(projectDir, a.asset.localPath));
+    if (!ok) missing.push(idx);
+  }
+  return missing;
+}
 const SCENE_RENDERER_VERSION = "scene-v2.0";
 const RENDERER_SCHEMA_VERSION = "render-v2.0";
 const OVERLAY_RENDERER_VERSION = "overlay-v2.0";
@@ -7421,11 +10996,11 @@ function normalizeForCanonical(value) {
 function canonicalJson(value) {
   return JSON.stringify(normalizeForCanonical(value));
 }
-function sha256(input) {
+function sha256$1(input) {
   return crypto__namespace.createHash("sha256").update(input).digest("hex");
 }
 function fingerprintOf(value) {
-  return sha256(canonicalJson(value));
+  return sha256$1(canonicalJson(value));
 }
 function normalizeSignaturePath(p) {
   return path__namespace.normalize(path__namespace.resolve(p));
@@ -7445,7 +11020,7 @@ function hashFileContent(filePath) {
   try {
     const st = fs__namespace.statSync(filePath);
     if (st.size <= SMALL_JSON_LIMIT) {
-      return sha256(fs__namespace.readFileSync(filePath));
+      return sha256$1(fs__namespace.readFileSync(filePath));
     }
     return fingerprintOf(fileSignature(filePath));
   } catch {
@@ -8147,7 +11722,7 @@ async function runRenderPreflight(options) {
   let mediaIndex = [];
   const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
   if (fs__namespace.existsSync(mediaIndexPath)) {
-    mediaIndex = readJsonSafe(mediaIndexPath, []);
+    mediaIndex = readJsonSafe$1(mediaIndexPath, []);
   }
   let resolvedScenesCount = 0;
   for (const entry of flattened) {
@@ -8195,7 +11770,7 @@ async function runRenderPreflight(options) {
   }
   const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
   if (fs__namespace.existsSync(audioPlanPath)) {
-    const audioPlan = readJsonSafe(audioPlanPath, {});
+    const audioPlan = readJsonSafe$1(audioPlanPath, {});
     if (audioPlan.musicTrack?.filePath && !fs__namespace.existsSync(audioPlan.musicTrack.filePath)) {
       addIssue("warning", "audio", `Approved background music file missing: ${audioPlan.musicTrack.filePath}`, "Check audio library");
     }
@@ -8309,12 +11884,12 @@ async function runRenderPreflightCached(options, opts = {}) {
 }
 let overlayRenderer = renderCaptionsOverlay;
 let transitionAssembler = concatSceneClipsWithTransitions;
-function ffmpegRun$1(args, ctx) {
-  return ffmpegRun$3(args, ctx?.ffmpeg ?? {});
+function ffmpegRun$2(args, ctx) {
+  return ffmpegRun$4(args, ctx?.ffmpeg ?? {});
 }
 async function encodeRun(args, ctx) {
   try {
-    await ffmpegRun$3(args, ctx.ffmpeg);
+    await ffmpegRun$4(args, ctx.ffmpeg);
   } catch (err) {
     if (isRenderCancelledError(err)) throw err;
     throw asHardwareError(err, ctx.encoder);
@@ -8355,7 +11930,7 @@ async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx) {
     sceneClips.map(concatListLine).join("\n"),
     "utf-8"
   );
-  await ffmpegRun$1([
+  await ffmpegRun$2([
     "-y",
     "-f",
     "concat",
@@ -8574,7 +12149,7 @@ async function renderVisualBeatsToClip(params) {
         beatClips.map(concatListLine).join("\n"),
         "utf-8"
       );
-      await ffmpegRun$1([
+      await ffmpegRun$2([
         "-y",
         "-f",
         "concat",
@@ -8705,11 +12280,68 @@ function prepareRenderPlan(params) {
       );
     }
   }
+  const visualPlanMap = /* @__PURE__ */ new Map();
+  const visualMixPlanPath = path__namespace.join(projectDir, "analysis", "visual-mix-plan.json");
+  if (fs__namespace.existsSync(visualMixPlanPath)) {
+    try {
+      const vp = JSON.parse(fs__namespace.readFileSync(visualMixPlanPath, "utf-8"));
+      for (const sc of vp.scenes || []) {
+        if (sc && typeof sc.sceneIndex === "number") {
+          visualPlanMap.set(sc.sceneIndex, sc);
+        }
+      }
+    } catch {
+    }
+  }
+  const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
+  if (fs__namespace.existsSync(healthPlanPath)) {
+    try {
+      const hp = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+      for (const sc of hp.scenes || []) {
+        if (sc && typeof sc.sceneIndex === "number" && !visualPlanMap.has(sc.sceneIndex)) {
+          visualPlanMap.set(sc.sceneIndex, sc);
+        }
+      }
+    } catch {
+    }
+  }
   const retentionSettings = DEFAULT_RETENTION_SETTINGS;
   const retCtx = createDefaultContext();
+  const retentionPlanMap = /* @__PURE__ */ new Map();
+  let retentionPlan = null;
+  try {
+    const rawScenes = scenes.map((s, idx) => ({
+      sceneIndex: s.sceneIndex ?? idx,
+      sceneId: String(s.sceneIndex ?? idx),
+      duration: s.duration,
+      narrativeText: s.narrativeText,
+      visualIntent: s.visualIntent,
+      energyLevel: s.energyLevel,
+      shotType: s.shotType,
+      isPatternInterrupt: s.isPatternInterrupt,
+      isFirstInChapter: idx === 0 || s.isFirstInChapter,
+      visualStrategy: visualPlanMap.get(s.sceneIndex)?.strategy,
+      category: visualPlanMap.get(s.sceneIndex)?.category,
+      motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+      localPath: s.localPath
+    }));
+    retentionPlan = ensureRetentionPlan(projectDir, {
+      scenes: rawScenes,
+      level: retentionSettings.level
+    });
+    if (retentionPlan) {
+      for (const sp of retentionPlan.scenes) {
+        retentionPlanMap.set(sp.sceneIndex, sp);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[RENDER] Failed to ensure retention plan (falling open to legacy): ${String(err)}`);
+    retentionPlan = null;
+  }
   const retentionDecisions = /* @__PURE__ */ new Map();
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i];
+    const retentionHint = retentionPlanMap.get(scene.sceneIndex) ?? retentionPlanMap.get(i);
     const sceneInput = {
       sceneId: String(scene.sceneIndex),
       sceneIndex: i,
@@ -8718,9 +12350,10 @@ function prepareRenderPlan(params) {
       shotType: scene.shotType,
       narrativeText: scene.narrativeText,
       visualIntent: scene.visualIntent,
-      isPatternInterrupt: scene.isPatternInterrupt,
+      isPatternInterrupt: scene.isPatternInterrupt || retentionHint?.patternInterrupt,
       localPath: scene.localPath,
-      isNewChapter: i === 0 || scene.isFirstInChapter
+      isNewChapter: i === 0 || scene.isFirstInChapter,
+      retentionHint
     };
     const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings);
     retentionDecisions.set(i, decision);
@@ -8736,6 +12369,10 @@ function prepareRenderPlan(params) {
     const mediaKind = hasMedia ? detectMediaKind(mediaPath, scene.mediaType) : "placeholder";
     const beats = retentionDecisions.get(i)?.visualBeats ?? [];
     const useBeats = hasMedia && beats.length > 1 && retentionSettings.enabled;
+    const visualScene = visualPlanMap.get(scene.sceneIndex);
+    const isAiStill = mediaKind === "image" && (visualScene?.strategy === "ai-still" || mediaPath && (mediaPath.includes(path__namespace.join("assets", "generated", "health")) || mediaPath.includes("/assets/generated/health/") || mediaPath.includes(path__namespace.join("assets", "generated", "general")) || mediaPath.includes("/assets/generated/general/")));
+    const motionPreset = isAiStill ? visualScene?.motionPreset || visualScene?.motion || "push-in-center" : "";
+    const effectiveFilter = isAiStill ? `${scaleFilt}:motion=${typeof motionPreset === "object" ? motionPreset.preset : motionPreset}` : scaleFilt;
     const fingerprint = computeSceneFingerprint({
       sceneIndex: scene.sceneIndex,
       duration: scene.duration,
@@ -8743,7 +12380,7 @@ function prepareRenderPlan(params) {
       mediaType: mediaKind,
       mediaSignature: hasMedia ? fileSignature(mediaPath) : null,
       visualBeats: hasMedia ? beats.map((b) => ({ s: b.relativeStart, e: b.relativeEnd, crop: b.crop ?? null })) : null,
-      filterChain: scaleFilt,
+      filterChain: effectiveFilter,
       multiBeat: useBeats,
       semanticCrop: !!retentionSettings.semanticCropEnabled,
       base
@@ -8818,6 +12455,9 @@ function prepareRenderPlan(params) {
     missingMediaCount,
     retentionSettings,
     retentionDecisions,
+    retentionPlan,
+    retentionPlanMap,
+    visualPlanMap,
     sceneJobs,
     base,
     hashes,
@@ -8908,7 +12548,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       transitionSettings: params.transitionSettings,
       encoderKey: encoder.key
     });
-    const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions } = prepared;
+    const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions, retentionPlan, retentionPlanMap, visualPlanMap } = prepared;
     const totalScenes = scenes.length;
     setPct(`Processing ${totalScenes} scenes...`, 0.06);
     setPct("Running preflight QA checks...", 0.07);
@@ -8925,6 +12565,12 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       throw new Error(`Render Preflight QA failed: ${msg}`);
     }
     throwIfAborted(signal);
+    const missingManualAiScenes = findMissingManualAiScenes(projectDir);
+    if (missingManualAiScenes.length > 0) {
+      throw new Error(
+        `Manual AI images missing for scenes: ${missingManualAiScenes.join(", ")}. Import the missing images (Production → Find Visuals → Import AI Images) before rendering.`
+      );
+    }
     setPct("Validating scene media...", 0.08);
     logger.info(
       `[RENDER][Media] resolved=${prepared.resolvedMediaCount} missing=${prepared.missingMediaCount} total=${scenes.length}`
@@ -8943,15 +12589,19 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
         shotType: s.shotType,
         narrativeText: s.narrativeText,
         visualIntent: s.visualIntent,
-        isPatternInterrupt: s.isPatternInterrupt,
-        visualBeats: retentionDecisions.get(i)?.visualBeats
+        isPatternInterrupt: s.isPatternInterrupt || retentionPlanMap.get(i)?.patternInterrupt,
+        visualBeats: retentionDecisions.get(i)?.visualBeats,
+        motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+        category: visualPlanMap.get(s.sceneIndex)?.category
       }));
-      const qaFlags = runRetentionQA(qaScenes);
+      const qaFlags = runRetentionQA(qaScenes, retentionPlan);
       if (qaFlags.length > 0) {
         const qaPath = path__namespace.join(projectDir, "analysis", "retention-qa.json");
         fs__namespace.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), "utf-8");
         logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`);
       }
+      const summary = generateRetentionSummary(qaScenes, retentionPlan, qaFlags);
+      saveRetentionSummary(projectDir, summary);
     } catch (err) {
       logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`);
     }
@@ -9039,6 +12689,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       };
     });
     workspace.saveManifest(manifest);
+    const recentAiMotionPresets = [];
     for (let i = 0; i < sceneJobs.length; i++) {
       throwIfAborted(signal);
       const job = sceneJobs[i];
@@ -9080,7 +12731,20 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       workspace.saveManifest(manifest);
       const partial = outClip.replace(/\.mp4$/, ".partial.mp4");
       safeUnlink(partial);
-      await renderSceneClip({ job, outClip: partial, width, height, fps, tmpDir, ctx, retentionSettings, sceneOrdinalIndex: i });
+      await renderSceneClip({
+        job,
+        outClip: partial,
+        width,
+        height,
+        fps,
+        tmpDir,
+        ctx,
+        retentionSettings,
+        sceneOrdinalIndex: i,
+        visualPlanMap,
+        retentionPlanMap,
+        recentAiMotionPresets
+      });
       let probe;
       try {
         probe = await workspace.commitPartial(partial, outClip, expect, { encoder: encoder.key, signal });
@@ -9286,7 +12950,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       if (!hasAudio && !hasMusicOrSfx) {
         fs__namespace.copyFileSync(rawVideo, workingOutputPath);
       } else if (!hasMusicOrSfx && hasAudio) {
-        await ffmpegRun$1([
+        await ffmpegRun$2([
           "-y",
           "-i",
           rawVideo,
@@ -9321,11 +12985,10 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           sfxInputs.push({ idx: inputIdx++, sfx });
         }
         const filterParts = [];
-        const mixLabels = [];
         if (hasAudio) {
           filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`);
-          mixLabels.push("[vo]");
         }
+        const musicLabels = [];
         for (const { idx, section } of musicInputs) {
           const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6);
           const fadeIn = section.fadeInSecs ?? 2;
@@ -9335,27 +12998,56 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           filterParts.push(
             `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(section.startTime * 1e3)}|${Math.round(section.startTime * 1e3)},apad[${label}]`
           );
-          mixLabels.push(`[${label}]`);
+          musicLabels.push(`[${label}]`);
         }
+        const sfxLabels = [];
         for (const { idx, sfx } of sfxInputs) {
-          const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6);
-          const fadeIn = sfx.fadeInSecs ?? 0.5;
-          const fadeOut = sfx.fadeOutSecs ?? 0.5;
+          const vol = Math.pow(10, (sfx.volumeDb ?? -24) / 20).toFixed(6);
+          const fadeIn = sfx.fadeInSecs ?? 0.05;
+          const fadeOut = sfx.fadeOutSecs ?? 0.15;
           const dur = sfx.endTime - sfx.startTime;
           const label = `sfx_${idx}`;
           filterParts.push(
             `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(sfx.startTime * 1e3)}|${Math.round(sfx.startTime * 1e3)},apad[${label}]`
           );
-          mixLabels.push(`[${label}]`);
+          sfxLabels.push(`[${label}]`);
         }
-        const nInputs = mixLabels.length;
-        filterParts.push(
-          // normalize=1 scales by 1/nInputs to prevent summing clips
-          `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
-        );
+        if (sfxInputs.length === 0) {
+          const mixLabels = [];
+          if (hasAudio) mixLabels.push("[vo]");
+          mixLabels.push(...musicLabels);
+          const nInputs = mixLabels.length;
+          filterParts.push(
+            `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+          );
+        } else {
+          const finalBuses = [];
+          if (hasAudio) finalBuses.push("[vo]");
+          if (musicLabels.length === 1) {
+            filterParts.push(`${musicLabels[0]}asplit=1[music_bus]`);
+            finalBuses.push("[music_bus]");
+          } else if (musicLabels.length > 1) {
+            filterParts.push(
+              `${musicLabels.join("")}amix=inputs=${musicLabels.length}:duration=longest:normalize=0[music_bus]`
+            );
+            finalBuses.push("[music_bus]");
+          }
+          if (sfxLabels.length === 1) {
+            filterParts.push(`${sfxLabels[0]}asplit=1[sfx_bus]`);
+            finalBuses.push("[sfx_bus]");
+          } else if (sfxLabels.length > 1) {
+            filterParts.push(
+              `${sfxLabels.join("")}amix=inputs=${sfxLabels.length}:duration=longest:normalize=0[sfx_bus]`
+            );
+            finalBuses.push("[sfx_bus]");
+          }
+          filterParts.push(
+            `${finalBuses.join("")}amix=inputs=${finalBuses.length}:duration=first:normalize=0,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+          );
+        }
         const filterComplex = filterParts.join(";");
         logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`);
-        await ffmpegRun$1([
+        await ffmpegRun$2([
           ...ffArgs,
           "-filter_complex",
           filterComplex,
@@ -9597,7 +13289,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         } else {
           const listPath = path__namespace.join(tmpDir, "overlay-concat.txt");
           fs__namespace.writeFileSync(listPath, blockFiles.map(concatListLine).join("\n"), "utf-8");
-          await ffmpegRun$1(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx);
+          await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx);
           safeUnlink(listPath);
         }
         await workspace.commitPartial(fullPartial, overlayFull, overlayFullExpect, { signal });
@@ -9839,7 +13531,7 @@ function markInterruptedCheckpoints(m) {
   if (!m.finalOutput) m.finalOutput = emptyCheckpoint();
 }
 async function renderSceneClip(p) {
-  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings } = p;
+  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p;
   const scene = job.scene;
   const i = p.sceneOrdinalIndex;
   const mediaPath = job.mediaPath;
@@ -9889,7 +13581,36 @@ async function renderSceneClip(p) {
   }
   const beats = job.beats;
   const hasMultipleBeats = beats.length > 1;
-  if (hasMultipleBeats && retentionSettings.enabled) {
+  const visualScene = visualPlanMap?.get(scene.sceneIndex);
+  const isAiStillImage = isImage && (visualScene?.strategy === "ai-still" || mediaPath.includes(path__namespace.join("assets", "generated", "health")) || mediaPath.includes("/assets/generated/health/") || mediaPath.includes(path__namespace.join("assets", "generated", "general")) || mediaPath.includes("/assets/generated/general/"));
+  if (isAiStillImage) {
+    const baseMotion = visualScene?.motion || visualScene?.motionPreset || "push-in-center";
+    const retentionHint = retentionPlanMap?.get(scene.sceneIndex) ?? retentionPlanMap?.get(i);
+    const motionParam = applyRetentionMotionHint(baseMotion, retentionHint, recentAiMotionPresets ?? []);
+    const presetName = typeof motionParam === "object" ? motionParam.preset : motionParam;
+    if (recentAiMotionPresets) {
+      recentAiMotionPresets.push(presetName);
+    }
+    const motionFilter = buildHealthMotionFilter(motionParam, width, height, scene.duration, fps);
+    logger.info(`[VisualMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`);
+    await encodeRun([
+      "-y",
+      "-loop",
+      "1",
+      "-i",
+      mediaPath,
+      "-vf",
+      motionFilter,
+      ...vcodec(ctx, 20),
+      "-t",
+      String(scene.duration),
+      "-r",
+      String(fps),
+      "-pix_fmt",
+      "yuv420p",
+      outClip
+    ], ctx);
+  } else if (hasMultipleBeats && retentionSettings.enabled) {
     await renderVisualBeatsToClip({
       beats,
       mediaPath,
@@ -10511,7 +14232,10 @@ function checkStockCompletion(projectDir) {
     missingSceneIndices
   };
 }
-function isAudioValid(projectDir, requireMusic) {
+function checkVisualCompletion(projectDir) {
+  return checkStockCompletion(projectDir);
+}
+function isAudioValid(projectDir, requireMusic, contentType) {
   const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
   if (!fs__namespace.existsSync(audioPlanPath)) return false;
   try {
@@ -10521,7 +14245,22 @@ function isAudioValid(projectDir, requireMusic) {
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
       );
-      return hasDownloadedMusic;
+      if (!hasDownloadedMusic) return false;
+    }
+    if (contentType === "health") {
+      const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
+      if (fs__namespace.existsSync(healthPlanPath)) {
+        try {
+          const healthPlan = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+          const hasSfxCues = (healthPlan.scenes || []).some((s) => s.sfxCue);
+          if (hasSfxCues) {
+            if (!plan.healthSfx?.enabled) return false;
+            const expectedHash = computeHealthMotionHash(healthPlan);
+            if (plan.healthSfx.planHash !== expectedHash) return false;
+          }
+        } catch {
+        }
+      }
     }
     return true;
   } catch {
@@ -10659,7 +14398,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
     uv: uvPath
   });
   onProgress?.("Starting uv + faster-whisper...", 0.02);
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject2) => {
     const args = [
       "run",
       scriptPath,
@@ -10677,6 +14416,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
     let resultData = null;
     let stderr = "";
     let stdoutBuffer = "";
+    let lastScriptError = "";
     proc.stdout.on("data", (chunk) => {
       stdoutBuffer += chunk.toString();
       const lines = stdoutBuffer.split("\n");
@@ -10693,6 +14433,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
             resultData = msg;
           } else if (msg.type === "error") {
             logger.error(`[WHISPER] Script error: ${msg.message}`);
+            lastScriptError = String(msg.message ?? "");
           }
         } catch {
           logger.debug(`[WHISPER stdout] ${trimmed.slice(0, 120)}`);
@@ -10711,11 +14452,12 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
     proc.on("close", (code) => {
       if (code !== 0) {
         logger.error(`Transcription process exited ${code}`, { stderr: stderr.slice(0, 500) });
-        reject(new Error(`Transcription failed (exit ${code}): ${stderr.slice(0, 300)}`));
+        const detail = stderr.trim() ? stderr.slice(0, 300) : lastScriptError.slice(0, 300);
+        reject2(new Error(`Transcription failed (exit ${code}): ${detail}`));
         return;
       }
       if (!resultData) {
-        reject(new Error("Transcription produced no result"));
+        reject2(new Error("Transcription produced no result"));
         return;
       }
       logger.info("Transcription complete", {
@@ -10727,7 +14469,7 @@ async function transcribeAudio(audioPath, modelName = "base", onProgress) {
     });
     proc.on("error", (err) => {
       logger.error(`Failed to spawn transcription process: ${err.message}`);
-      reject(new Error(`Failed to start transcription: ${err.message}`));
+      reject2(new Error(`Failed to start transcription: ${err.message}`));
     });
   });
 }
@@ -11472,7 +15214,7 @@ async function analyzeGlobalContext(params) {
   return ctx;
 }
 function buildFallbackContext(projectId, language, text) {
-  const STOP_WORDS = /* @__PURE__ */ new Set([
+  const STOP_WORDS2 = /* @__PURE__ */ new Set([
     "about",
     "above",
     "after",
@@ -11645,7 +15387,7 @@ function buildFallbackContext(projectId, language, text) {
   const properFreq = {};
   for (const p of properMatches) {
     const lower = p.toLowerCase();
-    if (!STOP_WORDS.has(lower) && lower.length > 3) {
+    if (!STOP_WORDS2.has(lower) && lower.length > 3) {
       properFreq[p] = (properFreq[p] ?? 0) + 1;
     }
   }
@@ -11654,7 +15396,7 @@ function buildFallbackContext(projectId, language, text) {
   const freq = {};
   for (const w of words) {
     const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "");
-    if (clean.length > 3 && !STOP_WORDS.has(clean)) {
+    if (clean.length > 3 && !STOP_WORDS2.has(clean)) {
       freq[clean] = (freq[clean] ?? 0) + 1;
     }
   }
@@ -13227,26 +16969,26 @@ function saveAssetsManifest(stockDir, assets) {
   fs__namespace.writeFileSync(p, JSON.stringify(assets, null, 2), "utf-8");
 }
 function downloadToFile(url$1, destPath) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject2) => {
     const parsed = new url.URL(url$1);
     const proto = parsed.protocol === "https:" ? https__namespace : http__namespace;
     const doRequest = (targetUrl, redirectCount = 0) => {
       if (redirectCount > 5) {
-        reject(new Error("Too many redirects"));
+        reject2(new Error("Too many redirects"));
         return;
       }
       proto.get(targetUrl, (res) => {
         if (res.statusCode === 301 || res.statusCode === 302) {
           const location = res.headers.location;
           if (!location) {
-            reject(new Error("Redirect without location"));
+            reject2(new Error("Redirect without location"));
             return;
           }
           doRequest(location, redirectCount + 1);
           return;
         }
         if (res.statusCode !== 200) {
-          reject(new Error(`HTTP ${res.statusCode} downloading ${targetUrl}`));
+          reject2(new Error(`HTTP ${res.statusCode} downloading ${targetUrl}`));
           return;
         }
         const out = fs__namespace.createWriteStream(destPath);
@@ -13255,9 +16997,9 @@ function downloadToFile(url$1, destPath) {
           const stat = fs__namespace.statSync(destPath);
           resolve(stat.size);
         });
-        out.on("error", reject);
-        res.on("error", reject);
-      }).on("error", reject);
+        out.on("error", reject2);
+        res.on("error", reject2);
+      }).on("error", reject2);
     };
     doRequest(url$1);
   });
@@ -14415,7 +18157,7 @@ function getCandidatesStorePath(projectDir) {
 }
 function loadStockCandidates(projectDir) {
   const filePath = getCandidatesStorePath(projectDir);
-  return readJsonSafe(filePath, {});
+  return readJsonSafe$1(filePath, {});
 }
 function saveStockCandidates(projectDir, data) {
   const filePath = getCandidatesStorePath(projectDir);
@@ -14429,7 +18171,7 @@ function getVisualTruthStorePath(projectDir) {
 }
 function loadVisualTruthStore(projectDir) {
   const filePath = getVisualTruthStorePath(projectDir);
-  return readJsonSafe(filePath, {
+  return readJsonSafe$1(filePath, {
     version: VISUAL_TRUTH_ANALYSIS_VERSION,
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     verifications: {}
@@ -14799,7 +18541,7 @@ Respond with STRICT JSON matching this schema:
         }
       });
       const timeoutPromise = new Promise(
-        (_, reject) => setTimeout(() => reject(new Error(`Visual truth timeout after ${timeoutMs}ms`)), timeoutMs)
+        (_, reject2) => setTimeout(() => reject2(new Error(`Visual truth timeout after ${timeoutMs}ms`)), timeoutMs)
       );
       const response = await Promise.race([callPromise, timeoutPromise]);
       rawJson = response.text ?? "";
@@ -15161,7 +18903,8 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     preferredAspectRatio = "16:9",
     apiKey,
     model,
-    forceReanalysis = false
+    forceReanalysis = false,
+    targetSceneIndices
   } = params;
   setPixabayProjectDir(projectDir);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
@@ -15184,19 +18927,38 @@ async function runContextAwareStockEngine(params, onProgress = () => {
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
   const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe(reviewPath, []) : [];
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe$1(reviewPath, []) : [];
   const existingMap = /* @__PURE__ */ new Map();
   for (const a of existingAssignments) {
     existingMap.set(a.sceneIndex, a);
   }
   const flattenedEntries = flattenEditPlanScenes(plan);
   const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
+      return false;
+    }
     const existing = existingMap.get(scene.sceneIndex);
     if (scene.locked || existing?.locked) return false;
     if (existing?.manualOverride) return false;
     if (existing?.approvalStatus === "approved") return false;
+    if (!targetSceneIndices && existing?.asset?.provider === "google-flow" && existing?.status === "assigned" && existing?.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
+      return false;
+    }
     return true;
   });
+  if (targetSceneIndices) {
+    const expectedTargetCount = targetSceneIndices.length;
+    const actualEligibleTargetCount = scenesToProcess.length;
+    const totalProjectScenes = flattenedEntries.length;
+    logger.info(
+      `[VisualMix] Stock ownership: expected=${expectedTargetCount} actualEligible=${actualEligibleTargetCount} totalProjectScenes=${totalProjectScenes}`
+    );
+    if (expectedTargetCount < totalProjectScenes && actualEligibleTargetCount > expectedTargetCount) {
+      throw new Error(
+        `VISUAL_MIX_STOCK_SCOPE_VIOLATION: Expected at most ${expectedTargetCount} scenes but stock engine targeted ${actualEligibleTargetCount} scenes out of ${totalProjectScenes}.`
+      );
+    }
+  }
   onProgress(`Starting context-aware stock search for ${scenesToProcess.length} scenes...`, 0.01);
   let globalContext = null;
   if (apiKey) {
@@ -15246,7 +19008,8 @@ async function runContextAwareStockEngine(params, onProgress = () => {
   for (const entry of flattenedEntries) {
     const existing = existingMap.get(entry.sceneIndex);
     const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved";
-    if (isLocked && existing) {
+    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex);
+    if ((isLocked || isExcluded) && existing) {
       assignments.push(existing);
       if (existing.status === "assigned") assignedCount++;
     }
@@ -15466,7 +19229,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
           if (isVisualTruthEnabled && apiKey) {
             try {
               const claimLedgerPath = getClaimLedgerPath(projectDir);
-              const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe(claimLedgerPath, null) : null;
+              const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe$1(claimLedgerPath, null) : null;
               const rerankResult = await rerankShortlistedCandidates({
                 projectDir,
                 sceneId,
@@ -15599,7 +19362,12 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     }))
   );
   atomicWriteJson(planPath, plan);
-  atomicWriteJson(reviewPath, assignments);
+  if (params.assignmentSink) {
+    const owned = targetSceneIndices ? assignments.filter((a) => targetSceneIndices.includes(a.sceneIndex)) : assignments;
+    await params.assignmentSink(owned);
+  } else {
+    atomicWriteJson(reviewPath, assignments);
+  }
   if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
     saveStockCandidates(projectDir, stockCandidatesStore);
   }
@@ -15760,7 +19528,7 @@ function toOrientation(ar) {
 }
 async function runStockEngine(params, onProgress = () => {
 }) {
-  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9" } = params;
+  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9", targetSceneIndices } = params;
   setPixabayProjectDir(projectDir);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) {
@@ -15782,19 +19550,38 @@ async function runStockEngine(params, onProgress = () => {
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
   const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe(reviewPath, []) : [];
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe$1(reviewPath, []) : [];
   const existingMap = /* @__PURE__ */ new Map();
   for (const a of existingAssignments) {
     existingMap.set(a.sceneIndex, a);
   }
   const flattenedEntries = flattenEditPlanScenes(plan);
   const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
+      return false;
+    }
     const existing = existingMap.get(scene.sceneIndex);
     if (scene.locked || existing?.locked) return false;
     if (existing?.manualOverride) return false;
     if (existing?.approvalStatus === "approved") return false;
+    if (!targetSceneIndices && existing?.asset?.provider === "google-flow" && existing?.status === "assigned" && existing?.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
+      return false;
+    }
     return true;
   });
+  if (targetSceneIndices) {
+    const expectedTargetCount = targetSceneIndices.length;
+    const actualEligibleTargetCount = scenesToProcess.length;
+    const totalProjectScenes = flattenedEntries.length;
+    logger.info(
+      `[VisualMix] Stock ownership: expected=${expectedTargetCount} actualEligible=${actualEligibleTargetCount} totalProjectScenes=${totalProjectScenes}`
+    );
+    if (expectedTargetCount < totalProjectScenes && actualEligibleTargetCount > expectedTargetCount) {
+      throw new Error(
+        `VISUAL_MIX_STOCK_SCOPE_VIOLATION: Expected at most ${expectedTargetCount} scenes but stock engine targeted ${actualEligibleTargetCount} scenes out of ${totalProjectScenes}.`
+      );
+    }
+  }
   const assignments = [];
   let assignedCount = 0;
   let failedCount = 0;
@@ -15802,7 +19589,8 @@ async function runStockEngine(params, onProgress = () => {
   for (const entry of flattenedEntries) {
     const existing = existingMap.get(entry.sceneIndex);
     const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved";
-    if (isLocked && existing) {
+    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex);
+    if ((isLocked || isExcluded) && existing) {
       assignments.push(existing);
       if (existing.status === "assigned") assignedCount++;
     }
@@ -15946,7 +19734,12 @@ async function runStockEngine(params, onProgress = () => {
   }
   assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
   atomicWriteJson(planPath, plan);
-  atomicWriteJson(reviewPath, assignments);
+  if (params.assignmentSink) {
+    const owned = targetSceneIndices ? assignments.filter((a) => targetSceneIndices.includes(a.sceneIndex)) : assignments;
+    await params.assignmentSink(owned);
+  } else {
+    atomicWriteJson(reviewPath, assignments);
+  }
   if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
     saveStockCandidates(projectDir, stockCandidatesStore);
   }
@@ -16003,416 +19796,6 @@ async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey,
     }
   }
   return asset;
-}
-const OV_HOST = "api.openverse.org";
-function httpsGet(url2, headers, timeoutMs = 12e3) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url2);
-    const req = https__namespace.request(
-      {
-        hostname: u.hostname,
-        path: u.pathname + u.search,
-        method: "GET",
-        headers,
-        timeout: timeoutMs
-      },
-      (res) => {
-        const chunks = [];
-        res.on("data", (d) => chunks.push(d));
-        res.on("end", () => {
-          const body = Buffer.concat(chunks).toString("utf-8");
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            reject(new Error(`HTTP ${res.statusCode}: ${body.slice(0, 300)}`));
-            return;
-          }
-          try {
-            resolve(JSON.parse(body));
-          } catch {
-            reject(new Error(`JSON parse error: ${body.slice(0, 200)}`));
-          }
-        });
-      }
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error(`Request timed out after ${timeoutMs}ms`));
-    });
-    req.on("error", (err) => reject(new Error(`Request error: ${err.message}`)));
-    req.end();
-  });
-}
-async function openverseSearchAudio(query, category, limit = 6, accessToken) {
-  const params = {
-    q: query,
-    page_size: String(Math.min(limit, 20)),
-    license_type: "commercial",
-    mature: "false"
-  };
-  if (category) params.category = category;
-  const qs = new URLSearchParams(params);
-  const headers = {
-    Accept: "application/json",
-    "User-Agent": "VideoFactory/1.0 (AI video editor)"
-  };
-  const url2 = `https://${OV_HOST}/v1/audio/?${qs.toString()}`;
-  logger.info(`[Openverse] ${category ?? "any"} search: "${query}"`);
-  let data;
-  try {
-    data = await httpsGet(url2, headers, 12e3);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.warn(`[Openverse] Search "${query}" failed: ${msg}`);
-    return [];
-  }
-  logger.info(`[Openverse] "${query}" -> ${data.result_count ?? 0} results`);
-  return (data.results ?? []).map((item) => ({
-    assetId: item.id,
-    provider: "openverse",
-    audioType: category === "sound_effects" ? "sfx" : "music",
-    title: item.title ?? "Unknown",
-    creator: item.creator ?? "Unknown",
-    creatorUrl: item.creator_url,
-    downloadUrl: item.url,
-    thumbnailUrl: item.thumbnail ?? "",
-    durationSecs: item.duration ?? 0,
-    tags: item.tags?.map((t) => t.name) ?? [],
-    license: item.license,
-    licenseUrl: item.license_url ?? `https://creativecommons.org/licenses/${item.license}/${item.license_version ?? "4.0"}/`,
-    pageUrl: item.foreign_landing_url,
-    filetype: item.filetype ?? "mp3",
-    searchQuery: query
-  }));
-}
-function flattenScenes(plan) {
-  return plan.chapters.flatMap((ch) => ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
-}
-function groupScenesIntoSections(plan) {
-  const sections = [];
-  for (const ch of plan.chapters) {
-    const scenes = (ch.chapters_seq ?? ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
-    if (scenes.length === 0) continue;
-    const startTime = Math.min(...scenes.map((s) => s.startTime));
-    const endTime = Math.max(...scenes.map((s) => s.endTime));
-    const narrativeSummary = scenes.map((s) => s.narrativeText ?? s.visualIntent ?? "").filter(Boolean).join(". ").slice(0, 300);
-    sections.push({
-      sectionLabel: ch.title ?? `Section ${sections.length + 1}`,
-      mood: ch.mood ?? "neutral",
-      narrativeSummary,
-      scenes,
-      startTime,
-      endTime
-    });
-  }
-  if (sections.length === 0) {
-    const allScenes = flattenScenes(plan);
-    if (allScenes.length > 0) {
-      sections.push({
-        sectionLabel: "Main",
-        mood: "neutral",
-        narrativeSummary: allScenes.map((s) => s.narrativeText ?? "").filter(Boolean).join(". ").slice(0, 300),
-        scenes: allScenes,
-        startTime: allScenes[0].startTime,
-        endTime: allScenes[allScenes.length - 1].endTime
-      });
-    }
-  }
-  return sections;
-}
-function buildMusicQuery(mood, _narrativeSummary, _sectionLabel) {
-  const moodMap = {
-    tense: ["dramatic tension", "suspense", "thriller"],
-    emotional: ["emotional piano", "sad piano", "cinematic emotional"],
-    inspirational: ["uplifting", "motivational", "inspiring"],
-    peaceful: ["calm ambient", "peaceful", "relaxing"],
-    dramatic: ["cinematic epic", "dramatic orchestral", "epic"],
-    melancholic: ["melancholic", "sad ambient", "nostalgic"],
-    hopeful: ["hopeful", "uplifting acoustic", "positive"],
-    neutral: ["ambient", "background music", "instrumental"],
-    action: ["action", "driving", "energetic"],
-    mysterious: ["mysterious", "dark ambient", "eerie"]
-  };
-  const queries = moodMap[mood.toLowerCase()] ?? moodMap.neutral;
-  return queries;
-}
-function buildSfxQuery(visualIntent) {
-  const text = (visualIntent ?? "").toLowerCase();
-  const patterns = [
-    [/crowd|audience|people|group/i, "crowd ambience"],
-    [/rain|storm|thunder/i, "rain storm sound"],
-    [/ocean|sea|wave|beach/i, "ocean waves"],
-    [/forest|bird|nature|park/i, "forest nature ambience"],
-    [/city|traffic|urban|street/i, "city street ambience"],
-    [/wind|breeze/i, "wind sound effect"],
-    [/fire|flame/i, "fire crackling"],
-    [/music|concert|instrument/i, "live music crowd"],
-    [/whisper|quiet|silence/i, "subtle ambient"],
-    [/footstep|walk|run/i, "footsteps walking"],
-    [/door|enter|exit/i, "door sound effect"],
-    [/phone|call|ring/i, "phone notification"],
-    [/car|vehicle|drive/i, "car engine driving"],
-    [/explosion|crash|impact/i, "impact crash sound"],
-    [/water|river|stream/i, "flowing water stream"]
-  ];
-  for (const [pattern, sfxQuery] of patterns) {
-    if (pattern.test(text)) return sfxQuery;
-  }
-  return null;
-}
-async function downloadAudio(asset, audioDir, timeoutMs = 45e3) {
-  const ext = (asset.filetype ?? path.extname(asset.downloadUrl).slice(1)) || "mp3";
-  const filename = `${asset.audioType}_${asset.assetId.replace(/[^a-z0-9]/gi, "_").slice(0, 40)}.${ext}`;
-  const destPath = path.join(audioDir, filename);
-  if (fs__namespace.existsSync(destPath) && fs__namespace.statSync(destPath).size > 0) return destPath;
-  const fetchUrl = (url2, redirectsLeft = 8) => new Promise((resolve, reject) => {
-    const u = new URL(url2);
-    const protocol = u.protocol === "https:" ? https__namespace : http__namespace;
-    const req = protocol.request(
-      {
-        hostname: u.hostname,
-        port: u.port || (u.protocol === "https:" ? 443 : 80),
-        path: u.pathname + u.search,
-        method: "GET",
-        headers: { "User-Agent": "VideoFactory/1.0" },
-        timeout: timeoutMs
-      },
-      (res) => {
-        const loc = res.headers.location;
-        if ((res.statusCode === 301 || res.statusCode === 302 || res.statusCode === 307 || res.statusCode === 308) && loc) {
-          res.resume();
-          if (redirectsLeft <= 0) {
-            reject(new Error("Too many redirects"));
-            return;
-          }
-          const nextUrl = loc.startsWith("http") ? loc : `${u.protocol}//${u.host}${loc}`;
-          fetchUrl(nextUrl, redirectsLeft - 1).then(resolve).catch(reject);
-          return;
-        }
-        if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-          res.resume();
-          reject(new Error(`HTTP ${res.statusCode} downloading ${url2}`));
-          return;
-        }
-        const tmp = destPath + ".tmp";
-        const out = fs__namespace.createWriteStream(tmp);
-        res.pipe(out);
-        out.on("finish", () => {
-          const size = fs__namespace.existsSync(tmp) ? fs__namespace.statSync(tmp).size : 0;
-          if (size < 1024) {
-            fs__namespace.unlinkSync(tmp);
-            reject(new Error(`Downloaded file too small (${size} bytes) — likely an error page`));
-            return;
-          }
-          fs__namespace.rename(tmp, destPath, (err) => {
-            if (err) reject(err);
-            else resolve(destPath);
-          });
-        });
-        out.on("error", (err) => {
-          try {
-            fs__namespace.unlinkSync(tmp);
-          } catch {
-          }
-          reject(err);
-        });
-        res.on("error", (err) => {
-          try {
-            fs__namespace.unlinkSync(tmp);
-          } catch {
-          }
-          reject(err);
-        });
-      }
-    );
-    req.on("timeout", () => {
-      req.destroy();
-      reject(new Error(`Download timed out after ${timeoutMs}ms: ${url2}`));
-    });
-    req.on("error", reject);
-    req.end();
-  });
-  return fetchUrl(asset.downloadUrl);
-}
-async function runAudioDirector(projectDir, onProgress = () => {
-}, openverseToken) {
-  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-  if (!fs__namespace.existsSync(planPath)) {
-    return { success: false, error: "No edit plan found. Run AI Planning first.", sections: [], sfxAssignments: [] };
-  }
-  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-  const audioDir = path.join(projectDir, "assets", "audio");
-  fs__namespace.mkdirSync(audioDir, { recursive: true });
-  onProgress("Analysing narrative structure…", 0.05);
-  const rawSections = groupScenesIntoSections(plan);
-  logger.info(`[AudioDirector] Found ${rawSections.length} narrative sections`);
-  const sections = [];
-  const sfxAssignments = [];
-  for (let i = 0; i < rawSections.length; i++) {
-    const sec = rawSections[i];
-    const pct = 0.08 + i / rawSections.length * 0.5;
-    onProgress(`[${i + 1}/${rawSections.length}] Music search: "${sec.sectionLabel}"`, pct);
-    const queries = buildMusicQuery(sec.mood, sec.narrativeSummary, sec.sectionLabel);
-    const sectionDuration = sec.endTime - sec.startTime;
-    const pickBest = (results) => {
-      if (results.length === 0) return null;
-      const sorted = results.sort((a, b) => {
-        const aDiff = Math.abs((a.durationSecs || 120) - sectionDuration);
-        const bDiff = Math.abs((b.durationSecs || 120) - sectionDuration);
-        return aDiff - bDiff;
-      });
-      return sorted[0];
-    };
-    let musicResult = null;
-    for (const q of queries) {
-      const results = await openverseSearchAudio(q, "music", 6);
-      const best = pickBest(results);
-      if (best) {
-        musicResult = { ...best, searchQuery: q };
-        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (music category): ${best.title}`);
-        break;
-      }
-    }
-    if (!musicResult) {
-      for (const q of queries) {
-        const results = await openverseSearchAudio(q, void 0, 6);
-        const best = pickBest(results);
-        if (best) {
-          musicResult = { ...best, searchQuery: q };
-          logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> "${q}" (no category): ${best.title}`);
-          break;
-        }
-      }
-    }
-    if (!musicResult) {
-      const results = await openverseSearchAudio("ambient background music", void 0, 6);
-      const best = pickBest(results);
-      if (best) {
-        musicResult = { ...best, searchQuery: "ambient background music" };
-        logger.info(`[AudioDirector] Section "${sec.sectionLabel}" -> fallback generic: ${best.title}`);
-      }
-    }
-    if (!musicResult) {
-      logger.warn(`[AudioDirector] Section "${sec.sectionLabel}": no music found after all passes`);
-    }
-    const section = {
-      sectionId: `section_${i}`,
-      sectionLabel: sec.sectionLabel,
-      mood: sec.mood,
-      startTime: sec.startTime,
-      endTime: sec.endTime,
-      durationSecs: sec.endTime - sec.startTime,
-      sceneIndexes: sec.scenes.map((s) => s.sceneIndex),
-      musicCandidate: musicResult,
-      approved: false,
-      status: musicResult ? "found" : "failed"
-    };
-    sections.push(section);
-  }
-  const allScenes = flattenScenes(plan);
-  let sfxCount = 0;
-  for (let i = 0; i < allScenes.length; i++) {
-    const scene = allScenes[i];
-    const sfxQuery = buildSfxQuery(scene.visualIntent ?? scene.narrativeText ?? "");
-    if (!sfxQuery) continue;
-    const pct = 0.6 + i / allScenes.length * 0.3;
-    onProgress(`[SFX] Scene ${scene.sceneIndex}: ${sfxQuery}`, pct);
-    try {
-      const results = await openverseSearchAudio(sfxQuery, "sound_effects", 3, openverseToken);
-      if (results.length > 0) {
-        sfxAssignments.push({
-          sceneIndex: scene.sceneIndex,
-          startTime: scene.startTime,
-          endTime: scene.endTime,
-          sfxQuery,
-          sfxCandidate: results[0],
-          approved: false,
-          volumeDb: -12,
-          fadeInSecs: 0.5,
-          fadeOutSecs: 0.5
-        });
-        sfxCount++;
-      }
-    } catch {
-    }
-  }
-  const foundSections = sections.filter((s) => s.status === "found" && s.musicCandidate);
-  for (let i = 0; i < foundSections.length; i++) {
-    const sec = foundSections[i];
-    sec.approved = true;
-    const pct = 0.62 + i / Math.max(foundSections.length, 1) * 0.3;
-    onProgress(`Downloading music [${i + 1}/${foundSections.length}]: ${sec.sectionLabel}…`, pct);
-    try {
-      const localPath = await downloadAudio(sec.musicCandidate, audioDir);
-      sec.approvedLocalPath = localPath;
-      sec.approvedFilename = path.basename(localPath);
-      logger.info(`[AudioDirector] Downloaded: ${sec.sectionLabel} -> ${localPath}`);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.warn(`[AudioDirector] Download failed for ${sec.sectionLabel}: ${msg}`);
-    }
-  }
-  const audioPlan = {
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    sections,
-    sfxAssignments
-  };
-  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
-  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(audioPlan, null, 2), "utf-8");
-  const downloadedCount = sections.filter((s) => s.approvedLocalPath).length;
-  onProgress(`Complete — ${sections.filter((s) => s.status === "found").length}/${sections.length} music found, ${downloadedCount} downloaded, ${sfxCount} SFX`, 1);
-  return {
-    success: true,
-    sections,
-    sfxAssignments
-  };
-}
-async function downloadApprovedAudio(projectDir, plan, onProgress = () => {
-}) {
-  const audioDir = path.join(projectDir, "assets", "audio");
-  fs__namespace.mkdirSync(audioDir, { recursive: true });
-  const total = plan.sections.filter((s) => s.approved && s.musicCandidate).length + plan.sfxAssignments.filter((s) => s.approved && s.sfxCandidate).length;
-  let done = 0;
-  for (const section of plan.sections) {
-    if (!section.approved || !section.musicCandidate) continue;
-    try {
-      onProgress(`Downloading music: ${section.sectionLabel}`, done / total);
-      const localPath = await downloadAudio(section.musicCandidate, audioDir);
-      section.approvedLocalPath = localPath;
-      section.approvedFilename = path.basename(localPath);
-      done++;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[AudioDirector] Failed to download music for ${section.sectionLabel}: ${msg}`);
-    }
-  }
-  for (const sfx of plan.sfxAssignments) {
-    if (!sfx.approved || !sfx.sfxCandidate) continue;
-    try {
-      onProgress(`Downloading SFX: Scene ${sfx.sceneIndex}`, done / total);
-      const localPath = await downloadAudio(sfx.sfxCandidate, audioDir);
-      sfx.approvedLocalPath = localPath;
-      sfx.approvedFilename = path.basename(localPath);
-      done++;
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[AudioDirector] Failed to download SFX for scene ${sfx.sceneIndex}: ${msg}`);
-    }
-  }
-  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
-  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
-  return plan;
-}
-function loadAudioPlan(projectDir) {
-  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
-  if (!fs__namespace.existsSync(audioPlanPath)) return null;
-  try {
-    return JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-function saveAudioPlan(projectDir, plan) {
-  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
-  fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
 }
 function probeAudioDuration(filePath) {
   return new Promise((resolve) => {
@@ -16617,6 +20000,3248 @@ async function validatePipelinePrerequisites(options) {
     warnings,
     detectedVoiceoverDuration: duration ?? void 0
   };
+}
+const VISUAL_MIX_SCHEMA_VERSION = 1;
+function getGeneralManifestPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "generated-visual-assets.json");
+}
+function computeGenerationHash(params) {
+  const width = params.width ?? 1920;
+  const height = params.height ?? 1080;
+  const imageModel = params.imageModel ?? "GEM_PIX_2";
+  const payload = [
+    String(params.sceneIndex),
+    (params.narration || "").trim().toLowerCase(),
+    (params.visualIntent || "").trim().toLowerCase(),
+    (params.imagePrompt || "").trim(),
+    `${width}x${height}`,
+    imageModel,
+    params.profile
+  ].join("||");
+  return crypto__namespace.createHash("sha256").update(payload).digest("hex");
+}
+class ManifestWriteQueue {
+  queue = Promise.resolve();
+  enqueue(fn) {
+    return new Promise((resolve, reject2) => {
+      this.queue = this.queue.then(async () => {
+        try {
+          const res = await fn();
+          resolve(res);
+        } catch (err) {
+          reject2(err);
+        }
+      });
+    });
+  }
+}
+const manifestWriteQueue = new ManifestWriteQueue();
+function loadGeneratedAssetsManifest(projectDir, profile) {
+  if (profile === "health") {
+    const healthManifest = loadHealthGeneratedManifest(projectDir);
+    if (Object.keys(healthManifest.scenes).length > 0) {
+      const records = {};
+      for (const [k, v] of Object.entries(healthManifest.scenes)) {
+        records[k] = {
+          ...v,
+          profile: "health"
+        };
+      }
+      return {
+        schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
+        updatedAt: healthManifest.updatedAt,
+        configHash: healthManifest.configHash,
+        profile: "health",
+        scenes: records
+      };
+    }
+  }
+  const manifestPath = getGeneralManifestPath(projectDir);
+  if (fs__namespace.existsSync(manifestPath)) {
+    try {
+      const data = JSON.parse(fs__namespace.readFileSync(manifestPath, "utf-8"));
+      if (data && typeof data === "object" && data.scenes) {
+        return data;
+      }
+    } catch (err) {
+      logger.warn(`[VisualMixCache] Failed to parse ${manifestPath}: ${err}`);
+    }
+  }
+  return {
+    schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    configHash: "initial",
+    profile,
+    scenes: {}
+  };
+}
+function saveGeneratedAssetsManifestAtomic(projectDir, manifest) {
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const manifestPath = getGeneralManifestPath(projectDir);
+  const dir = path__namespace.dirname(manifestPath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = `${manifestPath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs__namespace.renameSync(tmpPath, manifestPath);
+  if (manifest.profile === "health") {
+    try {
+      const healthScenes = {};
+      for (const [k, v] of Object.entries(manifest.scenes)) {
+        healthScenes[k] = {
+          sceneIndex: v.sceneIndex,
+          strategy: v.strategy,
+          promptHash: v.promptHash,
+          prompt: v.prompt,
+          status: v.status,
+          mediaId: v.mediaId,
+          flowProjectId: v.flowProjectId,
+          outputPath: v.outputPath,
+          width: v.width,
+          height: v.height,
+          motionPreset: v.motionPreset,
+          generatedAt: v.generatedAt,
+          error: v.error
+        };
+      }
+      saveHealthGeneratedManifest(projectDir, {
+        schemaVersion: 1,
+        updatedAt: manifest.updatedAt,
+        configHash: manifest.configHash,
+        scenes: healthScenes
+      });
+    } catch {
+    }
+  }
+}
+function getCachedVisualAsset(projectDir, sceneIndex, expectedHash, profile) {
+  const manifest = loadGeneratedAssetsManifest(projectDir, profile);
+  const record = manifest.scenes[String(sceneIndex)];
+  if (!record || record.status !== "completed" || !record.outputPath) {
+    return null;
+  }
+  if (record.promptHash !== expectedHash) {
+    logger.info(`[VisualMixCache] Scene ${sceneIndex}: prompt hash mismatch, invalidating cache`);
+    return null;
+  }
+  const fullPath = path__namespace.isAbsolute(record.outputPath) ? record.outputPath : path__namespace.join(projectDir, record.outputPath);
+  if (!fs__namespace.existsSync(fullPath)) {
+    logger.info(`[VisualMixCache] Scene ${sceneIndex}: cached file not found on disk: ${fullPath}`);
+    return null;
+  }
+  try {
+    const stat = fs__namespace.statSync(fullPath);
+    if (stat.size === 0) return null;
+    const dims = probeImageFileDimensions(fullPath);
+    if (!dims || dims.width < 1920 || dims.height < 1080) {
+      logger.warn(
+        `[VisualMixCache] Scene ${sceneIndex}: cached image does not satisfy 1920x1080 (${dims?.width}x${dims?.height})`
+      );
+      return null;
+    }
+    return record;
+  } catch (err) {
+    logger.warn(`[VisualMixCache] Error checking cached file ${fullPath}: ${err}`);
+    return null;
+  }
+}
+async function recordVisualAssetQueued(projectDir, record) {
+  return manifestWriteQueue.enqueue(() => {
+    const manifest = loadGeneratedAssetsManifest(projectDir, record.profile);
+    manifest.scenes[String(record.sceneIndex)] = record;
+    saveGeneratedAssetsManifestAtomic(projectDir, manifest);
+  });
+}
+const AI_PREFERENCE_REGEX = /\b(concept|abstract|theory|metaphor|symbol|symbolic|reconstruction|ancient|rome|egypt|pharaoh|myth|future|futuristic|internal|system|architecture|structure|infographic|diagram|invisible|secret|origin|vision|imagine|thought|mind|idea|revolution|century|galaxy|cosmos|quantum|microscopic|hidden)\b/i;
+const REAL_FOOTAGE_PREFERENCE_REGEX = /\b(people|crowd|walking|walk|running|run|driving|drive|car|traffic|city|street|intersection|shopping|market|store|cooking|cook|eating|eat|gym|exercise|workout|laughing|smiling|talking|conversation|interview|office|working|desk|nature|ocean|waves|beach|park|forest|travel|lifestyle|real-world|documentary\s*footage)\b/i;
+function classifyGeneralSceneSuitability(sceneOrNarration, totalScenesOrIntent) {
+  const narrativeText = typeof sceneOrNarration === "string" ? sceneOrNarration : sceneOrNarration.narrativeText;
+  const visualIntent = typeof totalScenesOrIntent === "string" ? totalScenesOrIntent : typeof sceneOrNarration === "object" ? sceneOrNarration.visualIntent : "";
+  const sceneIndex = typeof sceneOrNarration === "object" ? sceneOrNarration.sceneIndex : 1;
+  const text = `${narrativeText || ""} ${visualIntent || ""}`.toLowerCase();
+  const prefersAi = AI_PREFERENCE_REGEX.test(text);
+  const prefersReal = REAL_FOOTAGE_PREFERENCE_REGEX.test(text);
+  if (prefersAi && !prefersReal) {
+    const isHistorical = /\b(ancient|rome|egypt|pharaoh|century|reconstruction|myth)\b/i.test(text);
+    return {
+      category: isHistorical ? "historical" : "conceptual",
+      aiSuitabilityScore: 90,
+      stockSuitabilityScore: 25,
+      reasoning: "Conceptual, symbolic or hard-to-find visual best suited for AI still"
+    };
+  }
+  if (prefersReal && !prefersAi) {
+    const isNature = /\b(nature|ocean|waves|beach|forest|cliff|sky|river)\b/i.test(text);
+    return {
+      category: isNature ? "nature" : "lifestyle",
+      aiSuitabilityScore: 25,
+      stockSuitabilityScore: 90,
+      reasoning: "Real people, activities, or real-world establishing shot best suited for stock footage"
+    };
+  }
+  if (prefersAi && prefersReal) {
+    return {
+      category: "general",
+      aiSuitabilityScore: 65,
+      stockSuitabilityScore: 60,
+      reasoning: "Mixed conceptual and real elements"
+    };
+  }
+  const isHook = sceneIndex === 1;
+  return {
+    category: isHook ? "hook" : "general",
+    aiSuitabilityScore: isHook ? 75 : 55,
+    stockSuitabilityScore: isHook ? 50 : 50,
+    reasoning: "Standard documentary scene"
+  };
+}
+const GENERIC_MOTION_PRESETS = [
+  "push-in-center",
+  "push-in-left",
+  "push-in-right",
+  "push-out-center",
+  "pan-left",
+  "pan-right",
+  "pan-up",
+  "pan-down",
+  "drift-up-left",
+  "drift-up-right",
+  "drift-down-left",
+  "drift-down-right",
+  "still-hold"
+];
+function planGeneralSceneMotion(params) {
+  const { sceneIndex, visualIntent, duration, recentPresets } = params;
+  const text = visualIntent.toLowerCase();
+  let preset;
+  if (text.includes("landscape") || text.includes("sweeping") || text.includes("horizon")) {
+    preset = sceneIndex % 2 === 0 ? "pan-right" : "pan-left";
+  } else if (text.includes("tower") || text.includes("tall") || text.includes("sky") || text.includes("rising")) {
+    preset = "pan-up";
+  } else if (text.includes("ground") || text.includes("detail") || text.includes("deep")) {
+    preset = "push-in-center";
+  } else if (text.includes("vast") || text.includes("overview") || text.includes("reveal")) {
+    preset = "push-out-center";
+  } else {
+    const available = GENERIC_MOTION_PRESETS.filter((p) => p !== "still-hold");
+    preset = available[sceneIndex % available.length];
+  }
+  if (recentPresets.length >= 2) {
+    const p1 = recentPresets[recentPresets.length - 1];
+    const p2 = recentPresets[recentPresets.length - 2];
+    if (preset === p1 && preset === p2) {
+      preset = preset === "push-in-center" ? "pan-right" : "push-in-center";
+    }
+  }
+  const spec = resolvePresetDefaults(preset, duration);
+  return { motionSpec: spec, motionPreset: preset };
+}
+class VisualMixPlanner {
+  planVisualMix(params) {
+    const projectDir = params.projectDir ?? process.cwd();
+    let rawScenes = params.rawScenes;
+    if (!rawScenes && params.masterPlan?.scenes) {
+      rawScenes = params.masterPlan.scenes.map((s, idx) => ({
+        sceneIndex: idx + 1,
+        sceneId: s.sceneId,
+        narrativeText: s.narrationText,
+        visualIntent: s.visualIntent,
+        startTime: s.start,
+        endTime: s.end,
+        duration: s.duration,
+        searchQueries: s.searchQueries
+      }));
+    }
+    return VisualMixPlanner.buildPlan({
+      projectDir,
+      rawScenes: rawScenes ?? [],
+      config: params.config,
+      profile: params.profile,
+      globalContext: params.globalContext
+    });
+  }
+  static getPlanPath(projectDir) {
+    return path__namespace.join(projectDir, "analysis", "visual-mix-plan.json");
+  }
+  static loadPlan(projectDir) {
+    const p = this.getPlanPath(projectDir);
+    if (fs__namespace.existsSync(p)) {
+      try {
+        return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+  static loadScenesFromEditPlan(projectDir) {
+    return HealthVisualPlanner.loadScenesFromEditPlan(projectDir);
+  }
+  static buildPlan(params) {
+    const { projectDir, rawScenes, config, profile, globalContext } = params;
+    const totalScenes = rawScenes.length;
+    const aiRatio = config.aiImageRatio;
+    const stockRatio = config.stockFootageRatio;
+    logger.info(
+      `[VisualMixPlanner] Planning visuals for profile=${profile}, mode=${config.mode}, AI=${aiRatio}, Stock=${stockRatio} (${totalScenes} scenes)`
+    );
+    if (profile === "health") {
+      const healthPlan = HealthVisualPlanner.buildPlan(projectDir, rawScenes, {
+        aiRatio,
+        stockRatio,
+        width: config.width,
+        height: config.height,
+        motionEnabled: config.motionEnabled
+      });
+      const convertedScenes = healthPlan.scenes.map((s) => ({
+        sceneIndex: s.sceneIndex,
+        narration: s.narration,
+        visualIntent: s.visualIntent,
+        strategy: s.strategy,
+        category: s.category,
+        reasoning: s.reasoning,
+        imagePrompt: s.imagePrompt,
+        stockQueries: s.stockQueries,
+        motionPreset: s.motionPreset,
+        motion: s.motion,
+        sfxCue: s.sfxCue,
+        generationHash: s.generationHash,
+        startTime: s.startTime,
+        endTime: s.endTime,
+        duration: s.duration
+      }));
+      const aiSceneIndices2 = convertedScenes.filter((s) => s.strategy === "ai-still").map((s) => s.sceneIndex).sort((a, b) => a - b);
+      const stockSceneIndices2 = convertedScenes.filter((s) => s.strategy === "stock").map((s) => s.sceneIndex).sort((a, b) => a - b);
+      const planHash2 = `health_${config.mode || "custom-mix"}_${aiRatio}_${stockRatio}_${config.imageOutputResolution || "1080p"}_${totalScenes}`;
+      const visualMixPlan = {
+        schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
+        generatedAt: healthPlan.generatedAt,
+        profile: "health",
+        sourceMode: config.mode ?? "custom-mix",
+        planHash: planHash2,
+        requestedAiRatio: aiRatio,
+        requestedStockRatio: stockRatio,
+        requested: {
+          aiPercent: Math.round(aiRatio * 100),
+          stockPercent: Math.round(stockRatio * 100)
+        },
+        totalScenes: healthPlan.totalScenes,
+        targetAiScenes: healthPlan.targetAiScenes,
+        targetStockScenes: healthPlan.targetStockScenes,
+        target: {
+          ai: healthPlan.targetAiScenes,
+          stock: healthPlan.targetStockScenes
+        },
+        aiSceneIndices: aiSceneIndices2,
+        stockSceneIndices: stockSceneIndices2,
+        scenes: convertedScenes
+      };
+      if (projectDir) {
+        const analysisDir = path__namespace.join(projectDir, "analysis");
+        if (!fs__namespace.existsSync(analysisDir)) fs__namespace.mkdirSync(analysisDir, { recursive: true });
+        fs__namespace.writeFileSync(this.getPlanPath(projectDir), JSON.stringify(visualMixPlan, null, 2), "utf-8");
+      }
+      return visualMixPlan;
+    }
+    if (totalScenes === 0) {
+      return {
+        schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        profile: "general",
+        sourceMode: config.mode,
+        requestedAiRatio: aiRatio,
+        requestedStockRatio: stockRatio,
+        totalScenes: 0,
+        targetAiScenes: 0,
+        targetStockScenes: 0,
+        scenes: []
+      };
+    }
+    const targetAiScenes = Math.max(0, Math.min(totalScenes, Math.round(totalScenes * aiRatio)));
+    const targetStockScenes = totalScenes - targetAiScenes;
+    const classified = rawScenes.map((scene) => {
+      const cls = classifyGeneralSceneSuitability(scene, totalScenes);
+      return {
+        scene,
+        cls,
+        diff: cls.aiSuitabilityScore - cls.stockSuitabilityScore
+      };
+    });
+    const ranked = [...classified].sort((a, b) => {
+      if (b.diff !== a.diff) return b.diff - a.diff;
+      return a.scene.sceneIndex - b.scene.sceneIndex;
+    });
+    const selectedAiIndices = new Set(
+      ranked.slice(0, targetAiScenes).map((item) => item.scene.sceneIndex)
+    );
+    const strategyMap = /* @__PURE__ */ new Map();
+    for (const item of classified) {
+      strategyMap.set(
+        item.scene.sceneIndex,
+        selectedAiIndices.has(item.scene.sceneIndex) ? "ai-still" : "stock"
+      );
+    }
+    for (let i = 0; i < rawScenes.length; i++) {
+      const idx = rawScenes[i].sceneIndex;
+      const currentStrategy = strategyMap.get(idx);
+      if (currentStrategy === "stock" && i >= 3 && targetAiScenes > targetStockScenes) {
+        const p1 = strategyMap.get(rawScenes[i - 1].sceneIndex);
+        const p2 = strategyMap.get(rawScenes[i - 2].sceneIndex);
+        const p3 = strategyMap.get(rawScenes[i - 3].sceneIndex);
+        if (p1 === "stock" && p2 === "stock" && p3 === "stock") {
+          const swapCandidate = classified.find(
+            (c) => strategyMap.get(c.scene.sceneIndex) === "ai-still" && c.scene.sceneIndex > idx
+          );
+          if (swapCandidate) {
+            strategyMap.set(idx, "ai-still");
+            strategyMap.set(swapCandidate.scene.sceneIndex, "stock");
+          }
+        }
+      }
+      if (currentStrategy === "ai-still" && i >= 5 && targetStockScenes > 0) {
+        let allPrevAi = true;
+        for (let k = 1; k <= 5; k++) {
+          if (strategyMap.get(rawScenes[i - k].sceneIndex) !== "ai-still") {
+            allPrevAi = false;
+            break;
+          }
+        }
+        if (allPrevAi) {
+          const swapStock = classified.find(
+            (c) => strategyMap.get(c.scene.sceneIndex) === "stock" && c.scene.sceneIndex > idx
+          );
+          if (swapStock) {
+            strategyMap.set(idx, "stock");
+            strategyMap.set(swapStock.scene.sceneIndex, "ai-still");
+          }
+        }
+      }
+    }
+    const recentPresets = [];
+    const scenePlans = classified.map(({ scene, cls }) => {
+      const strategy = strategyMap.get(scene.sceneIndex) || "stock";
+      const narration = scene.narrativeText || "";
+      const visualIntent = scene.visualIntent || narration;
+      let motionSpec;
+      let motionPreset;
+      let imagePrompt;
+      let stockQueries;
+      let generationHash;
+      if (strategy === "ai-still") {
+        const motionPlan = planGeneralSceneMotion({
+          sceneIndex: scene.sceneIndex,
+          visualIntent,
+          duration: scene.duration,
+          recentPresets
+        });
+        motionSpec = motionPlan.motionSpec;
+        motionPreset = motionPlan.motionPreset;
+        recentPresets.push(motionPlan.motionPreset);
+        imagePrompt = buildGeneralImagePrompt({
+          narration,
+          visualIntent,
+          globalContext,
+          sceneIndex: scene.sceneIndex
+        });
+        generationHash = computeGenerationHash({
+          sceneIndex: scene.sceneIndex,
+          narration,
+          visualIntent,
+          imagePrompt,
+          profile: "general",
+          width: config.width,
+          height: config.height
+        });
+      } else {
+        stockQueries = scene.searchQueries && scene.searchQueries.length > 0 ? scene.searchQueries : [visualIntent.slice(0, 60), "documentary footage"];
+      }
+      return {
+        sceneIndex: scene.sceneIndex,
+        narration,
+        visualIntent,
+        strategy,
+        reasoning: cls.reasoning,
+        imagePrompt,
+        stockQueries,
+        motionPreset,
+        motion: motionSpec,
+        generationHash,
+        startTime: scene.startTime,
+        endTime: scene.endTime,
+        duration: scene.duration
+      };
+    });
+    const aiSceneIndices = scenePlans.filter((s) => s.strategy === "ai-still").map((s) => s.sceneIndex).sort((a, b) => a - b);
+    const stockSceneIndices = scenePlans.filter((s) => s.strategy === "stock").map((s) => s.sceneIndex).sort((a, b) => a - b);
+    const planHash = `general_${config.mode || "custom-mix"}_${aiRatio}_${stockRatio}_${config.imageOutputResolution || "1080p"}_${totalScenes}`;
+    const finalPlan = {
+      schemaVersion: VISUAL_MIX_SCHEMA_VERSION,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      profile: "general",
+      sourceMode: config.mode ?? "custom-mix",
+      planHash,
+      requestedAiRatio: aiRatio,
+      requestedStockRatio: stockRatio,
+      requested: {
+        aiPercent: Math.round(aiRatio * 100),
+        stockPercent: Math.round(stockRatio * 100)
+      },
+      totalScenes,
+      targetAiScenes,
+      targetStockScenes,
+      target: {
+        ai: targetAiScenes,
+        stock: targetStockScenes
+      },
+      aiSceneIndices,
+      stockSceneIndices,
+      scenes: scenePlans
+    };
+    if (projectDir) {
+      const analysisDir = path__namespace.join(projectDir, "analysis");
+      if (!fs__namespace.existsSync(analysisDir)) fs__namespace.mkdirSync(analysisDir, { recursive: true });
+      fs__namespace.writeFileSync(this.getPlanPath(projectDir), JSON.stringify(finalPlan, null, 2), "utf-8");
+    }
+    return finalPlan;
+  }
+}
+const ffmpegPath$1 = require("ffmpeg-static");
+function ffmpegRun$1(args) {
+  return new Promise((resolve, reject2) => {
+    const proc = cp.spawn(ffmpegPath$1, args, { windowsHide: true });
+    const stderr = [];
+    proc.stderr.on("data", (d) => stderr.push(d.toString()));
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join("")}`));
+    });
+    proc.on("error", reject2);
+  });
+}
+async function normalizeImageTo1080p(sourcePath, destPath, width = 1920, height = 1080) {
+  const destDir = path__namespace.dirname(destPath);
+  if (!fs__namespace.existsSync(destDir)) {
+    fs__namespace.mkdirSync(destDir, { recursive: true });
+  }
+  const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`;
+  await ffmpegRun$1(["-y", "-i", sourcePath, "-vf", vf, destPath]);
+}
+class AsyncSemaphore {
+  constructor(maxConcurrency) {
+    this.maxConcurrency = maxConcurrency;
+  }
+  currentRunning = 0;
+  queue = [];
+  async acquire() {
+    if (this.currentRunning < this.maxConcurrency) {
+      this.currentRunning++;
+      let released = false;
+      return () => {
+        if (!released) {
+          released = true;
+          this.currentRunning--;
+          const next = this.queue.shift();
+          if (next) next();
+        }
+      };
+    }
+    return new Promise((resolve) => {
+      this.queue.push(() => {
+        this.currentRunning++;
+        let released = false;
+        resolve(() => {
+          if (!released) {
+            released = true;
+            this.currentRunning--;
+            const next = this.queue.shift();
+            if (next) next();
+          }
+        });
+      });
+    });
+  }
+  release() {
+    if (this.currentRunning > 0) {
+      this.currentRunning--;
+      const next = this.queue.shift();
+      if (next) next();
+    }
+  }
+  async run(fn) {
+    const release = await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  }
+  get activeCount() {
+    return this.currentRunning;
+  }
+}
+class FlowImagePool {
+  client;
+  constructor(client) {
+    this.client = client || googleFlowClient;
+  }
+  async processBatch(items, onProgress, signal) {
+    if (items.length === 0) return [];
+    const total = items.length;
+    let completedCount = 0;
+    let failedCount = 0;
+    let generatingCount = 0;
+    let exportingCount = 0;
+    let normalizingCount = 0;
+    const stockFallbackEnabled = (items[0]?.config.aiFailureBehavior ?? "strict") === "stock-fallback";
+    const updateProgress = (message) => {
+      const finished = completedCount + failedCount;
+      const progress = total > 0 ? finished / total : 1;
+      const stats = {
+        total,
+        cached: 0,
+        queued: Math.max(0, total - finished - generatingCount - exportingCount - normalizingCount),
+        generating: generatingCount,
+        exporting: exportingCount,
+        normalizing: normalizingCount,
+        completed: completedCount,
+        failed: failedCount,
+        fallbackStock: stockFallbackEnabled ? failedCount : 0
+      };
+      onProgress?.(message, progress, stats);
+    };
+    const failItem = async (item, stage, reason) => {
+      failedCount++;
+      const behavior = item.config.aiFailureBehavior ?? "strict";
+      const stockAllowed = behavior === "stock-fallback";
+      logger.warn(
+        `[AIVisualFailure] scene=${item.scene.sceneIndex} stage=${stage} reason="${reason}" behavior=${behavior} stockFallback=${stockAllowed}`
+      );
+      updateProgress(
+        stockAllowed ? `Scene ${item.scene.sceneIndex} failed (${stage}); eligible for Stock fallback` : `Scene ${item.scene.sceneIndex} failed (${stage}); keeping AI ownership (strict)`
+      );
+      await recordVisualAssetQueued(item.projectDir, {
+        sceneIndex: item.scene.sceneIndex,
+        strategy: "ai-still",
+        profile: item.profile,
+        promptHash: item.scene.generationHash || "hash",
+        prompt: item.scene.imagePrompt,
+        status: "ai-failed",
+        failureStage: stage,
+        error: reason,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      return {
+        sceneIndex: item.scene.sceneIndex,
+        success: false,
+        fallbackToStock: stockAllowed,
+        failureStage: stage,
+        reason
+      };
+    };
+    let flowThrottle = null;
+    if (typeof this.client.getFlowThrottle === "function") {
+      try {
+        flowThrottle = await this.client.getFlowThrottle();
+      } catch {
+      }
+    }
+    const requestedGen = items[0]?.config.requestedGenerationConcurrency ?? items[0]?.config.generationConcurrency ?? 2;
+    const flowMax = flowThrottle?.maxConcurrent !== void 0 ? flowThrottle.maxConcurrent : requestedGen;
+    const effectiveGenConcurrency = Math.max(
+      1,
+      Math.min(requestedGen, flowMax)
+    );
+    const exportConcurrency = Math.max(1, items[0]?.config.exportConcurrency ?? 2);
+    const normalizeConcurrency = Math.max(1, items[0]?.config.normalizeConcurrency ?? 2);
+    logger.info(
+      `[FlowImagePool] Conveyor initialized: effectiveGenConcurrency=${effectiveGenConcurrency} (requested=${requestedGen}, flowKitMax=${flowThrottle?.maxConcurrent ?? "unthrottled"}), exportConcurrency=${exportConcurrency}, normalizeConcurrency=${normalizeConcurrency}`
+    );
+    const genSemaphore = new AsyncSemaphore(effectiveGenConcurrency);
+    const expSemaphore = new AsyncSemaphore(exportConcurrency);
+    const normSemaphore = new AsyncSemaphore(normalizeConcurrency);
+    let lastGenLaunchTime = 0;
+    const results = await Promise.all(
+      items.map(async (item) => {
+        if (signal?.aborted) {
+          return {
+            sceneIndex: item.scene.sceneIndex,
+            success: false,
+            fallbackToStock: false,
+            failureStage: "cancelled",
+            reason: "Pipeline execution was cancelled."
+          };
+        }
+        const tStart = Date.now();
+        let tGenEnd = tStart;
+        let tExpEnd = tStart;
+        let tNormEnd = tStart;
+        const releaseGen = await genSemaphore.acquire();
+        generatingCount++;
+        updateProgress(`Generating Scene ${item.scene.sceneIndex}...`);
+        let genResult = null;
+        const caller = item.profile === "health" ? "health-visuals" : "general-visuals";
+        let lastError = null;
+        const maxRetries = 1;
+        try {
+          const now = Date.now();
+          const minGapMs = flowThrottle?.minIntervalS ? flowThrottle.minIntervalS * 1e3 : 0;
+          const timeSinceLast = now - lastGenLaunchTime;
+          if (timeSinceLast < minGapMs) {
+            await new Promise((r) => setTimeout(r, minGapMs - timeSinceLast));
+          }
+          lastGenLaunchTime = Date.now();
+          for (let attempt = 0; attempt <= maxRetries; attempt++) {
+            if (signal?.aborted) break;
+            try {
+              if (attempt > 0) {
+                logger.warn(
+                  `[FlowImagePool] Scene ${item.scene.sceneIndex} retry attempt ${attempt}/${maxRetries}...`
+                );
+                await new Promise((r) => setTimeout(r, 2500 * attempt));
+                if (typeof this.client.getFlowThrottle === "function") {
+                  try {
+                    const t = await this.client.getFlowThrottle();
+                    if (t?.cooldownActive && (t.cooldownRemainingS ?? 0) > 0) {
+                      const waitS = Math.min(t.cooldownRemainingS, 120);
+                      logger.info(
+                        `[FlowImagePool] FlowKit cooldown active, waiting ${waitS}s before retrying scene ${item.scene.sceneIndex}`
+                      );
+                      await new Promise((r) => setTimeout(r, waitS * 1e3));
+                    }
+                  } catch {
+                  }
+                }
+              }
+              genResult = await this.client.generateImage({
+                prompt: item.scene.imagePrompt || "",
+                projectId: "",
+                imageModel: "GEM_PIX_2",
+                aspectRatio: "16:9",
+                count: 1,
+                optionId: String(item.scene.sceneIndex),
+                caller
+              });
+              break;
+            } catch (err) {
+              lastError = err instanceof Error ? err : new Error(String(err));
+              const msg = lastError.message;
+              if (msg.includes("FLOW_RATE_LIMITED") || msg.includes("429")) {
+                logger.warn(`[FlowImagePool] Scene ${item.scene.sceneIndex} rate limited, backing off...`);
+                await new Promise((r) => setTimeout(r, 4e3 * (attempt + 1)));
+              } else if (msg.includes("FLOW_EXTENSION_DISCONNECTED") || msg.includes("FLOW_RECAPTCHA_FAILED")) {
+                break;
+              }
+            }
+          }
+        } finally {
+          tGenEnd = Date.now();
+          generatingCount--;
+          releaseGen();
+        }
+        if (!genResult || !genResult.mediaId) {
+          const reason = lastError ? lastError.message : "Generation failed without mediaId";
+          return failItem(item, "generation", reason);
+        }
+        const releaseExp = await expSemaphore.acquire();
+        exportingCount++;
+        updateProgress(`Exporting Scene ${item.scene.sceneIndex}...`);
+        const assetsFolder = item.profile === "health" ? path__namespace.join(item.projectDir, "assets", "generated", "health") : path__namespace.join(item.projectDir, "assets", "generated", "general");
+        if (!fs__namespace.existsSync(assetsFolder)) {
+          fs__namespace.mkdirSync(assetsFolder, { recursive: true });
+        }
+        const sceneIdStr = `S${String(item.scene.sceneIndex).padStart(4, "0")}`;
+        const hashPrefix = (item.scene.generationHash || "hash").slice(0, 8);
+        const finalFilename = `${sceneIdStr}_${hashPrefix}.png`;
+        const finalAssetPath = path__namespace.join(assetsFolder, finalFilename);
+        const tempExportPath = path__namespace.join(
+          assetsFolder,
+          `.tmp_export_${item.scene.sceneIndex}_${Date.now()}_${Math.random().toString(36).slice(2)}.png`
+        );
+        const targetRes = item.config.imageOutputResolution || "1080p";
+        const exportQuality = targetRes === "4k" ? "4k" : "2k";
+        let exportSuccess = false;
+        let effectiveWidth = 1920;
+        let effectiveHeight = 1080;
+        let exportFailure = null;
+        try {
+          if (signal?.aborted) {
+            throw new Error("Pipeline execution was cancelled.");
+          }
+          const exportResult = await this.client.exportImage({
+            mediaId: genResult.mediaId,
+            projectId: genResult.projectId,
+            destinationPath: tempExportPath,
+            fallbackToOriginalUrl: genResult.fifeUrl,
+            quality: exportQuality,
+            preferredQuality: exportQuality
+          });
+          const dims = probeImageFileDimensions(tempExportPath);
+          effectiveWidth = dims?.width || exportResult.width;
+          effectiveHeight = dims?.height || exportResult.height;
+          if (effectiveWidth < 1920 || effectiveHeight < 1080) {
+            if (fs__namespace.existsSync(tempExportPath)) {
+              try {
+                fs__namespace.unlinkSync(tempExportPath);
+              } catch {
+              }
+            }
+            exportFailure = {
+              stage: "quality-gate",
+              reason: `Resolution ${effectiveWidth}x${effectiveHeight} is below 1920x1080 quality gate (not upscaled)`
+            };
+          } else {
+            exportSuccess = true;
+          }
+        } catch (expErr) {
+          if (tempExportPath && fs__namespace.existsSync(tempExportPath)) {
+            try {
+              fs__namespace.unlinkSync(tempExportPath);
+            } catch {
+            }
+          }
+          exportFailure = {
+            stage: "export",
+            reason: expErr instanceof Error ? expErr.message : String(expErr)
+          };
+        } finally {
+          tExpEnd = Date.now();
+          exportingCount--;
+          releaseExp();
+        }
+        if (!exportSuccess) {
+          const f = exportFailure ?? { stage: "export", reason: "Export stage failed" };
+          return failItem(item, f.stage, f.reason);
+        }
+        const releaseNorm = await normSemaphore.acquire();
+        normalizingCount++;
+        updateProgress(`Normalizing Scene ${item.scene.sceneIndex}...`);
+        const targetDims = targetRes === "4k" ? { width: 3840, height: 2160 } : targetRes === "2k" ? { width: 2560, height: 1440 } : { width: 1920, height: 1080 };
+        try {
+          if (signal?.aborted) {
+            throw new Error("Pipeline execution was cancelled.");
+          }
+          if (effectiveWidth === targetDims.width && effectiveHeight === targetDims.height) {
+            const destDir = path__namespace.dirname(finalAssetPath);
+            if (!fs__namespace.existsSync(destDir)) fs__namespace.mkdirSync(destDir, { recursive: true });
+            fs__namespace.copyFileSync(tempExportPath, finalAssetPath);
+          } else {
+            await normalizeImageTo1080p(tempExportPath, finalAssetPath, targetDims.width, targetDims.height);
+          }
+          if (fs__namespace.existsSync(tempExportPath)) {
+            try {
+              fs__namespace.unlinkSync(tempExportPath);
+            } catch {
+            }
+          }
+          tNormEnd = Date.now();
+          const genMs = tGenEnd - tStart;
+          const expMs = tExpEnd - tGenEnd;
+          const normMs = tNormEnd - tExpEnd;
+          const totMs = tNormEnd - tStart;
+          logger.info(
+            `[FlowPerf] Scene ${item.scene.sceneIndex} generate=${genMs}ms export=${expMs}ms normalize=${normMs}ms total=${totMs}ms`
+          );
+          await recordVisualAssetQueued(item.projectDir, {
+            sceneIndex: item.scene.sceneIndex,
+            strategy: "ai-still",
+            profile: item.profile,
+            promptHash: item.scene.generationHash || "hash",
+            prompt: item.scene.imagePrompt,
+            status: "completed",
+            mediaId: genResult.mediaId,
+            flowProjectId: genResult.projectId,
+            outputPath: finalAssetPath,
+            width: targetDims.width,
+            height: targetDims.height,
+            motionPreset: item.scene.motionPreset,
+            generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          completedCount++;
+          updateProgress(`AI visual completed for Scene ${item.scene.sceneIndex}`);
+          return {
+            sceneIndex: item.scene.sceneIndex,
+            success: true,
+            assetPath: finalAssetPath,
+            performance: {
+              generateMs: genMs,
+              exportMs: expMs,
+              normalizeMs: normMs,
+              totalMs: totMs
+            }
+          };
+        } catch (normErr) {
+          if (tempExportPath && fs__namespace.existsSync(tempExportPath)) {
+            try {
+              fs__namespace.unlinkSync(tempExportPath);
+            } catch {
+            }
+          }
+          const reason = normErr instanceof Error ? normErr.message : String(normErr);
+          return failItem(item, "normalization", reason);
+        } finally {
+          normalizingCount--;
+          releaseNorm();
+        }
+      })
+    );
+    return results;
+  }
+}
+const flowImagePool = new FlowImagePool();
+const AI_PROVIDERS = /* @__PURE__ */ new Set(["google-flow", "manual-ai"]);
+function isAiProvider(provider) {
+  return !!provider && AI_PROVIDERS.has(provider);
+}
+class VisualAssignmentStore {
+  assignments = /* @__PURE__ */ new Map();
+  filePath;
+  lockPromise = Promise.resolve();
+  constructor(projectDir) {
+    this.filePath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+    this.load();
+  }
+  load() {
+    if (fs__namespace.existsSync(this.filePath)) {
+      try {
+        const raw = fs__namespace.readFileSync(this.filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.assignments.clear();
+          for (const a of parsed) {
+            if (a && typeof a.sceneIndex === "number") {
+              this.assignments.set(a.sceneIndex, a);
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[VisualAssignmentStore] Failed to load ${this.filePath}: ${err}`);
+      }
+    }
+  }
+  get(sceneIndex) {
+    return this.assignments.get(sceneIndex);
+  }
+  has(sceneIndex) {
+    return this.assignments.has(sceneIndex);
+  }
+  /**
+   * Sets or updates an assignment.
+   * If called by the stock engine, enforces Section 29:
+   * never overwrites a valid Google Flow AI assignment.
+   */
+  set(sceneIndex, assignment, isStockCaller = false) {
+    const existing = this.assignments.get(sceneIndex);
+    if ((isStockCaller || assignment.asset && !isAiProvider(assignment.asset.provider)) && isAiProvider(existing?.asset?.provider) && existing?.status === "assigned") {
+      if (existing.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
+        logger.info(
+          `[VisualAssignmentStore] Preserving valid ${existing.asset.provider} AI assignment for scene ${sceneIndex} against stock overwrite.`
+        );
+        return false;
+      }
+    }
+    this.assignments.set(sceneIndex, assignment);
+    return true;
+  }
+  setMany(assignments, isStockCaller = false) {
+    for (const a of assignments) {
+      this.set(a.sceneIndex, a, isStockCaller);
+    }
+  }
+  delete(sceneIndex) {
+    return this.assignments.delete(sceneIndex);
+  }
+  getAll() {
+    return Array.from(this.assignments.values()).sort((a, b) => a.sceneIndex - b.sceneIndex);
+  }
+  /**
+   * Thread-safe atomic disk flush using a mutex queue and temporary file rename.
+   */
+  async flushAtomic() {
+    const previousLock = this.lockPromise;
+    let releaseLock = () => {
+    };
+    this.lockPromise = new Promise((resolve) => {
+      releaseLock = resolve;
+    });
+    await previousLock;
+    try {
+      const items = this.getAll();
+      const dir = path__namespace.dirname(this.filePath);
+      if (!fs__namespace.existsSync(dir)) {
+        fs__namespace.mkdirSync(dir, { recursive: true });
+      }
+      const tmpPath = `${this.filePath}.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      fs__namespace.writeFileSync(tmpPath, JSON.stringify(items, null, 2), "utf-8");
+      fs__namespace.renameSync(tmpPath, this.filePath);
+    } finally {
+      releaseLock();
+    }
+  }
+}
+function resolveAiFailureBehavior(config) {
+  return config?.aiFailureBehavior === "stock-fallback" ? "stock-fallback" : "strict";
+}
+function isStockAllowed(config, isFallback) {
+  if (isFallback) return resolveAiFailureBehavior(config) === "stock-fallback";
+  return config.stockFootageRatio > 0;
+}
+function assertStockAllowed(params) {
+  const { config, isFallback, sceneIndices } = params;
+  if (sceneIndices.length === 0) return;
+  if (!isStockAllowed(config, isFallback)) {
+    throw new Error(
+      `VISUAL_MIX_ZERO_STOCK_VIOLATION requestedAiPercent=${Math.round(config.aiImageRatio * 100)} requestedStockPercent=${Math.round(config.stockFootageRatio * 100)} isFallback=${isFallback} failureBehavior=${resolveAiFailureBehavior(config)} sceneIndices=${sceneIndices.join(",")}`
+    );
+  }
+}
+function validateFinalVisualAssignments(params) {
+  const behavior = resolveAiFailureBehavior(params.config);
+  const promptMode = params.aiImageMode === "prompt";
+  const requiredAiProvider = promptMode ? "manual-ai" : "google-flow";
+  const approved = new Set(params.approvedFallbackSceneIndices ?? []);
+  const byScene = /* @__PURE__ */ new Map();
+  for (const a of params.assignments) byScene.set(a.sceneIndex, a);
+  const violations = [];
+  const missingAi = [];
+  const missingStock = [];
+  for (const scene of params.plan.scenes) {
+    const a = byScene.get(scene.sceneIndex);
+    const usable = !!a && a.status === "assigned" && !!a.asset;
+    const provider = a?.asset?.provider ?? "none";
+    if (scene.strategy === "ai-still") {
+      if (!usable) {
+        missingAi.push(scene.sceneIndex);
+        continue;
+      }
+      if (provider !== requiredAiProvider) {
+        const fallbackApproved = !promptMode && behavior === "stock-fallback" && approved.has(scene.sceneIndex);
+        if (!fallbackApproved) {
+          violations.push({
+            sceneIndex: scene.sceneIndex,
+            code: "VISUAL_MIX_STRICT_ASSIGNMENT_VIOLATION",
+            provider,
+            message: `Scene ${scene.sceneIndex} is AI-owned but assigned to provider "${provider}"`
+          });
+        }
+      }
+    } else {
+      if (!usable) {
+        missingStock.push(scene.sceneIndex);
+        continue;
+      }
+      if (provider === "google-flow" || provider === "manual-ai") {
+        violations.push({
+          sceneIndex: scene.sceneIndex,
+          code: "VISUAL_MIX_STOCK_OWNED_AI_ASSIGNMENT",
+          provider,
+          message: provider === "manual-ai" ? `Scene ${scene.sceneIndex} is Stock-owned but assigned to a manual AI image` : `Scene ${scene.sceneIndex} is Stock-owned but assigned to a Google Flow image`
+        });
+      }
+    }
+  }
+  return {
+    valid: violations.length === 0,
+    violations,
+    missingAiSceneIndices: missingAi,
+    missingStockSceneIndices: missingStock
+  };
+}
+const MANUAL_AI_GATE_DEFAULT_POLL_MS = 3e3;
+const MANUAL_AI_CANCELLED_MESSAGE = "Pipeline execution was cancelled.";
+function keyOf(projectDir) {
+  return path__namespace.resolve(projectDir);
+}
+class ManualAiAssetGate {
+  listeners = /* @__PURE__ */ new Map();
+  /** Wakes every waiter of this project (event-driven path). */
+  notify(projectDir) {
+    const set = this.listeners.get(keyOf(projectDir));
+    if (!set) return;
+    for (const cb of [...set]) {
+      try {
+        cb();
+      } catch {
+      }
+    }
+  }
+  /** Number of active waiters for a project (used by tests / diagnostics). */
+  waiterCount(projectDir) {
+    return this.listeners.get(keyOf(projectDir))?.size ?? 0;
+  }
+  subscribe(projectDir, cb) {
+    const key2 = keyOf(projectDir);
+    let set = this.listeners.get(key2);
+    if (!set) {
+      set = /* @__PURE__ */ new Set();
+      this.listeners.set(key2, set);
+    }
+    set.add(cb);
+    return () => {
+      const s = this.listeners.get(key2);
+      if (!s) return;
+      s.delete(cb);
+      if (s.size === 0) this.listeners.delete(key2);
+    };
+  }
+  /**
+   * Resolves once `isReady()` is true. Rejects with the standard pipeline-cancel error on abort.
+   * Evaluations are coalesced: notifications arriving while one is running trigger exactly one re-run.
+   */
+  waitUntilReady(opts) {
+    const pollMs = Math.max(20, opts.pollIntervalMs ?? MANUAL_AI_GATE_DEFAULT_POLL_MS);
+    return new Promise((resolve, reject2) => {
+      let settled = false;
+      let running = false;
+      let dirty = false;
+      let timer = null;
+      let unsubscribe = null;
+      const cleanup = () => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        if (unsubscribe) unsubscribe();
+        unsubscribe = null;
+        opts.signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (err) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (err) reject2(err);
+        else resolve();
+      };
+      const onAbort = () => finish(new Error(MANUAL_AI_CANCELLED_MESSAGE));
+      const schedulePoll = () => {
+        if (settled) return;
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => void evaluate(), pollMs);
+        timer.unref?.();
+      };
+      const evaluate = async () => {
+        if (settled) return;
+        if (running) {
+          dirty = true;
+          return;
+        }
+        running = true;
+        try {
+          do {
+            dirty = false;
+            if (settled) return;
+            if (opts.signal?.aborted) {
+              finish(new Error(MANUAL_AI_CANCELLED_MESSAGE));
+              return;
+            }
+            const ready = await opts.isReady();
+            if (opts.onEvaluate) await opts.onEvaluate();
+            if (ready) {
+              finish();
+              return;
+            }
+          } while (dirty && !settled);
+        } catch (err) {
+          finish(err instanceof Error ? err : new Error(String(err)));
+          return;
+        } finally {
+          running = false;
+        }
+        schedulePoll();
+      };
+      if (opts.signal?.aborted) {
+        finish(new Error(MANUAL_AI_CANCELLED_MESSAGE));
+        return;
+      }
+      opts.signal?.addEventListener("abort", onAbort, { once: true });
+      unsubscribe = this.subscribe(opts.projectDir, () => void evaluate());
+      void evaluate();
+    });
+  }
+}
+const manualAiAssetGate = new ManualAiAssetGate();
+function normWs(text) {
+  return (text || "").replace(/\s+/g, " ").trim();
+}
+function fileHasContent(p) {
+  if (!p) return false;
+  try {
+    return fs__namespace.statSync(p).size > 0;
+  } catch {
+    return false;
+  }
+}
+function buildManualAiAssignment(scene, localPath, isHealth) {
+  let size = 0;
+  try {
+    size = fs__namespace.statSync(localPath).size;
+  } catch {
+  }
+  const asset = {
+    assetId: `manual_ai_${scene.sceneIndex}`,
+    provider: "manual-ai",
+    mediaType: "photo",
+    localPath,
+    thumbnailUrl: `file://${localPath}`,
+    downloadUrl: "",
+    creator: "Manual AI Image",
+    searchQuery: scene.imagePrompt || "",
+    downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    fileSizeBytes: size
+  };
+  return {
+    sceneId: `scene_${scene.sceneIndex}`,
+    sceneIndex: scene.sceneIndex,
+    narrationText: scene.narration,
+    startTime: scene.startTime,
+    endTime: scene.endTime,
+    visualIntent: scene.visualIntent,
+    searchQueries: [],
+    usedQuery: isHealth ? "AI Medical Still (Manual Import)" : "AI Still (Manual Import)",
+    score: 95,
+    locked: true,
+    manualOverride: false,
+    status: "assigned",
+    asset
+  };
+}
+async function syncManualAiAssignments(params) {
+  const { projectDir, pack, aiScenes, store, isHealth } = params;
+  const status = evaluateManualAiStatus({ projectDir, pack, manifest: loadManualAiManifest(projectDir) });
+  const sceneByIndex = new Map(aiScenes.map((s) => [s.sceneIndex, s]));
+  let changed = false;
+  for (const row of status.rows) {
+    const scene = sceneByIndex.get(row.sceneIndex);
+    if (!scene) continue;
+    const existing = store.get(row.sceneIndex);
+    if (row.status === "ready" && row.localPath) {
+      const same = existing?.status === "assigned" && existing.asset?.provider === "manual-ai" && existing.asset.localPath === row.localPath && normWs(existing.narrationText) === normWs(scene.narration);
+      if (!same) {
+        store.set(row.sceneIndex, buildManualAiAssignment(scene, row.localPath, isHealth));
+        changed = true;
+      }
+    } else if (existing?.asset?.provider === "manual-ai") {
+      store.delete(row.sceneIndex);
+      changed = true;
+    }
+  }
+  if (changed) await store.flushAtomic();
+  return { status, changed };
+}
+function isReusableStockAssignment(a, scene) {
+  if (!a || a.status !== "assigned" || !a.asset) return false;
+  const provider = a.asset.provider;
+  if (provider === "google-flow" || provider === "manual-ai") return false;
+  if (!fileHasContent(a.asset.localPath)) return false;
+  const prev = normWs(a.narrationText);
+  return prev === "" || prev === normWs(scene.narration);
+}
+function filterPendingStockScenes(store, stockScenes) {
+  return stockScenes.filter((s) => !isReusableStockAssignment(store.get(s.sceneIndex), s));
+}
+function countReadyStock(store, stockScenes) {
+  let n = 0;
+  for (const s of stockScenes) {
+    if (isReusableStockAssignment(store.get(s.sceneIndex), s)) n++;
+  }
+  return n;
+}
+function buildManualAiWaitInfo(params) {
+  const { status } = params;
+  return {
+    expected: status.expected,
+    ready: status.ready,
+    missingSceneIndices: status.missingSceneIndices,
+    promptFilePath: status.promptFilePath ?? "",
+    stockExpected: params.stockExpected,
+    stockReady: params.stockReady
+  };
+}
+function describeManualAiWait(info) {
+  const missing = Math.max(0, info.expected - info.ready);
+  const aiPart = missing > 0 ? `Waiting for ${missing} AI image${missing === 1 ? "" : "s"}` : "AI images ready";
+  return `${aiPart} — AI ${info.ready}/${info.expected} imported · Stock ${info.stockReady}/${info.stockExpected} ready`;
+}
+function getManualAiStatus(projectDir) {
+  const norm2 = normalizeProjectDir(projectDir);
+  const status = evaluateManualAiStatusForProject(norm2);
+  const jsonExists = fs__namespace.existsSync(getManualAiPromptJsonPath(norm2));
+  const txtExists = fs__namespace.existsSync(getManualAiPromptTxtPath(norm2));
+  logger.debug(
+    `[ManualAI:Status] projectDir=${norm2} promptJsonExists=${jsonExists} promptTxtExists=${txtExists} expected=${status.expected} ready=${status.ready}`
+  );
+  return status;
+}
+function broadcastManualAiStatus(projectDir, status) {
+  const norm2 = normalizeProjectDir(projectDir);
+  const s = status ?? getManualAiStatus(norm2);
+  try {
+    if (typeof electron.BrowserWindow !== "undefined" && typeof electron.BrowserWindow.getAllWindows === "function") {
+      const windows = electron.BrowserWindow.getAllWindows();
+      for (const win of windows) {
+        if (!win.isDestroyed()) {
+          win.webContents.send(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, {
+            projectDir: norm2,
+            status: s
+          });
+        }
+      }
+    }
+  } catch (err) {
+    logger.debug(`[ManualAI] BrowserWindow broadcast skipped or failed: ${String(err)}`);
+  }
+  return s;
+}
+function sha256(parts) {
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function cleanText(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function extractNumbers(text) {
+  const matches = text.match(/\b\d+(?:[.,]\d+)?%?\b/g);
+  return matches ? matches.map((m) => m.replace(/,/g, "")) : [];
+}
+function writeFileAtomic(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function computeScriptHash(scriptText, profile, globalContext) {
+  const semanticParts = [
+    scriptText.trim(),
+    profile,
+    globalContext?.primarySubject || "",
+    globalContext?.centralThesis || "",
+    globalContext?.documentaryAngle || "",
+    globalContext?.visualWorld?.colorMood || "",
+    String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)
+  ];
+  return sha256(semanticParts);
+}
+function computeSceneDirectionsHash(briefHash, aiScenes) {
+  const sceneTokens = aiScenes.map(
+    (s) => `${s.sceneIndex}:${cleanText(s.narration)}:${cleanText(s.visualIntent)}`
+  );
+  return sha256([briefHash, ...sceneTokens, String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)]);
+}
+function buildFallbackVisualBrief(scriptHashVal, profile, globalContext, sampleNarration) {
+  const isHealth = profile === "health";
+  const subject = globalContext?.primarySubject || (isHealth ? "Human physiological mechanism" : "Documentary investigation");
+  const thesis = globalContext?.centralThesis || (isHealth ? "Unveiling the hidden internal processes of the human body" : "Exploring real-world mechanisms and consequences");
+  let storytellingMode = isHealth ? "mechanism-explainer" : "documentary";
+  const combinedText = `${sampleNarration || ""} ${thesis}`.toLowerCase();
+  if (combinedText.includes("why") || combinedText.includes("mechanism") || combinedText.includes("how")) {
+    storytellingMode = isHealth ? "mechanism-explainer" : "scientific-explainer";
+  } else if (combinedText.includes("warning") || combinedText.includes("danger") || combinedText.includes("risk")) {
+    storytellingMode = "warning";
+  } else if (combinedText.includes("myth") || combinedText.includes("lie") || combinedText.includes("wrong")) {
+    storytellingMode = "myth-busting";
+  } else if (combinedText.includes("compare") || combinedText.includes("vs") || combinedText.includes("difference")) {
+    storytellingMode = "comparison";
+  }
+  return {
+    schemaVersion: MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    scriptHash: scriptHashVal,
+    profile,
+    primaryNiche: isHealth ? "medical-documentary" : "editorial-documentary",
+    secondaryNiches: isHealth ? ["human-physiology", "biology"] : ["investigative-journalism"],
+    storytellingMode,
+    corePromise: isHealth ? "Reveal the hidden physiological mechanisms and biological cause-and-effect processes." : "Uncover the real-world forces, cause-and-effect relationships, and visible consequences.",
+    centralQuestion: isHealth ? `What unseen internal mechanism governs ${subject.toLowerCase()}?` : `What causes the observable phenomena behind ${subject.toLowerCase()}?`,
+    centralThesis: thesis,
+    audienceTakeaway: isHealth ? "Understand the internal biological chain reaction that explains symptoms and daily bodily function." : "Grasp the underlying systematic forces shaping real-world outcomes.",
+    emotionalArc: ["curiosity", "realization", "clarity", "empowerment"],
+    narrativeArc: [
+      { phase: "hook", purpose: "Establish visual tension and introduce the central question" },
+      { phase: "mechanism", purpose: "Reveal internal processes, active flows, and cause-effect chains" },
+      { phase: "consequence", purpose: "Demonstrate visible outcomes and lifestyle manifestations" },
+      { phase: "resolution", purpose: "Synthesize core takeaways and provide clarity" }
+    ],
+    visualStrategy: {
+      dominantStyle: isHealth ? "cinematic medical documentary" : "cinematic grounded documentary",
+      realismLevel: "photorealistic documentary realism",
+      cameraLanguage: isHealth ? "85mm macro lens, tight internal cutaways, three-quarter anatomical depth" : "35mm to 50mm documentary lenses at eye level with authentic framing",
+      lightingLanguage: isHealth ? "controlled cool rim lighting over dark navy background with gentle warm biological highlights" : "natural documentary light with balanced contrast and layered depth",
+      colorLanguage: isHealth ? "deep navy blue, biological crimson, subtle amber highlights" : "authentic documentary palette with natural contrast",
+      depthLanguage: "strong foreground subject separation with layered background context",
+      recurringMotifs: isHealth ? ["active directional flow", "organ filtration", "cellular transport"] : ["human movement", "environmental tension"],
+      avoidVisualCliches: isHealth ? ["static anatomical models in void", "flat textbook diagrams", "gory surgical scenes"] : ["generic stock photo posing", "blank office voids"]
+    },
+    hookStrategy: {
+      primaryHookType: "unseen-mechanism-reveal",
+      tensionSources: ["invisible biological events happening right now", "cause and consequence gap"],
+      curiosityPatterns: ["counterintuitive physiological fact", "visible transformation of common state"]
+    },
+    overlayStrategy: {
+      enabled: true,
+      targetDensity: 0.3,
+      maxDensity: 0.35,
+      maxWords: 5,
+      maxCharacters: 28,
+      avoidBottomCaptionArea: true
+    },
+    modelUsed: "local-fallback",
+    fallbackUsed: true
+  };
+}
+async function generateGlobalVisualBriefWithGemini(params) {
+  const { apiKey, preferredModel, scriptText, profile, globalContext, scenesSummary, scriptHashVal, onProgress } = params;
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) throw new Error("NO_API_KEY");
+  const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+  const candidateModels = getAvailableModelsForTask("manual_ai_visual_director", preferredModel);
+  const systemPrompt = `You are the Lead Visual Director for a high-end cinematic documentary.
+Analyze the ENTIRE script and produce a Global Visual Brief JSON object that guides all individual image prompts for AI Image Generation.
+The documentary profile is: "${profile}".
+
+CRITICAL VISUAL PHILOSOPHY:
+- DO NOT MERELY DRAW THE NOUN. Visualize ACTION, MECHANISM, VISIBLE CHANGE, CAUSE & EFFECT, and VISUAL TENSION.
+- HEALTH TOPICS: Focus on active internal mechanisms (filtration, filling, flow, constriction, dilation, cellular signaling). Scientifically plausible anatomy with correct organ relationships. No gore. No anatomical labels.
+- GENERAL TOPICS: Focus on narrative tension, human behavior, environmental context, candid actions. Avoid generic stock posing.
+- OVERLAY STRATEGY: Recommend selective smart text overlays (target ~25-35% of scenes) that enhance comprehension or hook curiosity. Overlays must be 2-5 words, max 28 chars, safe for video (avoid bottom 25% caption area). NO invented numbers or facts.
+- Return ONLY valid JSON matching the schema. No markdown, no commentary.`;
+  const userPrompt = `DOCUMENTARY CONTEXT:
+Profile: ${profile}
+Global Subject: ${globalContext?.primarySubject || "N/A"}
+Central Thesis: ${globalContext?.centralThesis || "N/A"}
+Documentary Angle: ${globalContext?.documentaryAngle || "N/A"}
+
+SCENES OVERVIEW:
+${scenesSummary.slice(0, 12e3)}
+
+FULL SCRIPT / NARRATION:
+---
+${scriptText.slice(0, 24e3)}
+---
+
+Produce a JSON object conforming EXACTLY to:
+{
+  "profile": "${profile}",
+  "primaryNiche": "e.g. medical-documentary or financial-documentary",
+  "secondaryNiches": ["string"],
+  "storytellingMode": "mechanism-explainer" | "investigative" | "warning" | "myth-busting" | "comparison" | "problem-solution" | "historical-narrative" | "financial-explainer" | "lifestyle-explainer" | "scientific-explainer" | "documentary" | "other",
+  "corePromise": "one clear sentence",
+  "centralQuestion": "the single compelling question the video answers",
+  "centralThesis": "core argument",
+  "audienceTakeaway": "what viewer understands by the end",
+  "emotionalArc": ["curiosity", "tension", "realization", "empowerment"],
+  "narrativeArc": [
+    { "phase": "hook", "purpose": "..." },
+    { "phase": "mechanism", "purpose": "..." },
+    { "phase": "consequence", "purpose": "..." },
+    { "phase": "resolution", "purpose": "..." }
+  ],
+  "visualStrategy": {
+    "dominantStyle": "string",
+    "realismLevel": "string",
+    "cameraLanguage": "string",
+    "lightingLanguage": "string",
+    "colorLanguage": "string",
+    "depthLanguage": "string",
+    "recurringMotifs": ["string"],
+    "avoidVisualCliches": ["string"]
+  },
+  "hookStrategy": {
+    "primaryHookType": "string",
+    "tensionSources": ["string"],
+    "curiosityPatterns": ["string"]
+  },
+  "overlayStrategy": {
+    "enabled": true,
+    "targetDensity": 0.30,
+    "maxDensity": 0.35,
+    "maxWords": 5,
+    "maxCharacters": 28,
+    "avoidBottomCaptionArea": true
+  }
+}`;
+  for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+    const model = candidateModels[mIdx];
+    try {
+      onProgress?.(`Analyzing full script for Global Visual Brief (${model})...`, 0.05);
+      const res = await ai.models.generateContent({
+        model,
+        contents: [
+          { role: "user", parts: [{ text: `${systemPrompt}
+
+${userPrompt}` }] }
+        ],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
+          maxOutputTokens: 4096
+        }
+      });
+      const text = res.text?.trim();
+      if (!text) throw new Error("Empty response from model");
+      const parsed = JSON.parse(text);
+      if (!parsed.centralQuestion || !parsed.visualStrategy) {
+        throw new Error("Malformed Visual Brief JSON: missing required fields");
+      }
+      recordModelSuccess(model);
+      return {
+        schemaVersion: MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        scriptHash: scriptHashVal,
+        profile,
+        primaryNiche: parsed.primaryNiche || (profile === "health" ? "medical-documentary" : "documentary"),
+        secondaryNiches: Array.isArray(parsed.secondaryNiches) ? parsed.secondaryNiches : [],
+        storytellingMode: parsed.storytellingMode || (profile === "health" ? "mechanism-explainer" : "documentary"),
+        corePromise: parsed.corePromise || "",
+        centralQuestion: parsed.centralQuestion || "",
+        centralThesis: parsed.centralThesis || globalContext?.centralThesis || "",
+        audienceTakeaway: parsed.audienceTakeaway || "",
+        emotionalArc: Array.isArray(parsed.emotionalArc) ? parsed.emotionalArc : ["curiosity", "clarity"],
+        narrativeArc: Array.isArray(parsed.narrativeArc) ? parsed.narrativeArc : [],
+        visualStrategy: {
+          dominantStyle: parsed.visualStrategy?.dominantStyle || "cinematic documentary",
+          realismLevel: parsed.visualStrategy?.realismLevel || "photorealistic realism",
+          cameraLanguage: parsed.visualStrategy?.cameraLanguage || "50mm documentary lens",
+          lightingLanguage: parsed.visualStrategy?.lightingLanguage || "natural cinematic light",
+          colorLanguage: parsed.visualStrategy?.colorLanguage || "balanced documentary tones",
+          depthLanguage: parsed.visualStrategy?.depthLanguage || "layered depth with clear subject focus",
+          recurringMotifs: Array.isArray(parsed.visualStrategy?.recurringMotifs) ? parsed.visualStrategy.recurringMotifs : [],
+          avoidVisualCliches: Array.isArray(parsed.visualStrategy?.avoidVisualCliches) ? parsed.visualStrategy.avoidVisualCliches : []
+        },
+        hookStrategy: {
+          primaryHookType: parsed.hookStrategy?.primaryHookType || "curiosity-gap",
+          tensionSources: Array.isArray(parsed.hookStrategy?.tensionSources) ? parsed.hookStrategy.tensionSources : [],
+          curiosityPatterns: Array.isArray(parsed.hookStrategy?.curiosityPatterns) ? parsed.hookStrategy.curiosityPatterns : []
+        },
+        overlayStrategy: {
+          enabled: parsed.overlayStrategy?.enabled ?? true,
+          targetDensity: parsed.overlayStrategy?.targetDensity ?? 0.3,
+          maxDensity: parsed.overlayStrategy?.maxDensity ?? 0.35,
+          maxWords: parsed.overlayStrategy?.maxWords ?? 5,
+          maxCharacters: parsed.overlayStrategy?.maxCharacters ?? 28,
+          avoidBottomCaptionArea: parsed.overlayStrategy?.avoidBottomCaptionArea ?? true
+        },
+        modelUsed: model,
+        fallbackUsed: false
+      };
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(model, kind);
+      logger.warn(`[ManualAI:Director] Gemini model ${model} failed for Global Visual Brief (${kind}): ${message}`);
+    }
+  }
+  throw new Error("ALL_MODELS_FAILED");
+}
+function inferFallbackSceneRole(text, isOpening) {
+  const lower = text.toLowerCase();
+  if (isOpening) return "hook";
+  if (lower.includes("?")) return "question";
+  if (/\b(kidney|bladder|vessel|blood|cell|artery|vein|organ|filter|flow|fluid|hormone|enzyme|transport|absorb|expand|contract)\b/.test(lower)) {
+    return "mechanism";
+  }
+  if (/\b(because|cause|leads to|results in|trigger|reaction|consequence|due to)\b/.test(lower)) {
+    return "cause-effect";
+  }
+  if (/\b(danger|risk|warning|symptom|toxic|damage|threat|pain|problem|crisis)\b/.test(lower)) {
+    return "symptom";
+  }
+  if (/\b(percent|%|\b\d+\b|study|research|trial|evidence|data)\b/.test(lower)) {
+    return "statistic";
+  }
+  if (/\b(compare|contrast|unlike|whereas|different|versus|vs)\b/.test(lower)) {
+    return "comparison";
+  }
+  if (/\b(sleep|drink|water|night|morning|walk|lifestyle|habit|bed|daily|routine)\b/.test(lower)) {
+    return "lifestyle";
+  }
+  if (/\b(finally|remember|takeaway|summary|conclude|solution|protect|heal)\b/.test(lower)) {
+    return "solution";
+  }
+  return "setup";
+}
+function inferFallbackHookLevel(role, isOpening) {
+  if (isOpening || role === "hook" || role === "reveal") return "high";
+  if (role === "mechanism" || role === "cause-effect" || role === "statistic" || role === "question") return "medium";
+  return "low";
+}
+function extractActionVerb(text, isHealth) {
+  const match = text.match(/\b(filtering|flowing|filling|contracting|narrowing|expanding|releasing|absorbing|accumulating|separating|slowing|accelerating|signaling|responding|circulating|descending|rising|rushing|pumping|clearing|building)\b/i);
+  if (match) return match[1].toLowerCase();
+  return isHealth ? "actively filtering and transporting fluid" : "demonstrating concrete dynamic action";
+}
+function buildFallbackSceneDirection(scene, profile, isOpening) {
+  const isHealth = profile === "health";
+  const narration = cleanText(scene.narration);
+  const intent = cleanText(scene.visualIntent);
+  const combined = `${narration} ${intent}`;
+  const role = inferFallbackSceneRole(combined, isOpening);
+  const hook = inferFallbackHookLevel(role, isOpening);
+  const action = extractActionVerb(combined, isHealth);
+  const subject = intent || narration.slice(0, 80);
+  const numbers = extractNumbers(narration);
+  const eligibleForOverlay = (isOpening || role === "statistic" || role === "hook" || numbers.length > 0) && combined.length > 10;
+  let overlayText;
+  if (eligibleForOverlay) {
+    if (numbers.length > 0) {
+      overlayText = numbers[0];
+    } else if (isOpening && isHealth) {
+      overlayText = "YOUR BODY AT NIGHT";
+    } else if (role === "mechanism" && isHealth) {
+      overlayText = "INTERNAL MECHANISM";
+    }
+  }
+  return {
+    sceneIndex: scene.sceneIndex,
+    sceneRole: role,
+    hookLevel: hook,
+    coreMeaning: narration.slice(0, 100),
+    viewerShouldNotice: `The visual event of ${action}`,
+    curiosityGap: hook === "high" ? "What hidden process causes this visible reaction?" : void 0,
+    visualEvent: {
+      subject: subject.slice(0, 60),
+      action,
+      change: "visible dynamic transition and movement",
+      cause: "physiological biological activity",
+      consequence: "observable biological state"
+    },
+    composition: {
+      shotType: isHealth ? "close three-quarter cutaway" : "medium documentary framing",
+      cameraAngle: "straight-on eye level",
+      lensFeel: isHealth ? "85mm medical-documentary lens" : "50mm prime lens",
+      focalPriority: "dominant foreground subject with high clarity",
+      foreground: "main active subject occupying roughly 60% of useful frame",
+      background: isHealth ? "controlled deep navy gradient with soft atmospheric depth" : "natural contextual environment with layered depth",
+      negativeSpace: "clean upper-right area reserved for editorial balance"
+    },
+    lighting: isHealth ? "controlled cool rim light with soft biological volumetric fill" : "natural documentary lighting with balanced contrast",
+    colorStrategy: isHealth ? "deep navy blue with warm tissue accents" : "natural realistic documentary palette",
+    continuityNote: "maintain documentary realism and consistent color grading with adjacent scenes",
+    textOverlay: {
+      enabled: !!overlayText,
+      text: overlayText,
+      purpose: role === "statistic" ? "stat" : "hook",
+      position: "top-right",
+      emphasis: "medium",
+      reason: overlayText ? "Anchors viewer attention on key takeaway" : "Visual self-explanatory"
+    },
+    avoid: isHealth ? ["flat textbook diagrams", "static anatomical cards", "fake medical UI"] : ["generic stock poses"],
+    confidence: 0.75
+  };
+}
+async function analyzeSceneBatchWithGemini(params) {
+  const { apiKey, preferredModel, brief, batchScenes, prevContext, nextContext, profile } = params;
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) throw new Error("NO_API_KEY");
+  const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+  const candidateModels = getAvailableModelsForTask("manual_ai_visual_director", preferredModel);
+  const scenesPayload = batchScenes.map((s) => ({
+    sceneIndex: s.sceneIndex,
+    narration: cleanText(s.narration),
+    visualIntent: cleanText(s.visualIntent)
+  }));
+  const prevText = prevContext ? `SCENE ${prevContext.sceneIndex}: ${cleanText(prevContext.narration)}` : "None (start of video)";
+  const nextText = nextContext ? `SCENE ${nextContext.sceneIndex}: ${cleanText(nextContext.narration)}` : "None (end of video)";
+  const prompt = `You are the Lead Visual Director for a cinematic documentary (${profile}).
+GLOBAL VISUAL BRIEF:
+- Storytelling Mode: ${brief.storytellingMode}
+- Core Promise: ${brief.corePromise}
+- Central Question: ${brief.centralQuestion}
+- Visual Strategy: ${brief.visualStrategy.dominantStyle}, ${brief.visualStrategy.cameraLanguage}, ${brief.visualStrategy.lightingLanguage}
+- Avoid Visual Cliches: ${brief.visualStrategy.avoidVisualCliches.join(", ")}
+
+SURROUNDING CONTEXT:
+- Previous Scene: ${prevText}
+- Next Scene: ${nextText}
+
+BATCH SCENES TO DIRECT (respond for EACH of these ${scenesPayload.length} scenes):
+${JSON.stringify(scenesPayload, null, 2)}
+
+INSTRUCTIONS FOR EACH SCENE:
+1. sceneRole: select from hook | question | problem | symptom | setup | mechanism | cause-effect | reveal | evidence | statistic | comparison | definition | demonstration | consequence | solution | lifestyle | emotion | transition | recap
+2. hookLevel: low | medium | high (Scene 1, major reveals, surprising warnings = high; mechanisms = medium; lifestyle/setup = low)
+3. visualEvent: DO NOT JUST DRAW A NOUN. Subject + ACTION (must contain an active visible verb like filtering, flowing, filling, expanding, contracting, etc.) + change + cause/consequence.
+4. composition: shotType, cameraAngle, lensFeel, focalPriority, foreground, background, negativeSpace. For mechanisms, dominant subject occupies ~55-75% of useful frame.
+5. lighting & colorStrategy: specific, consistent with brief.
+6. textOverlay: Recommend an editorial text overlay ONLY if this scene is a Hook, Reveal, Statistic/Number, or complex Mechanism.
+   - Text must be 2-5 words, max 28 characters, in the PRIMARY LANGUAGE of the narration.
+   - If numbers/statistics are included, they MUST BE EXACTLY MENTIONED in the scene narration. NEVER invent numbers!
+   - Position: top-left | top-right | center-left | center-right (never bottom caption zone).
+   - If image is already visually clear or simple lifestyle, set enabled: false. Target ~25-35% of scenes enabled across the documentary.
+7. avoid: list specific visual cliches or static textbook errors to avoid.
+
+Return ONLY a valid JSON array of ${scenesPayload.length} objects matching the schema.`;
+  for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+    const model = candidateModels[mIdx];
+    try {
+      const res = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.25,
+          maxOutputTokens: 8192
+        }
+      });
+      const text = res.text?.trim();
+      if (!text) throw new Error("Empty response from model");
+      const parsed = JSON.parse(text);
+      if (!Array.isArray(parsed)) throw new Error("Response is not a JSON array");
+      const directions = [];
+      const byIndex = /* @__PURE__ */ new Map();
+      for (const item of parsed) {
+        if (typeof item?.sceneIndex === "number") {
+          byIndex.set(item.sceneIndex, item);
+        }
+      }
+      for (const s of batchScenes) {
+        const raw = byIndex.get(s.sceneIndex);
+        if (raw && raw.visualEvent && raw.composition) {
+          directions.push({
+            sceneIndex: s.sceneIndex,
+            sceneRole: raw.sceneRole || inferFallbackSceneRole(s.narration, s.sceneIndex === 1),
+            hookLevel: raw.hookLevel || "medium",
+            coreMeaning: raw.coreMeaning || cleanText(s.narration).slice(0, 100),
+            viewerShouldNotice: raw.viewerShouldNotice || "The visible action of the subject",
+            curiosityGap: raw.curiosityGap,
+            visualEvent: {
+              subject: raw.visualEvent.subject || cleanText(s.visualIntent || s.narration),
+              action: raw.visualEvent.action || extractActionVerb(s.narration, profile === "health"),
+              change: raw.visualEvent.change,
+              cause: raw.visualEvent.cause,
+              consequence: raw.visualEvent.consequence
+            },
+            composition: {
+              shotType: raw.composition.shotType || "medium documentary view",
+              cameraAngle: raw.composition.cameraAngle || "eye level",
+              lensFeel: raw.composition.lensFeel || "50mm prime",
+              focalPriority: raw.composition.focalPriority || "foreground subject",
+              foreground: raw.composition.foreground || "dominant subject",
+              background: raw.composition.background || "atmospheric background",
+              negativeSpace: raw.composition.negativeSpace
+            },
+            lighting: raw.lighting || "natural documentary lighting",
+            colorStrategy: raw.colorStrategy || "balanced documentary tones",
+            continuityNote: raw.continuityNote,
+            textOverlay: {
+              enabled: !!raw.textOverlay?.enabled,
+              text: raw.textOverlay?.text,
+              purpose: raw.textOverlay?.purpose || "hook",
+              position: raw.textOverlay?.position || "top-right",
+              emphasis: raw.textOverlay?.emphasis || "medium",
+              reason: raw.textOverlay?.reason || "Editorial clarity"
+            },
+            avoid: Array.isArray(raw.avoid) ? raw.avoid : [],
+            confidence: 0.9
+          });
+        } else {
+          directions.push(buildFallbackSceneDirection(s, profile, s.sceneIndex === 1));
+        }
+      }
+      recordModelSuccess(model);
+      return directions;
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(model, kind);
+      logger.warn(`[ManualAI:Director] Gemini model ${model} failed for scene batch (${kind}): ${message}`);
+    }
+  }
+  throw new Error("BATCH_ANALYSIS_FAILED");
+}
+function applySmartOverlayPass(directions, scriptText, profile) {
+  const total = directions.length;
+  if (total === 0) return;
+  const scriptLower = scriptText.toLowerCase();
+  const scriptNumbers = new Set(extractNumbers(scriptText));
+  for (const d of directions) {
+    if (!d.textOverlay.enabled || !d.textOverlay.text) {
+      d.textOverlay.enabled = false;
+      continue;
+    }
+    let text = d.textOverlay.text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+    const words = text.split(/\s+/).filter(Boolean);
+    if (words.length > 5) {
+      text = words.slice(0, 5).join(" ");
+    }
+    if (text.length > 28) {
+      const truncated = text.slice(0, 28).replace(/[,.:;\-\s]+$/, "");
+      text = truncated;
+    }
+    const finalWords = text.split(/\s+/).filter(Boolean);
+    if (finalWords.length === 0 || text.length < 2) {
+      d.textOverlay.enabled = false;
+      continue;
+    }
+    const upper = text.toUpperCase();
+    if (["HEALTH", "WARNING", "BODY", "IMPORTANT", "NOTE", "DANGER"].includes(upper)) {
+      d.textOverlay.enabled = false;
+      continue;
+    }
+    const overlayNums = extractNumbers(text);
+    if (overlayNums.length > 0) {
+      const sceneNums = extractNumbers(d.coreMeaning);
+      const numberValid = overlayNums.every(
+        (n) => sceneNums.includes(n) || scriptNumbers.has(n) || scriptLower.includes(n.toLowerCase())
+      );
+      if (!numberValid) {
+        logger.info(`[ManualAI:Overlay] Disabling overlay "${text}" for scene ${d.sceneIndex}: number not found in script`);
+        d.textOverlay.enabled = false;
+        continue;
+      }
+    }
+    const allowedPositions = ["top-left", "top-right", "center-left", "center-right"];
+    if (!d.textOverlay.position || !allowedPositions.includes(d.textOverlay.position)) {
+      d.textOverlay.position = "top-right";
+    }
+    d.textOverlay.text = text;
+  }
+  const maxAllowed = Math.max(1, Math.floor(total * 0.35));
+  const enabledDirections = directions.filter((d) => d.textOverlay.enabled);
+  if (enabledDirections.length > maxAllowed) {
+    const rolePriority = (role) => {
+      switch (role) {
+        case "hook":
+          return 10;
+        case "reveal":
+          return 9;
+        case "statistic":
+          return 8;
+        case "mechanism":
+          return 7;
+        case "cause-effect":
+          return 6;
+        case "comparison":
+          return 5;
+        case "definition":
+          return 4;
+        case "recap":
+          return 3;
+        default:
+          return 1;
+      }
+    };
+    enabledDirections.sort((a, b) => {
+      const pDiff = rolePriority(b.sceneRole) - rolePriority(a.sceneRole);
+      if (pDiff !== 0) return pDiff;
+      const hookScore = (h) => h === "high" ? 3 : h === "medium" ? 2 : 1;
+      return hookScore(b.hookLevel) - hookScore(a.hookLevel);
+    });
+    const keepers = new Set(enabledDirections.slice(0, maxAllowed).map((d) => d.sceneIndex));
+    for (const d of directions) {
+      if (d.textOverlay.enabled && !keepers.has(d.sceneIndex)) {
+        d.textOverlay.enabled = false;
+      }
+    }
+  }
+  for (let i = 0; i < directions.length - 2; i++) {
+    if (directions[i].textOverlay.enabled && directions[i + 1].textOverlay.enabled && directions[i + 2].textOverlay.enabled) {
+      const mid = directions[i + 1];
+      mid.textOverlay.enabled = false;
+    }
+  }
+}
+function applyRetentionAdvisoryToDirections(directions, retentionPlan) {
+  const planMap = /* @__PURE__ */ new Map();
+  for (const s of retentionPlan.scenes) {
+    planMap.set(s.sceneIndex, s);
+  }
+  for (const d of directions) {
+    const hint = planMap.get(d.sceneIndex);
+    if (!hint) continue;
+    if (hint.avoidSpoiler) {
+      const avoidMsg = "premature visual reveal of later payoff or mechanism";
+      if (!d.avoid.includes(avoidMsg)) {
+        d.avoid.push(avoidMsg);
+      }
+    }
+    if (hint.role === "hook" && hint.intensity === "high") {
+      d.hookLevel = "high";
+      d.sceneRole = "hook";
+    } else if (hint.role === "payoff") {
+      d.sceneRole = "reveal";
+      if (!d.viewerShouldNotice.toLowerCase().includes("payoff") && !d.viewerShouldNotice.toLowerCase().includes("reveal")) {
+        d.viewerShouldNotice = `${d.viewerShouldNotice} (clear payoff reveal)`;
+      }
+    }
+  }
+}
+async function prepareManualAiVisualDirection(params) {
+  const { projectDir, plan, profile, globalContext, preferredModel, forceRegenerate = false, onProgress } = params;
+  const aiScenes = plan.scenes.filter((s) => s.strategy === "ai-still").sort((a, b) => a.sceneIndex - b.sceneIndex);
+  if (aiScenes.length === 0) {
+    const emptyBrief = buildFallbackVisualBrief("empty", profile, globalContext);
+    return {
+      brief: emptyBrief,
+      sceneDirections: /* @__PURE__ */ new Map(),
+      metrics: {
+        globalMs: 0,
+        sceneMs: 0,
+        cacheHit: true,
+        enrichedCount: 0,
+        fallbackCount: 0,
+        overlayCount: 0,
+        modelUsed: "none"
+      }
+    };
+  }
+  const fullScriptText = params.scriptText || plan.scenes.map((s) => cleanText(s.narration)).join(" ");
+  const scriptHashVal = computeScriptHash(fullScriptText, profile, globalContext);
+  const briefPath = getManualAiVisualBriefPath(projectDir);
+  const directionsPath = getManualAiSceneDirectionsPath(projectDir);
+  let brief = null;
+  let briefCacheHit = false;
+  let globalT0 = Date.now();
+  if (!forceRegenerate && fs__namespace.existsSync(briefPath)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(briefPath, "utf-8"));
+      if (cached.schemaVersion === MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION && cached.scriptHash === scriptHashVal && cached.profile === profile) {
+        brief = cached;
+        briefCacheHit = true;
+        logger.info(`[ManualAI:VisualDirector] Global visual brief cache hit (model=${cached.modelUsed})`);
+      }
+    } catch {
+    }
+  }
+  if (!brief) {
+    const scenesSummary = plan.scenes.map((s) => `Scene ${s.sceneIndex}: ${cleanText(s.narration).slice(0, 120)} | Intent: ${cleanText(s.visualIntent).slice(0, 80)}`).join("\n");
+    try {
+      if (params.apiKey) {
+        brief = await generateGlobalVisualBriefWithGemini({
+          apiKey: params.apiKey,
+          preferredModel,
+          scriptText: fullScriptText,
+          profile,
+          globalContext,
+          scenesSummary,
+          scriptHashVal,
+          onProgress
+        });
+      }
+    } catch (err) {
+      logger.warn(`[ManualAI:VisualDirector] AI Global Brief generation failed (${err}) — using local fallback brief`);
+    }
+    if (!brief) {
+      brief = buildFallbackVisualBrief(
+        scriptHashVal,
+        profile,
+        globalContext,
+        aiScenes[0]?.narration
+      );
+    }
+    writeFileAtomic(briefPath, JSON.stringify(brief, null, 2));
+  }
+  const globalMs = Date.now() - globalT0;
+  const briefHash = sha256([
+    brief.storytellingMode,
+    brief.corePromise,
+    brief.centralQuestion,
+    brief.centralThesis,
+    brief.visualStrategy.dominantStyle,
+    brief.modelUsed
+  ]);
+  const sceneInputHash = computeSceneDirectionsHash(briefHash, aiScenes);
+  let sceneDirectionsList = null;
+  let sceneCacheHit = false;
+  let sceneT0 = Date.now();
+  if (!forceRegenerate && fs__namespace.existsSync(directionsPath)) {
+    try {
+      const cached = JSON.parse(fs__namespace.readFileSync(directionsPath, "utf-8"));
+      if (cached.schemaVersion === MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION && cached.briefHash === briefHash && cached.inputHash === sceneInputHash && cached.totalAiScenes === aiScenes.length && Array.isArray(cached.directions) && cached.directions.length === aiScenes.length) {
+        sceneDirectionsList = cached.directions;
+        sceneCacheHit = true;
+        logger.info(`[ManualAI:VisualDirector] Scene directions cache hit (${cached.directions.length} scenes)`);
+      }
+    } catch {
+    }
+  }
+  let enrichedCount = 0;
+  let fallbackCount = 0;
+  if (!sceneDirectionsList) {
+    const directionsMap = /* @__PURE__ */ new Map();
+    const batchSize = 10;
+    const batches = [];
+    for (let i = 0; i < aiScenes.length; i += batchSize) {
+      batches.push(aiScenes.slice(i, i + batchSize));
+    }
+    const concurrency = 2;
+    for (let i = 0; i < batches.length; i += concurrency) {
+      const slice = batches.slice(i, i + concurrency);
+      await Promise.all(
+        slice.map(async (batch, sliceIdx) => {
+          const batchIndex = i + sliceIdx;
+          const firstScene = batch[0];
+          const lastScene = batch[batch.length - 1];
+          const prevCtx = plan.scenes.find((s) => s.sceneIndex === firstScene.sceneIndex - 1);
+          const nextCtx = plan.scenes.find((s) => s.sceneIndex === lastScene.sceneIndex + 1);
+          let batchDirections = null;
+          if (params.apiKey && !brief?.fallbackUsed) {
+            try {
+              onProgress?.(
+                `Building scene visual directions ${Math.min((batchIndex + 1) * batchSize, aiScenes.length)}/${aiScenes.length}...`,
+                0.2 + batchIndex / batches.length * 0.6
+              );
+              batchDirections = await analyzeSceneBatchWithGemini({
+                apiKey: params.apiKey,
+                preferredModel,
+                brief,
+                batchScenes: batch,
+                prevContext: prevCtx,
+                nextContext: nextCtx,
+                profile
+              });
+            } catch (err) {
+              logger.warn(`[ManualAI:VisualDirector] Batch ${batchIndex + 1} analysis failed (${err}); falling back locally for this batch`);
+            }
+          }
+          if (batchDirections && batchDirections.length === batch.length) {
+            for (const d of batchDirections) {
+              directionsMap.set(d.sceneIndex, d);
+              enrichedCount++;
+            }
+          } else {
+            for (const s of batch) {
+              const fb = buildFallbackSceneDirection(s, profile, s.sceneIndex === 1);
+              directionsMap.set(s.sceneIndex, fb);
+              fallbackCount++;
+            }
+          }
+        })
+      );
+    }
+    sceneDirectionsList = aiScenes.map((s) => directionsMap.get(s.sceneIndex));
+    if (params.retentionPlan) {
+      applyRetentionAdvisoryToDirections(sceneDirectionsList, params.retentionPlan);
+    }
+    applySmartOverlayPass(sceneDirectionsList, fullScriptText);
+    const overlayCount2 = sceneDirectionsList.filter((d) => d.textOverlay.enabled).length;
+    const artifact = {
+      schemaVersion: MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      briefHash,
+      inputHash: sceneInputHash,
+      totalAiScenes: aiScenes.length,
+      enrichedCount,
+      fallbackCount,
+      overlayCount: overlayCount2,
+      directions: sceneDirectionsList
+    };
+    writeFileAtomic(directionsPath, JSON.stringify(artifact, null, 2));
+  } else {
+    enrichedCount = sceneDirectionsList.filter((d) => d.confidence > 0.8).length;
+    fallbackCount = sceneDirectionsList.length - enrichedCount;
+  }
+  const sceneMs = Date.now() - sceneT0;
+  const overlayCount = sceneDirectionsList.filter((d) => d.textOverlay.enabled).length;
+  const overlayDensityPct = Math.round(overlayCount / aiScenes.length * 100);
+  logger.info(
+    `[ManualAI:VisualDirector] Global brief generated profile=${brief.profile} mode=${brief.storytellingMode} model=${brief.modelUsed}`
+  );
+  logger.info(
+    `[ManualAI:VisualDirector] Scene directions generated AI scenes=${aiScenes.length} AI enriched=${enrichedCount} fallback=${fallbackCount}`
+  );
+  logger.info(
+    `[ManualAI:Overlay] enabled=${overlayCount}/${aiScenes.length} density=${overlayDensityPct}%`
+  );
+  const resultMap = /* @__PURE__ */ new Map();
+  for (const d of sceneDirectionsList) {
+    resultMap.set(d.sceneIndex, d);
+  }
+  return {
+    brief,
+    sceneDirections: resultMap,
+    metrics: {
+      globalMs,
+      sceneMs,
+      cacheHit: briefCacheHit && sceneCacheHit,
+      enrichedCount,
+      fallbackCount,
+      overlayCount,
+      modelUsed: brief.modelUsed
+    }
+  };
+}
+function checkAborted$1(signal) {
+  if (signal?.aborted) {
+    throw new Error("Pipeline execution was cancelled.");
+  }
+}
+async function runMixedVisualEngine(params) {
+  const { options, profile, mix, onProgress, signal, deps } = params;
+  const pool = params.flowPool || flowImagePool;
+  const projectDir = options.projectDir;
+  const phase2StartTime = Date.now();
+  checkAborted$1(signal);
+  const isHealth = profile === "health";
+  const targetAiRatio = mix.aiImageRatio;
+  const failureBehavior = resolveAiFailureBehavior(mix);
+  const requestedAiPercent = Math.round(mix.aiImageRatio * 100);
+  const requestedStockPercent = Math.round(mix.stockFootageRatio * 100);
+  const aiImageMode = targetAiRatio > 0 ? resolveAiImageMode(mix) : "auto";
+  const promptMode = aiImageMode === "prompt";
+  const analysisDir = path__namespace.join(projectDir, "analysis");
+  if (!fs__namespace.existsSync(analysisDir)) {
+    fs__namespace.mkdirSync(analysisDir, { recursive: true });
+  }
+  const statePath = path__namespace.join(projectDir, "project-state.json");
+  const projectJsonPath = path__namespace.join(projectDir, "project.json");
+  const activeJsonPath = fs__namespace.existsSync(statePath) ? statePath : fs__namespace.existsSync(projectJsonPath) ? projectJsonPath : null;
+  if (activeJsonPath) {
+    try {
+      const proj = JSON.parse(fs__namespace.readFileSync(activeJsonPath, "utf-8"));
+      const projInputs = proj?.inputs;
+      if (projInputs?.visualSourceMode === "custom-mix" && projInputs?.visualMixConfig) {
+        const setupAi = Math.round((projInputs.visualMixConfig.aiImageRatio ?? 0) * 100);
+        const setupStock = Math.round((projInputs.visualMixConfig.stockFootageRatio ?? 0) * 100);
+        if (setupAi !== requestedAiPercent || setupStock !== requestedStockPercent) {
+          const err = `VISUAL_MIX_CONFIG_MISMATCH: Setup requested AI=${setupAi} Stock=${setupStock}, pipeline received AI=${requestedAiPercent} Stock=${requestedStockPercent}.`;
+          logger.error(`[MixedVisualEngine] ${err}`);
+          return {
+            success: false,
+            needsAttention: true,
+            error: err
+          };
+        }
+      }
+    } catch {
+    }
+  }
+  if (promptMode) {
+    logger.info("[ManualAI] Prompt mode active (Google Flow is not used for scene visuals)");
+  }
+  if (targetAiRatio > 0 && !promptMode && !deps?.skipFlowReadiness) {
+    onProgress("Checking Google Flow readiness...", 0.02);
+    try {
+      const bridgeUrl = googleFlowClient.getBridgeUrl();
+      const readiness = await flowkitRuntimeManager.ensureFlowReady(bridgeUrl);
+      if (!readiness.ready) {
+        let msg = readiness.message || "FlowKit bridge or Google Flow is not ready.";
+        if (!readiness.bridgeReachable) {
+          msg = `Visual mix requires Google Flow AI generation, but FlowKit is unreachable at ${bridgeUrl}. Ensure FlowKit is running.`;
+        } else if (!readiness.extensionConnected) {
+          msg = "Visual mix requires Google Flow AI generation, but Chrome extension is disconnected. Open Google Flow in Chrome and reconnect the FlowKit extension.";
+        } else if (!readiness.flowConnected) {
+          msg = "Visual mix requires Google Flow AI generation, but Google Flow is not signed in. Open Google Flow in Chrome and log in.";
+        }
+        logger.warn(`[MixedVisualEngine] FlowKit readiness failed: ${msg}`);
+        return {
+          success: false,
+          needsAttention: true,
+          error: msg
+        };
+      }
+      const health = await googleFlowClient.checkHealth();
+      if (!health.reachable || !health.extensionConnected) {
+        return {
+          success: false,
+          needsAttention: true,
+          error: health.message || "FlowKit is not reachable or Chrome extension is disconnected."
+        };
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        success: false,
+        needsAttention: true,
+        error: `Google Flow readiness check error: ${msg}. Open Google Flow in Chrome and reconnect the extension.`
+      };
+    }
+  }
+  checkAborted$1(signal);
+  onProgress("Planning visuals...", 0.05);
+  const rawScenes = VisualMixPlanner.loadScenesFromEditPlan(projectDir);
+  if (rawScenes.length === 0) {
+    return {
+      success: false,
+      error: "No scenes found in edit plan for Visual Planning."
+    };
+  }
+  let globalContext;
+  const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+  if (fs__namespace.existsSync(contextPath)) {
+    try {
+      globalContext = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    } catch {
+    }
+  }
+  const plan = VisualMixPlanner.buildPlan({
+    projectDir,
+    rawScenes,
+    config: mix,
+    profile,
+    globalContext
+  });
+  checkAborted$1(signal);
+  const totalScenes = rawScenes.length;
+  const aiScenes = plan.scenes.filter((s) => s.strategy === "ai-still");
+  const initialStockScenes = plan.scenes.filter((s) => s.strategy === "stock");
+  const stockSceneIndices = plan.stockSceneIndices || initialStockScenes.map((s) => s.sceneIndex);
+  if (aiScenes.length !== plan.targetAiScenes) {
+    throw new Error(
+      `VISUAL_MIX_AI_COUNT_MISMATCH expected=${plan.targetAiScenes} actual=${aiScenes.length}`
+    );
+  }
+  if (stockSceneIndices.length !== plan.targetStockScenes) {
+    throw new Error(
+      `VISUAL_MIX_STOCK_COUNT_MISMATCH expected=${plan.targetStockScenes} actual=${stockSceneIndices.length}`
+    );
+  }
+  const inputSnapshot = {
+    visualSourceMode: mix.mode || "custom-mix",
+    requestedAiPercent,
+    requestedStockPercent,
+    aiImageRatio: mix.aiImageRatio,
+    stockFootageRatio: mix.stockFootageRatio,
+    imageOutputResolution: mix.imageOutputResolution || "1080p",
+    aiFailureBehavior: failureBehavior,
+    profileMode: options.contentProfileMode || "auto",
+    resolvedProfile: profile,
+    contentType: profile,
+    aiImageMode,
+    totalScenes
+  };
+  fs__namespace.writeFileSync(
+    path__namespace.join(analysisDir, "visual-input-snapshot.json"),
+    JSON.stringify(inputSnapshot, null, 2),
+    "utf-8"
+  );
+  logger.info(
+    `[VisualMixInput] profile=${profile} mode=${mix.mode} AI=${requestedAiPercent}% Stock=${requestedStockPercent}% failureBehavior=${failureBehavior} quality=${inputSnapshot.imageOutputResolution}`
+  );
+  logger.info(
+    `[VisualMixPlan] total=${totalScenes} targetAI=${aiScenes.length} targetStock=${initialStockScenes.length}`
+  );
+  logger.info(
+    `[VisualMixOwnership] aiSceneIndices=${aiScenes.length} stockSceneIndices=${stockSceneIndices.length}`
+  );
+  let manualPack = null;
+  let promptGenerationMs = 0;
+  let visualDirectorMetrics;
+  if (promptMode) {
+    logger.info(`[ManualAI] AI-owned scenes=${aiScenes.length}`);
+    onProgress("Analyzing script for visual direction...", 0.04);
+    let scriptText = null;
+    try {
+      const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
+      if (fs__namespace.existsSync(transcriptPath)) {
+        const tr = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+        scriptText = tr.fullText || tr.segments?.map((s) => s.text).join(" ") || null;
+      }
+      if (!scriptText && activeJsonPath) {
+        const proj = JSON.parse(fs__namespace.readFileSync(activeJsonPath, "utf-8"));
+        const sp = proj?.inputs?.scriptPath;
+        if (sp && fs__namespace.existsSync(sp)) {
+          scriptText = fs__namespace.readFileSync(sp, "utf-8");
+        }
+      }
+    } catch {
+    }
+    let directorBundle;
+    try {
+      const apiKey = resolveGeminiApiKey();
+      let retentionPlan = null;
+      try {
+        const rawScenes2 = plan.scenes.map((s) => ({
+          sceneIndex: s.sceneIndex,
+          duration: s.duration,
+          narration: s.narration,
+          visualIntent: s.visualIntent,
+          shotType: s.shotType,
+          energyLevel: s.energyLevel,
+          visualStrategy: s.strategy,
+          category: s.category,
+          motionPreset: s.motionPreset
+        }));
+        retentionPlan = await ensureRetentionPlan(projectDir, {
+          scenes: rawScenes2
+        });
+      } catch (err) {
+        logger.warn(`[MixedVisualEngine] Retention plan generation skipped (non-fatal): ${String(err)}`);
+      }
+      directorBundle = await prepareManualAiVisualDirection({
+        projectDir,
+        plan,
+        profile,
+        globalContext,
+        scriptText,
+        apiKey,
+        preferredModel: options.geminiModel,
+        retentionPlan,
+        onProgress: (msg, pct) => onProgress(msg, 0.04 + pct * 0.04)
+      });
+      visualDirectorMetrics = directorBundle?.metrics;
+    } catch (err) {
+      logger.warn(`[ManualAI:Director] AI enrichment unavailable (${err}) — using deterministic prompt fallback`);
+    }
+    onProgress(`Generating ${aiScenes.length} AI prompts...`, 0.08);
+    const ensured = ensureManualAiPromptPack({
+      projectDir,
+      plan,
+      profile,
+      globalContext,
+      outputResolution: mix.imageOutputResolution || "1080p",
+      visualBrief: directorBundle?.brief,
+      sceneDirections: directorBundle?.sceneDirections
+    });
+    manualPack = ensured.pack;
+    promptGenerationMs = ensured.generationMs;
+    logger.info(
+      `[ManualAI] Prompt pack ${ensured.reused ? "reused" : "generated"}: ${manualPack.scenes.length} prompts (${promptGenerationMs}ms)`
+    );
+  }
+  const store = new VisualAssignmentStore(projectDir);
+  const requiredAiProvider = promptMode ? "manual-ai" : "google-flow";
+  for (const s of initialStockScenes) {
+    const existing = store.get(s.sceneIndex);
+    if (existing?.asset?.provider === "google-flow" || existing?.asset?.provider === "manual-ai") {
+      store.delete(s.sceneIndex);
+    }
+  }
+  for (const s of aiScenes) {
+    const existing = store.get(s.sceneIndex);
+    if (existing && existing.asset?.provider !== requiredAiProvider) {
+      logger.info(
+        `[VisualMixReconcile] scene=${s.sceneIndex} is AI-owned; deactivating stale ${existing.asset?.provider ?? "unknown"} assignment`
+      );
+      store.delete(s.sceneIndex);
+    }
+  }
+  await store.flushAtomic();
+  let lastManualStatus = null;
+  let manualWaitMs = 0;
+  let manualReadyAtStart = 0;
+  let stockCompletedWhileWaiting = false;
+  let maxStockReady = countReadyStock(store, initialStockScenes);
+  let maxAiReady = 0;
+  function currentWaitInfo() {
+    if (!lastManualStatus) return null;
+    const storeStockReady = countReadyStock(store, initialStockScenes);
+    const currentStock = stockCompletedWhileWaiting ? initialStockScenes.length : Math.max(maxStockReady, storeStockReady);
+    maxStockReady = Math.max(maxStockReady, currentStock);
+    const effectiveAiReady = Math.max(maxAiReady, lastManualStatus.ready);
+    maxAiReady = effectiveAiReady;
+    return buildManualAiWaitInfo({
+      status: {
+        ...lastManualStatus,
+        ready: effectiveAiReady
+      },
+      stockExpected: initialStockScenes.length,
+      stockReady: maxStockReady
+    });
+  }
+  function combinedProgress(info) {
+    const total = info.expected + info.stockExpected;
+    const done = info.ready + info.stockReady;
+    return 0.1 + (total > 0 ? done / total : 1) * 0.85;
+  }
+  const publishWait = () => {
+    const info = currentWaitInfo();
+    if (!info) return;
+    const finished = info.ready >= info.expected && info.stockReady >= info.stockExpected;
+    onProgress(describeManualAiWait(info), combinedProgress(info), {
+      manualAiWait: finished ? null : info
+    });
+  };
+  if (promptMode && manualPack) {
+    const jsonPath = getManualAiPromptJsonPath(projectDir);
+    const txtPath = getManualAiPromptTxtPath(projectDir);
+    const jsonExists = fs__namespace.existsSync(jsonPath);
+    const txtExists = fs__namespace.existsSync(txtPath);
+    logger.info(`[ManualAI] Prompt pack path: ${txtPath}`);
+    logger.info(`[ManualAI] Prompt JSON exists=${jsonExists}`);
+    logger.info(`[ManualAI] Prompt TXT exists=${txtExists}`);
+    logger.info(`[ManualAI] Prompt count=${manualPack.scenes.length}`);
+    logger.debug(
+      `[ManualAI:PromptPack] projectDir=${projectDir} generated=${manualPack.scenes.length} json=${jsonPath} txt=${txtPath}`
+    );
+    lastManualStatus = getManualAiStatus(projectDir);
+    maxAiReady = lastManualStatus.ready;
+    const broadcastFn = deps?.broadcastManualAiStatus ?? broadcastManualAiStatus;
+    broadcastFn(projectDir, lastManualStatus);
+    const initialWait = currentWaitInfo();
+    if (initialWait) {
+      onProgress(describeManualAiWait(initialWait), combinedProgress(initialWait), {
+        manualAiWait: initialWait
+      });
+    }
+  }
+  let aiBranchTimeMs = 0;
+  let stockBranchTimeMs = 0;
+  let totalFlowCalls = 0;
+  let stockEngineInvocations = 0;
+  let stockSceneTargetsTotal = 0;
+  let stockDownloadCount = 0;
+  const runAiBranch = async () => {
+    const t0 = Date.now();
+    if (aiScenes.length === 0) {
+      aiBranchTimeMs = Date.now() - t0;
+      logger.info("[VisualMix] 0% AI requested: Skipping AI generation completely.");
+      return {
+        newlyGenerated: 0,
+        cached: 0,
+        failedScenes: [],
+        failures: [],
+        totalGenMs: 0,
+        totalExpMs: 0,
+        totalNormMs: 0
+      };
+    }
+    let reusedCount = 0;
+    const uncached = [];
+    for (const sc of aiScenes) {
+      const hash = sc.generationHash || "hash";
+      const cached = getCachedVisualAsset(projectDir, sc.sceneIndex, hash, profile);
+      if (cached && cached.outputPath && fs__namespace.existsSync(cached.outputPath)) {
+        reusedCount++;
+        const stat = fs__namespace.statSync(cached.outputPath);
+        const asset = {
+          assetId: `flow_${hash.slice(0, 12)}`,
+          provider: "google-flow",
+          mediaType: "photo",
+          localPath: cached.outputPath,
+          thumbnailUrl: `file://${cached.outputPath}`,
+          downloadUrl: "",
+          creator: "Google Flow AI",
+          searchQuery: sc.imagePrompt || "",
+          downloadedAt: cached.generatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          fileSizeBytes: stat.size
+        };
+        store.set(sc.sceneIndex, {
+          sceneId: `scene_${sc.sceneIndex}`,
+          sceneIndex: sc.sceneIndex,
+          narrationText: sc.narration,
+          startTime: sc.startTime,
+          endTime: sc.endTime,
+          visualIntent: sc.visualIntent,
+          searchQueries: [],
+          usedQuery: isHealth ? "AI Medical Still (Google Flow)" : "AI Still (Google Flow)",
+          score: 95,
+          locked: true,
+          manualOverride: false,
+          status: "assigned",
+          asset
+        });
+      } else {
+        store.delete(sc.sceneIndex);
+        uncached.push({
+          scene: sc,
+          config: mix,
+          profile,
+          projectDir
+        });
+      }
+    }
+    await store.flushAtomic();
+    logger.info(`[CACHE_SCAN] AI cache hits=${reusedCount} misses=${uncached.length}`);
+    logger.info(
+      `[VisualMixExecution] AI planned=${aiScenes.length} AI cached=${reusedCount} AI queue=${uncached.length} Stock initial targets=${initialStockScenes.length}`
+    );
+    totalFlowCalls = uncached.length;
+    let newlyGenerated = 0;
+    const failedScenes = [];
+    const failures = [];
+    let totalGenMs = 0;
+    let totalExpMs = 0;
+    let totalNormMs = 0;
+    if (uncached.length > 0) {
+      const poolResults = await pool.processBatch(
+        uncached,
+        (msg, prog, stats) => {
+          checkAborted$1(signal);
+          const completedTotal = reusedCount + stats.completed;
+          const failedNote = stats.failed > 0 ? `, ${stats.failed} failed` : "";
+          onProgress(
+            `AI Visuals: [${completedTotal}/${aiScenes.length}] complete (${stats.generating} generating, ${stats.exporting} exporting${failedNote}) — ${msg}`,
+            0.1 + prog * 0.45
+          );
+        },
+        signal
+      );
+      for (const res of poolResults) {
+        const sc = aiScenes.find((s) => s.sceneIndex === res.sceneIndex);
+        if (!sc) continue;
+        if (res.performance) {
+          totalGenMs += res.performance.generateMs;
+          totalExpMs += res.performance.exportMs;
+          totalNormMs += res.performance.normalizeMs;
+        }
+        if (res.success && res.assetPath && fs__namespace.existsSync(res.assetPath)) {
+          newlyGenerated++;
+          const stat = fs__namespace.statSync(res.assetPath);
+          const asset = {
+            assetId: `flow_${(sc.generationHash || "gen").slice(0, 12)}`,
+            provider: "google-flow",
+            mediaType: "photo",
+            localPath: res.assetPath,
+            thumbnailUrl: `file://${res.assetPath}`,
+            downloadUrl: "",
+            creator: "Google Flow AI",
+            searchQuery: sc.imagePrompt || "",
+            downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            fileSizeBytes: stat.size
+          };
+          store.set(sc.sceneIndex, {
+            sceneId: `scene_${sc.sceneIndex}`,
+            sceneIndex: sc.sceneIndex,
+            narrationText: sc.narration,
+            startTime: sc.startTime,
+            endTime: sc.endTime,
+            visualIntent: sc.visualIntent,
+            searchQueries: [],
+            usedQuery: isHealth ? "AI Medical Still (Google Flow)" : "AI Still (Google Flow)",
+            score: 95,
+            locked: true,
+            manualOverride: false,
+            status: "assigned",
+            asset
+          });
+        } else {
+          failedScenes.push(sc);
+          failures.push({
+            sceneIndex: sc.sceneIndex,
+            stage: res.failureStage ?? "generation",
+            reason: res.reason ?? "AI visual was not produced"
+          });
+        }
+      }
+      await store.flushAtomic();
+    }
+    aiBranchTimeMs = Date.now() - t0;
+    return {
+      newlyGenerated,
+      cached: reusedCount,
+      failedScenes,
+      failures,
+      totalGenMs,
+      totalExpMs,
+      totalNormMs
+    };
+  };
+  const runStockBranch = async (targetIndices, isFallback = false) => {
+    const t0 = Date.now();
+    if (targetIndices.length === 0) {
+      if (!isFallback) {
+        logger.info("[VisualMix:Stock] initialTargets=0 action=SKIP");
+        logger.info("[VisualMix] 0 stock scenes targeted: Skipping stock search completely.");
+      }
+      return { assigned: 0, failed: 0 };
+    }
+    assertStockAllowed({ config: mix, isFallback, sceneIndices: targetIndices });
+    stockEngineInvocations++;
+    stockSceneTargetsTotal += targetIndices.length;
+    logger.info(
+      `[STOCK_SEARCH] Launching Stock acquisition for ${targetIndices.length} scenes: ${targetIndices.join(", ")} (isFallback=${isFallback})`
+    );
+    const stockProgressBridge = (msg, pct) => {
+      checkAborted$1(signal);
+      if (promptMode && !isFallback) {
+        const info = currentWaitInfo();
+        if (info) {
+          onProgress(`${describeManualAiWait(info)} · Stock: ${msg}`, combinedProgress(info), {
+            manualAiWait: info
+          });
+          return;
+        }
+      }
+      onProgress(msg, 0.55 + pct * 0.4);
+    };
+    let sinkAssigned = 0;
+    let sinkFailed = 0;
+    const assignmentSink = async (owned) => {
+      store.setMany(owned, true);
+      for (const a of owned) {
+        if (a.status === "assigned" && a.asset) sinkAssigned++;
+        else sinkFailed++;
+      }
+      await store.flushAtomic();
+    };
+    const baseParams = {
+      projectDir,
+      pexelsApiKey: "",
+      pixabayApiKey: "",
+      preferredAspectRatio: (options.resolution?.width ?? 1920) >= (options.resolution?.height ?? 1080) ? "16:9" : "9:16",
+      targetSceneIndices: targetIndices,
+      assignmentSink
+    };
+    if (deps?.stockRunner) {
+      await deps.stockRunner(baseParams, stockProgressBridge);
+    } else {
+      const appCfg = loadConfig();
+      const apiKey = resolveGeminiApiKey();
+      baseParams.pexelsApiKey = normalizeApiKey(appCfg.pexelsApiKey ?? "");
+      baseParams.pixabayApiKey = normalizeApiKey(appCfg.pixabayApiKey ?? "");
+      if (apiKey) {
+        await runContextAwareStockEngine(
+          {
+            ...baseParams,
+            apiKey,
+            model: options.geminiModel,
+            forceReanalysis: false
+          },
+          stockProgressBridge
+        );
+      } else {
+        await runStockEngine({ ...baseParams, preferredAspectRatio: "16:9" }, stockProgressBridge);
+      }
+    }
+    stockDownloadCount += sinkAssigned;
+    logger.info(`[STOCK_DOWNLOAD] assigned=${sinkAssigned} failed=${sinkFailed} (isFallback=${isFallback})`);
+    stockBranchTimeMs += Date.now() - t0;
+    return { assigned: sinkAssigned, failed: sinkFailed };
+  };
+  const runManualAiBranch = async (gateSignal) => {
+    const pack = manualPack;
+    const t0 = Date.now();
+    const evaluateAndSync = async () => {
+      const res = await syncManualAiAssignments({
+        projectDir,
+        pack,
+        aiScenes,
+        store,
+        isHealth
+      });
+      lastManualStatus = res.status;
+      maxAiReady = Math.max(maxAiReady, res.status.ready);
+      return res.status;
+    };
+    const first = await evaluateAndSync();
+    manualReadyAtStart = first.ready;
+    logger.info(
+      `[ManualAI] Waiting for ${first.expected - first.ready} images (ready ${first.ready}/${first.expected})`
+    );
+    publishWait();
+    let lastLoggedReady = first.ready;
+    await manualAiAssetGate.waitUntilReady({
+      projectDir,
+      signal: gateSignal,
+      pollIntervalMs: deps?.manualAiPollMs,
+      isReady: async () => (await evaluateAndSync()).allReady,
+      onEvaluate: () => {
+        if (lastManualStatus && lastManualStatus.ready !== lastLoggedReady) {
+          lastLoggedReady = lastManualStatus.ready;
+          logger.info(`[ManualAI] Ready ${lastManualStatus.ready}/${lastManualStatus.expected}`);
+        }
+        publishWait();
+      }
+    });
+    manualWaitMs = Date.now() - t0;
+    logger.info(`[ManualAI] All ${pack.scenes.length} images ready`);
+  };
+  let aiRes;
+  if (promptMode) {
+    const pendingStock = filterPendingStockScenes(store, initialStockScenes);
+    const stockTargets = pendingStock.map((s) => s.sceneIndex);
+    logger.info(
+      `[ManualAI] Stock-owned scenes=${initialStockScenes.length} cached=${initialStockScenes.length - pendingStock.length} pending=${stockTargets.length}`
+    );
+    const gateAbort = new AbortController();
+    const forwardAbort = () => gateAbort.abort();
+    signal?.addEventListener("abort", forwardAbort, { once: true });
+    try {
+      await Promise.all([
+        runManualAiBranch(gateAbort.signal),
+        runStockBranch(stockTargets, false).then(() => {
+          const info = currentWaitInfo();
+          if (info && info.ready < info.expected) {
+            stockCompletedWhileWaiting = true;
+            maxStockReady = initialStockScenes.length;
+            logger.info(
+              `[ManualAI] Stock branch ${info.stockExpected}/${info.stockExpected} completed while waiting`
+            );
+          }
+          publishWait();
+        })
+      ]);
+    } finally {
+      gateAbort.abort();
+      signal?.removeEventListener("abort", forwardAbort);
+    }
+    aiBranchTimeMs = manualWaitMs;
+    aiRes = {
+      newlyGenerated: 0,
+      cached: manualReadyAtStart,
+      failedScenes: [],
+      failures: [],
+      totalGenMs: 0,
+      totalExpMs: 0,
+      totalNormMs: 0
+    };
+    logger.info("[ManualAI] Resuming pipeline");
+  } else {
+    [aiRes] = await Promise.all([runAiBranch(), runStockBranch(stockSceneIndices, false)]);
+  }
+  checkAborted$1(signal);
+  const failedAiIndices = aiRes.failedScenes.map((s) => s.sceneIndex);
+  let aiFallbackCount = 0;
+  let strictModeBlockedStockScenes = 0;
+  const approvedFallbackIndices = [];
+  if (failedAiIndices.length > 0) {
+    if (failureBehavior === "stock-fallback") {
+      logger.warn(
+        `[VisualMix:FallbackDecision] failedAiScenes=${failedAiIndices.length} behavior=stock-fallback action=RUN_STOCK_FALLBACK`
+      );
+      logger.info(
+        `[VisualMixFallback] failedAI=${failedAiIndices.length} behavior=stock-fallback stockFallbackTargets=${failedAiIndices.length}`
+      );
+      onProgress(`Running stock fallback for ${failedAiIndices.length} failed AI scenes...`, 0.9);
+      for (const sc of aiRes.failedScenes) {
+        const f = aiRes.failures.find((x) => x.sceneIndex === sc.sceneIndex);
+        await recordVisualAssetQueued(projectDir, {
+          sceneIndex: sc.sceneIndex,
+          strategy: "stock",
+          profile,
+          promptHash: sc.generationHash || "hash",
+          status: "fallback-stock",
+          failureStage: f?.stage,
+          error: f?.reason,
+          generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      }
+      await runStockBranch(failedAiIndices, true);
+      for (const idx of failedAiIndices) {
+        const a = store.get(idx);
+        if (a && a.status === "assigned" && a.asset && a.asset.provider !== "google-flow") {
+          approvedFallbackIndices.push(idx);
+        }
+      }
+      aiFallbackCount = approvedFallbackIndices.length;
+    } else {
+      strictModeBlockedStockScenes = failedAiIndices.length;
+      logger.warn(
+        `[VisualMix:FallbackDecision] failedAiScenes=${failedAiIndices.length} behavior=strict requestedAI=${requestedAiPercent} requestedStock=${requestedStockPercent} action=NO_STOCK_FALLBACK`
+      );
+      logger.info(
+        `[VisualMixFallback] failedAI=${failedAiIndices.length} behavior=strict stockFallbackTargets=0`
+      );
+    }
+  }
+  checkAborted$1(signal);
+  await store.flushAtomic();
+  const validation = validateFinalVisualAssignments({
+    plan,
+    assignments: store.getAll(),
+    config: mix,
+    approvedFallbackSceneIndices: approvedFallbackIndices,
+    aiImageMode
+  });
+  const completion = checkVisualCompletion(projectDir);
+  let completedAiCount = 0;
+  let completedStockCount = 0;
+  let googleFlowCount = 0;
+  let manualAiCount = 0;
+  let pexelsCount = 0;
+  let pixabayCount = 0;
+  let localCount = 0;
+  const planOwner = new Map(plan.scenes.map((s) => [s.sceneIndex, s.strategy]));
+  for (const a of store.getAll()) {
+    if (!planOwner.has(a.sceneIndex)) continue;
+    if (a.status !== "assigned" || !a.asset) continue;
+    const provider = a.asset.provider;
+    if (provider === "google-flow") {
+      completedAiCount++;
+      googleFlowCount++;
+    } else if (provider === "manual-ai") {
+      completedAiCount++;
+      manualAiCount++;
+    } else if (provider === "pexels") {
+      completedStockCount++;
+      pexelsCount++;
+    } else if (provider === "pixabay") {
+      completedStockCount++;
+      pixabayCount++;
+    } else {
+      completedStockCount++;
+      localCount++;
+    }
+  }
+  const failedAiFinal = validation.missingAiSceneIndices;
+  const needsAttention = !validation.valid || completion.missingScenes > 0 || failedAiFinal.length > 0;
+  const finalStatus = needsAttention ? "needs-attention" : "success";
+  logger.info(
+    `[VisualMixFinal] requestedAI=${aiScenes.length} requestedStock=${initialStockScenes.length} completedAI=${completedAiCount} completedStock=${completedStockCount} failedAI=${failedAiFinal.length} fallbackStock=${aiFallbackCount} status=${finalStatus} (googleFlow=${googleFlowCount} pexels=${pexelsCount} pixabay=${pixabayCount} local=${localCount})`
+  );
+  const phase2WallTimeMs = Date.now() - phase2StartTime;
+  let flowThrottleInfo = { maxConcurrent: 1, minIntervalS: 3, cooldownActive: false };
+  if (!deps?.skipFlowReadiness && !promptMode && aiScenes.length > 0) {
+    try {
+      const t = await googleFlowClient.getFlowThrottle();
+      flowThrottleInfo = {
+        maxConcurrent: t.maxConcurrent,
+        minIntervalS: t.minIntervalS,
+        cooldownActive: t.cooldownActive
+      };
+    } catch {
+    }
+  }
+  const countStage = (stage) => aiRes.failures.filter((f) => f.stage === stage).length;
+  const perfReport = {
+    aiImageMode,
+    resolvedProfile: profile,
+    failureBehavior,
+    requestedRatio: { ai: requestedAiPercent, stock: requestedStockPercent },
+    plannedRatio: { ai: aiScenes.length, stock: initialStockScenes.length },
+    requestedAiScenes: aiScenes.length,
+    requestedStockScenes: initialStockScenes.length,
+    completedAiScenes: completedAiCount,
+    completedStockScenes: completedStockCount,
+    failedAiScenes: failedAiFinal.length,
+    failedAiSceneIndices: failedAiFinal,
+    finalRatio: { ai: completedAiCount, stock: completedStockCount },
+    providerCounts: {
+      googleFlow: googleFlowCount,
+      manualAi: manualAiCount,
+      pexels: pexelsCount,
+      pixabay: pixabayCount,
+      local: localCount
+    },
+    totalScenes,
+    status: finalStatus,
+    aiCacheHits: aiRes.cached,
+    flowCalls: totalFlowCalls,
+    flowSuccessfulCalls: aiRes.newlyGenerated,
+    aiGenerationFailures: countStage("generation"),
+    aiExportFailures: countStage("export"),
+    aiQualityGateFailures: countStage("quality-gate"),
+    aiNormalizationFailures: countStage("normalization"),
+    stockFallbackAllowed: failureBehavior === "stock-fallback",
+    stockFallbackCount: aiFallbackCount,
+    aiFallbackCount,
+    strictModeBlockedStockCalls: strictModeBlockedStockScenes,
+    stockEngineInvocations,
+    stockSceneTargets: stockSceneTargetsTotal,
+    // Provider search calls are not individually instrumented; 0 is exact when the Stock engine never ran.
+    pexelsSearchCalls: stockEngineInvocations === 0 ? 0 : null,
+    pixabaySearchCalls: stockEngineInvocations === 0 ? 0 : null,
+    stockDownloadCount,
+    timings: {
+      phase2WallTimeMs,
+      aiBranchTimeMs,
+      stockBranchTimeMs,
+      totalAiGenerationTimeMs: aiRes.totalGenMs,
+      totalAiExportTimeMs: aiRes.totalExpMs,
+      totalAiNormalizationTimeMs: aiRes.totalNormMs
+    },
+    flowThrottleSettings: flowThrottleInfo,
+    ...promptMode ? {
+      manualAi: {
+        aiImageMode,
+        promptCount: manualPack?.scenes.length ?? 0,
+        promptGenerationMs,
+        manualExpected: aiScenes.length,
+        manualImported: manualAiCount,
+        // Human wait time (NOT compute): time spent waiting for the user's manual images.
+        manualWaitDurationMs: manualWaitMs,
+        stockSceneCount: initialStockScenes.length,
+        stockAcquisitionMs: stockBranchTimeMs,
+        stockCompletedWhileWaiting,
+        manualAiDirectorEnabled: !!visualDirectorMetrics,
+        manualAiDirectorModel: visualDirectorMetrics?.modelUsed,
+        manualAiDirectorGlobalMs: visualDirectorMetrics?.globalMs,
+        manualAiDirectorSceneMs: visualDirectorMetrics?.sceneMs,
+        manualAiDirectorCacheHit: visualDirectorMetrics?.cacheHit,
+        manualAiDirectorEnrichedCount: visualDirectorMetrics?.enrichedCount,
+        manualAiDirectorFallbackCount: visualDirectorMetrics?.fallbackCount,
+        manualAiOverlayCount: visualDirectorMetrics?.overlayCount,
+        manualAiAveragePromptWords: manualPack && manualPack.scenes.length > 0 ? Math.round(
+          manualPack.scenes.reduce(
+            (sum, s) => sum + s.prompt.split(/\s+/).filter(Boolean).length,
+            0
+          ) / manualPack.scenes.length
+        ) : 0
+      }
+    } : {}
+  };
+  fs__namespace.writeFileSync(
+    path__namespace.join(analysisDir, "visual-performance-report.json"),
+    JSON.stringify(perfReport, null, 2),
+    "utf-8"
+  );
+  const baseStats = {
+    totalScenes: completion.totalScenes,
+    assignedScenes: completion.assignedScenes,
+    downloadedScenes: completion.downloadedScenes,
+    aiGeneratedScenes: completedAiCount,
+    stockScenes: completedStockCount,
+    aiFallbackToStock: aiFallbackCount,
+    cachedAiScenes: aiRes.cached,
+    detectedProfile: isHealth ? "Health Explainer" : "General Documentary",
+    resolvedProfile: profile,
+    requestedAiPercent,
+    requestedStockPercent,
+    targetAiScenes: aiScenes.length,
+    targetStockScenes: initialStockScenes.length,
+    failureBehavior,
+    failedAiScenes: failedAiFinal.length,
+    failedAiSceneIndices: failedAiFinal
+  };
+  if (!validation.valid) {
+    const errorMsg = `VISUAL_MIX_STRICT_ASSIGNMENT_VIOLATION: ${validation.violations.map((v) => v.message).join("; ")}`;
+    logger.error(`[MixedVisualEngine] ${errorMsg}`);
+    return {
+      success: false,
+      needsAttention: true,
+      error: errorMsg,
+      stats: {
+        ...baseStats,
+        missingScenes: completion.missingScenes,
+        missingSceneIndices: completion.missingSceneIndices
+      }
+    };
+  }
+  if (needsAttention) {
+    let errorMsg;
+    if (promptMode && failedAiFinal.length > 0) {
+      errorMsg = `Manual AI images missing for scenes: ${failedAiFinal.join(", ")}. Import the missing images and run production again.`;
+    } else if (failedAiFinal.length > 0 && failureBehavior === "strict") {
+      const disconnected = aiRes.failures.some((f) => /FLOW_EXTENSION_DISCONNECTED/.test(f.reason));
+      const head = disconnected ? "Google Flow disconnected while generating AI visuals. Stock fallback is disabled because selected mix is strict. Completed AI images are preserved." : `${failedAiFinal.length} AI visuals failed and Stock fallback is disabled.`;
+      errorMsg = `${head}
+
+Failed scenes:
+${failedAiFinal.join(", ")}
+
+Requested Visual Mix:
+AI ${requestedAiPercent}%
+Stock ${requestedStockPercent}%
+
+Action:
+Retry failed AI visuals.`;
+    } else {
+      errorMsg = `${completion.missingScenes}/${completion.totalScenes} scenes lack usable visual media (missing: ${completion.missingSceneIndices.join(", ")}).`;
+    }
+    logger.warn(`[MixedVisualEngine] Needs attention: ${errorMsg}`);
+    return {
+      success: false,
+      needsAttention: true,
+      error: errorMsg,
+      stats: {
+        ...baseStats,
+        missingScenes: completion.missingScenes,
+        missingSceneIndices: completion.missingSceneIndices
+      }
+    };
+  }
+  const completionMsg = `${isHealth ? "Health" : "Mixed"} visuals completed — ${completion.totalScenes}/${completion.totalScenes} scenes ready · ${completedAiCount} AI stills · ${completedStockCount} stock`;
+  logger.info(`[MixedVisualEngine] ${completionMsg}`);
+  onProgress(completionMsg, 1, promptMode ? { manualAiWait: null } : void 0);
+  return {
+    success: true,
+    stats: {
+      ...baseStats,
+      missingScenes: 0,
+      failedScenes: 0,
+      percent: 100,
+      completionMessage: completionMsg
+    }
+  };
+}
+const CONTENT_PROFILE_SCHEMA_VERSION = 1;
+const ANATOMICAL_ORGAN_SIGNALS = [
+  "liver",
+  "kidney",
+  "kidneys",
+  "heart",
+  "brain",
+  "gut",
+  "lung",
+  "lungs",
+  "pancreas",
+  "stomach",
+  "intestine",
+  "intestines",
+  "colon",
+  "gallbladder",
+  "spleen",
+  "artery",
+  "arteries",
+  "vein",
+  "veins",
+  "bloodstream",
+  "blood vessel",
+  "blood vessels",
+  "neuron",
+  "neurons",
+  "synapse",
+  "synapses",
+  "neurotransmitter",
+  "microbiome",
+  "microbiota",
+  "cells",
+  "cellular",
+  "mitochondria",
+  "dna",
+  "rna"
+];
+const PHYSIOLOGICAL_MECHANISM_SIGNALS = [
+  "physiology",
+  "physiological",
+  "metabolism",
+  "metabolic",
+  "insulin",
+  "glucose",
+  "blood sugar",
+  "glycogen",
+  "insulin resistance",
+  "blood pressure",
+  "hypertension",
+  "cholesterol",
+  "triglyceride",
+  "inflammation",
+  "inflammatory",
+  "oxidation",
+  "oxidative stress",
+  "hormone",
+  "hormones",
+  "endocrine",
+  "cortisol",
+  "adrenaline",
+  "melatonin",
+  "dopamine",
+  "serotonin",
+  "digestive process",
+  "digestion",
+  "nutrient absorption",
+  "circadian rhythm",
+  "rem sleep",
+  "deep sleep",
+  "sleep cycle",
+  "autophagy",
+  "apoptosis",
+  "immune system",
+  "pathogen",
+  "antibody",
+  "antibodies"
+];
+const CLINICAL_MEDICAL_SIGNALS = [
+  "cardiovascular",
+  "gastrointestinal",
+  "neurological",
+  "biomarker",
+  "clinical trial",
+  "clinical trials",
+  "pathology",
+  "pathological",
+  "symptom",
+  "symptoms",
+  "medical diagnosis",
+  "human anatomy",
+  "anatomical structure",
+  "supplements",
+  "micronutrient",
+  "micronutrients",
+  "electrolyte",
+  "electrolytes"
+];
+const FALSE_POSITIVE_TRIGGERS = [
+  /\bfinancial health\b/i,
+  /\beconomic health\b/i,
+  /\bhealth of the economy\b/i,
+  /\bcompany health\b/i,
+  /\bbusiness health\b/i,
+  /\bmarket health\b/i,
+  /\bcommunity health\b/i,
+  /\bpolitical health\b/i,
+  /\bsystem health\b/i
+];
+function getContentProfilePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "content-profile.json");
+}
+function loadContentProfileArtifact(projectDir) {
+  const filePath = getContentProfilePath(projectDir);
+  if (!fs__namespace.existsSync(filePath)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && (parsed.resolvedProfile === "health" || parsed.resolvedProfile === "general")) {
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+}
+function saveContentProfileArtifact(projectDir, detection) {
+  const analysisDir = path__namespace.join(projectDir, "analysis");
+  if (!fs__namespace.existsSync(analysisDir)) {
+    fs__namespace.mkdirSync(analysisDir, { recursive: true });
+  }
+  const filePath = getContentProfilePath(projectDir);
+  const tempPath = `${filePath}.${Date.now()}.tmp`;
+  fs__namespace.writeFileSync(tempPath, JSON.stringify(detection, null, 2), "utf-8");
+  fs__namespace.renameSync(tempPath, filePath);
+}
+function evaluateContentProfileSemantics(params) {
+  const { scriptText = "", scenes = [], globalContext } = params;
+  const sceneTexts = scenes.map((s) => `${s.narrativeText ?? s.narration ?? ""} ${s.visualIntent ?? s.visualDescription ?? ""}`);
+  const combinedText = `${scriptText} ${sceneTexts.join(" ")}`.toLowerCase();
+  const gSubject = (globalContext?.primarySubject || "").toLowerCase();
+  const gThesis = (globalContext?.centralThesis || "").toLowerCase();
+  const gAnchors = (globalContext?.exactTopicAnchors || []).map((a) => a.toLowerCase()).join(" ");
+  const gContextCombined = `${gSubject} ${gThesis} ${gAnchors}`;
+  const foundSignals = /* @__PURE__ */ new Set();
+  const allSignalList = [
+    ...ANATOMICAL_ORGAN_SIGNALS,
+    ...PHYSIOLOGICAL_MECHANISM_SIGNALS,
+    ...CLINICAL_MEDICAL_SIGNALS
+  ];
+  let totalSignalOccurrences = 0;
+  for (const signal of allSignalList) {
+    const regex = new RegExp(`\\b${signal.replace(/\s+/g, "\\s+")}\\b`, "gi");
+    const matchesInText = combinedText.match(regex);
+    const matchesInGlobal = gContextCombined.match(regex);
+    const count = (matchesInText?.length || 0) + (matchesInGlobal?.length ? matchesInGlobal.length * 2 : 0);
+    if (count > 0) {
+      foundSignals.add(signal);
+      totalSignalOccurrences += count;
+    }
+  }
+  let falsePositiveHits = 0;
+  for (const fpRegex of FALSE_POSITIVE_TRIGGERS) {
+    if (fpRegex.test(combinedText)) {
+      falsePositiveHits++;
+    }
+  }
+  const detectedSignals = Array.from(foundSignals);
+  const reasons = [];
+  const organHits = ANATOMICAL_ORGAN_SIGNALS.filter((s) => foundSignals.has(s));
+  const mechanismHits = PHYSIOLOGICAL_MECHANISM_SIGNALS.filter((s) => foundSignals.has(s));
+  const clinicalHits = CLINICAL_MEDICAL_SIGNALS.filter((s) => foundSignals.has(s));
+  const isGlobalSubjectMedical = ANATOMICAL_ORGAN_SIGNALS.some((s) => gSubject.includes(s)) || PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => gSubject.includes(s));
+  const hasStrongOrganPresence = organHits.length >= 2;
+  const hasDiverseSignals = organHits.length > 0 && mechanismHits.length > 0 || detectedSignals.length >= 4;
+  const isHeavySignalDensity = totalSignalOccurrences >= 5 && detectedSignals.length >= 2;
+  const isHealth = (hasDiverseSignals || isGlobalSubjectMedical || hasStrongOrganPresence && isHeavySignalDensity) && !(falsePositiveHits > 0 && detectedSignals.length < 3);
+  if (isHealth) {
+    if (organHits.length > 0) {
+      reasons.push(`Identified biological/anatomical organs: ${organHits.slice(0, 5).join(", ")}`);
+    }
+    if (mechanismHits.length > 0) {
+      reasons.push(`Detected physiological and metabolic mechanisms: ${mechanismHits.slice(0, 5).join(", ")}`);
+    }
+    if (clinicalHits.length > 0) {
+      reasons.push(`Referenced clinical or medical context: ${clinicalHits.slice(0, 4).join(", ")}`);
+    }
+    if (isGlobalSubjectMedical) {
+      reasons.push(`Global script context primary subject (${globalContext?.primarySubject}) centers on human physiology`);
+    }
+    if (reasons.length === 0) {
+      reasons.push(`Detected ${detectedSignals.length} distinct biological/physiological signals throughout script`);
+    }
+    const confidence2 = Math.min(0.98, Math.max(0.82, 0.8 + detectedSignals.length * 0.03 + (isGlobalSubjectMedical ? 0.08 : 0)));
+    return {
+      resolvedProfile: "health",
+      confidence: Math.round(confidence2 * 100) / 100,
+      reasons,
+      detectedSignals
+    };
+  }
+  if (falsePositiveHits > 0) {
+    reasons.push("Health terminology appears in metaphorical or financial/economic context");
+  } else if (detectedSignals.length === 0) {
+    reasons.push("No anatomical organs, clinical terms or physiological mechanisms detected");
+  } else {
+    reasons.push(
+      `Isolated mentions (${detectedSignals.slice(0, 3).join(", ")}) insufficient to establish medical/physiological focus`
+    );
+  }
+  reasons.push("Script narrative aligns with general documentary style (history, society, tech, culture, nature, or lifestyle)");
+  const confidence = Math.min(0.98, Math.max(0.88, 0.98 - detectedSignals.length * 0.03));
+  return {
+    resolvedProfile: "general",
+    confidence: Math.round(confidence * 100) / 100,
+    reasons,
+    detectedSignals
+  };
+}
+async function detectOrResolveContentProfile(params) {
+  const { projectDir, forceRefresh = false } = params;
+  const mode = params.mode ?? "auto";
+  if (mode === "health" || mode === "general") {
+    const overrideDetection = {
+      schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
+      mode,
+      resolvedProfile: mode,
+      confidence: 1,
+      reasons: [`Explicit user profile mode override: ${mode}`],
+      detectedSignals: [],
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    saveContentProfileArtifact(projectDir, overrideDetection);
+    logger.info(`[ContentProfile] Explicit profile override applied: ${mode}`);
+    return overrideDetection;
+  }
+  if (!forceRefresh) {
+    const cached = loadContentProfileArtifact(projectDir);
+    if (cached && cached.mode === "auto") {
+      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`);
+      return cached;
+    }
+  }
+  let scriptText = params.scriptText ?? "";
+  if (!scriptText) {
+    const possibleScriptPaths = [
+      path__namespace.join(projectDir, "source", "script.txt"),
+      path__namespace.join(projectDir, "source", "script.md"),
+      path__namespace.join(projectDir, "analysis", "script.txt")
+    ];
+    for (const p of possibleScriptPaths) {
+      if (fs__namespace.existsSync(p)) {
+        try {
+          scriptText = fs__namespace.readFileSync(p, "utf-8");
+          break;
+        } catch {
+        }
+      }
+    }
+  }
+  let rawScenes = params.rawScenes;
+  if (!rawScenes) {
+    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+    if (fs__namespace.existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+        const scenes = [];
+        for (const ch of plan.chapters || []) {
+          const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+          for (const seq of seqs) {
+            for (const sc of seq.scenes || []) {
+              scenes.push({
+                sceneIndex: sc.sceneIndex,
+                narrativeText: sc.narrativeText ?? sc.narration ?? "",
+                visualIntent: sc.visualIntent ?? sc.visualDescription ?? ""
+              });
+            }
+          }
+        }
+        rawScenes = scenes;
+      } catch {
+      }
+    }
+  }
+  let globalContext = params.globalContext;
+  if (!globalContext) {
+    const ctxPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+    if (fs__namespace.existsSync(ctxPath)) {
+      try {
+        globalContext = JSON.parse(fs__namespace.readFileSync(ctxPath, "utf-8"));
+      } catch {
+      }
+    }
+  }
+  const evaluation = evaluateContentProfileSemantics({
+    scriptText,
+    scenes: rawScenes,
+    globalContext
+  });
+  const detection = {
+    schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
+    mode: "auto",
+    resolvedProfile: evaluation.resolvedProfile,
+    confidence: evaluation.confidence,
+    reasons: evaluation.reasons,
+    detectedSignals: evaluation.detectedSignals,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  saveContentProfileArtifact(projectDir, detection);
+  logger.info(
+    `[ContentProfile] Auto-detected profile: ${detection.resolvedProfile} (confidence=${detection.confidence}, signals=[${detection.detectedSignals.slice(0, 6).join(", ")}])`
+  );
+  return detection;
 }
 function checkAborted(signal) {
   if (signal?.aborted) {
@@ -16887,6 +23512,23 @@ async function runGlobalContextStage(options, onProgress, signal) {
 }
 async function runStockSearchStage(options, onProgress, signal) {
   checkAborted(signal);
+  const mix = resolveVisualMixConfig(options);
+  if (mix.mode === "custom-mix") {
+    const mode = options.contentProfileMode ?? resolveContentProfileMode(options);
+    onProgress("Resolving content profile...", 0.02);
+    const detection = await detectOrResolveContentProfile({
+      projectDir: options.projectDir,
+      mode
+    });
+    const profile = detection.resolvedProfile;
+    return runMixedVisualEngine({
+      options,
+      profile,
+      mix,
+      onProgress,
+      signal
+    });
+  }
   if (!isGlobalContextValid(options.projectDir)) {
     return {
       success: false,
@@ -16995,7 +23637,9 @@ async function runStockSearchStage(options, onProgress, signal) {
 async function runAudioSearchStage(options, onProgress, signal) {
   checkAborted(signal);
   const audioPlanPath = path__namespace.join(options.projectDir, "analysis", "audio-plan.json");
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic)) {
+  const profileArtifact = loadContentProfileArtifact(options.projectDir);
+  const isHealthAudio = profileArtifact ? profileArtifact.resolvedProfile === "health" : options.contentProfileMode === "health" || options.contentType === "health";
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? "health" : "default")) {
     const cachedPlan = loadAudioPlan(options.projectDir);
     if (cachedPlan) {
       const downloadedMusicCount2 = cachedPlan.sections.filter(
@@ -17025,8 +23669,47 @@ async function runAudioSearchStage(options, onProgress, signal) {
     }
   );
   checkAborted(signal);
+  if (isHealthAudio) {
+    const healthPlanPath = path__namespace.join(options.projectDir, "analysis", "health-visual-plan.json");
+    if (fs__namespace.existsSync(healthPlanPath)) {
+      try {
+        const healthPlan = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+        const sfxCues = /* @__PURE__ */ new Map();
+        const sfxScenes = [];
+        for (const sc of healthPlan.scenes || []) {
+          if (sc.sfxCue) {
+            sfxCues.set(sc.sceneIndex, sc.sfxCue);
+            sfxScenes.push({
+              sceneIndex: sc.sceneIndex,
+              startTime: sc.startTime,
+              endTime: sc.endTime,
+              duration: sc.duration,
+              category: sc.category,
+              narration: sc.narration,
+              visualIntent: sc.visualIntent,
+              motionPreset: sc.motionPreset
+            });
+          }
+        }
+        if (sfxCues.size > 0) {
+          onProgress("Planning and downloading Health cinematic SFX...", 0.9);
+          await HealthSfxDirector.applyHealthSfxToAudioPlan(
+            options.projectDir,
+            sfxCues,
+            sfxScenes,
+            options.openverseToken
+          );
+        }
+      } catch (err) {
+        logger.warn(`[HealthSFX] Failed to apply Health SFX: ${err}`);
+      }
+    }
+  }
   const plan = loadAudioPlan(options.projectDir);
   const downloadedMusicCount = plan?.sections.filter(
+    (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+  ).length ?? 0;
+  const downloadedSfxCount = plan?.sfxAssignments.filter(
     (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
   ).length ?? 0;
   if (downloadedMusicCount === 0 && options.requireBackgroundMusic) {
@@ -17040,16 +23723,16 @@ async function runAudioSearchStage(options, onProgress, signal) {
   if (downloadedMusicCount === 0) {
     warning = "No background music tracks were downloaded. Video will render voiceover-only.";
   }
-  onProgress(`Audio plan ready (${downloadedMusicCount} music tracks)`, 1);
+  onProgress(`Audio plan ready (${downloadedMusicCount} music tracks, ${downloadedSfxCount} SFX)`, 1);
   return {
     success: true,
     warning,
     artifactPath: audioPlanPath,
-    data: result,
+    data: plan || result,
     stats: {
-      sectionsCount: result.sections.length,
+      sectionsCount: plan?.sections.length ?? result.sections.length,
       downloadedMusicCount,
-      sfxCount: result.sfxAssignments.length
+      sfxCount: plan?.sfxAssignments.length ?? result.sfxAssignments.length
     }
   };
 }
@@ -17858,7 +24541,7 @@ class PipelineOrchestrator {
         savePipelineStateAtomic(norm2, state2);
         this.broadcastProgress(state2);
         const stageStartTime = Date.now();
-        const onProgress = (message, progress) => {
+        const onProgress = (message, progress, meta) => {
           if (signal.aborted) return;
           if (state2.runId !== currentRunId || state2.stages[stage]?.status === "completed") {
             logger.debug(`[Pipeline] Ignoring late progress event for stage ${stage}`);
@@ -17866,6 +24549,10 @@ class PipelineOrchestrator {
           }
           state2.stages[stage].message = message;
           state2.stages[stage].progress = Math.min(Math.max(progress, 0), 1);
+          if (meta && "manualAiWait" in meta) {
+            if (meta.manualAiWait) state2.stages[stage].manualAiWait = meta.manualAiWait;
+            else delete state2.stages[stage].manualAiWait;
+          }
           state2.version = (state2.version ?? 0) + 1;
           state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
           if (state2.lease) {
@@ -17928,6 +24615,7 @@ class PipelineOrchestrator {
             error: msg
           };
         }
+        if (state2.stages[stage]) delete state2.stages[stage].manualAiWait;
         if (stageResult.needsAttention) {
           logger.warn(`[Pipeline] Stage ${stage} requires user attention: ${stageResult.error}`);
           state2.stages[stage].status = "warning";
@@ -18104,7 +24792,10 @@ function registerProjectHandlers(ipcMain) {
           imagesFolder: null,
           videosFolder: null,
           musicFolder: null,
-          sfxFolder: null
+          sfxFolder: null,
+          contentType: "default",
+          contentProfileMode: "auto",
+          visualSourceMode: "legacy"
         },
         stats: {
           totalImages: 0,
@@ -18140,6 +24831,11 @@ function registerProjectHandlers(ipcMain) {
         const state2 = JSON.parse(
           fs__namespace.readFileSync(statePath, "utf-8")
         );
+        if (state2.inputs) {
+          state2.inputs.contentType ??= "default";
+          state2.inputs.contentProfileMode ??= resolveContentProfileMode(state2.inputs);
+          state2.inputs.visualSourceMode ??= "legacy";
+        }
         logger.info(`Project opened: ${state2.name}`, { projectDir });
         scheduleRenderAutoResume(projectDir, {
           resumePipeline: (dir) => pipelineOrchestrator.resumePipeline(dir),
@@ -18230,7 +24926,7 @@ const IMAGE_EXTS = /* @__PURE__ */ new Set([".jpg", ".jpeg", ".png", ".webp", ".
 const VIDEO_EXTS = /* @__PURE__ */ new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"]);
 const AUDIO_EXTS = /* @__PURE__ */ new Set([".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac", ".opus"]);
 async function probeMedia(filePath) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject2) => {
     const { spawn } = require("child_process");
     const proc = spawn(FFPROBE_PATH, [
       "-v",
@@ -18248,17 +24944,17 @@ async function probeMedia(filePath) {
     proc.on("close", (code) => {
       if (code !== 0) {
         ffmpegLogger.error(`ffprobe failed for ${filePath}: ${stderr}`);
-        reject(new Error(`ffprobe exited ${code}: ${stderr.slice(0, 200)}`));
+        reject2(new Error(`ffprobe exited ${code}: ${stderr.slice(0, 200)}`));
       } else {
         try {
           resolve(JSON.parse(stdout));
         } catch {
-          reject(new Error("Failed to parse ffprobe JSON"));
+          reject2(new Error("Failed to parse ffprobe JSON"));
         }
       }
     });
     proc.on("error", (err) => {
-      reject(new Error(`Failed to spawn ffprobe: ${err.message}`));
+      reject2(new Error(`Failed to spawn ffprobe: ${err.message}`));
     });
   });
 }
@@ -18677,10 +25373,10 @@ function registerRenderHandlers(ipcMain) {
       const qaPath = path__namespace.join(params.projectDir, "analysis", "render-qa.json");
       const preflightPath = path__namespace.join(params.projectDir, "analysis", "render-preflight.json");
       if (fs__namespace.existsSync(qaPath)) {
-        return readJsonSafe(qaPath, null);
+        return readJsonSafe$1(qaPath, null);
       }
       if (fs__namespace.existsSync(preflightPath)) {
-        return readJsonSafe(preflightPath, null);
+        return readJsonSafe$1(preflightPath, null);
       }
       return null;
     }
@@ -18731,7 +25427,7 @@ async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
     saveStockCandidates(projectDir, candidatesStore);
     const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
     if (fs__namespace.existsSync(assignmentsPath)) {
-      const assignments = readJsonSafe(assignmentsPath, []);
+      const assignments = readJsonSafe$1(assignmentsPath, []);
       const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
       if (idx >= 0) {
         assignments[idx].asset = asset;
@@ -18747,7 +25443,7 @@ async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
     }
     const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
     if (fs__namespace.existsSync(planPath)) {
-      const plan = readJsonSafe(planPath, {});
+      const plan = readJsonSafe$1(planPath, {});
       for (const ch of plan.chapters ?? []) {
         const seqs = ch.sequences ?? ch.chapters_seq ?? [];
         for (const seq of seqs) {
@@ -18789,7 +25485,7 @@ function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
     }
     const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
     if (fs__namespace.existsSync(assignmentsPath)) {
-      const assignments = readJsonSafe(assignmentsPath, []);
+      const assignments = readJsonSafe$1(assignmentsPath, []);
       const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
       if (idx >= 0) {
         assignments[idx].approvalStatus = "approved";
@@ -18808,7 +25504,7 @@ function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
 }
 function calculateStoryboardSummary(projectDir) {
   const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe(assignmentsPath, []) : [];
+  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe$1(assignmentsPath, []) : [];
   const totalScenes = assignments.length;
   let assignedScenes = 0;
   let approvedScenes = 0;
@@ -19138,7 +25834,7 @@ function registerStockHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.CLAIM_GET_LEDGER, (_event, projectDir) => {
     try {
       const ledgerPath = getClaimLedgerPath(projectDir);
-      return readJsonSafe(ledgerPath, null);
+      return readJsonSafe$1(ledgerPath, null);
     } catch (err) {
       logger.error(`[ClaimIPC] Failed to load claim ledger: ${String(err)}`);
       return null;
@@ -19161,7 +25857,7 @@ function registerStockHandlers(ipcMain) {
     (_event, params) => {
       try {
         const ledgerPath = getClaimLedgerPath(params.projectDir);
-        const ledger = readJsonSafe(ledgerPath, null);
+        const ledger = readJsonSafe$1(ledgerPath, null);
         if (!ledger) return { success: false, error: "Ledger not found" };
         ledger.sources = ledger.sources.filter((s) => s.id !== params.sourceId);
         for (const claim of ledger.claims) {
@@ -19290,15 +25986,15 @@ function registerAudioHandlers(ipcMain) {
 }
 const ffmpegPath = require("ffmpeg-static");
 function ffmpegRun(args) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve, reject2) => {
     const proc = cp.spawn(ffmpegPath, args, { windowsHide: true });
     const stderr = [];
     proc.stderr.on("data", (d) => stderr.push(d.toString()));
     proc.on("close", (code) => {
       if (code === 0) resolve();
-      else reject(new Error(`FFmpeg exited ${code}: ${stderr.slice(-3).join("")}`));
+      else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-3).join("")}`));
     });
-    proc.on("error", reject);
+    proc.on("error", reject2);
   });
 }
 function registerCaptionHandlers(ipcMain) {
@@ -19618,6 +26314,386 @@ function registerPipelineHandlers(ipcMain) {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[PipelineIPC] Recover failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
+function parseSceneNumberFromFilename(fileName) {
+  const base = path__namespace.basename(fileName, path__namespace.extname(fileName)).trim();
+  const m = /^(?:scene|s)[\s_-]*0*(\d+)(?!\d)/i.exec(base);
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+function naturalCompare(a, b) {
+  return a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
+}
+const defaultImageNormalizer = (sourcePath, destPath, width, height) => new Promise((resolve, reject2) => {
+  const ffmpegPath2 = require("ffmpeg-static");
+  const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`;
+  const proc = cp.spawn(ffmpegPath2, ["-y", "-i", sourcePath, "-vf", vf, "-frames:v", "1", destPath], {
+    windowsHide: true
+  });
+  const stderr = [];
+  proc.stderr.on("data", (d) => stderr.push(d.toString()));
+  proc.on("error", reject2);
+  proc.on("close", (code) => {
+    if (code === 0) resolve();
+    else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-4).join("").slice(-300)}`));
+  });
+});
+function loadOwnership(projectDir) {
+  const map = /* @__PURE__ */ new Map();
+  try {
+    const p = getVisualMixPlanFilePath(projectDir);
+    if (!fs__namespace.existsSync(p)) return map;
+    const plan = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    for (const s of plan.scenes ?? []) map.set(s.sceneIndex, s.strategy);
+  } catch {
+  }
+  return map;
+}
+function reject(filePath, code, message, extra) {
+  return { filePath, fileName: path__namespace.basename(filePath), code, message, ...extra };
+}
+function planManualAiImport(params) {
+  const { projectDir } = params;
+  const rejections = [];
+  const mappings = [];
+  const files = Array.from(new Set(params.filePaths.map((f) => path__namespace.resolve(f))));
+  const pack = loadManualAiPromptPack(projectDir);
+  if (!pack) {
+    for (const f of files) {
+      rejections.push(reject(f, "NO_PROMPT_PACK", "No prompt pack exists yet. Start production in Prompt mode first."));
+    }
+    return { mappings, rejections, needsConfirmation: false, missingCount: 0 };
+  }
+  const status = evaluateManualAiStatus({ projectDir, pack });
+  const packScenes = new Set(pack.scenes.map((e) => e.sceneIndex));
+  const ownership = loadOwnership(projectDir);
+  const readyScenes = new Set(status.rows.filter((r) => r.status === "ready").map((r) => r.sceneIndex));
+  const missingSorted = [...status.missingSceneIndices].sort((a, b) => a - b);
+  const supported = [];
+  for (const f of files) {
+    if (!isSupportedImageExtension(f)) {
+      rejections.push(reject(f, "UNSUPPORTED_TYPE", `Unsupported file type "${path__namespace.extname(f) || "none"}". Use PNG, JPG, JPEG or WEBP.`));
+    } else {
+      supported.push(f);
+    }
+  }
+  const numbered = supported.map((f) => ({ f, n: parseSceneNumberFromFilename(f) }));
+  const noneNumbered = numbered.length > 0 && numbered.every((x) => x.n === null);
+  let needsConfirmation = false;
+  const candidates = [];
+  if (noneNumbered) {
+    const sortedFiles = [...supported].sort((a, b) => naturalCompare(path__namespace.basename(a), path__namespace.basename(b)));
+    if (sortedFiles.length === missingSorted.length) {
+      sortedFiles.forEach(
+        (f, i) => candidates.push({ filePath: f, fileName: path__namespace.basename(f), sceneIndex: missingSorted[i], via: "natural-sort" })
+      );
+      needsConfirmation = true;
+    } else {
+      for (const f of sortedFiles) {
+        rejections.push(
+          reject(
+            f,
+            "NO_SCENE_NUMBER",
+            `File has no scene number and ${sortedFiles.length} files do not match the ${missingSorted.length} missing AI images. Name files like ${expectedFilenameForScene(missingSorted[0] ?? 1)} or select exactly ${missingSorted.length} files.`
+          )
+        );
+      }
+    }
+  } else {
+    for (const x of numbered) {
+      if (x.n === null) {
+        rejections.push(
+          reject(x.f, "NO_SCENE_NUMBER", `File name has no scene number. Rename it like ${expectedFilenameForScene(missingSorted[0] ?? 1)}.`)
+        );
+      } else {
+        candidates.push({ filePath: x.f, fileName: path__namespace.basename(x.f), sceneIndex: x.n, via: "filename" });
+      }
+    }
+  }
+  const byScene = /* @__PURE__ */ new Map();
+  for (const c of candidates) {
+    const list = byScene.get(c.sceneIndex) ?? [];
+    list.push(c);
+    byScene.set(c.sceneIndex, list);
+  }
+  for (const [sceneIndex, list] of byScene) {
+    if (list.length > 1) {
+      for (const c2 of list) {
+        rejections.push(
+          reject(c2.filePath, "DUPLICATE_SCENE", `Scene ${sceneIndex} has ${list.length} files in this import (${list.map((x) => x.fileName).join(", ")}). Keep only one.`, { sceneIndex })
+        );
+      }
+      continue;
+    }
+    const c = list[0];
+    const strategy = ownership.get(sceneIndex);
+    if (!packScenes.has(sceneIndex)) {
+      if (strategy === "stock") {
+        rejections.push(reject(c.filePath, "NOT_AI_OWNED", `Scene ${sceneIndex} is not an AI-owned scene (it uses real footage).`, { sceneIndex }));
+      } else {
+        rejections.push(reject(c.filePath, "UNKNOWN_SCENE", `Scene ${sceneIndex} does not exist in this project's AI prompt pack.`, { sceneIndex }));
+      }
+      continue;
+    }
+    if (readyScenes.has(sceneIndex) && !params.replaceExisting) {
+      rejections.push(reject(c.filePath, "ALREADY_IMPORTED", `Scene ${sceneIndex} already has an image. Choose "Replace" to overwrite it.`, { sceneIndex }));
+      continue;
+    }
+    mappings.push(c);
+  }
+  mappings.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  return { mappings, rejections, needsConfirmation: needsConfirmation && mappings.length > 0, missingCount: missingSorted.length };
+}
+async function commitManualAiImport(params) {
+  const { projectDir } = params;
+  const normalizer = params.normalizer ?? defaultImageNormalizer;
+  const rejections = [];
+  const imported = [];
+  const pack = loadManualAiPromptPack(projectDir);
+  if (!pack) {
+    for (const m of params.mappings) {
+      rejections.push(reject(m.filePath, "NO_PROMPT_PACK", "No prompt pack exists yet.", { sceneIndex: m.sceneIndex }));
+    }
+    return { imported, rejections, status: evaluateManualAiStatus({ projectDir, pack: null }) };
+  }
+  const target = resolutionDims(pack.outputResolution);
+  const entryByScene = new Map(pack.scenes.map((e) => [e.sceneIndex, e]));
+  const ownership = loadOwnership(projectDir);
+  const counts = /* @__PURE__ */ new Map();
+  for (const m of params.mappings) counts.set(m.sceneIndex, (counts.get(m.sceneIndex) ?? 0) + 1);
+  const outDir = getManualAiAssetsDir(projectDir);
+  fs__namespace.mkdirSync(outDir, { recursive: true });
+  const countsFn = (manifest) => {
+    const s = evaluateManualAiStatus({ projectDir, pack, manifest });
+    return { expected: s.expected, ready: s.ready };
+  };
+  for (const m of [...params.mappings].sort((a, b) => a.sceneIndex - b.sceneIndex)) {
+    const sceneIndex = m.sceneIndex;
+    const entry = entryByScene.get(sceneIndex);
+    if ((counts.get(sceneIndex) ?? 0) > 1) {
+      rejections.push(reject(m.filePath, "DUPLICATE_SCENE", `Scene ${sceneIndex} appears more than once in this import.`, { sceneIndex }));
+      continue;
+    }
+    if (!entry) {
+      const code = ownership.get(sceneIndex) === "stock" ? "NOT_AI_OWNED" : "UNKNOWN_SCENE";
+      rejections.push(
+        reject(
+          m.filePath,
+          code,
+          code === "NOT_AI_OWNED" ? `Scene ${sceneIndex} is not an AI-owned scene (it uses real footage).` : `Scene ${sceneIndex} does not exist in this project's AI prompt pack.`,
+          { sceneIndex }
+        )
+      );
+      continue;
+    }
+    const before = evaluateManualAiStatus({ projectDir, pack });
+    const alreadyReady = before.rows.find((r) => r.sceneIndex === sceneIndex)?.status === "ready";
+    if (alreadyReady && !params.replaceExisting) {
+      rejections.push(reject(m.filePath, "ALREADY_IMPORTED", `Scene ${sceneIndex} already has an image.`, { sceneIndex }));
+      continue;
+    }
+    const validation = validateImageFile(m.filePath, target);
+    if (!validation.ok) {
+      rejections.push(reject(m.filePath, validation.code ?? "UNREADABLE", validation.message ?? "Invalid image.", { sceneIndex }));
+      continue;
+    }
+    if (validation.lowResolution && !params.allowLowResolution) {
+      rejections.push(
+        reject(
+          m.filePath,
+          "LOW_RESOLUTION",
+          `LOW RESOLUTION: ${validation.width}x${validation.height} is below the selected ${pack.outputResolution} target ${target.width}x${target.height}. Replace it or choose "Use Anyway".`,
+          { sceneIndex, width: validation.width, height: validation.height }
+        )
+      );
+      continue;
+    }
+    const finalName = expectedFilenameForScene(sceneIndex);
+    const finalPath = path__namespace.join(outDir, finalName);
+    const tmpPath = path__namespace.join(outDir, `.tmp_${process.pid}_${Date.now()}_${sceneIndex}.png`);
+    try {
+      await normalizer(m.filePath, tmpPath, target.width, target.height);
+      const outDims = probeImageFileDimensions(tmpPath);
+      if (!outDims || outDims.width !== target.width || outDims.height !== target.height) {
+        throw new Error(`Normalized image is ${outDims ? `${outDims.width}x${outDims.height}` : "unreadable"}, expected ${target.width}x${target.height}`);
+      }
+      fs__namespace.renameSync(tmpPath, finalPath);
+    } catch (err) {
+      try {
+        if (fs__namespace.existsSync(tmpPath)) fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+      rejections.push(
+        reject(m.filePath, "NORMALIZE_FAILED", `Could not process image (it may be corrupted): ${err instanceof Error ? err.message : String(err)}`, { sceneIndex })
+      );
+      continue;
+    }
+    const warnings = [...validation.warnings];
+    if (validation.lowResolution) warnings.push("LOW_RESOLUTION_ACCEPTED");
+    const record = {
+      sceneIndex,
+      promptHash: entry.promptHash,
+      status: "ready",
+      sourcePath: m.filePath,
+      localPath: finalPath,
+      width: target.width,
+      height: target.height,
+      sourceWidth: validation.width,
+      sourceHeight: validation.height,
+      importedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      lowResolution: validation.lowResolution || void 0,
+      warnings: warnings.length > 0 ? warnings : void 0
+    };
+    await upsertManualAiRecord(projectDir, record, countsFn);
+    logger.info(`[ManualAI] Imported Scene ${sceneIndex} -> ${finalName}`);
+    imported.push({
+      sceneIndex,
+      fileName: finalName,
+      localPath: finalPath,
+      width: target.width,
+      height: target.height,
+      warnings
+    });
+  }
+  const status = evaluateManualAiStatus({ projectDir, pack });
+  logger.info(`[ManualAI] Ready ${status.ready}/${status.expected}`);
+  manualAiAssetGate.notify(projectDir);
+  return { imported, rejections, status };
+}
+function listImagesInFolder(folder) {
+  try {
+    return fs__namespace.readdirSync(folder, { withFileTypes: true }).filter((d) => d.isFile() && MANUAL_AI_SUPPORTED_EXTENSIONS.includes(path__namespace.extname(d.name).toLowerCase())).map((d) => path__namespace.join(folder, d.name));
+  } catch {
+    return [];
+  }
+}
+function registerManualAiHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_STATUS, async (_event, params) => {
+    try {
+      if (!params?.projectDir) return null;
+      const norm2 = normalizeProjectDir(params.projectDir);
+      logger.debug(`[ManualAI:GetStatus] projectDir=${norm2}`);
+      return getManualAiStatus(norm2);
+    } catch (err) {
+      logger.error(`[ManualAI-IPC] GetStatus failed: ${String(err)}`);
+      return null;
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, async (_event, params) => {
+    try {
+      if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+      const norm2 = normalizeProjectDir(params.projectDir);
+      const text = readManualAiPromptText(norm2);
+      if (text === null) return { success: false, error: "No prompt pack exists yet." };
+      return { success: true, text };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, async (_event, params) => {
+    try {
+      if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+      const norm2 = normalizeProjectDir(params.projectDir);
+      const text = readManualAiPromptText(norm2);
+      if (text === null) return { success: false, error: "No prompt pack exists yet." };
+      const opts = {
+        title: "Export AI image prompts",
+        defaultPath: path__namespace.join(norm2, "manual-ai-prompts.txt"),
+        filters: [{ name: "Text", extensions: ["txt"] }]
+      };
+      const win = electron.BrowserWindow.getFocusedWindow();
+      const res = win ? await electron.dialog.showSaveDialog(win, opts) : await electron.dialog.showSaveDialog(opts);
+      if (res.canceled || !res.filePath) return { success: false, canceled: true };
+      fs__namespace.writeFileSync(res.filePath, text + "\n", "utf-8");
+      return { success: true, filePath: res.filePath };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, async (_event, params) => {
+    try {
+      if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+      const norm2 = normalizeProjectDir(params.projectDir);
+      const txt = getManualAiPromptTxtPath(norm2);
+      if (!fs__namespace.existsSync(txt)) return { success: false, error: "Prompt file does not exist yet." };
+      const openError = await electron.shell.openPath(txt);
+      if (openError) {
+        electron.shell.showItemInFolder(txt);
+      }
+      return { success: true, filePath: txt };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES,
+    async (_event, params) => {
+      try {
+        const folder = params?.mode === "folder";
+        const opts = folder ? { title: "Select the folder with your AI images", properties: ["openDirectory"] } : {
+          title: "Select AI images",
+          properties: ["openFile", "multiSelections"],
+          filters: [
+            {
+              name: "Images",
+              extensions: MANUAL_AI_SUPPORTED_EXTENSIONS.map((e) => e.replace(".", ""))
+            }
+          ]
+        };
+        const win = electron.BrowserWindow.getFocusedWindow();
+        const res = win ? await electron.dialog.showOpenDialog(win, opts) : await electron.dialog.showOpenDialog(opts);
+        if (res.canceled || res.filePaths.length === 0) return { success: true, filePaths: [], canceled: true };
+        const filePaths = folder ? listImagesInFolder(res.filePaths[0]) : res.filePaths;
+        return { success: true, filePaths };
+      } catch (err) {
+        return { success: false, filePaths: [], error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir || !Array.isArray(params.filePaths)) {
+          return { success: false, error: "projectDir and filePaths are required." };
+        }
+        const norm2 = normalizeProjectDir(params.projectDir);
+        const plan = planManualAiImport({
+          projectDir: norm2,
+          filePaths: params.filePaths,
+          replaceExisting: params.replaceExisting
+        });
+        return { success: true, plan };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_COMMIT_IMPORT,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir || !Array.isArray(params.mappings)) {
+          return { success: false, error: "projectDir and mappings are required." };
+        }
+        const norm2 = normalizeProjectDir(params.projectDir);
+        const result = await commitManualAiImport({
+          projectDir: norm2,
+          mappings: params.mappings,
+          replaceExisting: params.replaceExisting,
+          allowLowResolution: params.allowLowResolution
+        });
+        broadcastManualAiStatus(norm2, result.status);
+        return { success: true, result };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ManualAI-IPC] Commit failed: ${msg}`);
+        manualAiAssetGate.notify(params?.projectDir ? normalizeProjectDir(params.projectDir) : "");
         return { success: false, error: msg };
       }
     }
@@ -20600,6 +27676,7 @@ electron.app.whenReady().then(() => {
   registerAudioHandlers(electron.ipcMain);
   registerCaptionHandlers(electron.ipcMain);
   registerPipelineHandlers(electron.ipcMain);
+  registerManualAiHandlers(electron.ipcMain);
   registerResearchHandlers(electron.ipcMain);
   registerThumbnailHandlers(electron.ipcMain);
   researchSidecar.start().catch((err) => {

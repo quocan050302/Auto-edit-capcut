@@ -171,7 +171,7 @@ function buildSfxQuery(visualIntent: string): string | null {
 
 // ─── Audio downloader ─────────────────────────────────────────────────────────
 
-async function downloadAudio(
+export async function downloadAudio(
   asset: AudioSearchResult,
   audioDir: string,
   timeoutMs = 45000

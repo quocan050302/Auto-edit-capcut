@@ -8,6 +8,7 @@ import {
   ProjectSettings,
   ProjectInputs,
   ProjectStatus,
+  resolveContentProfileMode,
 } from "../../../shared/types";
 import { logger } from "../logger";
 import { pipelineOrchestrator } from "../pipeline/pipeline-orchestrator";
@@ -120,6 +121,9 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
           videosFolder: null,
           musicFolder: null,
           sfxFolder: null,
+          contentType: "default",
+          contentProfileMode: "auto",
+          visualSourceMode: "legacy"
         },
         stats: {
           totalImages: 0,
@@ -158,6 +162,11 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
         const state: ProjectState = JSON.parse(
           fs.readFileSync(statePath, "utf-8"),
         );
+        if (state.inputs) {
+          state.inputs.contentType ??= 'default';
+          state.inputs.contentProfileMode ??= resolveContentProfileMode(state.inputs);
+          state.inputs.visualSourceMode ??= 'legacy';
+        }
         logger.info(`Project opened: ${state.name}`, { projectDir });
         // Resumable Render Engine V2: one-time crash auto-resume of an interrupted
         // Auto Pipeline render (never for user-cancelled or manual renders).

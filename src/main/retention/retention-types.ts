@@ -136,6 +136,16 @@ export type RetentionQaFlagType =
   | 'PROOF_TOO_FREQUENT'
   | 'PROOF_TEXT_TOO_LONG'
   | 'LOCATION_LOW_CONFIDENCE'
+  // Upgraded retention QA flags
+  | 'LOW_NOVELTY_STREAK'
+  | 'REHOOK_GAP_TOO_LONG'
+  | 'REPEATED_MOTION'
+  | 'REPEATED_VISUAL_CATEGORY'
+  | 'OPEN_LOOP_UNRESOLVED'
+  | 'PAYOFF_UNDEREMPHASIZED'
+  | 'TOO_MANY_PATTERN_INTERRUPTS'
+  | 'OVERLAY_DENSITY_HIGH'
+  | 'AI_STILL_MONOTONY'
 
 export interface RetentionQaFlag {
   sceneId: string
@@ -163,6 +173,14 @@ export interface RetentionContext {
   consecutiveStrongEffect: number
   accumulatedVisualLoad: number
   sceneIndex: number
+  // Optional extended tracking fields
+  timeSinceLastRehook?: number
+  timeSinceLastPatternInterrupt?: number
+  recentNoveltyScores?: number[]
+  recentSceneRoles?: RetentionSceneRole[]
+  recentMotionPresets?: string[]
+  recentVisualCategories?: string[]
+  openLoopIds?: string[]
 }
 
 // ─── Settings ─────────────────────────────────────────────────────────────────
@@ -184,3 +202,108 @@ export const DEFAULT_RETENTION_SETTINGS: RetentionSettings = {
   semanticCropEnabled: true,
   patternInterruptEnabled: true,
 }
+
+// ─── Retention Director & Plan Types ──────────────────────────────────────────
+
+export type RetentionSceneRole =
+  | 'hook'
+  | 'setup'
+  | 'question'
+  | 'open-loop'
+  | 'problem'
+  | 'mechanism'
+  | 'proof'
+  | 'comparison'
+  | 'surprise'
+  | 'reveal'
+  | 're-hook'
+  | 'payoff'
+  | 'solution'
+  | 'bridge'
+  | 'recap'
+  | 'conclusion'
+
+export interface RetentionOpenLoop {
+  id: string
+  openedAtSceneIndex: number
+  payoffSceneIndex?: number
+  question: string
+  confidence: number
+  status: 'open' | 'resolved' | 'uncertain'
+  keywords: string[]
+}
+
+export interface RetentionMotif {
+  id: string
+  label: string
+  conceptKeywords: string[]
+  firstSeenSceneIndex: number
+  recurringSceneIndices: number[]
+}
+
+export interface RetentionScenePlan {
+  sceneIndex: number
+  sceneId: string
+  role: RetentionSceneRole
+  intensity: 'low' | 'medium' | 'high'
+  reason: string
+  noveltyScore: number
+  noveltyTarget: number
+  patternInterrupt: boolean
+  patternInterruptReason?: string
+  openLoopId?: string
+  payoffForLoopId?: string
+  avoidSpoiler?: boolean
+  motionEnergy: 'calm' | 'normal' | 'elevated'
+  beatPacing: 'slow' | 'normal' | 'fast'
+  overlayPriority: 'none' | 'low' | 'medium' | 'high'
+  proofPriority: 'normal' | 'high'
+  preferredVisualChange?: 'none' | 'crop' | 'motion' | 'proof' | 'overlay' | 'hard-cut'
+  notes: string[]
+}
+
+export interface RetentionPlan {
+  schemaVersion: number
+  generatedAt: string
+  inputHash: string
+  totalScenes: number
+  totalDuration: number
+  strategy: {
+    level: RetentionLevel
+    targetRehookGapSecs: number
+    maxNoResetSecs: number
+    noveltyWindowScenes: number
+  }
+  openLoops: RetentionOpenLoop[]
+  motifs: RetentionMotif[]
+  scenes: RetentionScenePlan[]
+  summary: {
+    hooks: number
+    rehooks: number
+    payoffs: number
+    patternInterrupts: number
+    lowNoveltyScenes: number
+    openLoops: number
+  }
+}
+
+export interface RetentionSummary {
+  schemaVersion: number
+  sceneCount: number
+  durationSecs: number
+  retentionHealthScore: number
+  riskCounts: {
+    lowNovelty: number
+    longRehookGap: number
+    repeatedMotion: number
+    overedited: number
+  }
+  openLoops: {
+    detected: number
+    resolved: number
+    unresolved: number
+  }
+  patternInterrupts: number
+  averageNoveltyScore: number
+}
+

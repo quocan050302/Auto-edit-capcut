@@ -13,7 +13,7 @@
  */
 
 import { logger } from '../logger'
-import type { VisualBeat, ProofVisual, RetentionContext, RetentionLevel } from './retention-types'
+import type { VisualBeat, ProofVisual, RetentionContext, RetentionLevel, RetentionScenePlan } from './retention-types'
 
 // ─── Config theo level ────────────────────────────────────────────────────────
 
@@ -433,6 +433,7 @@ export interface SceneInput {
   visualIntent?: string
   isPatternInterrupt?: boolean
   localPath?: string
+  retentionHint?: RetentionScenePlan
 }
 
 /**
@@ -478,6 +479,17 @@ export function resolveVisualBeats(
     targetBeats = seed < 60 ? 1 : 2
   }
 
+  // ── Retention Hint Pacing Integration ──────────────────────────────────────
+  const hint = scene.retentionHint
+  if (hint) {
+    if (hint.beatPacing === 'fast' && isLongEnough) {
+      targetBeats = Math.min(cfg.maxBeatsPerScene, Math.max(targetBeats, 2))
+    } else if (hint.beatPacing === 'slow') {
+      // For payoff / proof / bridge: avoid over-editing, allow calm hold
+      targetBeats = duration >= 9 ? Math.min(targetBeats, 2) : 1
+    }
+  }
+
   // Không chia quá max config
   targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene)
 
@@ -521,11 +533,12 @@ export function resolveVisualBeats(
         ctx.timeSinceLastProofVisual > 15 &&
         proofVisualFound === null
       ) {
+        const maxPvDur = hint?.proofPriority === 'high' ? 3.5 : 2.5
         const pv = detectProofVisual(
           scene.narrativeText!,
           sceneId,
           relStart,
-          Math.min(beatDuration, 2.5)
+          Math.min(beatDuration, maxPvDur)
         )
         if (pv) {
           proofVisualFound = pv
@@ -549,10 +562,11 @@ export function resolveVisualBeats(
     } else {
       // Beat 3+: secondary hoặc pattern interrupt nếu eligible
       const timeSinceInterrupt = ctx.timeSinceLastStrongEffect
-      if (
-        scene.isPatternInterrupt &&
+      const shouldTriggerInterrupt =
+        (scene.isPatternInterrupt || hint?.patternInterrupt) &&
         timeSinceInterrupt >= cfg.patternInterruptCooldown
-      ) {
+
+      if (shouldTriggerInterrupt) {
         beatType = 'pattern_interrupt'
         beatPurpose = 'reset_attention'
       } else {

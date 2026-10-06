@@ -16,8 +16,10 @@ import {
   type SceneRetentionInput
 } from './retention/retention-engine'
 import { cropToZoomFilter } from './retention/visual-beat-engine'
-import { runRetentionQA } from './retention/retention-qa'
-import type { RetentionSettings, VisualBeat, ProofVisual, RetentionDecision } from './retention/retention-types'
+import { runRetentionQA, generateRetentionSummary, saveRetentionSummary } from './retention/retention-qa'
+import { ensureRetentionPlan } from './retention/retention-director'
+import { applyRetentionMotionHint } from './retention/retention-motion'
+import type { RetentionSettings, VisualBeat, ProofVisual, RetentionDecision, RetentionPlan, RetentionScenePlan } from './retention/retention-types'
 import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
 import { loadProductionSettings } from './production-intelligence/production-settings'
 import {
@@ -27,6 +29,9 @@ import {
 
 
 import { runRenderPostflight } from './qa/render-postflight'
+import { buildHealthMotionFilter } from './health/health-motion'
+import type { HealthVisualScenePlan, HealthMotionPreset } from './health/health-visual-types'
+import { findMissingManualAiScenes } from './visual-mix/manual-ai/manual-ai-validator'
 
 // ── Resumable Render Engine V2 ───────────────────────────────────────────────
 import {
@@ -626,6 +631,9 @@ export interface PreparedRenderPlan {
   missingMediaCount: number
   retentionSettings: RetentionSettings
   retentionDecisions: Map<number, RetentionDecision>
+  retentionPlan: RetentionPlan | null
+  retentionPlanMap: Map<number, RetentionScenePlan>
+  visualPlanMap: Map<number, { strategy?: string; motion?: any; motionPreset?: any; category?: string }>
   sceneJobs: SceneRenderJob[]
   base: VisualBaseSettings
   hashes: {
@@ -734,14 +742,75 @@ export function prepareRenderPlan(params: {
     }
   }
 
-  // ── Retention Engine setup ─────────────────────────────────────────────────
+  // Load visual mix plan or Health visual plan if available to detect AI images and motion presets
+  const visualPlanMap = new Map<number, { strategy?: string; motion?: any; motionPreset?: any; category?: string }>()
+  const visualMixPlanPath = path.join(projectDir, 'analysis', 'visual-mix-plan.json')
+  if (fs.existsSync(visualMixPlanPath)) {
+    try {
+      const vp = JSON.parse(fs.readFileSync(visualMixPlanPath, 'utf-8'))
+      for (const sc of vp.scenes || []) {
+        if (sc && typeof sc.sceneIndex === 'number') {
+          visualPlanMap.set(sc.sceneIndex, sc)
+        }
+      }
+    } catch { /* ignore */ }
+  }
+  const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
+  if (fs.existsSync(healthPlanPath)) {
+    try {
+      const hp = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+      for (const sc of hp.scenes || []) {
+        if (sc && typeof sc.sceneIndex === 'number' && !visualPlanMap.has(sc.sceneIndex)) {
+          visualPlanMap.set(sc.sceneIndex, sc)
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // ── Retention Engine & Retention Director setup ───────────────────────────
   const retentionSettings: RetentionSettings = DEFAULT_RETENTION_SETTINGS
   const retCtx = createDefaultContext()
+
+  // Ensure or load Retention Plan (deterministic, whole-narrative analysis)
+  const retentionPlanMap = new Map<number, RetentionScenePlan>()
+  let retentionPlan: RetentionPlan | null = null
+  try {
+    const rawScenes = scenes.map((s, idx) => ({
+      sceneIndex: s.sceneIndex ?? idx,
+      sceneId: String(s.sceneIndex ?? idx),
+      duration: s.duration,
+      narrativeText: (s as any).narrativeText,
+      visualIntent: s.visualIntent,
+      energyLevel: (s as any).energyLevel,
+      shotType: (s as any).shotType,
+      isPatternInterrupt: (s as any).isPatternInterrupt,
+      isFirstInChapter: idx === 0 || (s as any).isFirstInChapter,
+      visualStrategy: visualPlanMap.get(s.sceneIndex)?.strategy,
+      category: visualPlanMap.get(s.sceneIndex)?.category,
+      motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+      localPath: s.localPath
+    }))
+
+    retentionPlan = ensureRetentionPlan(projectDir, {
+      scenes: rawScenes,
+      level: retentionSettings.level
+    })
+
+    if (retentionPlan) {
+      for (const sp of retentionPlan.scenes) {
+        retentionPlanMap.set(sp.sceneIndex, sp)
+      }
+    }
+  } catch (err) {
+    logger.warn(`[RENDER] Failed to ensure retention plan (falling open to legacy): ${String(err)}`)
+    retentionPlan = null
+  }
 
   // Pre-compute retention decisions for all scenes (sequential context tracking)
   const retentionDecisions = new Map<number, RetentionDecision>()
   for (let i = 0; i < scenes.length; i++) {
     const scene = scenes[i]
+    const retentionHint = retentionPlanMap.get(scene.sceneIndex) ?? retentionPlanMap.get(i)
     const sceneInput: SceneRetentionInput = {
       sceneId: String(scene.sceneIndex),
       sceneIndex: i,
@@ -750,9 +819,10 @@ export function prepareRenderPlan(params: {
       shotType: (scene as any).shotType,
       narrativeText: (scene as any).narrativeText,
       visualIntent: scene.visualIntent,
-      isPatternInterrupt: (scene as any).isPatternInterrupt,
+      isPatternInterrupt: (scene as any).isPatternInterrupt || retentionHint?.patternInterrupt,
       localPath: scene.localPath,
       isNewChapter: i === 0 || (scene as any).isFirstInChapter,
+      retentionHint
     }
     const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings)
     retentionDecisions.set(i, decision)
@@ -775,6 +845,18 @@ export function prepareRenderPlan(params: {
     const mediaKind: SceneRenderJob['mediaKind'] = hasMedia ? detectMediaKind(mediaPath!, scene.mediaType) : 'placeholder'
     const beats = retentionDecisions.get(i)?.visualBeats ?? []
     const useBeats = hasMedia && beats.length > 1 && retentionSettings.enabled
+    const visualScene = visualPlanMap.get(scene.sceneIndex)
+    const isAiStill =
+      mediaKind === 'image' &&
+      (visualScene?.strategy === 'ai-still' ||
+        (mediaPath && (
+          mediaPath.includes(path.join('assets', 'generated', 'health')) ||
+          mediaPath.includes('/assets/generated/health/') ||
+          mediaPath.includes(path.join('assets', 'generated', 'general')) ||
+          mediaPath.includes('/assets/generated/general/')
+        )))
+    const motionPreset = isAiStill ? (visualScene?.motionPreset || visualScene?.motion || 'push-in-center') : ''
+    const effectiveFilter = isAiStill ? `${scaleFilt}:motion=${typeof motionPreset === 'object' ? motionPreset.preset : motionPreset}` : scaleFilt
     const fingerprint = computeSceneFingerprint({
       sceneOrdinal: i + 1,
       sceneIndex: scene.sceneIndex,
@@ -783,7 +865,7 @@ export function prepareRenderPlan(params: {
       mediaType: mediaKind,
       mediaSignature: hasMedia ? fileSignature(mediaPath) : null,
       visualBeats: hasMedia ? beats.map((b) => ({ s: b.relativeStart, e: b.relativeEnd, crop: b.crop ?? null })) : null,
-      filterChain: scaleFilt,
+      filterChain: effectiveFilter,
       multiBeat: useBeats,
       semanticCrop: !!retentionSettings.semanticCropEnabled,
       base
@@ -862,6 +944,9 @@ export function prepareRenderPlan(params: {
     missingMediaCount,
     retentionSettings,
     retentionDecisions,
+    retentionPlan,
+    retentionPlanMap,
+    visualPlanMap,
     sceneJobs,
     base,
     hashes,
@@ -1000,7 +1085,7 @@ async function renderVideoV2(
       transitionSettings: params.transitionSettings,
       encoderKey: encoder.key
     })
-    const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions } = prepared
+    const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions, retentionPlan, retentionPlanMap, visualPlanMap } = prepared
     const totalScenes = scenes.length
     setPct(`Processing ${totalScenes} scenes...`, 0.06)
 
@@ -1021,6 +1106,17 @@ async function renderVideoV2(
     }
     throwIfAborted(signal)
 
+    // ── 3a-2. Manual AI (Prompt mode) guard ──────────────────────────────────
+    // The user chose to supply the AI images themselves. A missing image must STOP the render
+    // instead of silently becoming a black placeholder or Stock footage.
+    const missingManualAiScenes = findMissingManualAiScenes(projectDir)
+    if (missingManualAiScenes.length > 0) {
+      throw new Error(
+        `Manual AI images missing for scenes: ${missingManualAiScenes.join(', ')}. ` +
+          'Import the missing images (Production → Find Visuals → Import AI Images) before rendering.'
+      )
+    }
+
     // ── 3b. Media Preflight ──────────────────────────────────────────────────
     setPct('Validating scene media...', 0.08)
     logger.info(
@@ -1033,7 +1129,7 @@ async function renderVideoV2(
       )
     }
 
-    // Run retention QA (flags only — does NOT block render)
+    // Run retention QA & generate retention summary (flags only — does NOT block render)
     try {
       const qaScenes = scenes.map((s, i) => ({
         sceneIndex: i,
@@ -1043,15 +1139,19 @@ async function renderVideoV2(
         shotType: (s as any).shotType,
         narrativeText: (s as any).narrativeText,
         visualIntent: s.visualIntent,
-        isPatternInterrupt: (s as any).isPatternInterrupt,
+        isPatternInterrupt: (s as any).isPatternInterrupt || retentionPlanMap.get(i)?.patternInterrupt,
         visualBeats: retentionDecisions.get(i)?.visualBeats,
+        motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+        category: visualPlanMap.get(s.sceneIndex)?.category
       }))
-      const qaFlags = runRetentionQA(qaScenes)
+      const qaFlags = runRetentionQA(qaScenes, retentionPlan)
       if (qaFlags.length > 0) {
         const qaPath = path.join(projectDir, 'analysis', 'retention-qa.json')
         fs.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), 'utf-8')
         logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`)
       }
+      const summary = generateRetentionSummary(qaScenes, retentionPlan, qaFlags)
+      saveRetentionSummary(projectDir, summary)
     } catch (err) {
       logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`)
     }
@@ -1152,6 +1252,7 @@ async function renderVideoV2(
     workspace.saveManifest(manifest)
 
     // ── 5. Scene clips (persistent, resumable) ───────────────────────────────
+    const recentAiMotionPresets: string[] = []
     for (let i = 0; i < sceneJobs.length; i++) {
       throwIfAborted(signal)
       const job = sceneJobs[i]
@@ -1197,7 +1298,20 @@ async function renderVideoV2(
 
       const partial = outClip.replace(/\.mp4$/, '.partial.mp4')
       safeUnlink(partial)
-      await renderSceneClip({ job, outClip: partial, width, height, fps, tmpDir, ctx, retentionSettings, sceneOrdinalIndex: i })
+      await renderSceneClip({
+        job,
+        outClip: partial,
+        width,
+        height,
+        fps,
+        tmpDir,
+        ctx,
+        retentionSettings,
+        sceneOrdinalIndex: i,
+        visualPlanMap,
+        retentionPlanMap,
+        recentAiMotionPresets
+      })
 
       let probe
       try {
@@ -1464,16 +1578,15 @@ async function renderVideoV2(
 
         // Build filter_complex
         const filterParts: string[] = []
-        const mixLabels: string[] = []
 
         // Voiceover — normalize loudness to -16 LUFS so it's always clear and consistent
         if (hasAudio) {
           filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`)
-          mixLabels.push('[vo]')
         }
 
         // Music sections — ducked under voiceover
         // Default: -30 dB (3.2% amplitude) — subtle background bed
+        const musicLabels: string[] = []
         for (const { idx, section } of musicInputs) {
           const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6)
           const fadeIn = section.fadeInSecs ?? 2
@@ -1487,37 +1600,72 @@ async function renderVideoV2(
             `adelay=${Math.round(section.startTime * 1000)}|${Math.round(section.startTime * 1000)},` +
             `apad[${label}]`
           )
-          mixLabels.push(`[${label}]`)
+          musicLabels.push(`[${label}]`)
         }
 
-        // SFX — placed at scene start time
-        for (const { idx, sfx } of sfxInputs) {
-          const vol = Math.pow(10, (sfx.volumeDb ?? -18) / 20).toFixed(6)
-          const fadeIn = sfx.fadeInSecs ?? 0.5
-          const fadeOut = sfx.fadeOutSecs ?? 0.5
-          const dur = sfx.endTime - sfx.startTime
-          const label = `sfx_${idx}`
-          filterParts.push(
-            `[${idx}:a]volume=${vol},` +
-            `afade=t=in:ss=0:d=${fadeIn},` +
-            `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
-            `adelay=${Math.round(sfx.startTime * 1000)}|${Math.round(sfx.startTime * 1000)},` +
-            `apad[${label}]`
-          )
-          mixLabels.push(`[${label}]`)
-        }
+      // SFX — placed at scene start time
+      const sfxLabels: string[] = []
+      for (const { idx, sfx } of sfxInputs) {
+        const vol = Math.pow(10, (sfx.volumeDb ?? -24) / 20).toFixed(6)
+        const fadeIn = sfx.fadeInSecs ?? 0.05
+        const fadeOut = sfx.fadeOutSecs ?? 0.15
+        const dur = sfx.endTime - sfx.startTime
+        const label = `sfx_${idx}`
+        filterParts.push(
+          `[${idx}:a]volume=${vol},` +
+          `afade=t=in:ss=0:d=${fadeIn},` +
+          `afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},` +
+          `adelay=${Math.round(sfx.startTime * 1000)}|${Math.round(sfx.startTime * 1000)},` +
+          `apad[${label}]`
+        )
+        sfxLabels.push(`[${label}]`)
+      }
 
-        // Mix all tracks, then limit output to prevent clipping
+      // Mix all tracks, protecting voiceover loudness
+      if (sfxInputs.length === 0) {
+        // Legacy Default path (when no SFX are present): unchanged behavior
+        const mixLabels: string[] = []
+        if (hasAudio) mixLabels.push('[vo]')
+        mixLabels.push(...musicLabels)
         const nInputs = mixLabels.length
         filterParts.push(
-          // normalize=1 scales by 1/nInputs to prevent summing clips
           `${mixLabels.join('')}amix=inputs=${nInputs}:duration=first:normalize=1,` +
-          // Final brick-wall limiter: ensure no sample exceeds -1 dBTP
           `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
         )
+      } else {
+        // Bus architecture when SFX are present:
+        // Isolates SFX and Music buses so that amix normalize=0 does not divide voiceover by N tracks
+        const finalBuses: string[] = []
+        if (hasAudio) finalBuses.push('[vo]')
 
-        const filterComplex = filterParts.join(';')
-        logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`)
+        if (musicLabels.length === 1) {
+          filterParts.push(`${musicLabels[0]}asplit=1[music_bus]`)
+          finalBuses.push('[music_bus]')
+        } else if (musicLabels.length > 1) {
+          filterParts.push(
+            `${musicLabels.join('')}amix=inputs=${musicLabels.length}:duration=longest:normalize=0[music_bus]`
+          )
+          finalBuses.push('[music_bus]')
+        }
+
+        if (sfxLabels.length === 1) {
+          filterParts.push(`${sfxLabels[0]}asplit=1[sfx_bus]`)
+          finalBuses.push('[sfx_bus]')
+        } else if (sfxLabels.length > 1) {
+          filterParts.push(
+            `${sfxLabels.join('')}amix=inputs=${sfxLabels.length}:duration=longest:normalize=0[sfx_bus]`
+          )
+          finalBuses.push('[sfx_bus]')
+        }
+
+        filterParts.push(
+          `${finalBuses.join('')}amix=inputs=${finalBuses.length}:duration=first:normalize=0,` +
+          `alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+        )
+      }
+
+      const filterComplex = filterParts.join(';')
+      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`)
 
         await ffmpegRun([
           ...ffArgs,
@@ -2041,8 +2189,11 @@ async function renderSceneClip(p: {
   ctx: EncodeContext
   retentionSettings: RetentionSettings
   sceneOrdinalIndex: number
+  visualPlanMap?: Map<number, { strategy?: string; motion?: any; motionPreset?: any; category?: string }>
+  retentionPlanMap?: Map<number, RetentionScenePlan>
+  recentAiMotionPresets?: string[]
 }): Promise<void> {
-  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings } = p
+  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p
   const scene = job.scene
   const i = p.sceneOrdinalIndex
   const mediaPath = job.mediaPath
@@ -2104,7 +2255,41 @@ async function renderSceneClip(p: {
   const beats = job.beats
   const hasMultipleBeats = beats.length > 1
 
-  if (hasMultipleBeats && retentionSettings.enabled) {
+  // Check if this is an AI still scene or generated image (Health or General)
+  const visualScene = visualPlanMap?.get(scene.sceneIndex)
+  const isAiStillImage =
+    isImage &&
+    (visualScene?.strategy === 'ai-still' ||
+      mediaPath.includes(path.join('assets', 'generated', 'health')) ||
+      mediaPath.includes('/assets/generated/health/') ||
+      mediaPath.includes(path.join('assets', 'generated', 'general')) ||
+      mediaPath.includes('/assets/generated/general/'))
+
+  if (isAiStillImage) {
+    // Camera motion spec for AI still images (Health or General)
+    const baseMotion = visualScene?.motion || visualScene?.motionPreset || 'push-in-center'
+    const retentionHint = retentionPlanMap?.get(scene.sceneIndex) ?? retentionPlanMap?.get(i)
+    const motionParam = applyRetentionMotionHint(baseMotion, retentionHint, recentAiMotionPresets ?? [])
+    const presetName = typeof motionParam === 'object' ? motionParam.preset : motionParam
+    if (recentAiMotionPresets) {
+      recentAiMotionPresets.push(presetName)
+    }
+
+    const motionFilter = buildHealthMotionFilter(motionParam as any, width, height, scene.duration, fps)
+    logger.info(`[VisualMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`)
+
+    await encodeRun([
+      '-y',
+      '-loop', '1',
+      '-i', mediaPath,
+      '-vf', motionFilter,
+      ...vcodec(ctx, 20),
+      '-t', String(scene.duration),
+      '-r', String(fps),
+      '-pix_fmt', 'yuv420p',
+      outClip
+    ], ctx)
+  } else if (hasMultipleBeats && retentionSettings.enabled) {
     // ── ENHANCED: render visual beats then concat into scene clip ──────────
     await renderVisualBeatsToClip({
       beats,

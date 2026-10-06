@@ -1,5 +1,23 @@
 import React, { useState, useEffect, useRef } from 'react'
-import type { ProjectState, ProjectInputs, PipelineStage } from '../../../../shared/types'
+import type {
+  ProjectState,
+  ProjectInputs,
+  PipelineStage,
+  ContentType,
+  ContentProfileMode,
+  VisualSourceMode,
+  VisualMixConfig,
+  AiImageOutputResolution,
+  AiFailureBehavior,
+  AiImageMode
+} from '../../../../shared/types'
+import {
+  resolveVisualMixConfig,
+  resolveContentProfileMode,
+  resolveAiImageMode,
+  HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG,
+  GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG
+} from '../../../../shared/types'
 import { usePipeline } from '../hooks/usePipeline'
 import { useUiPreferences } from '../hooks/useUiPreferences'
 import { PipelineTimeline } from '../components/PipelineTimeline'
@@ -102,6 +120,526 @@ function FileRow({
   )
 }
 
+interface VisualSourceSectionProps {
+  isCustomMix: boolean
+  currentAiPercent: number
+  currentStockPercent: number
+  imageOutputResolution?: AiImageOutputResolution
+  flowHealth: { reachable?: boolean; extensionConnected?: boolean; checking?: boolean }
+  isRunning: boolean
+  onSelectMode: (mode: VisualSourceMode) => void
+  onSetAiRatio: (ai: number) => void
+  onSetStockRatio: (stock: number) => void
+  onSelectResolution?: (res: AiImageOutputResolution) => void
+  aiFailureBehavior?: AiFailureBehavior
+  onSelectFailureBehavior?: (behavior: AiFailureBehavior) => void
+  aiImageMode?: AiImageMode
+  onSelectAiImageMode?: (mode: AiImageMode) => void
+  isAdvanced?: boolean
+}
+
+function VisualSourceSection({
+  isCustomMix,
+  currentAiPercent,
+  currentStockPercent,
+  imageOutputResolution = '1080p',
+  flowHealth,
+  isRunning,
+  onSelectMode,
+  onSetAiRatio,
+  onSetStockRatio,
+  onSelectResolution,
+  aiFailureBehavior = 'strict',
+  onSelectFailureBehavior,
+  aiImageMode = 'auto',
+  onSelectAiImageMode,
+  isAdvanced
+}: VisualSourceSectionProps): React.ReactElement {
+  const containerClass = isAdvanced ? 'panel' : 'setup-section'
+  const idSuffix = isAdvanced ? '-adv' : ''
+
+  return (
+    <div className={containerClass} style={{ marginBottom: '16px' }}>
+      <div className={isAdvanced ? 'panel-header' : 'setup-section__header'}>
+        <div>
+          <h2 className={isAdvanced ? 'panel-title' : 'setup-section__title'}>Visual Source</h2>
+          <p
+            className={isAdvanced ? '' : 'setup-section__desc'}
+            style={isAdvanced ? { fontSize: '12px', color: 'var(--text-secondary)' } : undefined}
+          >
+            Choose where scene visuals come from — standard stock or AI-generated visual mix
+          </p>
+        </div>
+        <span className="panel-badge badge-primary">
+          {isCustomMix ? 'Custom Mix' : 'Default Workflow'}
+        </span>
+      </div>
+
+      <div className={isAdvanced ? 'panel-body' : ''}>
+        <div className="content-type-grid" style={{ marginBottom: '12px' }}>
+          <button
+            type="button"
+            id={`visual-mode-legacy${idSuffix}`}
+            className={`content-type-card ${!isCustomMix ? 'is-selected' : ''}`}
+            onClick={() => onSelectMode('legacy')}
+            disabled={isRunning}
+          >
+            <div className="content-type-card__icon">🎞️</div>
+            <div className="content-type-card__content">
+              <div className="content-type-card__title">
+                Default Workflow
+                {!isCustomMix && (
+                  <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Active</span>
+                )}
+              </div>
+              <div className="content-type-card__subtitle">Stock Footage</div>
+              <div className="content-type-card__desc">
+                Use current stock footage production flow (Pexels / Pixabay / local assets). No Google Flow scene images.
+              </div>
+            </div>
+          </button>
+
+          <button
+            type="button"
+            id={`visual-mode-custom-mix${idSuffix}`}
+            className={`content-type-card ${isCustomMix ? 'is-selected' : ''}`}
+            onClick={() => onSelectMode('custom-mix')}
+            disabled={isRunning}
+          >
+            <div className="content-type-card__icon">🎨</div>
+            <div className="content-type-card__content">
+              <div className="content-type-card__title">
+                Custom Mix
+                {isCustomMix && (
+                  <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Active</span>
+                )}
+              </div>
+              <div className="content-type-card__subtitle">AI Stills + Real Footage</div>
+              <div className="content-type-card__desc">
+                Combine AI-generated stills with real footage.
+              </div>
+            </div>
+          </button>
+        </div>
+
+        {!isCustomMix ? (
+          <div
+            style={{
+              padding: '10px 14px',
+              borderRadius: 'var(--radius-sm, 6px)',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid rgba(255, 255, 255, 0.08)',
+              fontSize: '12px',
+              color: 'var(--text-secondary)'
+            }}
+          >
+            ✓ Uses existing production flow: Pexels / Pixabay / local assets. No Google Flow scene images will be generated.
+          </div>
+        ) : (
+          <div
+            style={{
+              padding: '14px 16px',
+              borderRadius: 'var(--radius-md, 8px)',
+              background: 'rgba(255, 255, 255, 0.03)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
+                Visual Mix
+              </div>
+              <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
+                Total: <strong>100%</strong>
+              </div>
+            </div>
+
+            {/* Linked Inputs */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+                gap: '16px'
+              }}
+            >
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  background: 'rgba(99, 102, 241, 0.08)',
+                  border: '1px solid rgba(99, 102, 241, 0.25)'
+                }}
+              >
+                <label
+                  htmlFor={`input-ai-image-ratio${idSuffix}`}
+                  style={{
+                    display: 'block',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: 'var(--color-brand, #818cf8)',
+                    marginBottom: '4px'
+                  }}
+                >
+                  {aiImageMode === 'prompt' ? 'AI Images (Manual Prompts)' : 'AI Images (Google Flow)'}
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <input
+                    id={`input-ai-image-ratio${idSuffix}`}
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={currentAiPercent}
+                    onChange={(e) => onSetAiRatio(Number(e.target.value))}
+                    disabled={isRunning}
+                    style={{
+                      width: '80px',
+                      padding: '6px 10px',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      background: 'rgba(0, 0, 0, 0.4)',
+                      color: '#fff',
+                      fontSize: '16px',
+                      fontWeight: 700
+                    }}
+                  />
+                  <span style={{ fontSize: '14px', fontWeight: 600, color: '#fff' }}>%</span>
+                </div>
+              </div>
+
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderRadius: 'var(--radius-sm, 6px)',
+                  background: 'rgba(14, 165, 233, 0.08)',
+                  border: '1px solid rgba(14, 165, 233, 0.25)'
+                }}
+              >
+                <label
+                  htmlFor={`input-stock-footage-ratio${idSuffix}`}
+                  style={{
+                    display: 'block',
+                    fontSize: '11px',
+                    fontWeight: 600,
+                    color: '#38bdf8',
+                    marginBottom: '4px'
+                  }}
+                >
+                  Real Footage
+                </label>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <input
+                    id={`input-stock-footage-ratio${idSuffix}`}
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={5}
+                    value={currentStockPercent}
+                    onChange={(e) => onSetStockRatio(Number(e.target.value))}
+                    disabled={isRunning}
+                    style={{
+                      width: '80px',
+                      padding: '6px 10px',
+                      borderRadius: '4px',
+                      border: '1px solid rgba(255, 255, 255, 0.15)',
+                      background: 'rgba(0, 0, 0, 0.4)',
+                      color: '#fff',
+                      fontSize: '16px',
+                      fontWeight: 700
+                    }}
+                  />
+                  <span style={{ fontSize: '14px', fontWeight: 600, color: '#fff' }}>%</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Dual Visual Bar */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+              <div
+                style={{
+                  height: '10px',
+                  width: '100%',
+                  borderRadius: '5px',
+                  overflow: 'hidden',
+                  display: 'flex',
+                  background: 'rgba(255, 255, 255, 0.1)'
+                }}
+              >
+                <div
+                  style={{
+                    width: `${currentAiPercent}%`,
+                    background: 'linear-gradient(90deg, #6366f1, #8b5cf6)',
+                    transition: 'width 0.2s ease'
+                  }}
+                />
+                <div
+                  style={{
+                    width: `${currentStockPercent}%`,
+                    background: 'linear-gradient(90deg, #0284c7, #0ea5e9)',
+                    transition: 'width 0.2s ease'
+                  }}
+                />
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  fontSize: '11px',
+                  color: 'var(--text-secondary)'
+                }}
+              >
+                <span>AI Images: {currentAiPercent}%</span>
+                <span>Real Footage: {currentStockPercent}%</span>
+              </div>
+            </div>
+
+            {/* Quick Presets */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>Presets:</span>
+              {[
+                { label: '100 / 0', ai: 100 },
+                { label: '80 / 20', ai: 80 },
+                { label: '70 / 30', ai: 70 },
+                { label: '50 / 50', ai: 50 },
+                { label: '30 / 70', ai: 30 },
+                { label: '0 / 100', ai: 0 }
+              ].map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  id={`preset-${preset.ai}-${100 - preset.ai}${idSuffix}`}
+                  className="btn btn-secondary btn-sm"
+                  style={{
+                    padding: '2px 8px',
+                    fontSize: '11px',
+                    background: currentAiPercent === preset.ai ? 'var(--color-brand)' : undefined,
+                    color: currentAiPercent === preset.ai ? '#fff' : undefined
+                  }}
+                  onClick={() => onSetAiRatio(preset.ai)}
+                  disabled={isRunning}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+
+            {/* AI Image Mode: Auto (Google Flow) vs Prompt (manual import). Hidden when AI = 0%. */}
+            {currentAiPercent > 0 && (
+              <div
+                id={`ai-image-mode${idSuffix}`}
+                style={{ marginTop: '2px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}
+              >
+                <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                  AI Image Mode
+                </div>
+                <div className="content-type-grid">
+                  <button
+                    type="button"
+                    id={`ai-image-mode-auto${idSuffix}`}
+                    className={`content-type-card ${aiImageMode !== 'prompt' ? 'is-selected' : ''}`}
+                    onClick={() => onSelectAiImageMode?.('auto')}
+                    disabled={isRunning}
+                  >
+                    <div className="content-type-card__content">
+                      <div className="content-type-card__title">
+                        Auto
+                        {aiImageMode !== 'prompt' && (
+                          <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Selected</span>
+                        )}
+                      </div>
+                      <div className="content-type-card__subtitle">Generate AI images automatically</div>
+                      <div className="content-type-card__desc">
+                        Uses the current AI-image generation workflow (Google Flow).
+                      </div>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    id={`ai-image-mode-prompt${idSuffix}`}
+                    className={`content-type-card ${aiImageMode === 'prompt' ? 'is-selected' : ''}`}
+                    onClick={() => onSelectAiImageMode?.('prompt')}
+                    disabled={isRunning}
+                  >
+                    <div className="content-type-card__content">
+                      <div className="content-type-card__title">
+                        Prompt
+                        {aiImageMode === 'prompt' && (
+                          <span style={{ fontSize: '11px', color: 'var(--color-brand)' }}>● Selected</span>
+                        )}
+                      </div>
+                      <div className="content-type-card__subtitle">Generate prompts and import images manually</div>
+                      <div className="content-type-card__desc">
+                        Generate detailed prompts only. You create the images externally and import them back into the project.
+                      </div>
+                    </div>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* AI Image Quality Selector (Section 12) */}
+            <div style={{ marginTop: '2px', paddingTop: '8px', borderTop: '1px solid rgba(255, 255, 255, 0.08)' }}>
+              <div style={{ fontSize: '11px', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                AI Image Quality:
+              </div>
+              <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                {(['1080p', '2k', '4k'] as const).map((res) => {
+                  const isSelected = (imageOutputResolution || '1080p') === res
+                  return (
+                    <button
+                      key={res}
+                      type="button"
+                      id={`quality-opt-${res}${idSuffix}`}
+                      className={`btn btn-sm ${isSelected ? 'btn-primary' : 'btn-secondary'}`}
+                      style={{
+                        padding: '3px 10px',
+                        fontSize: '11px',
+                        fontWeight: isSelected ? 600 : 400
+                      }}
+                      onClick={() => onSelectResolution?.(res)}
+                      disabled={isRunning}
+                    >
+                      {isSelected ? '● ' : ''}{res === '1080p' ? '1080p — Recommended' : res.toUpperCase()}
+                    </button>
+                  )
+                })}
+              </div>
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginTop: '4px', fontStyle: 'italic' }}>
+                {(imageOutputResolution || '1080p') === '1080p' && '1080p: Best for faster long-form production'}
+                {(imageOutputResolution || '1080p') === '2k' && '2K: Higher-resolution still output'}
+                {(imageOutputResolution || '1080p') === '4k' && '4K: Highest quality, slower generation/export'}
+              </div>
+            </div>
+
+            {/* AI Generation Failure handling (strict by default) */}
+            {currentAiPercent > 0 && aiImageMode !== 'prompt' && (
+              <details
+                id={`ai-failure-handling${idSuffix}`}
+                style={{ fontSize: '11px', color: 'var(--text-secondary)' }}
+              >
+                <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                  Failure handling — {aiFailureBehavior === 'stock-fallback' ? 'Allow Stock fallback' : 'Keep selected mix'}
+                </summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+                  <div style={{ fontWeight: 600 }}>AI Generation Failure</div>
+                  <label style={{ display: 'flex', gap: '6px', alignItems: 'flex-start', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      id={`ai-failure-strict${idSuffix}`}
+                      name={`ai-failure-behavior${idSuffix}`}
+                      checked={aiFailureBehavior !== 'stock-fallback'}
+                      onChange={() => onSelectFailureBehavior?.('strict')}
+                      disabled={isRunning}
+                    />
+                    <span>
+                      <strong>Keep selected mix — Recommended</strong>
+                      <br />
+                      Retry AI and pause if an AI visual cannot be generated.
+                    </span>
+                  </label>
+                  <label style={{ display: 'flex', gap: '6px', alignItems: 'flex-start', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      id={`ai-failure-stock-fallback${idSuffix}`}
+                      name={`ai-failure-behavior${idSuffix}`}
+                      checked={aiFailureBehavior === 'stock-fallback'}
+                      onChange={() => onSelectFailureBehavior?.('stock-fallback')}
+                      disabled={isRunning}
+                    />
+                    <span>
+                      <strong>Allow Stock fallback</strong>
+                      <br />
+                      Replace failed AI visuals with Pexels/Pixabay footage.
+                    </span>
+                  </label>
+                  {aiFailureBehavior === 'stock-fallback' && (
+                    <div id={`ai-failure-warning${idSuffix}`} style={{ color: '#fbbf24' }}>
+                      ⚠️ AI failures may increase the final footage percentage.
+                    </div>
+                  )}
+                </div>
+              </details>
+            )}
+            {currentAiPercent === 100 && aiImageMode !== 'prompt' && aiFailureBehavior !== 'stock-fallback' && (
+              <div id={`ai-only-helper${idSuffix}`} style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                100% AI mode — Stock fallback disabled by default.
+              </div>
+            )}
+
+            {/* Google Flow status for Custom Mix */}
+            {currentAiPercent > 0 && aiImageMode === 'prompt' ? (
+              <div
+                id={`manual-prompt-mode-status${idSuffix}`}
+                style={{
+                  fontSize: '11px',
+                  color: 'var(--color-success, #10b981)',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '2px'
+                }}
+              >
+                <span>● Manual Prompt Mode</span>
+                <span>✓ No Google Flow connection required</span>
+              </div>
+            ) : currentAiPercent > 0 ? (
+              flowHealth.checking === false &&
+              (flowHealth.reachable === false || flowHealth.extensionConnected === false) ? (
+                <div
+                  style={{
+                    marginTop: '6px',
+                    padding: '8px 12px',
+                    background: 'rgba(239, 68, 68, 0.1)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    borderRadius: 'var(--radius-sm, 6px)',
+                    fontSize: '11px',
+                    color: '#f87171',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '8px'
+                  }}
+                >
+                  <div>
+                    ⚠️ <strong>Google Flow / FlowKit is not ready:</strong> Health mode requires Google Flow / FlowKit connection. Open Google Flow in Chrome and ensure the FlowKit extension is connected.
+                  </div>
+                  {window.api?.thumbnail?.openFlowTab && (
+                    <button
+                      type="button"
+                      className="btn btn-secondary btn-sm"
+                      style={{ flexShrink: 0, fontSize: '11px', padding: '3px 8px' }}
+                      onClick={() => window.api.thumbnail.openFlowTab()}
+                    >
+                      Open Google Flow
+                    </button>
+                  )}
+                </div>
+              ) : (
+                <div
+                  style={{
+                    fontSize: '11px',
+                    color: 'var(--color-success, #10b981)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px'
+                  }}
+                >
+                  <span>●</span> AI Images — Google Flow: Ready
+                </div>
+              )
+            ) : (
+              <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                No Google Flow images required (100% stock footage).
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 export function InputPage({
   project,
   onUpdateInputs,
@@ -114,6 +652,156 @@ export function InputPage({
 
   // Mode: 'manual' (default) hoặc 'auto'
   const [workflowMode, setWorkflowMode] = useState<'manual' | 'auto'>('auto')
+
+  // Resolve effective visual mix settings
+  const effectiveMix = resolveVisualMixConfig({
+    visualSourceMode: inputs.visualSourceMode,
+    visualMixConfig: inputs.visualMixConfig,
+    contentType: inputs.contentType
+  })
+  const isCustomMix = effectiveMix.mode === 'custom-mix'
+  const currentAiPercent = Math.round(effectiveMix.aiImageRatio * 100)
+  const currentStockPercent = 100 - currentAiPercent
+  const aiImageMode: AiImageMode = isCustomMix && currentAiPercent > 0 ? resolveAiImageMode(effectiveMix) : 'auto'
+
+  // Flow health check for Custom Mix with AI ratio > 0
+  const [flowHealth, setFlowHealth] = useState<{
+    reachable?: boolean
+    extensionConnected?: boolean
+    signedIn?: boolean
+    checking?: boolean
+  }>({ checking: false })
+
+  useEffect(() => {
+    let cancelled = false
+    const checkFlow = async (): Promise<void> => {
+      if (!isCustomMix || currentAiPercent <= 0 || aiImageMode === 'prompt') {
+        // Prompt mode never needs Google Flow: do not even probe FlowKit from Setup.
+        setFlowHealth({ checking: false })
+        return
+      }
+      try {
+        setFlowHealth((prev) => ({ ...prev, checking: true }))
+        const h = await window.api?.thumbnail?.checkFlowHealth?.()
+        if (!cancelled && h) {
+          setFlowHealth({
+            reachable: Boolean(h.reachable),
+            extensionConnected: Boolean(h.extensionConnected),
+            signedIn: Boolean(h.signedIn),
+            checking: false
+          })
+        }
+      } catch {
+        if (!cancelled) {
+          setFlowHealth({ reachable: false, extensionConnected: false, checking: false })
+        }
+      }
+    }
+    checkFlow()
+    return () => {
+      cancelled = true
+    }
+  }, [isCustomMix, currentAiPercent, aiImageMode])
+
+  async function handleSelectContentType(type: ContentType): Promise<void> {
+    if (isRunning) return
+    const updates: Partial<ProjectInputs> = {
+      contentType: type,
+      contentProfileMode: type === 'health' ? 'health' : 'general'
+    }
+    await onUpdateInputs(updates)
+  }
+
+  async function handleSelectContentProfileMode(mode: ContentProfileMode): Promise<void> {
+    if (isRunning) return
+    const legacyType: ContentType = mode === 'health' ? 'health' : 'default'
+    await onUpdateInputs({
+      contentProfileMode: mode,
+      contentType: legacyType
+    })
+  }
+
+  async function handleSelectVisualSourceMode(mode: VisualSourceMode): Promise<void> {
+    if (isRunning) return
+    const baseAi = inputs.visualMixConfig?.aiImageRatio ?? (inputs.contentType === 'health' ? 0.8 : 0.5)
+    const aiRatio = mode === 'legacy' ? 0 : baseAi
+    const stockRatio = mode === 'legacy' ? 1 : Math.round((1 - aiRatio) * 1000) / 1000
+
+    const nextConfig: VisualMixConfig = {
+      mode,
+      aiImageRatio: aiRatio,
+      stockFootageRatio: stockRatio,
+      imageOutputResolution: effectiveMix.imageOutputResolution,
+      aiFailureBehavior: inputs.visualMixConfig?.aiFailureBehavior ?? 'strict',
+      aiImageMode: resolveAiImageMode(inputs.visualMixConfig),
+      width: inputs.visualMixConfig?.width ?? 1920,
+      height: inputs.visualMixConfig?.height ?? 1080,
+      motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
+      generationConcurrency: inputs.visualMixConfig?.generationConcurrency ?? 2,
+      postProcessConcurrency: inputs.visualMixConfig?.postProcessConcurrency ?? 2
+    }
+
+    await onUpdateInputs({
+      visualSourceMode: mode,
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSelectFailureBehavior(behavior: AiFailureBehavior): Promise<void> {
+    if (isRunning) return
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      aiFailureBehavior: behavior
+    }
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSelectAiImageMode(mode: AiImageMode): Promise<void> {
+    if (isRunning) return
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      aiImageMode: mode
+    }
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSelectResolution(resolution: AiImageOutputResolution): Promise<void> {
+    if (isRunning) return
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      imageOutputResolution: resolution
+    }
+    await onUpdateInputs({
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSetAiRatio(aiPercent: number): Promise<void> {
+    if (isRunning) return
+    const clampedAi = Math.max(0, Math.min(100, Math.round(isNaN(aiPercent) ? 0 : aiPercent)))
+    const clampedStock = 100 - clampedAi
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      mode: 'custom-mix',
+      aiImageRatio: clampedAi / 100,
+      stockFootageRatio: clampedStock / 100,
+      imageOutputResolution: effectiveMix.imageOutputResolution
+    }
+    await onUpdateInputs({
+      visualSourceMode: 'custom-mix',
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSetStockRatio(stockPercent: number): Promise<void> {
+    if (isRunning) return
+    const clampedStock = Math.max(0, Math.min(100, Math.round(isNaN(stockPercent) ? 0 : stockPercent)))
+    await handleSetAiRatio(100 - clampedStock)
+  }
 
   // Auto Pipeline Options
   const [whisperModel, setWhisperModel] = useState<'tiny' | 'base' | 'small' | 'medium'>('base')
@@ -167,7 +855,8 @@ export function InputPage({
       return
     }
 
-    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}`
+    const currentProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`
     if (lastAutoStartedFingerprintRef.current === currentFp) {
       return
     }
@@ -188,19 +877,52 @@ export function InputPage({
         clearTimeout(debounceTimerRef.current)
       }
     }
-  }, [workflowMode, autoStartOnReady, isAutoReady, inputs.scriptPath, inputs.voiceoverPath, isRunning])
+  }, [
+    workflowMode,
+    autoStartOnReady,
+    isAutoReady,
+    inputs.scriptPath,
+    inputs.voiceoverPath,
+    inputs.contentType,
+    inputs.contentProfileMode,
+    effectiveMix.mode,
+    effectiveMix.aiImageRatio,
+    isRunning
+  ])
 
   async function handleStartAutoPipeline(): Promise<void> {
     if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return
     setIsStarting(true)
     try {
+      const resolvedMix = resolveVisualMixConfig({
+        visualSourceMode: inputs.visualSourceMode,
+        visualMixConfig: inputs.visualMixConfig,
+        contentType: inputs.contentType
+      })
+      const resolvedProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
+
+      console.log(
+        `[Setup] Starting pipeline:\nprofileMode=${resolvedProfileMode}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}`
+      )
+
       const ok = await startPipeline({
         projectDir: project.projectDir,
         scriptPath: inputs.scriptPath,
         voiceoverPath: inputs.voiceoverPath,
         whisperModel,
         requireBackgroundMusic: requireBgMusic,
-        autoStartOnReady
+        autoStartOnReady,
+        contentType: inputs.contentType ?? (resolvedProfileMode === 'health' ? 'health' : 'default'),
+        contentProfileMode: resolvedProfileMode,
+        visualSourceMode: resolvedMix.mode,
+        visualMixConfig: resolvedMix,
+        healthVisualConfig: (inputs.contentType === 'health' || resolvedProfileMode === 'health') && resolvedMix.mode === 'custom-mix' ? {
+          aiRatio: resolvedMix.aiImageRatio,
+          stockRatio: resolvedMix.stockFootageRatio,
+          width: resolvedMix.width,
+          height: resolvedMix.height,
+          motionEnabled: resolvedMix.motionEnabled
+        } : undefined
       })
       if (ok && onNavigate && isSimpleMode) {
         onNavigate('production')
@@ -295,6 +1017,25 @@ export function InputPage({
             </div>
           </div>
         )}
+
+        {/* Visual Source / Mix Section */}
+        <VisualSourceSection
+          isCustomMix={isCustomMix}
+          currentAiPercent={currentAiPercent}
+          currentStockPercent={currentStockPercent}
+          imageOutputResolution={effectiveMix.imageOutputResolution}
+          flowHealth={flowHealth}
+          isRunning={isRunning}
+          onSelectMode={handleSelectVisualSourceMode}
+          onSetAiRatio={handleSetAiRatio}
+          onSetStockRatio={handleSetStockRatio}
+          onSelectResolution={handleSelectResolution}
+          aiFailureBehavior={effectiveMix.aiFailureBehavior}
+          onSelectFailureBehavior={handleSelectFailureBehavior}
+          aiImageMode={aiImageMode}
+          onSelectAiImageMode={handleSelectAiImageMode}
+          isAdvanced={false}
+        />
 
         {/* Required Inputs Section */}
         <div className="setup-section">
@@ -681,6 +1422,97 @@ export function InputPage({
           ⚠️ <strong>Input files changed while pipeline is running:</strong> New files will not take effect until current pipeline is cancelled or restarted.
         </div>
       )}
+
+      {/* Content Profile Selector (Advanced Mode Override - Section 7) */}
+      <div className="panel">
+        <div className="panel-header">
+          <div className="panel-title">
+            <div className="panel-title-icon">
+              <svg width="12" height="12" viewBox="0 0 20 20" fill="var(--brand-primary)">
+                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+              </svg>
+            </div>
+            Content Profile
+          </div>
+          <span className="panel-badge badge-primary">
+            {(inputs.contentProfileMode ?? 'auto') === 'auto'
+              ? 'Auto Detect'
+              : inputs.contentProfileMode === 'health'
+              ? 'Health (Override)'
+              : 'General (Override)'}
+          </span>
+        </div>
+        <div className="panel-body">
+          <div className="content-type-grid" style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))' }}>
+            <button
+              type="button"
+              id="content-profile-auto-adv"
+              className={`content-type-card ${(inputs.contentProfileMode ?? 'auto') === 'auto' ? 'is-selected' : ''}`}
+              onClick={() => handleSelectContentProfileMode('auto')}
+              disabled={isRunning}
+            >
+              <div className="content-type-card__icon">🤖</div>
+              <div className="content-type-card__content">
+                <div className="content-type-card__title">Auto Detect (Default)</div>
+                <div className="content-type-card__desc">
+                  Automatically detects medical vs general documentary from script
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              id="content-profile-general-adv"
+              className={`content-type-card ${inputs.contentProfileMode === 'general' ? 'is-selected' : ''}`}
+              onClick={() => handleSelectContentProfileMode('general')}
+              disabled={isRunning}
+            >
+              <div className="content-type-card__icon">🎬</div>
+              <div className="content-type-card__content">
+                <div className="content-type-card__title">General Documentary</div>
+                <div className="content-type-card__desc">
+                  General documentary still prompts (no medical anatomy/SFX)
+                </div>
+              </div>
+            </button>
+
+            <button
+              type="button"
+              id="content-profile-health-adv"
+              className={`content-type-card ${inputs.contentProfileMode === 'health' ? 'is-selected' : ''}`}
+              onClick={() => handleSelectContentProfileMode('health')}
+              disabled={isRunning}
+            >
+              <div className="content-type-card__icon">🩺</div>
+              <div className="content-type-card__content">
+                <div className="content-type-card__title">Health Explainer</div>
+                <div className="content-type-card__desc">
+                  Enforces anatomical realism, scientific prompts & Health SFX
+                </div>
+              </div>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* Visual Source / Mix Section */}
+      <VisualSourceSection
+        isCustomMix={isCustomMix}
+        currentAiPercent={currentAiPercent}
+        currentStockPercent={currentStockPercent}
+        imageOutputResolution={effectiveMix.imageOutputResolution}
+        flowHealth={flowHealth}
+        isRunning={isRunning}
+        onSelectMode={handleSelectVisualSourceMode}
+        onSetAiRatio={handleSetAiRatio}
+        onSetStockRatio={handleSetStockRatio}
+        onSelectResolution={handleSelectResolution}
+        aiFailureBehavior={effectiveMix.aiFailureBehavior}
+        onSelectFailureBehavior={handleSelectFailureBehavior}
+        aiImageMode={aiImageMode}
+        onSelectAiImageMode={handleSelectAiImageMode}
+        isAdvanced={true}
+      />
 
       {/* Required Source Files */}
       <div className="panel">

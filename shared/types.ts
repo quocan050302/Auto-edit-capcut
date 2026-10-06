@@ -91,6 +91,410 @@ export interface ProjectSettings {
   pacing: Pacing
 }
 
+export type ContentType = 'default' | 'health'
+
+export type ContentProfileMode = 'auto' | 'general' | 'health'
+
+export type ResolvedContentProfile = 'general' | 'health'
+
+export interface ContentProfileDetection {
+  schemaVersion: number
+  mode: ContentProfileMode
+  resolvedProfile: ResolvedContentProfile
+  confidence: number
+  reasons: string[]
+  detectedSignals: string[]
+  generatedAt: string
+}
+
+export function resolveContentProfileMode(options?: {
+  contentProfileMode?: ContentProfileMode
+  contentType?: ContentType
+} | null): ContentProfileMode {
+  if (options?.contentProfileMode) {
+    return options.contentProfileMode
+  }
+  if (options?.contentType === 'health') {
+    return 'health'
+  }
+  if (options?.contentType === 'default') {
+    return 'general'
+  }
+  return 'auto'
+}
+
+export type VisualSourceMode = 'legacy' | 'custom-mix'
+
+export type AiImageOutputResolution = '1080p' | '2k' | '4k'
+
+/**
+ * What to do when an AI-owned scene cannot be generated after bounded retries.
+ * - 'strict' (default): never replace an AI-owned scene with Stock; report Needs Attention.
+ * - 'stock-fallback': failed AI scenes may be replaced with Pexels/Pixabay footage.
+ */
+export type AiFailureBehavior = 'strict' | 'stock-fallback'
+
+/**
+ * How the AI-image portion of Custom Mix is acquired.
+ * - 'auto' (default): generate AI stills automatically through Google Flow / FlowKit.
+ * - 'prompt': generate detailed per-scene prompts only; the user creates the images
+ *   externally and imports them back. FlowKit is never contacted for scene visuals.
+ */
+export type AiImageMode = 'auto' | 'prompt'
+
+/** Old projects without the property resolve to 'auto'. */
+export function resolveAiImageMode(config?: { aiImageMode?: AiImageMode } | null): AiImageMode {
+  return config?.aiImageMode === 'prompt' ? 'prompt' : 'auto'
+}
+
+export type AiVisualFailureStage =
+  | 'generation'
+  | 'export'
+  | 'quality-gate'
+  | 'normalization'
+  | 'cancelled'
+
+export interface VisualMixConfig {
+  mode?: VisualSourceMode
+  aiImageRatio: number
+  stockFootageRatio: number
+  imageOutputResolution: AiImageOutputResolution
+  /** Defaults to 'strict' when missing (old projects never opt into Stock fallback implicitly). */
+  aiFailureBehavior?: AiFailureBehavior
+  /** Defaults to 'auto' when missing (old projects keep generating AI images automatically). */
+  aiImageMode?: AiImageMode
+  motionEnabled: boolean
+  requestedGenerationConcurrency: number
+  exportConcurrency: number
+  normalizeConcurrency: number
+  stockSearchConcurrency: number
+  stockDownloadConcurrency: number
+
+  // Backward-compatible alias fields
+  generationConcurrency?: number
+  postProcessConcurrency?: number
+  width?: number
+  height?: number
+}
+
+export const DEFAULT_VISUAL_MIX_CONFIG: VisualMixConfig = {
+  mode: 'legacy',
+  aiImageRatio: 0,
+  stockFootageRatio: 1,
+  imageOutputResolution: '1080p',
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+}
+
+export const HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG: VisualMixConfig = {
+  mode: 'custom-mix',
+  aiImageRatio: 0.8,
+  stockFootageRatio: 0.2,
+  imageOutputResolution: '1080p',
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+}
+
+export const GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG: VisualMixConfig = {
+  mode: 'custom-mix',
+  aiImageRatio: 0.5,
+  stockFootageRatio: 0.5,
+  imageOutputResolution: '1080p',
+  motionEnabled: true,
+  requestedGenerationConcurrency: 2,
+  exportConcurrency: 2,
+  normalizeConcurrency: 2,
+  stockSearchConcurrency: 4,
+  stockDownloadConcurrency: 3,
+  generationConcurrency: 6,
+  postProcessConcurrency: 2,
+  width: 1920,
+  height: 1080
+}
+
+export function normalizeVisualMixConfig(
+  config?: Partial<VisualMixConfig>,
+  modeOverride?: VisualSourceMode
+): VisualMixConfig {
+  const mode = modeOverride ?? config?.mode ?? 'legacy'
+
+  const imageOutputResolution: AiImageOutputResolution =
+    config?.imageOutputResolution === '4k'
+      ? '4k'
+      : config?.imageOutputResolution === '2k'
+        ? '2k'
+        : '1080p'
+
+  const resDims =
+    imageOutputResolution === '4k'
+      ? { width: 3840, height: 2160 }
+      : imageOutputResolution === '2k'
+        ? { width: 2560, height: 1440 }
+        : { width: 1920, height: 1080 }
+
+  const requestedGenerationConcurrency = Math.max(
+    1,
+    Math.min(6, config?.requestedGenerationConcurrency ?? config?.generationConcurrency ?? 2)
+  )
+  const exportConcurrency = Math.max(
+    1,
+    Math.min(4, config?.exportConcurrency ?? config?.postProcessConcurrency ?? 2)
+  )
+  const normalizeConcurrency = Math.max(
+    1,
+    Math.min(4, config?.normalizeConcurrency ?? config?.postProcessConcurrency ?? 2)
+  )
+  const stockSearchConcurrency = Math.max(
+    1,
+    Math.min(8, config?.stockSearchConcurrency ?? 4)
+  )
+  const stockDownloadConcurrency = Math.max(
+    1,
+    Math.min(6, config?.stockDownloadConcurrency ?? 3)
+  )
+
+  if (mode === 'legacy') {
+    return {
+      mode: 'legacy',
+      aiImageRatio: 0,
+      stockFootageRatio: 1,
+      imageOutputResolution,
+      motionEnabled: config?.motionEnabled ?? true,
+      requestedGenerationConcurrency,
+      exportConcurrency,
+      normalizeConcurrency,
+      stockSearchConcurrency,
+      stockDownloadConcurrency,
+      generationConcurrency: requestedGenerationConcurrency,
+      postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+      width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+      height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
+    }
+  }
+
+  let rawAi = config?.aiImageRatio
+  let rawStock = config?.stockFootageRatio
+
+  if (rawAi === undefined && rawStock === undefined) {
+    rawAi = 0.5
+    rawStock = 0.5
+  } else if (rawAi !== undefined && rawStock === undefined) {
+    const clampedAi = Math.max(0, Math.min(1, rawAi))
+    rawAi = Math.round(clampedAi * 1000) / 1000
+    rawStock = Math.round((1 - rawAi) * 1000) / 1000
+  } else if (rawAi === undefined && rawStock !== undefined) {
+    const clampedStock = Math.max(0, Math.min(1, rawStock))
+    rawStock = Math.round(clampedStock * 1000) / 1000
+    rawAi = Math.round((1 - rawStock) * 1000) / 1000
+  } else {
+    const clampedAi = Math.max(0, Math.min(1, rawAi!))
+    const clampedStock = Math.max(0, Math.min(1, rawStock!))
+    const sum = clampedAi + clampedStock
+
+    if (sum === 0) {
+      rawAi = 0
+      rawStock = 1
+    } else if (Math.abs(sum - 1.0) < 0.0001) {
+      rawAi = Math.round(clampedAi * 1000) / 1000
+      rawStock = Math.round((1 - rawAi) * 1000) / 1000
+    } else {
+      rawAi = Math.round((clampedAi / sum) * 1000) / 1000
+      rawStock = Math.round((1 - rawAi) * 1000) / 1000
+    }
+  }
+
+  const aiRatio = Math.max(0, Math.min(1, Math.round(rawAi * 1000) / 1000))
+  const stockRatio = Math.max(0, Math.min(1, Math.round((1 - aiRatio) * 1000) / 1000))
+
+  return {
+    mode: 'custom-mix',
+    aiImageRatio: aiRatio,
+    stockFootageRatio: stockRatio,
+    imageOutputResolution,
+    aiFailureBehavior: config?.aiFailureBehavior === 'stock-fallback' ? 'stock-fallback' : 'strict',
+    aiImageMode: resolveAiImageMode(config),
+    motionEnabled: config?.motionEnabled ?? true,
+    requestedGenerationConcurrency,
+    exportConcurrency,
+    normalizeConcurrency,
+    stockSearchConcurrency,
+    stockDownloadConcurrency,
+    generationConcurrency: requestedGenerationConcurrency,
+    postProcessConcurrency: Math.max(exportConcurrency, normalizeConcurrency),
+    width: config?.width && config.width > 0 ? Math.round(config.width) : resDims.width,
+    height: config?.height && config.height > 0 ? Math.round(config.height) : resDims.height
+  }
+}
+
+export function resolveVisualMixConfig(options?: {
+  visualSourceMode?: VisualSourceMode
+  visualMixConfig?: Partial<VisualMixConfig>
+  contentType?: ContentType
+  healthVisualConfig?: HealthVisualConfig
+} | null): VisualMixConfig {
+  if (!options) {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG }
+  }
+
+  const isHealth = (options.contentType ?? 'default') === 'health'
+
+  // If user has explicitly persisted visualMixConfig, it is the authoritative Single Source of Truth
+  if (options.visualMixConfig) {
+    const mode = options.visualSourceMode ?? options.visualMixConfig.mode ?? 'custom-mix'
+    return normalizeVisualMixConfig(options.visualMixConfig, mode)
+  }
+
+  if (options.visualSourceMode === 'legacy') {
+    return { ...DEFAULT_VISUAL_MIX_CONFIG }
+  }
+
+  if (options.visualSourceMode === 'custom-mix') {
+    if (isHealth) {
+      if (options.healthVisualConfig) {
+        return normalizeVisualMixConfig(
+          {
+            mode: 'custom-mix',
+            aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+            stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+            imageOutputResolution: '1080p',
+            motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+          },
+          'custom-mix'
+        )
+      }
+      return { ...HEALTH_RECOMMENDED_VISUAL_MIX_CONFIG }
+    }
+    return { ...GENERAL_RECOMMENDED_CUSTOM_MIX_CONFIG }
+  }
+
+  // Fallback for legacy health configurations
+  if (isHealth && options.healthVisualConfig) {
+    return normalizeVisualMixConfig(
+      {
+        mode: 'custom-mix',
+        aiImageRatio: options.healthVisualConfig.aiRatio ?? 0.8,
+        stockFootageRatio: options.healthVisualConfig.stockRatio ?? 0.2,
+        imageOutputResolution: '1080p',
+        motionEnabled: options.healthVisualConfig.motionEnabled ?? true
+      },
+      'custom-mix'
+    )
+  }
+
+  return { ...DEFAULT_VISUAL_MIX_CONFIG }
+}
+
+// ─── Manual AI Image (Prompt mode) shared types ──────────────────────────────
+
+export type ManualAiSceneStatus = 'waiting-image' | 'ready' | 'stale' | 'low-resolution'
+
+export interface ManualAiSceneRow {
+  sceneIndex: number
+  sceneId: string
+  prompt: string
+  promptHash: string
+  expectedFilename: string
+  status: ManualAiSceneStatus
+  localPath?: string
+  width?: number
+  height?: number
+  importedAt?: string
+}
+
+export interface ManualAiStatus {
+  imageMode: AiImageMode
+  hasPromptPack: boolean
+  profile?: VisualMixProfile
+  outputResolution?: AiImageOutputResolution
+  promptFilePath?: string
+  expected: number
+  ready: number
+  missingSceneIndices: number[]
+  /** Scenes whose imported image no longer matches the current prompt (narration changed). */
+  staleSceneIndices: number[]
+  lowResolutionSceneIndices: number[]
+  allReady: boolean
+  rows: ManualAiSceneRow[]
+}
+
+/** Live wait metadata attached to the running stock-search stage. */
+export interface ManualAiWaitInfo {
+  expected: number
+  ready: number
+  missingSceneIndices: number[]
+  promptFilePath: string
+  stockExpected: number
+  stockReady: number
+}
+
+export type ManualAiRejectionCode =
+  | 'NO_PROMPT_PACK'
+  | 'UNSUPPORTED_TYPE'
+  | 'UNREADABLE'
+  | 'NO_SCENE_NUMBER'
+  | 'UNKNOWN_SCENE'
+  | 'NOT_AI_OWNED'
+  | 'DUPLICATE_SCENE'
+  | 'ALREADY_IMPORTED'
+  | 'LOW_RESOLUTION'
+  | 'NORMALIZE_FAILED'
+
+export interface ManualAiImportMapping {
+  filePath: string
+  fileName: string
+  sceneIndex: number
+  via: 'filename' | 'natural-sort'
+}
+
+export interface ManualAiImportRejection {
+  filePath: string
+  fileName: string
+  sceneIndex?: number
+  code: ManualAiRejectionCode
+  message: string
+  width?: number
+  height?: number
+}
+
+export interface ManualAiImportPlan {
+  mappings: ManualAiImportMapping[]
+  rejections: ManualAiImportRejection[]
+  /** True when the mapping was guessed (natural-sort) and must be confirmed by the user. */
+  needsConfirmation: boolean
+  missingCount: number
+}
+
+export interface ManualAiImportedItem {
+  sceneIndex: number
+  fileName: string
+  localPath: string
+  width: number
+  height: number
+  warnings: string[]
+}
+
+export interface ManualAiImportResult {
+  imported: ManualAiImportedItem[]
+  rejections: ManualAiImportRejection[]
+  status: ManualAiStatus
+}
+
 export interface ProjectInputs {
   scriptPath: string | null
   voiceoverPath: string | null
@@ -98,6 +502,10 @@ export interface ProjectInputs {
   videosFolder: string | null
   musicFolder: string | null
   sfxFolder: string | null
+  contentType?: ContentType
+  contentProfileMode?: ContentProfileMode
+  visualSourceMode?: VisualSourceMode
+  visualMixConfig?: VisualMixConfig
 }
 
 export type MediaItemType = 'image' | 'video' | 'audio'
@@ -322,7 +730,7 @@ export interface ContextScoreBreakdown {
 
 // ─── Stock Media Types ────────────────────────────────────────────────────────
 
-export type StockProvider = 'pexels' | 'pixabay'
+export type StockProvider = 'pexels' | 'pixabay' | 'google-flow' | 'manual-ai'
 export type StockMediaType = 'video' | 'photo'
 
 /** A single candidate returned from a stock media API search */
@@ -732,6 +1140,14 @@ export interface StockRunParams {
   pexelsApiKey: string
   pixabayApiKey?: string
   preferredAspectRatio?: string  // e.g. '16:9'
+  targetSceneIndices?: number[]
+  /**
+   * Custom Mix only: when provided, the engine hands its newly produced assignments
+   * (target scenes only) to this sink instead of rewriting analysis/stock-assignments.json.
+   * The sink owner (VisualAssignmentStore) is then the single serialized writer, so
+   * concurrent AI + Stock branches can never lose each other's updates.
+   */
+  assignmentSink?: (assignments: StockSceneAssignment[]) => void | Promise<void>
 }
 
 /** Result from a completed stock engine run */
@@ -819,6 +1235,12 @@ export interface AudioPlan {
   generatedAt: string
   sections: AudioSection[]
   sfxAssignments: AudioSfxAssignment[]
+  healthSfx?: {
+    enabled: boolean
+    planHash: string
+    generatedAt: string
+    cueCount: number
+  }
 }
 
 /** Result from a runAudioDirector() call */
@@ -1012,6 +1434,16 @@ export const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: 'pipeline:retry-stage',
   PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
   PIPELINE_RECOVER: 'pipeline:recover',
+
+  // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
+  MANUAL_AI_GET_STATUS: 'manual-ai:get-status',
+  MANUAL_AI_GET_PROMPT_TEXT: 'manual-ai:get-prompt-text',
+  MANUAL_AI_EXPORT_TXT: 'manual-ai:export-txt',
+  MANUAL_AI_OPEN_PROMPT_FILE: 'manual-ai:open-prompt-file',
+  MANUAL_AI_SELECT_IMAGES: 'manual-ai:select-images',
+  MANUAL_AI_PLAN_IMPORT: 'manual-ai:plan-import',
+  MANUAL_AI_COMMIT_IMPORT: 'manual-ai:commit-import',
+  MANUAL_AI_STATUS_UPDATED: 'manual-ai:status-updated',
 
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: 'research:sidecar-status',
@@ -1214,6 +1646,8 @@ export interface PipelineStageState {
   warning?: string
   error?: string
   artifactPath?: string
+  /** Present while Prompt-mode AI images are being awaited (not an error state). */
+  manualAiWait?: ManualAiWaitInfo
   stats?: {
     totalScenes?: number
     processedScenes?: number
@@ -1248,6 +1682,11 @@ export interface AutoPipelineOptions {
   fps?: 24 | 25 | 30 | 60
   transitionSettings?: RenderTransitionSettings
   autoStartOnReady?: boolean
+  contentType?: ContentType
+  contentProfileMode?: ContentProfileMode
+  visualSourceMode?: VisualSourceMode
+  visualMixConfig?: VisualMixConfig
+  healthVisualConfig?: HealthVisualConfig
 }
 
 export type PipelineOverallStatus =
@@ -1607,6 +2046,341 @@ export interface ThumbnailProgressPayload {
   candidate?: ThumbnailCandidate
   jobState?: ThumbnailJobState
 }
+
+// ─── Health Visual Mode Types ─────────────────────────────────────────────────
+
+export type HealthVisualStrategy = 'ai-still' | 'stock'
+
+export type HealthVisualCategory =
+  | 'lifestyle'
+  | 'anatomy'
+  | 'mechanism'
+  | 'food'
+  | 'exercise'
+  | 'evidence'
+  | 'conceptual'
+
+export type HealthScientificAccuracy =
+  | 'conceptual'
+  | 'anatomical'
+  | 'mechanistic'
+
+export type HealthMotionPreset =
+  | 'slow-push-in'
+  | 'slow-push-out'
+  | 'pan-left'
+  | 'pan-right'
+  | 'micro-drift'
+  | 'none'
+  | 'push-in-center'
+  | 'push-in-left'
+  | 'push-in-right'
+  | 'push-out-center'
+  | 'pan-up'
+  | 'pan-down'
+  | 'drift-up-left'
+  | 'drift-up-right'
+  | 'drift-down-left'
+  | 'drift-down-right'
+  | 'focus-left'
+  | 'focus-right'
+  | 'gentle-pulse'
+  | 'still-hold'
+
+export interface HealthMotionSpec {
+  preset: HealthMotionPreset
+  intensity: 'very-subtle' | 'subtle' | 'medium'
+  focusX: number
+  focusY: number
+  zoomStart: number
+  zoomEnd: number
+  ease: 'linear' | 'ease-in-out' | 'ease-out'
+  reason: string
+}
+
+export type HealthSfxType =
+  | 'none'
+  | 'soft-whoosh'
+  | 'reverse-whoosh'
+  | 'air-swish'
+  | 'soft-impact'
+  | 'digital-scan'
+  | 'soft-pulse'
+  | 'heartbeat'
+  | 'clock-tick'
+  | 'subtle-riser'
+
+export interface HealthSfxCuePlan {
+  sceneIndex: number
+  type: HealthSfxType
+  queryCandidates: string[]
+  relativeStart: number
+  duration: number
+  volumeDb: number
+  reason: string
+  strength: 'subtle' | 'accent'
+}
+
+export interface HealthMotionReport {
+  totalAiScenes: number
+  motionDistribution: Record<string, number>
+  sfxCueCount: number
+  sfxDistribution: Record<string, number>
+  maxConsecutiveSameMotion: number
+  generatedAt: string
+}
+
+export interface HealthVisualConfig {
+  aiRatio?: number
+  stockRatio?: number
+  width?: number
+  height?: number
+  motionEnabled?: boolean
+}
+
+export interface HealthVisualScenePlan {
+  sceneIndex: number
+  narration: string
+  visualIntent: string
+  strategy: HealthVisualStrategy
+  category: HealthVisualCategory
+  reasoning: string
+  scientificAccuracy: HealthScientificAccuracy
+  imagePrompt?: string
+  stockQueries?: string[]
+  motionPreset: HealthMotionPreset
+  motion?: HealthMotionSpec
+  sfxCue?: HealthSfxCuePlan
+  generationHash?: string
+  generatedAssetPath?: string
+  startTime: number
+  endTime: number
+  duration: number
+}
+
+export interface HealthVisualPlan {
+  schemaVersion: number
+  generatedAt: string
+  targetAiRatio: number
+  targetStockRatio: number
+  totalScenes: number
+  targetAiScenes: number
+  targetStockScenes: number
+  scenes: HealthVisualScenePlan[]
+}
+
+export interface HealthGeneratedAssetRecord {
+  sceneIndex: number
+  strategy: HealthVisualStrategy
+  promptHash: string
+  prompt?: string
+  status: 'pending' | 'generating' | 'exporting' | 'completed' | 'failed' | 'fallback-stock'
+  mediaId?: string
+  flowProjectId?: string
+  outputPath?: string
+  width?: number
+  height?: number
+  motionPreset?: HealthMotionPreset
+  generatedAt?: string
+  error?: string
+}
+
+export interface HealthGeneratedAssetsManifest {
+  schemaVersion: number
+  updatedAt: string
+  configHash: string
+  scenes: Record<string, HealthGeneratedAssetRecord>
+}
+
+// ─── General Visual Mix Types ────────────────────────────────────────────────
+
+export type VisualMixProfile = 'general' | 'health'
+
+export type VisualStrategy = 'ai-still' | 'stock'
+
+export interface VisualMixScenePlan {
+  sceneIndex: number
+  narration: string
+  visualIntent: string
+  strategy: VisualStrategy
+  category?: string
+  reasoning?: string
+  imagePrompt?: string
+  stockQueries?: string[]
+  motionPreset?: string
+  motion?: HealthMotionSpec
+  sfxCue?: HealthSfxCuePlan
+  generationHash?: string
+  generatedAssetPath?: string
+  startTime: number
+  endTime: number
+  duration: number
+}
+
+export interface VisualMixPlan {
+  schemaVersion: number
+  generatedAt: string
+  profile: VisualMixProfile
+  resolvedProfile?: ResolvedContentProfile
+  sourceMode: VisualSourceMode
+  planHash?: string
+  requestedAiRatio: number
+  requestedStockRatio: number
+  requested?: {
+    aiPercent: number
+    stockPercent: number
+  }
+  totalScenes: number
+  targetAiScenes: number
+  targetStockScenes: number
+  target?: {
+    ai: number
+    stock: number
+  }
+  aiSceneIndices?: number[]
+  stockSceneIndices?: number[]
+  scenes: VisualMixScenePlan[]
+}
+
+export interface GeneratedVisualAssetRecord {
+  sceneIndex: number
+  strategy: VisualStrategy
+  profile: VisualMixProfile
+  promptHash: string
+  prompt?: string
+  status:
+    | 'pending'
+    | 'queued'
+    | 'generating'
+    | 'exporting'
+    | 'normalizing'
+    | 'completed'
+    | 'failed'
+    | 'ai-failed'
+    | 'fallback-stock'
+  failureStage?: AiVisualFailureStage
+  mediaId?: string
+  flowProjectId?: string
+  outputPath?: string
+  width?: number
+  height?: number
+  motionPreset?: string
+  generatedAt?: string
+  error?: string
+}
+
+export interface GeneratedVisualAssetsManifest {
+  schemaVersion: number
+  updatedAt: string
+  configHash: string
+  profile?: VisualMixProfile
+  scenes: Record<string, GeneratedVisualAssetRecord>
+}
+
+// ─── Retention Director Shared Types ──────────────────────────────────────────
+
+export type RetentionSceneRole =
+  | 'hook'
+  | 'setup'
+  | 'question'
+  | 'open-loop'
+  | 'problem'
+  | 'mechanism'
+  | 'proof'
+  | 'comparison'
+  | 'surprise'
+  | 'reveal'
+  | 're-hook'
+  | 'payoff'
+  | 'solution'
+  | 'bridge'
+  | 'recap'
+  | 'conclusion'
+
+export interface RetentionOpenLoop {
+  id: string
+  openedAtSceneIndex: number
+  payoffSceneIndex?: number
+  question: string
+  confidence: number
+  status: 'open' | 'resolved' | 'uncertain'
+  keywords: string[]
+}
+
+export interface RetentionMotif {
+  id: string
+  label: string
+  conceptKeywords: string[]
+  firstSeenSceneIndex: number
+  recurringSceneIndices: number[]
+}
+
+export interface RetentionScenePlan {
+  sceneIndex: number
+  sceneId: string
+  role: RetentionSceneRole
+  intensity: 'low' | 'medium' | 'high'
+  reason: string
+  noveltyScore: number
+  noveltyTarget: number
+  patternInterrupt: boolean
+  patternInterruptReason?: string
+  openLoopId?: string
+  payoffForLoopId?: string
+  avoidSpoiler?: boolean
+  motionEnergy: 'calm' | 'normal' | 'elevated'
+  beatPacing: 'slow' | 'normal' | 'fast'
+  overlayPriority: 'none' | 'low' | 'medium' | 'high'
+  proofPriority: 'normal' | 'high'
+  preferredVisualChange?: 'none' | 'crop' | 'motion' | 'proof' | 'overlay' | 'hard-cut'
+  notes: string[]
+}
+
+export interface RetentionPlan {
+  schemaVersion: number
+  generatedAt: string
+  inputHash: string
+  totalScenes: number
+  totalDuration: number
+  strategy: {
+    level: 'low' | 'balanced' | 'high'
+    targetRehookGapSecs: number
+    maxNoResetSecs: number
+    noveltyWindowScenes: number
+  }
+  openLoops: RetentionOpenLoop[]
+  motifs: RetentionMotif[]
+  scenes: RetentionScenePlan[]
+  summary: {
+    hooks: number
+    rehooks: number
+    payoffs: number
+    patternInterrupts: number
+    lowNoveltyScenes: number
+    openLoops: number
+  }
+}
+
+export interface RetentionSummary {
+  schemaVersion: number
+  sceneCount: number
+  durationSecs: number
+  retentionHealthScore: number
+  riskCounts: {
+    lowNovelty: number
+    longRehookGap: number
+    repeatedMotion: number
+    overedited: number
+  }
+  openLoops: {
+    detected: number
+    resolved: number
+    unresolved: number
+  }
+  patternInterrupts: number
+  averageNoveltyScore: number
+}
+
 // ─── Resumable Render Engine V2 (all fields optional for backward compatibility) ──
 
 export type RenderResourceProfileId = 'balanced' | 'low-power' | 'fast'
@@ -1656,4 +2430,3 @@ export interface RenderRecoveryInfo {
     transitionSettings?: RenderTransitionSettings
   }
 }
-
