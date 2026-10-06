@@ -44,7 +44,15 @@ import {
   filterPendingStockScenes,
   syncManualAiAssignments
 } from './manual-ai/manual-ai-branch'
-import type { ManualAiPromptPack } from './manual-ai/manual-ai-types'
+import {
+  getManualAiPromptJsonPath,
+  getManualAiPromptTxtPath,
+  type ManualAiPromptPack
+} from './manual-ai/manual-ai-types'
+import {
+  broadcastManualAiStatus,
+  getManualAiStatus
+} from './manual-ai/manual-ai-broadcaster'
 
 function checkAborted(signal?: AbortSignal): void {
   if (signal?.aborted) {
@@ -63,6 +71,8 @@ export interface MixedVisualEngineDeps {
   skipFlowReadiness?: boolean
   /** Safety-net poll interval of the manual AI gate (Prompt mode). Default 3s; tests use small values. */
   manualAiPollMs?: number
+  /** Broadcaster for Manual AI status updates (allows test spying/intercepting). */
+  broadcastManualAiStatus?: (projectDir: string, status?: ManualAiStatus) => void
 }
 
 export interface MixedVisualEngineParams {
@@ -308,6 +318,76 @@ export async function runMixedVisualEngine(
     }
   }
   await store.flushAtomic()
+
+  // ─── Prompt mode: Branch A = prompt pack + manual image gate (no FlowKit, no Flow calls) ───
+  let lastManualStatus: ManualAiStatus | null = null
+  let manualWaitMs = 0
+  let manualReadyAtStart = 0
+  let stockCompletedWhileWaiting = false
+  let maxStockReady = countReadyStock(store, initialStockScenes)
+  let maxAiReady = 0
+
+  function currentWaitInfo(): ManualAiWaitInfo | null {
+    if (!lastManualStatus) return null
+    const storeStockReady = countReadyStock(store, initialStockScenes)
+    const currentStock = stockCompletedWhileWaiting
+      ? initialStockScenes.length
+      : Math.max(maxStockReady, storeStockReady)
+    maxStockReady = Math.max(maxStockReady, currentStock)
+    const effectiveAiReady = Math.max(maxAiReady, lastManualStatus.ready)
+    maxAiReady = effectiveAiReady
+    return buildManualAiWaitInfo({
+      status: {
+        ...lastManualStatus,
+        ready: effectiveAiReady
+      },
+      stockExpected: initialStockScenes.length,
+      stockReady: maxStockReady
+    })
+  }
+
+  function combinedProgress(info: ManualAiWaitInfo): number {
+    const total = info.expected + info.stockExpected
+    const done = info.ready + info.stockReady
+    return 0.1 + (total > 0 ? done / total : 1) * 0.85
+  }
+
+  const publishWait = (): void => {
+    const info = currentWaitInfo()
+    if (!info) return
+    const finished = info.ready >= info.expected && info.stockReady >= info.stockExpected
+    onProgress(describeManualAiWait(info), combinedProgress(info), {
+      manualAiWait: finished ? null : info
+    })
+  }
+
+  if (promptMode && manualPack) {
+    const jsonPath = getManualAiPromptJsonPath(projectDir)
+    const txtPath = getManualAiPromptTxtPath(projectDir)
+    const jsonExists = fs.existsSync(jsonPath)
+    const txtExists = fs.existsSync(txtPath)
+
+    logger.info(`[ManualAI] Prompt pack path: ${txtPath}`)
+    logger.info(`[ManualAI] Prompt JSON exists=${jsonExists}`)
+    logger.info(`[ManualAI] Prompt TXT exists=${txtExists}`)
+    logger.info(`[ManualAI] Prompt count=${manualPack.scenes.length}`)
+    logger.debug(
+      `[ManualAI:PromptPack] projectDir=${projectDir} generated=${manualPack.scenes.length} json=${jsonPath} txt=${txtPath}`
+    )
+
+    lastManualStatus = getManualAiStatus(projectDir)
+    maxAiReady = lastManualStatus.ready
+
+    const broadcastFn = deps?.broadcastManualAiStatus ?? broadcastManualAiStatus
+    broadcastFn(projectDir, lastManualStatus)
+
+    const initialWait = currentWaitInfo()
+    if (initialWait) {
+      onProgress(describeManualAiWait(initialWait), combinedProgress(initialWait), {
+        manualAiWait: initialWait
+      })
+    }
+  }
 
   // 7. Parallel Execution: AI and Stock acquisition start simultaneously
   let aiBranchTimeMs = 0
@@ -587,36 +667,6 @@ export async function runMixedVisualEngine(
     return { assigned: sinkAssigned, failed: sinkFailed }
   }
 
-  // ─── Prompt mode: Branch A = prompt pack + manual image gate (no FlowKit, no Flow calls) ───
-  let lastManualStatus: ManualAiStatus | null = null
-  let manualWaitMs = 0
-  let manualReadyAtStart = 0
-  let stockCompletedWhileWaiting = false
-
-  function currentWaitInfo(): ManualAiWaitInfo | null {
-    if (!lastManualStatus) return null
-    return buildManualAiWaitInfo({
-      status: lastManualStatus,
-      stockExpected: initialStockScenes.length,
-      stockReady: countReadyStock(store, initialStockScenes)
-    })
-  }
-
-  function combinedProgress(info: ManualAiWaitInfo): number {
-    const total = info.expected + info.stockExpected
-    const done = info.ready + info.stockReady
-    return 0.1 + (total > 0 ? done / total : 1) * 0.85
-  }
-
-  const publishWait = (): void => {
-    const info = currentWaitInfo()
-    if (!info) return
-    const finished = info.ready >= info.expected && info.stockReady >= info.stockExpected
-    onProgress(describeManualAiWait(info), combinedProgress(info), {
-      manualAiWait: finished ? null : info
-    })
-  }
-
   const runManualAiBranch = async (gateSignal: AbortSignal): Promise<void> => {
     const pack = manualPack as ManualAiPromptPack
     const t0 = Date.now()
@@ -629,6 +679,7 @@ export async function runMixedVisualEngine(
         isHealth
       })
       lastManualStatus = res.status
+      maxAiReady = Math.max(maxAiReady, res.status.ready)
       return res.status
     }
 
@@ -678,8 +729,9 @@ export async function runMixedVisualEngine(
           const info = currentWaitInfo()
           if (info && info.ready < info.expected) {
             stockCompletedWhileWaiting = true
+            maxStockReady = initialStockScenes.length
             logger.info(
-              `[ManualAI] Stock branch ${info.stockReady}/${info.stockExpected} completed while waiting`
+              `[ManualAI] Stock branch ${info.stockExpected}/${info.stockExpected} completed while waiting`
             )
           }
           publishWait()

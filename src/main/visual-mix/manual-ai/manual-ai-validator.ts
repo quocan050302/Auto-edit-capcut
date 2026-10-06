@@ -171,8 +171,14 @@ export function evaluateManualAiStatus(params: {
 }
 
 export function evaluateManualAiStatusForProject(projectDir: string, imageMode: AiImageMode = 'prompt'): ManualAiStatus {
-  return evaluateManualAiStatus({ projectDir, pack: loadManualAiPromptPack(projectDir), imageMode })
+  const norm = projectDir ? path.normalize(path.resolve(projectDir)) : ''
+  return evaluateManualAiStatus({ projectDir: norm, pack: loadManualAiPromptPack(norm), imageMode })
 }
+
+/**
+ * Standard centralized getter for ManualAiStatus (matches Section 8).
+ */
+export const getManualAiStatus = evaluateManualAiStatusForProject
 
 // ─── Render preflight ───────────────────────────────────────────────────────
 

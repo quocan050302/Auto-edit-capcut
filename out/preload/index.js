@@ -96,6 +96,15 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
+  MANUAL_AI_GET_STATUS: "manual-ai:get-status",
+  MANUAL_AI_GET_PROMPT_TEXT: "manual-ai:get-prompt-text",
+  MANUAL_AI_EXPORT_TXT: "manual-ai:export-txt",
+  MANUAL_AI_OPEN_PROMPT_FILE: "manual-ai:open-prompt-file",
+  MANUAL_AI_SELECT_IMAGES: "manual-ai:select-images",
+  MANUAL_AI_PLAN_IMPORT: "manual-ai:plan-import",
+  MANUAL_AI_COMMIT_IMPORT: "manual-ai:commit-import",
+  MANUAL_AI_STATUS_UPDATED: "manual-ai:status-updated",
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
@@ -297,6 +306,24 @@ const api = {
       electron.ipcRenderer.on(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
       return () => {
         electron.ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler);
+      };
+    }
+  },
+  manualAi: {
+    getStatus: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_STATUS, { projectDir }),
+    getPromptText: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
+    exportTxt: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, { projectDir }),
+    openPromptFile: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, { projectDir }),
+    selectImages: (mode) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES, { mode }),
+    planImport: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT, params),
+    commitImport: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_COMMIT_IMPORT, params),
+    onStatusUpdated: (callback) => {
+      const handler = (_event, payload) => {
+        callback(payload);
+      };
+      electron.ipcRenderer.on(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler);
+      return () => {
+        electron.ipcRenderer.off(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler);
       };
     }
   },

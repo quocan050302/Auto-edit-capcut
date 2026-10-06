@@ -4,19 +4,17 @@ import * as path from 'path'
 import { IPC_CHANNELS } from '../../../shared/types'
 import type { ManualAiImportMapping, ManualAiStatus } from '../../../shared/types'
 import { logger } from '../logger'
+import { normalizeProjectDir } from '../pipeline/pipeline-state'
 import { MANUAL_AI_SUPPORTED_EXTENSIONS, getManualAiPromptTxtPath } from '../visual-mix/manual-ai/manual-ai-types'
 import { readManualAiPromptText } from '../visual-mix/manual-ai/manual-ai-prompt-pack'
-import { evaluateManualAiStatusForProject } from '../visual-mix/manual-ai/manual-ai-validator'
 import { commitManualAiImport, planManualAiImport } from '../visual-mix/manual-ai/manual-ai-importer'
 import { manualAiAssetGate } from '../visual-mix/manual-ai/manual-ai-gate'
+import {
+  getManualAiStatus,
+  broadcastManualAiStatus
+} from '../visual-mix/manual-ai/manual-ai-broadcaster'
 
-function broadcastStatus(projectDir: string, status: ManualAiStatus): void {
-  for (const win of BrowserWindow.getAllWindows()) {
-    if (!win.isDestroyed()) {
-      win.webContents.send(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, { projectDir, status })
-    }
-  }
-}
+export { getManualAiStatus, broadcastManualAiStatus }
 
 function listImagesInFolder(folder: string): string[] {
   try {
@@ -33,7 +31,9 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_STATUS, async (_event, params: { projectDir: string }) => {
     try {
       if (!params?.projectDir) return null
-      return evaluateManualAiStatusForProject(params.projectDir)
+      const norm = normalizeProjectDir(params.projectDir)
+      logger.debug(`[ManualAI:GetStatus] projectDir=${norm}`)
+      return getManualAiStatus(norm)
     } catch (err) {
       logger.error(`[ManualAI-IPC] GetStatus failed: ${String(err)}`)
       return null
@@ -43,7 +43,8 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, async (_event, params: { projectDir: string }) => {
     try {
       if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
-      const text = readManualAiPromptText(params.projectDir)
+      const norm = normalizeProjectDir(params.projectDir)
+      const text = readManualAiPromptText(norm)
       if (text === null) return { success: false, error: 'No prompt pack exists yet.' }
       return { success: true, text }
     } catch (err) {
@@ -54,12 +55,13 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, async (_event, params: { projectDir: string }) => {
     try {
       if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
-      const text = readManualAiPromptText(params.projectDir)
+      const norm = normalizeProjectDir(params.projectDir)
+      const text = readManualAiPromptText(norm)
       if (text === null) return { success: false, error: 'No prompt pack exists yet.' }
 
       const opts = {
         title: 'Export AI image prompts',
-        defaultPath: path.join(params.projectDir, 'manual-ai-prompts.txt'),
+        defaultPath: path.join(norm, 'manual-ai-prompts.txt'),
         filters: [{ name: 'Text', extensions: ['txt'] }]
       }
       const win = BrowserWindow.getFocusedWindow()
@@ -76,7 +78,8 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, async (_event, params: { projectDir: string }) => {
     try {
       if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
-      const txt = getManualAiPromptTxtPath(params.projectDir)
+      const norm = normalizeProjectDir(params.projectDir)
+      const txt = getManualAiPromptTxtPath(norm)
       if (!fs.existsSync(txt)) return { success: false, error: 'Prompt file does not exist yet.' }
       const openError = await shell.openPath(txt)
       if (openError) {
@@ -123,8 +126,9 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
         if (!params?.projectDir || !Array.isArray(params.filePaths)) {
           return { success: false, error: 'projectDir and filePaths are required.' }
         }
+        const norm = normalizeProjectDir(params.projectDir)
         const plan = planManualAiImport({
-          projectDir: params.projectDir,
+          projectDir: norm,
           filePaths: params.filePaths,
           replaceExisting: params.replaceExisting
         })
@@ -150,19 +154,20 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
         if (!params?.projectDir || !Array.isArray(params.mappings)) {
           return { success: false, error: 'projectDir and mappings are required.' }
         }
+        const norm = normalizeProjectDir(params.projectDir)
         const result = await commitManualAiImport({
-          projectDir: params.projectDir,
+          projectDir: norm,
           mappings: params.mappings,
           replaceExisting: params.replaceExisting,
           allowLowResolution: params.allowLowResolution
         })
-        broadcastStatus(params.projectDir, result.status)
+        broadcastManualAiStatus(norm, result.status)
         return { success: true, result }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err)
         logger.error(`[ManualAI-IPC] Commit failed: ${msg}`)
         // Wake any waiter anyway so a half-written import is re-evaluated.
-        manualAiAssetGate.notify(params?.projectDir ?? '')
+        manualAiAssetGate.notify(params?.projectDir ? normalizeProjectDir(params.projectDir) : '')
         return { success: false, error: msg }
       }
     }
