@@ -170,7 +170,9 @@ async function runTests(): Promise<void> {
         height: 1080,
         motionEnabled: true,
         generationConcurrency: 6,
-        postProcessConcurrency: 2
+        postProcessConcurrency: 2,
+        // Strict is the default; this test verifies the explicit Stock-fallback opt-in.
+        aiFailureBehavior: 'stock-fallback'
       },
       scenes: scenePlans,
       flowClient: mockFlowClient,
