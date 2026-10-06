@@ -16152,6 +16152,24 @@ function fmtBytes(bytes) {
   if (bytes > 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   return `${(bytes / 1024).toFixed(0)} KB`;
 }
+const RESOURCE_PROFILE_OPTIONS = [
+  { value: "balanced", label: "Balanced — Recommended for Mac" },
+  { value: "low-power", label: "Low Power — Keeps the Mac responsive" },
+  { value: "fast", label: "Fast — Uses more CPU and memory" }
+];
+const RECOVERY_STATUS_LABEL = {
+  none: "No cache",
+  available: "Cache available",
+  resuming: "Resuming cached render",
+  "partially-invalidated": "Cache partially invalidated",
+  complete: "Render complete"
+};
+function phaseLabel(status) {
+  if (!status || status === "pending") return "pending";
+  if (status === "completed") return "cached";
+  if (status === "invalid") return "needs re-render";
+  return status;
+}
 function RenderPage({ project, onNavigate }) {
   const [isRendering, setIsRendering] = reactExports.useState(false);
   const [isPreflightRunning, setIsPreflightRunning] = reactExports.useState(false);
@@ -16178,6 +16196,44 @@ function RenderPage({ project, onNavigate }) {
   const [transitionDuration, setTransitionDuration] = reactExports.useState(0.35);
   const [chapterDuration, setChapterDuration] = reactExports.useState(0.65);
   const voiceoverPath = project.inputs?.voiceoverPath ?? "";
+  const [recovery, setRecovery] = reactExports.useState(null);
+  const [renderPrefs, setRenderPrefs] = reactExports.useState(null);
+  const [encoderNote, setEncoderNote] = reactExports.useState(null);
+  const [confirmAction, setConfirmAction] = reactExports.useState(null);
+  const [isCancelling, setIsCancelling] = reactExports.useState(false);
+  const loadRecovery = reactExports.useCallback(async () => {
+    try {
+      const info = await window.api.render.getRecovery?.({ projectDir: project.projectDir });
+      if (info) setRecovery(info);
+    } catch {
+    }
+  }, [project.projectDir]);
+  reactExports.useEffect(() => {
+    void loadRecovery();
+    window.api.render.getPreferences?.().then((p2) => p2 && setRenderPrefs(p2)).catch(() => {
+    });
+  }, [loadRecovery]);
+  async function updateRenderPrefs(patch) {
+    try {
+      const next = await window.api.render.setPreferences(patch);
+      setRenderPrefs(next);
+    } catch {
+    }
+  }
+  async function handleEncoderChange(mode) {
+    setEncoderNote(null);
+    if (mode === "videotoolbox-h264") {
+      setEncoderNote("Testing Apple VideoToolbox on this Mac...");
+      const probe = await window.api.render.probeEncoder({ force: true }).catch(() => ({ ok: false, reason: "Probe failed" }));
+      if (!probe.ok) {
+        setEncoderNote(`Apple VideoToolbox is not available: ${probe.reason ?? "unknown reason"}. Keeping Software H.264.`);
+        await updateRenderPrefs({ videoEncoder: "software-h264" });
+        return;
+      }
+      setEncoderNote("Apple VideoToolbox verified. Falls back to Software H.264 automatically if it fails.");
+    }
+    await updateRenderPrefs({ videoEncoder: mode });
+  }
   const resMap = {
     "1920x1080": { width: 1920, height: 1080 },
     "1280x720": { width: 1280, height: 720 },
@@ -16272,19 +16328,9 @@ function RenderPage({ project, onNavigate }) {
       return;
     }
     setProgress({ stage: "Starting render...", progress: 0.05 });
-    startTimer();
-    const unsub = window.api.render.onProgress((data) => setProgress(data));
-    const unsubCaption = window.api.captions?.onRenderProgress?.(
-      (data) => setCaptionProgress(data)
-    );
-    const unsubQa = window.api.render.onQaProgress?.(
-      (data) => {
-        setProgress({ stage: `QA: ${data.stage} (${data.message})`, progress: data.progress });
-      }
-    );
-    try {
-      const res = resolution;
-      const response = await window.api.render.start({
+    const res = resolution;
+    await runRenderWithProgress(
+      () => window.api.render.start({
         projectDir: project.projectDir,
         voiceoverPath,
         outputName,
@@ -16297,9 +16343,26 @@ function RenderPage({ project, onNavigate }) {
           defaultDuration: transitionDuration,
           chapterDuration
         }
-      });
+      })
+    );
+  }
+  async function runRenderWithProgress(invoke) {
+    startTimer();
+    const unsub = window.api.render.onProgress((data) => setProgress(data));
+    const unsubCaption = window.api.captions?.onRenderProgress?.(
+      (data) => setCaptionProgress(data)
+    );
+    const unsubQa = window.api.render.onQaProgress?.(
+      (data) => {
+        setProgress({ stage: `QA: ${data.stage} (${data.message})`, progress: data.progress });
+      }
+    );
+    try {
+      const response = await invoke();
       if (response.success && response.result) {
         setResult(response.result);
+      } else if (response.cancelled) {
+        setError("Render stopped. Completed scenes are kept, so the next render continues from the cache.");
       } else {
         setError(response.error ?? "Render failed");
       }
@@ -16307,13 +16370,45 @@ function RenderPage({ project, onNavigate }) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsRendering(false);
+      setIsCancelling(false);
       setProgress(null);
       setCaptionProgress(null);
       stopTimer();
       unsub();
       unsubCaption?.();
       unsubQa?.();
+      void loadRecovery();
     }
+  }
+  async function handleResumeCached() {
+    setIsRendering(true);
+    setError(null);
+    setResult(null);
+    setCaptionProgress(null);
+    setProgress({ stage: "Resuming cached render...", progress: 0.05 });
+    await runRenderWithProgress(() => window.api.render.resumeCached({ projectDir: project.projectDir }));
+  }
+  async function handleCancelRender() {
+    setIsCancelling(true);
+    try {
+      await window.api.render.cancel({ projectDir: project.projectDir });
+    } catch {
+      setIsCancelling(false);
+    }
+  }
+  async function handleConfirmAction() {
+    const action = confirmAction;
+    setConfirmAction(null);
+    const cleared = await window.api.render.clearCache({ projectDir: project.projectDir }).catch((e) => ({
+      success: false,
+      error: e instanceof Error ? e.message : String(e)
+    }));
+    if (!cleared.success) {
+      setError(cleared.error ?? "Could not clear the render cache");
+      return;
+    }
+    await loadRecovery();
+    if (action === "restart") await handleRender();
   }
   const pct2 = progress ? Math.round(progress.progress * 100) : 0;
   const isPreflightFailed = preflightReport?.status === "failed";
@@ -16489,6 +16584,97 @@ function RenderPage({ project, onNavigate }) {
         ] })
       ] })
     ] }),
+    recovery && (recovery.manifestFound || (recovery.cacheSizeBytes ?? 0) > 0) && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel render-recovery-card", id: "render-recovery-card", children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-title", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-title-icon", children: "♻️" }),
+          "Render Recovery"
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "span",
+          {
+            className: `panel-badge ${recovery.status === "complete" ? "badge-success" : recovery.status === "partially-invalidated" ? "badge-warning" : recovery.status === "none" ? "" : "badge-success"}`,
+            id: "render-recovery-status",
+            children: isRendering ? RECOVERY_STATUS_LABEL.resuming : RECOVERY_STATUS_LABEL[recovery.status ?? "none"]
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-grid", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-card", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__label", children: "Scenes cached" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "render-summary-card__value", id: "render-recovery-scenes", children: [
+              recovery.completedScenes,
+              " / ",
+              recovery.totalScenes
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-card", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__label", children: "Scene assembly" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__value", children: phaseLabel(recovery.assemblyStatus) })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-card", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__label", children: "Audio mix" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__value", children: phaseLabel(recovery.audioMixStatus) })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-card", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__label", children: "Overlay blocks" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "render-summary-card__value", children: [
+              recovery.completedOverlayBlocks,
+              " / ",
+              recovery.totalOverlayBlocks
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-card", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__label", children: "Estimated work saved" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "render-summary-card__value text-brand", id: "render-recovery-saved", children: [
+              recovery.estimatedWorkSavedPct ?? 0,
+              "%"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "render-summary-card", children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__label", children: "Cache size" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "render-summary-card__value", children: fmtBytes(recovery.cacheSizeBytes ?? 0) })
+          ] })
+        ] }),
+        recovery.message && !isRendering && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs text-muted mt-2", style: { whiteSpace: "pre-line" }, children: recovery.message }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3 mt-4", style: { flexWrap: "wrap" }, children: [
+          recovery.resumable && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              id: "btn-resume-cached-render",
+              type: "button",
+              className: "btn btn-primary",
+              onClick: handleResumeCached,
+              disabled: isRendering || isPreflightRunning,
+              children: "▶ Resume Cached Render"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              id: "btn-restart-render-scratch",
+              type: "button",
+              className: "btn btn-secondary",
+              onClick: () => setConfirmAction("restart"),
+              disabled: isRendering || isPreflightRunning || !hasPlan || isPreflightFailed,
+              children: "Restart Render From Scratch"
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              id: "btn-clear-render-cache",
+              type: "button",
+              className: "btn btn-ghost",
+              onClick: () => setConfirmAction("clear"),
+              disabled: isRendering || recovery.status === "resuming",
+              children: "Clear Render Cache"
+            }
+          )
+        ] })
+      ] })
+    ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsxs(
       CollapsibleSection,
       {
@@ -16546,7 +16732,52 @@ function RenderPage({ project, onNavigate }) {
                   placeholder: "final_output"
                 }
               )
-            ] })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", htmlFor: "render-resource-profile", children: "Resource Profile" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "select",
+                {
+                  id: "render-resource-profile",
+                  className: "settings-select",
+                  value: renderPrefs?.resourceProfile ?? "balanced",
+                  onChange: (e) => void updateRenderPrefs({ resourceProfile: e.target.value }),
+                  disabled: isRendering || !renderPrefs,
+                  children: RESOURCE_PROFILE_OPTIONS.map((o) => /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: o.value, children: o.label }, o.value))
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "settings-field", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("label", { className: "settings-label", htmlFor: "render-video-encoder", children: "Video encoder" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "select",
+                {
+                  id: "render-video-encoder",
+                  className: "settings-select",
+                  value: renderPrefs?.videoEncoder ?? "software-h264",
+                  onChange: (e) => void handleEncoderChange(e.target.value),
+                  disabled: isRendering || !renderPrefs,
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "software-h264", children: "Software H.264 — Current Quality" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("option", { value: "videotoolbox-h264", children: "Apple VideoToolbox — Faster, Experimental" })
+                  ]
+                }
+              ),
+              encoderNote && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "text-xs text-muted mt-2", children: encoderNote })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "settings-field", style: { gridColumn: "span 2" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { className: "checkbox-label", children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  id: "render-remotion-hw",
+                  type: "checkbox",
+                  checked: renderPrefs?.remotionHardwareAcceleration ?? false,
+                  onChange: (e) => void updateRenderPrefs({ remotionHardwareAcceleration: e.target.checked }),
+                  disabled: isRendering || !renderPrefs
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Use Apple hardware acceleration for overlays — Experimental" })
+            ] }) })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "transition-settings-box", children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "transition-header-row", children: [
@@ -16650,9 +16881,22 @@ function RenderPage({ project, onNavigate }) {
     isRendering && progress && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel render-progress-card", children: [
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title", children: "Render Progress" }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "font-mono text-brand font-bold", children: [
-          pct2,
-          "%"
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "flex gap-3", style: { alignItems: "center" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { className: "font-mono text-brand font-bold", children: [
+            pct2,
+            "%"
+          ] }),
+          !isPreflightRunning && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              id: "btn-cancel-render",
+              type: "button",
+              className: "btn btn-secondary btn-sm",
+              onClick: handleCancelRender,
+              disabled: isCancelling,
+              children: isCancelling ? "Stopping..." : "Cancel"
+            }
+          )
         ] })
       ] }),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", children: [
@@ -16758,6 +17002,18 @@ function RenderPage({ project, onNavigate }) {
       {
         projectDir: project.projectDir,
         onOpenStudio: () => onNavigate?.("thumbnails")
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ConfirmDialog,
+      {
+        isOpen: confirmAction !== null,
+        title: confirmAction === "restart" ? "Restart render from scratch?" : "Clear render cache?",
+        message: confirmAction === "restart" ? "All cached scenes and render checkpoints for this project will be deleted and the video will be rendered again from the beginning. Your source media and finished videos are not affected." : "All cached scenes and render checkpoints for this project will be deleted. Your source media and finished videos are not affected.",
+        confirmText: confirmAction === "restart" ? "Restart From Scratch" : "Clear Cache",
+        isDestructive: true,
+        onConfirm: () => void handleConfirmAction(),
+        onCancel: () => setConfirmAction(null)
       }
     )
   ] });

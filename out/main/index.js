@@ -6,15 +6,16 @@ const utils = require("@electron-toolkit/utils");
 const fs = require("fs");
 const uuid = require("uuid");
 const winston = require("winston");
-const crypto = require("crypto");
-const ffprobeStatic$2 = require("ffprobe-static");
-const os = require("os");
-const cp = require("child_process");
 const genai = require("@google/genai");
+const crypto = require("crypto");
+const cp = require("child_process");
+const os = require("os");
 const bundler = require("@remotion/bundler");
 const renderer = require("@remotion/renderer");
+const perf_hooks = require("perf_hooks");
 const https = require("https");
 const http = require("http");
+const ffprobeStatic$2 = require("ffprobe-static");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
   if (e) {
@@ -35,8 +36,8 @@ const path__namespace = /* @__PURE__ */ _interopNamespaceDefault(path);
 const fs__namespace = /* @__PURE__ */ _interopNamespaceDefault(fs);
 const winston__namespace = /* @__PURE__ */ _interopNamespaceDefault(winston);
 const crypto__namespace = /* @__PURE__ */ _interopNamespaceDefault(crypto);
-const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const cp__namespace = /* @__PURE__ */ _interopNamespaceDefault(cp);
+const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 function resolveContentProfileMode(options) {
@@ -303,6 +304,13 @@ const IPC_CHANNELS = {
   RENDER_START: "render:start",
   RENDER_PROGRESS: "render:progress",
   RENDER_CANCEL: "render:cancel",
+  // Resumable Render Engine V2
+  RENDER_RECOVERY_GET: "render:recovery-get",
+  RENDER_RESUME_CACHED: "render:resume-cached",
+  RENDER_CACHE_CLEAR: "render:cache-clear",
+  RENDER_PREFERENCES_GET: "render:preferences-get",
+  RENDER_PREFERENCES_SET: "render:preferences-set",
+  RENDER_ENCODER_PROBE: "render:encoder-probe",
   // Stock Media Engine
   STOCK_SEARCH_START: "stock:search-start",
   STOCK_SEARCH_PROGRESS: "stock:search-progress",
@@ -508,595 +516,6 @@ const ffmpegLogger = winston__namespace.createLogger({
     })
   ]
 });
-const FALLBACK_PROJECTS_DIR = process.platform === "win32" ? "D:\\Video_factory_hutteries" : path.join(electron.app.getPath("documents"), "Video_factory_hutteries");
-function getConfigPath() {
-  return path.join(electron.app.getPath("userData"), "config.json");
-}
-function readConfig() {
-  try {
-    const cfgPath = getConfigPath();
-    if (fs__namespace.existsSync(cfgPath)) {
-      return JSON.parse(fs__namespace.readFileSync(cfgPath, "utf-8"));
-    }
-  } catch {
-  }
-  return {};
-}
-function writeConfig(cfg) {
-  fs__namespace.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), "utf-8");
-}
-function getProjectsDir() {
-  return readConfig().projectsDir ?? FALLBACK_PROJECTS_DIR;
-}
-getProjectsDir();
-function ensureProjectsDir() {
-  const dir = getProjectsDir();
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-}
-function createProjectFolderStructure(projectDir) {
-  const dirs = [
-    "source",
-    "media/images",
-    "media/videos",
-    "media/music",
-    "media/sfx",
-    "analysis",
-    "planning",
-    "renders/segments",
-    "qa",
-    "output",
-    "logs"
-  ];
-  for (const dir of dirs) {
-    fs__namespace.mkdirSync(path.join(projectDir, dir), { recursive: true });
-  }
-}
-function defaultSettings() {
-  return {
-    videoType: "documentary",
-    aspectRatio: "16:9",
-    resolution: { width: 1920, height: 1080 },
-    fps: 30,
-    pacing: "balanced"
-  };
-}
-function saveProjectState(state2) {
-  const statePath = path.join(state2.projectDir, "project-state.json");
-  fs__namespace.writeFileSync(statePath, JSON.stringify(state2, null, 2), "utf-8");
-}
-function registerProjectHandlers(ipcMain) {
-  ipcMain.handle(IPC_CHANNELS.PROJECT_CREATE, async (_event, name) => {
-    try {
-      ensureProjectsDir();
-      const safeName = name.replace(/[^a-zA-Z0-9-_\s]/g, "").trim().replace(/\s+/g, "-");
-      const projectDir = path.join(getProjectsDir(), safeName);
-      if (fs__namespace.existsSync(projectDir)) {
-        throw new Error(
-          `Project "${safeName}" already exists at ${projectDir}`
-        );
-      }
-      createProjectFolderStructure(projectDir);
-      const state2 = {
-        id: uuid.v4(),
-        name: safeName,
-        projectDir,
-        status: "NEW",
-        settings: defaultSettings(),
-        inputs: {
-          scriptPath: null,
-          voiceoverPath: null,
-          imagesFolder: null,
-          videosFolder: null,
-          musicFolder: null,
-          sfxFolder: null,
-          contentType: "default",
-          contentProfileMode: "auto",
-          visualSourceMode: "legacy"
-        },
-        stats: {
-          totalImages: 0,
-          totalVideos: 0,
-          totalMusic: 0,
-          totalSfx: 0,
-          voiceDurationSeconds: 0,
-          estimatedScenes: 0,
-          estimatedChapters: 0
-        },
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        lastOperation: null,
-        error: null
-      };
-      saveProjectState(state2);
-      logger.info(`Project created: ${safeName}`, { projectDir });
-      return { success: true, state: state2 };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`Failed to create project: ${msg}`);
-      return { success: false, error: msg };
-    }
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.PROJECT_OPEN,
-    async (_event, projectDir) => {
-      try {
-        const statePath = path.join(projectDir, "project-state.json");
-        if (!fs__namespace.existsSync(statePath)) {
-          throw new Error(`No project-state.json found in ${projectDir}`);
-        }
-        const state2 = JSON.parse(
-          fs__namespace.readFileSync(statePath, "utf-8")
-        );
-        if (state2.inputs) {
-          state2.inputs.contentType ??= "default";
-          state2.inputs.contentProfileMode ??= resolveContentProfileMode(state2.inputs);
-          state2.inputs.visualSourceMode ??= "legacy";
-        }
-        logger.info(`Project opened: ${state2.name}`, { projectDir });
-        return { success: true, state: state2 };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Failed to open project: ${msg}`);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.PROJECT_SAVE,
-    async (_event, state2) => {
-      try {
-        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        saveProjectState(state2);
-        return { success: true };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Failed to save project: ${msg}`);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.PROJECT_UPDATE_INPUTS,
-    async (_event, projectDir, inputs) => {
-      try {
-        const statePath = path.join(projectDir, "project-state.json");
-        const state2 = JSON.parse(
-          fs__namespace.readFileSync(statePath, "utf-8")
-        );
-        state2.inputs = { ...state2.inputs, ...inputs };
-        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        saveProjectState(state2);
-        return { success: true, state: state2 };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Failed to update inputs: ${msg}`);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.PROJECT_UPDATE_SETTINGS,
-    async (_event, projectDir, settings) => {
-      try {
-        const statePath = path.join(projectDir, "project-state.json");
-        const state2 = JSON.parse(
-          fs__namespace.readFileSync(statePath, "utf-8")
-        );
-        state2.settings = { ...state2.settings, ...settings };
-        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        saveProjectState(state2);
-        return { success: true, state: state2 };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Failed to update settings: ${msg}`);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(IPC_CHANNELS.GET_PROJECTS_DIR, () => {
-    ensureProjectsDir();
-    return getProjectsDir();
-  });
-  ipcMain.handle(IPC_CHANNELS.SET_PROJECTS_DIR, (_event, newDir) => {
-    try {
-      if (!newDir || typeof newDir !== "string") return { success: false, error: "Invalid path" };
-      fs__namespace.mkdirSync(newDir, { recursive: true });
-      const cfg = readConfig();
-      cfg.projectsDir = newDir;
-      writeConfig(cfg);
-      return { success: true, projectsDir: newDir };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return { success: false, error: msg };
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.GET_APP_VERSION, () => electron.app.getVersion());
-}
-const FFPROBE_PATH = ffprobeStatic$2.path;
-const IMAGE_EXTS = /* @__PURE__ */ new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]);
-const VIDEO_EXTS = /* @__PURE__ */ new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"]);
-const AUDIO_EXTS = /* @__PURE__ */ new Set([".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac", ".opus"]);
-async function probeMedia(filePath) {
-  return new Promise((resolve, reject2) => {
-    const { spawn } = require("child_process");
-    const proc = spawn(FFPROBE_PATH, [
-      "-v",
-      "quiet",
-      "-print_format",
-      "json",
-      "-show_streams",
-      "-show_format",
-      filePath
-    ]);
-    let stdout = "";
-    let stderr = "";
-    proc.stdout.on("data", (d) => stdout += d.toString());
-    proc.stderr.on("data", (d) => stderr += d.toString());
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        ffmpegLogger.error(`ffprobe failed for ${filePath}: ${stderr}`);
-        reject2(new Error(`ffprobe exited ${code}: ${stderr.slice(0, 200)}`));
-      } else {
-        try {
-          resolve(JSON.parse(stdout));
-        } catch {
-          reject2(new Error("Failed to parse ffprobe JSON"));
-        }
-      }
-    });
-    proc.on("error", (err) => {
-      reject2(new Error(`Failed to spawn ffprobe: ${err.message}`));
-    });
-  });
-}
-function buildMediaItem(filePath, probe) {
-  const ext = path.extname(filePath).toLowerCase();
-  const stat = fs__namespace.statSync(filePath);
-  const streams = probe.streams || [];
-  const format = probe.format || {};
-  const videoStream = streams.find((s) => s.codec_type === "video");
-  streams.find((s) => s.codec_type === "audio");
-  const isImage = IMAGE_EXTS.has(ext);
-  const isVideo = VIDEO_EXTS.has(ext);
-  const isAudio = AUDIO_EXTS.has(ext);
-  const width = videoStream?.width;
-  const height = videoStream?.height;
-  const duration = parseFloat(
-    videoStream?.duration || format.duration || "0"
-  );
-  const fps = videoStream?.r_frame_rate ? (() => {
-    const parts = videoStream.r_frame_rate.split("/");
-    return parts.length === 2 ? Math.round(parseFloat(parts[0]) / parseFloat(parts[1])) : parseFloat(videoStream.r_frame_rate);
-  })() : void 0;
-  const ar = width && height ? `${Math.round(width / height * 100) / 100}:1` : void 0;
-  return {
-    type: isImage ? "image" : isVideo ? "video" : "audio",
-    path: filePath,
-    filename: path.basename(filePath),
-    fileSize: stat.size,
-    width: isImage || isVideo ? width : void 0,
-    height: isImage || isVideo ? height : void 0,
-    duration: isVideo ? isNaN(duration) ? void 0 : duration : void 0,
-    audioDuration: isAudio ? isNaN(duration) ? void 0 : duration : void 0,
-    fps: isVideo ? fps : void 0,
-    codec: videoStream?.codec_name,
-    aspectRatio: ar,
-    tags: [],
-    description: "",
-    usageCount: 0,
-    importedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-}
-function scanFolder(folderPath, extensions) {
-  const results = [];
-  if (!fs__namespace.existsSync(folderPath)) return results;
-  function recurse(dir) {
-    let entries;
-    try {
-      entries = fs__namespace.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        recurse(fullPath);
-      } else if (extensions.has(path.extname(entry.name).toLowerCase())) {
-        results.push(fullPath);
-      }
-    }
-  }
-  recurse(folderPath);
-  return results;
-}
-function registerMediaHandlers(ipcMain) {
-  ipcMain.handle(
-    IPC_CHANNELS.MEDIA_SCAN,
-    async (event, params) => {
-      const result = {
-        images: [],
-        videos: [],
-        music: [],
-        sfx: [],
-        errors: []
-      };
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, { message, progress });
-        logger.info(`[SCAN] ${message} (${Math.round(progress * 100)}%)`);
-      };
-      const processFiles = async (files, bucket, label, offset, range) => {
-        for (let i = 0; i < files.length; i++) {
-          const fp = files[i];
-          const progress = offset + i / Math.max(files.length, 1) * range;
-          sendProgress(`Analyzing ${label}: ${path.basename(fp)}`, progress);
-          try {
-            const probe = await probeMedia(fp);
-            const item = buildMediaItem(fp, probe);
-            const id = uuid.v4();
-            bucket.push({ id, ...item });
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            result.errors.push({ path: fp, error: msg });
-            logger.warn(`Failed to probe ${fp}: ${msg}`);
-          }
-        }
-      };
-      sendProgress("Scanning image folder...", 0);
-      const imageFiles = params.imagesFolder ? scanFolder(params.imagesFolder, IMAGE_EXTS) : [];
-      sendProgress("Scanning video folder...", 0.05);
-      const videoFiles = params.videosFolder ? scanFolder(params.videosFolder, VIDEO_EXTS) : [];
-      sendProgress("Scanning music folder...", 0.1);
-      const musicFiles = params.musicFolder ? scanFolder(params.musicFolder, AUDIO_EXTS) : [];
-      sendProgress("Scanning SFX folder...", 0.12);
-      const sfxFiles = params.sfxFolder ? scanFolder(params.sfxFolder, AUDIO_EXTS) : [];
-      const total = imageFiles.length + videoFiles.length + musicFiles.length + sfxFiles.length;
-      logger.info(`Found ${total} media files total`, {
-        images: imageFiles.length,
-        videos: videoFiles.length,
-        music: musicFiles.length,
-        sfx: sfxFiles.length
-      });
-      await processFiles(imageFiles, result.images, "image", 0.15, 0.3);
-      await processFiles(videoFiles, result.videos, "video", 0.45, 0.35);
-      await processFiles(musicFiles, result.music, "music", 0.8, 0.1);
-      await processFiles(sfxFiles, result.sfx, "sfx", 0.9, 0.08);
-      const allMedia = [
-        ...result.images,
-        ...result.videos,
-        ...result.music,
-        ...result.sfx
-      ];
-      const indexPath = path.join(params.projectDir, "analysis", "media-index.json");
-      fs__namespace.mkdirSync(path.join(params.projectDir, "analysis"), { recursive: true });
-      fs__namespace.writeFileSync(indexPath, JSON.stringify(allMedia, null, 2), "utf-8");
-      sendProgress(`Scan complete — ${total} assets indexed`, 1);
-      logger.info("Media scan complete", {
-        images: result.images.length,
-        videos: result.videos.length,
-        music: result.music.length,
-        sfx: result.sfx.length,
-        errors: result.errors.length
-      });
-      return result;
-    }
-  );
-}
-function getUvPath() {
-  if (process.env.UV_PATH && fs__namespace.existsSync(process.env.UV_PATH)) {
-    return process.env.UV_PATH;
-  }
-  try {
-    const cmd = process.platform === "win32" ? "where uv" : "which uv";
-    const out = cp.execSync(cmd, { encoding: "utf8", env: process.env }).trim().split(/\r?\n/)[0].trim();
-    if (out && fs__namespace.existsSync(out)) {
-      return out;
-    }
-  } catch {
-  }
-  const homedir = os__namespace.homedir();
-  const candidates = process.platform === "win32" ? [
-    path.join(homedir, ".local", "bin", "uv.exe"),
-    path.join(homedir, ".cargo", "bin", "uv.exe"),
-    "C:\\Users\\ADMIN\\.local\\bin\\uv.exe"
-  ] : [
-    path.join(homedir, ".local", "bin", "uv"),
-    path.join(homedir, ".cargo", "bin", "uv"),
-    "/opt/homebrew/bin/uv",
-    "/usr/local/bin/uv",
-    "/usr/bin/uv"
-  ];
-  for (const candidate of candidates) {
-    if (fs__namespace.existsSync(candidate)) return candidate;
-  }
-  return process.platform === "win32" ? candidates[0] : "uv";
-}
-function getScriptPath() {
-  if (!electron.app.isPackaged) {
-    return path.join(process.cwd(), "scripts", "transcribe.py");
-  }
-  return path.join(process.resourcesPath, "scripts", "transcribe.py");
-}
-function getModelsDir() {
-  const dir = path.join(electron.app.getPath("userData"), "whisper-models");
-  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
-  return dir;
-}
-async function transcribeAudio(audioPath, modelName = "base", onProgress) {
-  const scriptPath = getScriptPath();
-  const modelsDir = getModelsDir();
-  const uvPath = getUvPath();
-  if (!fs__namespace.existsSync(scriptPath)) {
-    throw new Error(`Transcription script not found: ${scriptPath}`);
-  }
-  const uvExists = fs__namespace.existsSync(uvPath) || (() => {
-    try {
-      cp.execSync(`${uvPath} --version`, { stdio: "ignore" });
-      return true;
-    } catch {
-      return false;
-    }
-  })();
-  if (!uvExists) {
-    throw new Error(
-      `uv not found at "${uvPath}". Please install uv (https://docs.astral.sh/uv/) or run "brew install uv" on macOS.`
-    );
-  }
-  logger.info("Starting transcription via uv + faster-whisper", {
-    audio: audioPath,
-    model: modelName,
-    script: scriptPath,
-    uv: uvPath
-  });
-  onProgress?.("Starting uv + faster-whisper...", 0.02);
-  return new Promise((resolve, reject2) => {
-    const args = [
-      "run",
-      scriptPath,
-      audioPath,
-      "--model",
-      modelName,
-      "--cache-dir",
-      modelsDir
-    ];
-    logger.info(`Spawning: ${uvPath} ${args.join(" ")}`);
-    const proc = cp.spawn(uvPath, args, {
-      env: { ...process.env },
-      windowsHide: true
-    });
-    let resultData = null;
-    let stderr = "";
-    let stdoutBuffer = "";
-    let lastScriptError = "";
-    proc.stdout.on("data", (chunk) => {
-      stdoutBuffer += chunk.toString();
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() ?? "";
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const msg = JSON.parse(trimmed);
-          if (msg.type === "progress") {
-            onProgress?.(msg.message, msg.progress);
-            logger.info(`[WHISPER] ${msg.message}`);
-          } else if (msg.type === "result") {
-            resultData = msg;
-          } else if (msg.type === "error") {
-            logger.error(`[WHISPER] Script error: ${msg.message}`);
-            lastScriptError = String(msg.message ?? "");
-          }
-        } catch {
-          logger.debug(`[WHISPER stdout] ${trimmed.slice(0, 120)}`);
-        }
-      }
-    });
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-      const lines = chunk.toString().split("\n");
-      for (const line of lines) {
-        if (line.includes("Transcribing") || line.includes("Detected") || line.includes("%")) {
-          onProgress?.(line.trim(), 0.5);
-        }
-      }
-    });
-    proc.on("close", (code) => {
-      if (code !== 0) {
-        logger.error(`Transcription process exited ${code}`, { stderr: stderr.slice(0, 500) });
-        const detail = stderr.trim() ? stderr.slice(0, 300) : lastScriptError.slice(0, 300);
-        reject2(new Error(`Transcription failed (exit ${code}): ${detail}`));
-        return;
-      }
-      if (!resultData) {
-        reject2(new Error("Transcription produced no result"));
-        return;
-      }
-      logger.info("Transcription complete", {
-        segments: resultData.segments.length,
-        words: resultData.wordCount,
-        duration: resultData.duration
-      });
-      resolve(resultData);
-    });
-    proc.on("error", (err) => {
-      logger.error(`Failed to spawn transcription process: ${err.message}`);
-      reject2(new Error(`Failed to start transcription: ${err.message}`));
-    });
-  });
-}
-function registerTranscribeHandlers(ipcMain) {
-  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, (_event, modelName) => {
-    const cacheDir = getModelsDir();
-    const modelFile = path.join(cacheDir, `models--Systran--faster-whisper-${modelName}`);
-    return {
-      exists: fs__namespace.existsSync(modelFile),
-      path: modelFile,
-      modelsDir: cacheDir
-    };
-  });
-  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_GET, (_event, projectDir) => {
-    const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
-    if (!fs__namespace.existsSync(transcriptPath)) return null;
-    try {
-      return JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-    } catch {
-      return null;
-    }
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.TRANSCRIBE_START,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.TRANSCRIBE_PROGRESS, { message, progress });
-        logger.info(`[TRANSCRIBE] ${message}`);
-      };
-      try {
-        sendProgress("Initializing Whisper...", 0.02);
-        const transcriptPath = path.join(params.projectDir, "analysis", "transcript.json");
-        const cacheMetaPath = path.join(params.projectDir, "analysis", "transcript-meta.json");
-        if (fs__namespace.existsSync(cacheMetaPath) && fs__namespace.existsSync(transcriptPath)) {
-          const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
-          const stat2 = fs__namespace.statSync(params.voiceoverPath);
-          const currentHash = `${params.voiceoverPath}:${stat2.size}:${stat2.mtimeMs}`;
-          if (meta.hash === currentHash && meta.model === params.modelName) {
-            sendProgress("Using cached transcript", 1);
-            const cached = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-            return { success: true, transcript: cached, cached: true };
-          }
-        }
-        const transcript = await transcribeAudio(
-          params.voiceoverPath,
-          params.modelName,
-          (msg, prog) => sendProgress(msg, prog ?? 0.3)
-        );
-        sendProgress("Saving transcript...", 0.95);
-        fs__namespace.mkdirSync(path.join(params.projectDir, "analysis"), { recursive: true });
-        fs__namespace.writeFileSync(transcriptPath, JSON.stringify(transcript, null, 2), "utf-8");
-        const stat = fs__namespace.statSync(params.voiceoverPath);
-        fs__namespace.writeFileSync(
-          cacheMetaPath,
-          JSON.stringify({
-            hash: `${params.voiceoverPath}:${stat.size}:${stat.mtimeMs}`,
-            model: params.modelName,
-            generatedAt: (/* @__PURE__ */ new Date()).toISOString()
-          }),
-          "utf-8"
-        );
-        sendProgress(`Done — ${transcript.segments.length} segments`, 1);
-        logger.info("Transcript saved", { segments: transcript.segments.length });
-        return { success: true, transcript, cached: false };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Transcription failed: ${msg}`);
-        sendProgress(`Error: ${msg}`, -1);
-        return { success: false, error: msg };
-      }
-    }
-  );
-}
 const healthRegistry = /* @__PURE__ */ new Map();
 function getOrCreateState(model) {
   let state2 = healthRegistry.get(model);
@@ -1209,6 +628,32 @@ function classifyGeminiErrorKind(err) {
   }
   return { kind: "UNKNOWN", message: msg };
 }
+const CONFIG_PATH = path.join(
+  electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
+  "app-config.json"
+);
+function loadConfig() {
+  try {
+    if (fs__namespace.existsSync(CONFIG_PATH)) {
+      const cfg = JSON.parse(fs__namespace.readFileSync(CONFIG_PATH, "utf-8"));
+      if (cfg.preferredModel) {
+        cfg.preferredModel = normalizePreferredTextModel(cfg.preferredModel);
+      }
+      return cfg;
+    }
+  } catch {
+    logger.warn("Failed to read app config, using defaults");
+  }
+  return {};
+}
+function saveConfig(config) {
+  try {
+    fs__namespace.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
+    logger.info("App config saved", { hasGeminiKey: !!config.geminiApiKey });
+  } catch (err) {
+    logger.error(`Failed to save config: ${err}`);
+  }
+}
 function normalizeApiKey(raw) {
   let value = raw ?? "";
   value = value.trim();
@@ -1290,8 +735,8 @@ function classifyGeminiError(err) {
   };
 }
 async function verifyGeminiApiKey(rawKey, model) {
-  const key = normalizeApiKey(rawKey);
-  if (!key) {
+  const key2 = normalizeApiKey(rawKey);
+  if (!key2) {
     return {
       valid: false,
       status: "EMPTY",
@@ -1300,7 +745,7 @@ async function verifyGeminiApiKey(rawKey, model) {
   }
   try {
     const ai = new genai.GoogleGenAI({
-      apiKey: key,
+      apiKey: key2,
       httpOptions: { apiVersion: "v1beta" }
     });
     const pager = await ai.models.list({ config: { pageSize: 1 } });
@@ -1386,1760 +831,4388 @@ function getAvailableModelsForTask(taskType, preferredModel) {
   }
   return available;
 }
-const FILLER_PHRASES = [
-  /\bnot\s+specified\b/gi,
-  /\bnot\s+available\b/gi,
-  /\bunknown\b/gi,
-  /\bn\/?a\b/gi,
-  /\bnone\b/gi,
-  /\bnull\b/gi,
-  /\bundefined\b/gi,
-  /\bstock\s+footage\s+of\b/gi,
-  /\bfootage\s+of\b/gi,
-  /\bpicture\s+of\b/gi,
-  /\bimage\s+of\b/gi,
-  /\bphoto\s+of\b/gi,
-  /\bvideo\s+of\b/gi,
-  /\bclip\s+of\b/gi,
-  /\bscene\s+showing\b/gi,
-  /\bshow\s+a\b/gi,
-  /\bpicture\b/gi,
-  /\bphoto\b/gi,
-  /\bfootage\b/gi
-];
-const CHARACTER_NAME_REGEX = /\b(man|woman|person|boy|girl|guy|worker|farmer|shopper|customer|doctor|lawyer|teacher|driver|passenger|elder|child)\s+(?:named|called)\s+[A-ZÀ-Ỹa-zà-ỹ0-9_-]+/gi;
-const PUNCTUATION_REGEX = /[.,;:!?"'()[\]{}<>\\/|_~`#@*+=]/g;
-function sanitizeStockQuery(query, fallback = "") {
-  if (!query || typeof query !== "string") {
-    return fallback.trim();
-  }
-  let cleaned = query.trim();
-  cleaned = cleaned.replace(CHARACTER_NAME_REGEX, "$1");
-  for (const pattern of FILLER_PHRASES) {
-    cleaned = cleaned.replace(pattern, " ");
-  }
-  cleaned = cleaned.replace(PUNCTUATION_REGEX, " ");
-  const words = cleaned.split(/\s+/).map((w) => w.trim()).filter((w) => w.length > 0);
-  const dedupedWords = [];
-  const seenLower = /* @__PURE__ */ new Set();
-  for (const word of words) {
-    const lower = word.toLowerCase();
-    if (lower.length === 1 && lower !== "a") continue;
-    if (!seenLower.has(lower)) {
-      seenLower.add(lower);
-      dedupedWords.push(word);
+const BUILTIN_MASTER_PROMPT_TEXT = `# MASTER PROMPT — SCRIPT TO YOUTUBE THUMBNAIL
+
+Bạn là chuyên gia thiết kế thumbnail cho kênh YouTube thị trường Mỹ.
+
+Đọc toàn bộ script được cung cấp và tạo đúng {{VARIANT_COUNT}} phương án thumbnail khác nhau. Giá trị mặc định của {{VARIANT_COUNT}} là 5.
+
+Mục tiêu hình ảnh:
+
+- Ảnh chụp đời thực, photorealistic, giàu chi tiết và trông như một khoảnh khắc có thể xảy ra tại Mỹ.
+- Bối cảnh có thể là siêu thị dạng kho, kệ thực phẩm, quầy đồ hộp, cửa hàng tạp hóa, bãi đỗ xe hoặc kho dự trữ tại nhà, tùy nội dung script.
+- Thumbnail 16:9, thiết kế ở 3840 × 2160 px.
+- Hai dòng chữ cực lớn ở vùng 35–45% phía trên ảnh.
+- Dòng đầu màu vàng tươi.
+- Dòng thứ hai màu trắng.
+- Chữ in hoa, condensed sans-serif siêu đậm, viền đen dày và bóng tối nhẹ.
+- Phần dưới thể hiện rõ thực phẩm, vật dụng, con người hoặc tình huống trung tâm.
+- Thumbnail phải đọc được trên điện thoại.
+- Mỗi phương án phải tạo một curiosity gap nhưng không được bóp méo nội dung script.
+
+DỮ LIỆU ĐẦU VÀO
+
+FULL SCRIPT:
+
+{{SCRIPT}}
+
+VIDEO TITLE HIỆN CÓ:
+
+{{VIDEO_TITLE}}
+
+GLOBAL VISUAL CONTEXT:
+
+{{GLOBAL_VISUAL_CONTEXT}}
+
+OUTPUT LANGUAGE:
+
+{{OUTPUT_LANGUAGE}}
+
+CÁC CONCEPT ĐÃ DÙNG Ở CÁC ROUND TRƯỚC:
+
+{{PREVIOUS_CONCEPTS}}
+
+BƯỚC 1 — HIỂU SCRIPT
+
+Đọc toàn bộ script và xác định:
+
+1. Chủ đề chính video thực sự giải thích.
+2. Một chi tiết cụ thể và dễ thể hiện bằng hình ảnh.
+3. Điều người xem lo lắng hoặc muốn đạt được.
+4. Lời hứa thực tế video có thể đáp ứng.
+5. Các con số, địa điểm, thời hạn hoặc sản phẩm được script nhắc đến rõ ràng.
+6. Những tuyên bố không được phép suy diễn thêm.
+
+Không lấy riêng một câu giật gân rồi tạo thumbnail sai trọng tâm.
+
+Không tự bịa:
+
+- Tình trạng thiếu hàng.
+- Tăng giá.
+- Thiên tai.
+- Hạn chót.
+- Khủng hoảng.
+- Con số.
+- Dự báo.
+- Sự kiện chưa được script hỗ trợ.
+
+Nếu script chỉ nói về cách chuẩn bị nói chung, sử dụng hook về lợi ích hoặc sự tò mò, không tuyên bố một cuộc khủng hoảng sắp xảy ra.
+
+BƯỚC 2 — TẠO ĐÚNG 5 GÓC THUMBNAIL
+
+Tạo đúng 5 phương án khác nhau về ý tưởng hình ảnh, bố cục, chủ thể hoặc curiosity gap.
+
+Có thể sử dụng các hướng:
+
+A — Con người và tình huống:
+Người mua hàng, gia đình, giỏ hàng hoặc một hành động cụ thể. Khuôn mặt và hành động đủ lớn để nhìn rõ khi thu nhỏ.
+
+B — Sản phẩm và giải pháp:
+Kệ hàng, thực phẩm hoặc vật dụng thiết yếu được xếp rõ ràng. Có một nhóm sản phẩm chính nổi bật.
+
+C — Hậu quả hoặc sự thay đổi:
+Giá tại quầy, kệ hàng, before/after hoặc sự thay đổi đối với người xem, nhưng chỉ khi script hỗ trợ.
+
+D — Proof object:
+Một vật thể chứng minh trọng tâm video như receipt, price tag, shelf label, grocery total, pantry inventory hoặc sản phẩm cụ thể được script nhắc đến.
+
+E — Curiosity or contrast:
+Một sự đối lập rõ ràng, một tình huống chưa giải thích hết hoặc một chi tiết khiến người xem muốn biết nguyên nhân.
+
+Nếu một hướng không phù hợp, thay bằng một hướng khác phù hợp hơn.
+
+Năm phương án không được chỉ thay đổi vài chữ trên cùng một bức ảnh.
+
+BƯỚC 3 — QUY TẮC TEXT OVERLAY
+
+Mỗi thumbnail có đúng hai dòng chữ.
+
+- Dòng 1 màu vàng tươi.
+- Dòng 2 màu trắng.
+- Ưu tiên tổng cộng 4–7 từ.
+- Tối đa 9 từ nếu thật cần thiết.
+- Chữ phải hiểu được trong chưa đến một giây.
+- Chỉ thể hiện một thông điệp chính.
+- Không thêm logo, badge, mũi tên hoặc dòng phụ không cần thiết.
+- Không dùng ngày tháng hoặc hạn chót nếu script không xác nhận.
+- Không dùng tuyên bố tuyệt đối như NEVER EXPIRE, GUARANTEED hoặc WILL BE DEVASTATING nếu script không hỗ trợ.
+- Text thumbnail và title phải bổ sung cho nhau.
+- Không lặp lại nguyên văn toàn bộ thumbnail text trong title.
+- Kiểm tra chính tả tiếng Anh Mỹ.
+- Tất cả text xuất hiện trên thumbnail phải là tiếng Anh Mỹ.
+
+BƯỚC 4 — IMAGE PROMPT
+
+Mỗi option phải có một IMAGE PROMPT đầy đủ bằng tiếng Anh và sẵn sàng gửi trực tiếp sang Google Flow.
+
+Mỗi image prompt phải tự đầy đủ, không viết “same as above” và không tham chiếu option khác.
+
+Image prompt phải mô tả:
+
+1. YouTube thumbnail 16:9, 3840 × 2160.
+2. Địa điểm cụ thể tại Mỹ phù hợp với script.
+3. Chủ thể chính, vị trí, kích thước, hành động và biểu cảm.
+4. Bố cục với vùng chữ phía trên.
+5. Không để chữ che mặt, tay hoặc proof object.
+6. Tiền cảnh rõ, hậu cảnh có ngữ cảnh nhưng không rối.
+7. Photorealistic documentary look.
+8. Tương phản cao nhưng da người tự nhiên.
+9. Hai dòng text chính xác đã chọn.
+10. Dòng đầu màu vàng và dòng thứ hai màu trắng.
+11. Font condensed sans-serif siêu đậm, chữ in hoa, viền đen dày.
+12. Safe margin.
+13. Không đặt thông tin quan trọng ở góc dưới bên phải.
+14. Giải phẫu chính xác.
+15. Không có mặt hoặc bàn tay bị méo.
+16. Không lặp người.
+17. Không có bao bì biến dạng quá mức.
+18. Không logo hoặc watermark ngoài nội dung được yêu cầu.
+
+Nếu script nói về người hoặc cộng đồng có thật, không trình bày cảnh dàn dựng như bằng chứng chụp tại một sự kiện có thật.
+
+BƯỚC 5 — TITLE
+
+Với mỗi option, tạo hai title tiếng Anh Mỹ:
+
+- titleClear: nói rõ video mang lại thông tin gì.
+- titleCuriosity: tạo lý do bấm xem nhưng vẫn đúng nội dung.
+
+Không tự tạo con số chỉ để tăng click.
+
+BƯỚC 6 — ROUND MỚI
+
+Nếu PREVIOUS_CONCEPTS không trống:
+
+- Không lặp lại concept cũ.
+- Không chỉ đổi góc camera hoặc vài từ.
+- Phải tạo 5 ý tưởng hình ảnh mới thực sự khác biệt.
+- Vẫn giữ đúng nội dung script và visual identity của niche.
+
+OUTPUT
+
+Chỉ trả về một JSON object hợp lệ.
+
+Không markdown.
+Không code fence.
+Không giải thích bên ngoài JSON.
+Không trailing comma.
+
+Schema bắt buộc:
+
+{
+  "scriptInsight": {
+    "mainTopic": "string",
+    "groundedHook": "string",
+    "strongestVisualDetail": "string",
+    "viewerConcernOrGoal": "string",
+    "unsupportedClaimsToAvoid": ["string"]
+  },
+  "options": [
+    {
+      "id": "A",
+      "conceptName": "string",
+      "yellowText": "string",
+      "whiteText": "string",
+      "visualConcept": "string",
+      "imagePrompt": "complete English prompt",
+      "titleClear": "string",
+      "titleCuriosity": "string",
+      "whyItWorks": "string"
     }
-  }
-  let result = dedupedWords.join(" ").trim();
-  if (result.length > 100) {
-    result = result.slice(0, 100).trim();
-    const lastSpace = result.lastIndexOf(" ");
-    if (lastSpace > 20) {
-      result = result.slice(0, lastSpace).trim();
-    }
-  }
-  if (!result || result.length < 2) {
-    if (fallback && fallback.trim().length > 0) {
-      return sanitizeStockQuery(fallback);
-    }
-    return "documentary scene";
-  }
-  return result;
+  ],
+  "recommendedOptionId": "A",
+  "recommendationReason": "string",
+  "postGenerationCheck": "string"
 }
-function normalizeStockQueryKey(query) {
-  return (query || "").toLowerCase().trim().replace(/[^\w\sà-ỹ]/g, " ").replace(/\s+/g, " ").trim();
-}
-function dedupeStockQueries(queries, fallback) {
-  const result = [];
-  const seenKeys = /* @__PURE__ */ new Set();
-  for (const raw of queries) {
-    const sanitized = sanitizeStockQuery(raw, fallback);
-    const key = normalizeStockQueryKey(sanitized);
-    if (key && !seenKeys.has(key)) {
-      seenKeys.add(key);
-      result.push(sanitized);
-    }
-  }
-  return result;
-}
-const DEFAULT_CONFIG = {
-  maxMonotoneEnergySeconds: 150,
-  // 2.5 minutes — documentary standard
-  maxMonotoneShotSeconds: 90,
-  // 1.5 minutes — for shot variation
-  requireShotTypeVariety: true
+
+Yêu cầu bắt buộc:
+
+- options phải có đúng 5 phần tử.
+- ID lần lượt là A, B, C, D, E.
+- Mỗi imagePrompt phải đầy đủ.
+- Không để placeholder.
+- Không viết same as above.
+- Chưa tạo ảnh trong bước lập kế hoạch này.`;
+const BUILTIN_TEMPLATE = {
+  id: "builtin-us-grocery-preparedness",
+  name: "US Grocery & Preparedness — Script Grounded",
+  description: "Script-grounded 5-variant YouTube thumbnail generator tailored for US grocery and preparedness topics with bold 2-line overlay text.",
+  category: "US Grocery",
+  promptText: BUILTIN_MASTER_PROMPT_TEXT,
+  isBuiltIn: true,
+  isDefault: true,
+  createdAt: "2026-01-01T00:00:00.000Z",
+  updatedAt: "2026-01-01T00:00:00.000Z"
 };
-function inferEnergyLevel(scene) {
-  const text = `${scene.narrativeText ?? ""} ${scene.visualIntent ?? ""}`.toLowerCase();
-  const highCues = [
-    "conflict",
-    "battle",
-    "crisis",
-    "explosion",
-    "urgent",
-    "reveal",
-    "shocking",
-    "protest",
-    "riot",
-    "disaster",
-    "fire",
-    "attack",
-    "death",
-    "murder",
-    "crash",
-    "breakthrough",
-    "victory",
-    "defeat",
-    "climax",
-    "confrontation"
-  ];
-  if (highCues.some((c) => text.includes(c))) return "high";
-  const lowCues = [
-    "peaceful",
-    "quiet",
-    "meditation",
-    "reflection",
-    "landscape",
-    "sunrise",
-    "slow",
-    "history",
-    "archive",
-    "document",
-    "explain",
-    "background",
-    "context",
-    "meanwhile",
-    "tradition",
-    "ceremony",
-    "ritual",
-    "daily life",
-    "routine"
-  ];
-  if (lowCues.some((c) => text.includes(c))) return "low";
-  return "medium";
-}
-function inferShotType(scene) {
-  const text = `${scene.visualIntent ?? ""} ${(scene.searchQueries ?? []).join(" ")}`.toLowerCase();
-  if (text.includes("close") || text.includes("portrait") || text.includes("face") || text.includes("detail") || text.includes("hand") || text.includes("eye")) {
-    return "close-up";
+class ThumbnailTemplateStore {
+  customPath;
+  queue = Promise.resolve();
+  constructor(customPath) {
+    this.customPath = customPath;
   }
-  if (text.includes("aerial") || text.includes("wide") || text.includes("landscape") || text.includes("establishing") || text.includes("panorama") || text.includes("horizon")) {
-    return "wide";
+  getFilePath() {
+    if (this.customPath) {
+      return this.customPath;
+    }
+    const dir = electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd();
+    return path__namespace.join(dir, "thumbnail-prompt-library.json");
   }
-  if (text.includes("abstract") || text.includes("concept") || text.includes("metaphor") || text.includes("symbol") || text.includes("silhouette") || text.includes("blur")) {
-    return "abstract";
+  getBackupPath() {
+    return `${this.getFilePath()}.backup.json`;
   }
-  return "medium";
-}
-function nextShotType(current) {
-  const cycle = ["wide", "medium", "close-up", "abstract"];
-  const idx = cycle.indexOf(current);
-  return cycle[(idx + 1) % cycle.length];
-}
-function analyzePacing(scenes, config = {}) {
-  const cfg = { ...DEFAULT_CONFIG, ...config };
-  const issues = [];
-  for (const scene of scenes) {
-    if (!scene.energyLevel) {
-      scene.energyLevel = inferEnergyLevel(scene);
-    }
-    if (!scene.shotType) {
-      scene.shotType = inferShotType(scene);
-    }
+  runInLock(task) {
+    const res = this.queue.then(task, task);
+    this.queue = res.catch(() => {
+    });
+    return res;
   }
-  logger.info(`[PacingGuard] Analyzing ${scenes.length} scenes for monotone stretches...`);
-  let energyRunSeconds = 0;
-  let currentEnergy = scenes[0]?.energyLevel ?? "medium";
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i];
-    const sceneEnergy = scene.energyLevel;
-    if (sceneEnergy === currentEnergy) {
-      energyRunSeconds += scene.duration;
-      if (energyRunSeconds > cfg.maxMonotoneEnergySeconds) {
-        const suggestion = sceneEnergy === "low" ? "insert_broll" : "insert_text_overlay";
-        issues.push({
-          sceneId: String(scene.sceneIndex),
-          accumulatedMonotoneSeconds: Math.round(energyRunSeconds),
-          suggestion,
-          affectedField: "energyLevel"
-        });
-        logger.info(
-          `[PacingGuard] Monotone energy "${sceneEnergy}" for ${Math.round(energyRunSeconds)}s at scene ${scene.sceneIndex} → ${suggestion}`
-        );
-        scene.isPatternInterrupt = true;
-        energyRunSeconds = scene.duration;
-      }
-    } else {
-      currentEnergy = sceneEnergy;
-      energyRunSeconds = scene.duration;
-    }
+  async getAll() {
+    return this.runInLock(async () => this.loadInternal());
   }
-  if (cfg.requireShotTypeVariety) {
-    let shotRunSeconds = 0;
-    let currentShot = scenes[0]?.shotType ?? "medium";
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = scenes[i];
-      const sceneShot = scene.shotType;
-      if (sceneShot === currentShot) {
-        shotRunSeconds += scene.duration;
-        if (shotRunSeconds > cfg.maxMonotoneShotSeconds) {
-          const suggestedNext = nextShotType(currentShot);
-          issues.push({
-            sceneId: String(scene.sceneIndex),
-            accumulatedMonotoneSeconds: Math.round(shotRunSeconds),
-            suggestion: "vary_shot_type",
-            affectedField: "shotType"
-          });
-          logger.info(
-            `[PacingGuard] Monotone shot "${currentShot}" for ${Math.round(shotRunSeconds)}s at scene ${scene.sceneIndex} → suggest "${suggestedNext}" next`
-          );
-          if (i + 1 < scenes.length) {
-            const nextScene = scenes[i + 1];
-            if (!nextScene.isPatternInterrupt) {
-              nextScene.shotType = suggestedNext;
-              nextScene.isPatternInterrupt = true;
-            }
-          }
-          shotRunSeconds = scene.duration;
-        }
-      } else {
-        currentShot = sceneShot;
-        shotRunSeconds = scene.duration;
-      }
-    }
-  }
-  const breakCount = scenes.filter((s) => s.isPatternInterrupt).length;
-  logger.info(
-    `[PacingGuard] Analysis complete: ${issues.length} issues found, ${breakCount} scenes annotated as pattern-interrupt candidates.`
-  );
-  return issues;
-}
-function flattenPlanScenes(plan) {
-  return plan.chapters.flatMap((ch) => {
-    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-    return seqs.flatMap((seq) => seq.scenes ?? []);
-  });
-}
-const PACING_PROFILES = {
-  fast: {
-    hook: { min: 2, targetMin: 2.5, preferred: 3.2, targetMax: 4, hardMax: 6 },
-    normal: { min: 3, targetMin: 4, preferred: 5, targetMax: 6, hardMax: 8 }
-  },
-  balanced: {
-    hook: { min: 2.5, targetMin: 3, preferred: 4, targetMax: 5, hardMax: 6 },
-    normal: { min: 3, targetMin: 5.5, preferred: 6.8, targetMax: 8, hardMax: 10 }
-  },
-  cinematic: {
-    hook: { min: 3, targetMin: 4, preferred: 5, targetMax: 6, hardMax: 8 },
-    normal: { min: 4, targetMin: 7, preferred: 8.5, targetMax: 10, hardMax: 12 }
-  },
-  slow: {
-    hook: { min: 4, targetMin: 5, preferred: 6, targetMax: 7, hardMax: 9 },
-    normal: { min: 5, targetMin: 8, preferred: 10, targetMax: 12, hardMax: 14 }
-  }
-};
-const STRONG_PUNCTUATION = /[.?!;]$/;
-function preprocessSegments(segments, profile) {
-  const normalized = [];
-  for (const seg of segments) {
-    const isHook = seg.start < 30;
-    const limits = isHook ? profile.hook : profile.normal;
-    if (seg.duration <= limits.hardMax) {
-      normalized.push({
-        id: seg.id,
-        subId: seg.id,
-        text: seg.text.trim(),
-        start: seg.start,
-        end: seg.end,
-        duration: seg.duration,
-        isSplit: false
-      });
-      continue;
-    }
-    logger.warn(
-      `[PLAN][Segmentation] Segment ${seg.id} duration (${seg.duration.toFixed(1)}s) exceeds hardMax (${limits.hardMax}s). Splitting into sub-parts...`
-    );
-    const rawWords = seg.text.trim().split(/\s+/).filter(Boolean);
-    if (rawWords.length <= 1) {
-      normalized.push({
-        id: seg.id,
-        subId: seg.id,
-        text: seg.text.trim(),
-        start: seg.start,
-        end: seg.end,
-        duration: seg.duration,
-        isSplit: false
-      });
-      continue;
-    }
-    const numParts = Math.max(2, Math.ceil(seg.duration / limits.preferred));
-    const wordsPerPart = Math.ceil(rawWords.length / numParts);
-    let prevEnd = seg.start;
-    for (let p = 0; p < numParts; p++) {
-      const startWordIdx = p * wordsPerPart;
-      const endWordIdx = Math.min((p + 1) * wordsPerPart, rawWords.length);
-      const partWords = rawWords.slice(startWordIdx, endWordIdx);
-      if (partWords.length === 0) continue;
-      const isLastPart = p === numParts - 1 || endWordIdx >= rawWords.length;
-      const partStart = prevEnd;
-      let partEnd;
-      if (isLastPart) {
-        partEnd = seg.end;
-      } else if (seg.words && seg.words.length === rawWords.length) {
-        const lastWordInPart = seg.words[endWordIdx - 1];
-        const nextWord = seg.words[endWordIdx];
-        partEnd = nextWord ? nextWord.start : lastWordInPart?.end ?? seg.end;
-        partEnd = Number(partEnd.toFixed(2));
-      } else {
-        partEnd = Number((seg.start + endWordIdx / rawWords.length * (seg.end - seg.start)).toFixed(2));
-      }
-      const partDuration = Number((partEnd - partStart).toFixed(2));
-      prevEnd = partEnd;
-      normalized.push({
-        id: seg.id,
-        subId: `${seg.id}#${p + 1}`,
-        text: partWords.join(" "),
-        start: partStart,
-        end: partEnd,
-        duration: partDuration,
-        isSplit: true
-      });
-      if (isLastPart) break;
-    }
-  }
-  return normalized;
-}
-function buildSceneSkeleton(transcript, pacing = "balanced") {
-  const profile = PACING_PROFILES[pacing] ?? PACING_PROFILES.balanced;
-  const normalizedSegments = preprocessSegments(transcript.segments, profile);
-  const skeletons = [];
-  let i = 0;
-  while (i < normalizedSegments.length) {
-    const firstSeg = normalizedSegments[i];
-    const candidateSegments = [firstSeg];
-    i++;
-    while (i < normalizedSegments.length) {
-      const nextSeg = normalizedSegments[i];
-      const isHook = firstSeg.start < 30;
-      const currentLimits = isHook ? profile.hook : profile.normal;
-      const currentDuration = candidateSegments[candidateSegments.length - 1].end - firstSeg.start;
-      const potentialDuration = nextSeg.end - firstSeg.start;
-      if (currentDuration < currentLimits.min) {
-        candidateSegments.push(nextSeg);
-        i++;
-        continue;
-      }
-      if (potentialDuration > currentLimits.hardMax) {
-        break;
-      }
-      const lastText = candidateSegments[candidateSegments.length - 1].text.trim();
-      if (currentDuration >= currentLimits.targetMin && STRONG_PUNCTUATION.test(lastText)) {
-        break;
-      }
-      if (currentDuration >= currentLimits.preferred) {
-        break;
-      }
-      if (potentialDuration > currentLimits.targetMax && currentDuration >= currentLimits.targetMin) {
-        break;
-      }
-      candidateSegments.push(nextSeg);
-      i++;
-    }
-    const sceneStartTime = candidateSegments[0].start;
-    const sceneEndTime = candidateSegments[candidateSegments.length - 1].end;
-    const narrativeText = candidateSegments.map((s) => s.text).join(" ");
-    const transcriptSegmentIds = Array.from(new Set(candidateSegments.map((s) => s.id)));
-    skeletons.push({
-      sceneIndex: skeletons.length + 1,
-      startTime: sceneStartTime,
-      endTime: sceneEndTime,
-      duration: Number((sceneEndTime - sceneStartTime).toFixed(2)),
-      narrativeText,
-      transcriptSegmentIds
+  async getById(id) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      return list.find((t) => t.id === id) || null;
     });
   }
-  if (skeletons.length > 1) {
-    const lastScene = skeletons[skeletons.length - 1];
-    const prevScene = skeletons[skeletons.length - 2];
-    const isHook = lastScene.startTime < 30;
-    const minDur = isHook ? profile.hook.min : profile.normal.min;
-    const hardMax = isHook ? profile.hook.hardMax : profile.normal.hardMax;
-    if (lastScene.duration < minDur) {
-      if (prevScene.duration + lastScene.duration <= hardMax) {
-        prevScene.endTime = lastScene.endTime;
-        prevScene.duration = Number((prevScene.endTime - prevScene.startTime).toFixed(2));
-        prevScene.narrativeText = `${prevScene.narrativeText} ${lastScene.narrativeText}`;
-        prevScene.transcriptSegmentIds = Array.from(
-          /* @__PURE__ */ new Set([...prevScene.transcriptSegmentIds, ...lastScene.transcriptSegmentIds])
-        );
-        skeletons.pop();
-      } else {
-        logger.warn(
-          `[PLAN][Segmentation] Final scene duration (${lastScene.duration.toFixed(1)}s) is below minimum (${minDur}s) but cannot merge into previous scene without exceeding hardMax (${hardMax}s). Keeping final scene.`
-        );
-      }
-    }
+  async getDefault() {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const def = list.find((t) => t.isDefault);
+      if (def) return def;
+      const builtin = list.find((t) => t.isBuiltIn);
+      if (builtin) return builtin;
+      return list[0] || BUILTIN_TEMPLATE;
+    });
   }
-  for (let s = 0; s < skeletons.length; s++) {
-    skeletons[s].sceneIndex = s + 1;
-    if (s === 0 && skeletons[s].startTime <= 0.15) {
-      skeletons[s].startTime = 0;
+  async create(data) {
+    this.validateTemplateData(data.name, data.promptText);
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const id = `tpl-${uuid.v4()}`;
+      const newTemplate = {
+        id,
+        name: data.name.trim(),
+        description: data.description?.trim() || void 0,
+        category: data.category?.trim() || "Custom",
+        promptText: data.promptText.trim(),
+        isBuiltIn: false,
+        isDefault: Boolean(data.isDefault),
+        createdAt: now,
+        updatedAt: now
+      };
+      if (newTemplate.isDefault) {
+        list.forEach((t) => {
+          t.isDefault = false;
+        });
+      }
+      list.push(newTemplate);
+      await this.saveInternal(list);
+      return newTemplate;
+    });
+  }
+  async update(id, updates) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const index = list.findIndex((t) => t.id === id);
+      if (index === -1) {
+        throw new Error(`Template not found: ${id}`);
+      }
+      const current = list[index];
+      const nextName = updates.name !== void 0 ? updates.name : current.name;
+      const nextPrompt = updates.promptText !== void 0 ? updates.promptText : current.promptText;
+      this.validateTemplateData(nextName, nextPrompt);
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      if (updates.isDefault) {
+        list.forEach((t) => {
+          t.isDefault = false;
+        });
+      }
+      const updated = {
+        ...current,
+        name: nextName.trim(),
+        description: updates.description !== void 0 ? updates.description.trim() || void 0 : current.description,
+        category: updates.category !== void 0 ? updates.category.trim() : current.category,
+        promptText: nextPrompt.trim(),
+        isDefault: updates.isDefault !== void 0 ? updates.isDefault : current.isDefault,
+        updatedAt: now
+      };
+      list[index] = updated;
+      await this.saveInternal(list);
+      return updated;
+    });
+  }
+  async duplicate(id, newName) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const source = list.find((t) => t.id === id);
+      if (!source) {
+        throw new Error(`Template not found: ${id}`);
+      }
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      const copyName = newName?.trim() || `${source.name} (Copy)`;
+      const newTemplate = {
+        ...source,
+        id: `tpl-${uuid.v4()}`,
+        name: copyName,
+        isBuiltIn: false,
+        isDefault: false,
+        createdAt: now,
+        updatedAt: now
+      };
+      list.push(newTemplate);
+      await this.saveInternal(list);
+      return newTemplate;
+    });
+  }
+  async delete(id) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const target = list.find((t) => t.id === id);
+      if (!target) {
+        return false;
+      }
+      if (target.isBuiltIn) {
+        throw new Error("Cannot delete a built-in template");
+      }
+      const filtered = list.filter((t) => t.id !== id);
+      if (target.isDefault && filtered.length > 0) {
+        const builtin = filtered.find((t) => t.isBuiltIn) || filtered[0];
+        builtin.isDefault = true;
+      }
+      await this.saveInternal(filtered);
+      return true;
+    });
+  }
+  async setDefault(id) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const target = list.find((t) => t.id === id);
+      if (!target) {
+        throw new Error(`Template not found: ${id}`);
+      }
+      list.forEach((t) => {
+        t.isDefault = t.id === id;
+      });
+      await this.saveInternal(list);
+      return target;
+    });
+  }
+  async exportToJson(ids) {
+    return this.runInLock(async () => {
+      const list = await this.loadInternal();
+      const toExport = ids && ids.length > 0 ? list.filter((t) => ids.includes(t.id)) : list;
+      return JSON.stringify(toExport, null, 2);
+    });
+  }
+  async importFromJson(jsonString) {
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonString);
+    } catch (err) {
+      throw new Error(`Invalid JSON format: ${err instanceof Error ? err.message : String(err)}`);
     }
-    if (s > 0) {
-      const prev = skeletons[s - 1];
-      const cur = skeletons[s];
-      const isPrevHook = prev.startTime < 30;
-      const prevHardMax = isPrevHook ? profile.hook.hardMax : profile.normal.hardMax;
-      if (cur.startTime > prev.endTime) {
-        const gap = cur.startTime - prev.endTime;
-        if (prev.duration + gap <= prevHardMax) {
-          prev.endTime = cur.startTime;
-        } else {
-          cur.startTime = prev.endTime;
+    let rawTemplates;
+    if (Array.isArray(parsed)) {
+      rawTemplates = parsed;
+    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.templates)) {
+      rawTemplates = parsed.templates;
+    } else {
+      throw new Error('Import data must be a JSON array of templates or an object with a "templates" array');
+    }
+    if (rawTemplates.length === 0) {
+      throw new Error("No templates found in import data");
+    }
+    return this.runInLock(async () => {
+      const currentList = await this.loadInternal();
+      const existingIds = new Set(currentList.map((t) => t.id));
+      const importedTemplates = [];
+      const now = (/* @__PURE__ */ new Date()).toISOString();
+      for (let i = 0; i < rawTemplates.length; i++) {
+        const item = rawTemplates[i];
+        if (!item || typeof item !== "object") {
+          throw new Error(`Template at index ${i} is not a valid object`);
         }
-      } else if (cur.startTime < prev.endTime) {
-        prev.endTime = cur.startTime;
+        const record = item;
+        const name = typeof record.name === "string" ? record.name.trim() : "";
+        const promptText = typeof record.promptText === "string" ? record.promptText.trim() : "";
+        const category = typeof record.category === "string" ? record.category.trim() : "Custom";
+        const description = typeof record.description === "string" ? record.description.trim() : void 0;
+        if (!name) {
+          throw new Error(`Template at index ${i} has empty name`);
+        }
+        if (!promptText) {
+          throw new Error(`Template "${name}" has empty promptText`);
+        }
+        if (!promptText.includes("{{SCRIPT}}")) {
+          throw new Error(`Template "${name}" is missing required variable {{SCRIPT}}`);
+        }
+        let id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : `tpl-${uuid.v4()}`;
+        if (existingIds.has(id)) {
+          id = `tpl-${uuid.v4()}`;
+        }
+        existingIds.add(id);
+        const template = {
+          id,
+          name,
+          description,
+          category,
+          promptText,
+          isBuiltIn: false,
+          isDefault: false,
+          createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
+          updatedAt: now
+        };
+        currentList.push(template);
+        importedTemplates.push(template);
       }
-      prev.duration = Number((prev.endTime - prev.startTime).toFixed(2));
-      cur.duration = Number((cur.endTime - cur.startTime).toFixed(2));
+      await this.saveInternal(currentList);
+      return {
+        importedCount: importedTemplates.length,
+        importedTemplates
+      };
+    });
+  }
+  validateTemplateData(name, promptText) {
+    if (!name || !name.trim()) {
+      throw new Error("Template name cannot be empty");
+    }
+    if (!promptText || !promptText.trim()) {
+      throw new Error("Prompt text cannot be empty");
+    }
+    if (!promptText.includes("{{SCRIPT}}")) {
+      throw new Error("Prompt text must contain the required variable {{SCRIPT}}");
     }
   }
-  const last = skeletons[skeletons.length - 1];
-  if (last) {
-    if (transcript.duration > last.endTime && transcript.duration - last.endTime <= 2) {
-      last.endTime = Number(transcript.duration.toFixed(2));
+  async loadInternal() {
+    const filePath = this.getFilePath();
+    const backupPath = this.getBackupPath();
+    let raw = "";
+    let loadedFromBackup = false;
+    if (fs__namespace.existsSync(filePath)) {
+      try {
+        raw = fs__namespace.readFileSync(filePath, "utf-8");
+      } catch (err) {
+        logger.warn(`[ThumbnailStore] Failed to read primary library file: ${err}`);
+      }
     }
-    last.duration = Number((last.endTime - last.startTime).toFixed(2));
+    if (!raw && fs__namespace.existsSync(backupPath)) {
+      try {
+        raw = fs__namespace.readFileSync(backupPath, "utf-8");
+        loadedFromBackup = true;
+        logger.info("[ThumbnailStore] Recovered template library from backup");
+      } catch (err) {
+        logger.warn(`[ThumbnailStore] Failed to read backup file: ${err}`);
+      }
+    }
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        let templates = [];
+        if (Array.isArray(parsed)) {
+          templates = parsed;
+        } else if (parsed && Array.isArray(parsed.templates)) {
+          templates = parsed.templates;
+        }
+        const hasBuiltin = templates.some((t) => t.isBuiltIn && t.id === BUILTIN_TEMPLATE.id);
+        if (!hasBuiltin) {
+          templates.unshift({ ...BUILTIN_TEMPLATE });
+        }
+        const hasDefault = templates.some((t) => t.isDefault);
+        if (!hasDefault && templates.length > 0) {
+          const builtin = templates.find((t) => t.isBuiltIn) || templates[0];
+          builtin.isDefault = true;
+        }
+        if (loadedFromBackup) {
+          await this.saveInternal(templates);
+        }
+        return templates;
+      } catch (err) {
+        logger.error(`[ThumbnailStore] Corrupted library file: ${err}. Attempting recovery...`);
+        if (!loadedFromBackup && fs__namespace.existsSync(backupPath)) {
+          try {
+            const bRaw = fs__namespace.readFileSync(backupPath, "utf-8");
+            const bParsed = JSON.parse(bRaw);
+            const bTemplates = Array.isArray(bParsed) ? bParsed : bParsed.templates || [];
+            if (bTemplates.length > 0) {
+              if (!bTemplates.some((t) => t.isBuiltIn && t.id === BUILTIN_TEMPLATE.id)) {
+                bTemplates.unshift({ ...BUILTIN_TEMPLATE });
+              }
+              await this.saveInternal(bTemplates);
+              return bTemplates;
+            }
+          } catch {
+          }
+        }
+      }
+    }
+    const initialList = [{ ...BUILTIN_TEMPLATE }];
+    await this.saveInternal(initialList);
+    return initialList;
   }
-  const totalDuration = transcript.duration;
-  const avgDuration = totalDuration / skeletons.length;
-  const minDuration = Math.min(...skeletons.map((s) => s.duration));
-  const maxDuration = Math.max(...skeletons.map((s) => s.duration));
-  logger.info(`[PLAN][Segmentation] transcriptSegments=${transcript.segments.length}`);
-  logger.info(`[PLAN][Segmentation] generatedScenes=${skeletons.length}`);
-  logger.info(`[PLAN][Segmentation] duration=${totalDuration.toFixed(1)}s`);
-  logger.info(`[PLAN][Segmentation] averageSceneDuration=${avgDuration.toFixed(2)}s`);
-  logger.info(`[PLAN][Segmentation] minSceneDuration=${minDuration.toFixed(2)}s`);
-  logger.info(`[PLAN][Segmentation] maxSceneDuration=${maxDuration.toFixed(2)}s`);
-  return skeletons;
+  async saveInternal(templates) {
+    const filePath = this.getFilePath();
+    const backupPath = this.getBackupPath();
+    const dir = path__namespace.dirname(filePath);
+    if (!fs__namespace.existsSync(dir)) {
+      fs__namespace.mkdirSync(dir, { recursive: true });
+    }
+    const payload = {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      templates
+    };
+    const serialized = JSON.stringify(payload, null, 2);
+    const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+      try {
+        fs__namespace.copyFileSync(filePath, backupPath);
+      } catch {
+      }
+    } finally {
+      if (fs__namespace.existsSync(tmpPath)) {
+        try {
+          fs__namespace.unlinkSync(tmpPath);
+        } catch {
+        }
+      }
+    }
+  }
 }
-function validateScenePlanCoverage(transcript, scenes) {
-  const errors = [];
-  const warnings = [];
-  if (!scenes || scenes.length === 0) {
-    errors.push("Scene plan is empty (0 scenes).");
+const thumbnailTemplateStore = new ThumbnailTemplateStore();
+function computeSha256(content) {
+  return crypto__namespace.createHash("sha256").update(content.trim(), "utf-8").digest("hex");
+}
+function getProjectThumbnailSettingsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-settings.json");
+}
+async function loadProjectThumbnailSettings(projectDir) {
+  const filePath = getProjectThumbnailSettingsPath(projectDir);
+  if (fs__namespace.existsSync(filePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      return {
+        enabled: parsed.enabled !== void 0 ? parsed.enabled : true,
+        autoGenerateAfterRender: parsed.autoGenerateAfterRender !== void 0 ? parsed.autoGenerateAfterRender : true,
+        selectedTemplateId: parsed.selectedTemplateId,
+        templateSnapshot: parsed.templateSnapshot,
+        templateSnapshotHash: parsed.templateSnapshotHash,
+        existingVideoTitle: parsed.existingVideoTitle || "",
+        variantCount: 5,
+        outputLanguage: "en-US",
+        provider: "google-flow",
+        imageModel: parsed.imageModel || "GEM_PIX_2",
+        outputQuality: "4k"
+      };
+    } catch (err) {
+      logger.warn(`[ThumbnailSettings] Failed to parse ${filePath}: ${err}. Falling back to defaults.`);
+    }
+  }
+  const defTpl = await thumbnailTemplateStore.getDefault();
+  const settings = {
+    enabled: true,
+    autoGenerateAfterRender: true,
+    selectedTemplateId: defTpl.id,
+    templateSnapshot: defTpl.promptText,
+    templateSnapshotHash: computeSha256(defTpl.promptText),
+    existingVideoTitle: "",
+    variantCount: 5,
+    outputLanguage: "en-US",
+    provider: "google-flow",
+    imageModel: "GEM_PIX_2",
+    outputQuality: "4k"
+  };
+  await saveProjectThumbnailSettings(projectDir, settings);
+  return settings;
+}
+async function saveProjectThumbnailSettings(projectDir, settings) {
+  const filePath = getProjectThumbnailSettingsPath(projectDir);
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  if (settings.templateSnapshot && !settings.templateSnapshotHash) {
+    settings.templateSnapshotHash = computeSha256(settings.templateSnapshot);
+  }
+  const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(settings, null, 2), "utf-8");
+  try {
+    fs__namespace.renameSync(tmpPath, filePath);
+  } finally {
+    if (fs__namespace.existsSync(tmpPath)) {
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+  }
+}
+function getThumbnailPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-plan.json");
+}
+function cleanJsonFence(raw) {
+  if (!raw) return "";
+  return raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
+}
+function validateThumbnailPlanSchema(obj) {
+  if (!obj || typeof obj !== "object") {
+    return { valid: false, error: "Output must be a JSON object" };
+  }
+  const p = obj;
+  if (!p.scriptInsight || typeof p.scriptInsight !== "object") {
+    return { valid: false, error: 'Missing "scriptInsight" object in response' };
+  }
+  const insight = p.scriptInsight;
+  if (typeof insight.mainTopic !== "string" || !insight.mainTopic.trim()) {
+    return { valid: false, error: "scriptInsight.mainTopic is missing or empty" };
+  }
+  if (!Array.isArray(p.options)) {
+    return { valid: false, error: '"options" must be an array' };
+  }
+  if (p.options.length !== 5) {
+    return { valid: false, error: `Expected exactly 5 thumbnail options, got ${p.options.length}` };
+  }
+  const requiredIds = ["A", "B", "C", "D", "E"];
+  const validatedOptions = [];
+  for (let i = 0; i < 5; i++) {
+    const opt = p.options[i];
+    const expectedId = requiredIds[i];
+    if (!opt || typeof opt !== "object") {
+      return { valid: false, error: `Option at index ${i} is not a valid object` };
+    }
+    if (String(opt.id || "").toUpperCase() !== expectedId) {
+      return { valid: false, error: `Option at index ${i} must have id "${expectedId}", got "${opt.id}"` };
+    }
+    const conceptName = typeof opt.conceptName === "string" ? opt.conceptName.trim() : "";
+    const yellowText = typeof opt.yellowText === "string" ? opt.yellowText.trim() : "";
+    const whiteText = typeof opt.whiteText === "string" ? opt.whiteText.trim() : "";
+    const visualConcept = typeof opt.visualConcept === "string" ? opt.visualConcept.trim() : "";
+    const imagePrompt = typeof opt.imagePrompt === "string" ? opt.imagePrompt.trim() : "";
+    const titleClear = typeof opt.titleClear === "string" ? opt.titleClear.trim() : "";
+    const titleCuriosity = typeof opt.titleCuriosity === "string" ? opt.titleCuriosity.trim() : "";
+    const whyItWorks = typeof opt.whyItWorks === "string" ? opt.whyItWorks.trim() : "";
+    if (!conceptName) return { valid: false, error: `Option ${expectedId}: conceptName cannot be empty` };
+    if (!yellowText) return { valid: false, error: `Option ${expectedId}: yellowText cannot be empty` };
+    if (!whiteText) return { valid: false, error: `Option ${expectedId}: whiteText cannot be empty` };
+    if (!imagePrompt) return { valid: false, error: `Option ${expectedId}: imagePrompt cannot be empty` };
+    if (imagePrompt.toLowerCase().includes("same as above")) {
+      return { valid: false, error: `Option ${expectedId}: imagePrompt cannot reference previous option or use "same as above"` };
+    }
+    validatedOptions.push({
+      id: expectedId,
+      conceptName,
+      yellowText,
+      whiteText,
+      visualConcept,
+      imagePrompt,
+      titleClear,
+      titleCuriosity,
+      whyItWorks
+    });
+  }
+  const scriptInsight = {
+    mainTopic: String(insight.mainTopic || "").trim(),
+    groundedHook: String(insight.groundedHook || "").trim(),
+    strongestVisualDetail: String(insight.strongestVisualDetail || "").trim(),
+    viewerConcernOrGoal: String(insight.viewerConcernOrGoal || "").trim(),
+    unsupportedClaimsToAvoid: Array.isArray(insight.unsupportedClaimsToAvoid) ? insight.unsupportedClaimsToAvoid.map(String) : []
+  };
+  const plan = {
+    scriptInsight,
+    options: validatedOptions,
+    recommendedOptionId: String(p.recommendedOptionId || "A").toUpperCase(),
+    recommendationReason: String(p.recommendationReason || ""),
+    postGenerationCheck: String(p.postGenerationCheck || "")
+  };
+  return { valid: true, plan };
+}
+function substituteTemplateVariables(templateText, vars) {
+  let prompt = templateText;
+  prompt = prompt.replace(/\{\{SCRIPT\}\}/g, vars.script || "");
+  prompt = prompt.replace(/\{\{VIDEO_TITLE\}\}/g, vars.videoTitle || "Untitled Documentary");
+  prompt = prompt.replace(/\{\{GLOBAL_VISUAL_CONTEXT\}\}/g, vars.globalVisualContext || "None specified");
+  prompt = prompt.replace(/\{\{VARIANT_COUNT\}\}/g, String(vars.variantCount));
+  prompt = prompt.replace(/\{\{PREVIOUS_CONCEPTS\}\}/g, vars.previousConcepts || "None");
+  prompt = prompt.replace(/\{\{OUTPUT_LANGUAGE\}\}/g, vars.outputLanguage || "en-US");
+  if (!templateText.includes("{{VARIANT_COUNT}}") && !prompt.includes("exactly 5")) {
+    prompt += "\n\nIMPORTANT SYSTEM REQUIREMENT: You MUST generate exactly 5 distinct options with IDs A, B, C, D, and E.";
+  }
+  return prompt;
+}
+class ThumbnailPlanner {
+  async plan(params) {
+    const { projectDir } = params;
+    const script = this.readScript(projectDir);
+    if (!script || !script.trim()) {
+      throw new Error(`Cannot plan thumbnails: script file is missing or empty in project "${projectDir}"`);
+    }
+    const settings = await loadProjectThumbnailSettings(projectDir);
+    const globalContext = this.readGlobalContext(projectDir);
+    let templatePrompt = params.templateSnapshot || settings.templateSnapshot;
+    if (!templatePrompt) {
+      if (settings.selectedTemplateId) {
+        const tpl = await thumbnailTemplateStore.getById(settings.selectedTemplateId);
+        if (tpl) templatePrompt = tpl.promptText;
+      }
+      if (!templatePrompt) {
+        const defTpl = await thumbnailTemplateStore.getDefault();
+        templatePrompt = defTpl.promptText;
+      }
+    }
+    const prompt = substituteTemplateVariables(templatePrompt, {
+      script,
+      videoTitle: settings.existingVideoTitle,
+      globalVisualContext: globalContext,
+      variantCount: 5,
+      previousConcepts: params.previousConcepts,
+      outputLanguage: settings.outputLanguage || "en-US"
+    });
+    const config = loadConfig();
+    const apiKey = normalizeApiKey(params.apiKeyOverride || config.geminiApiKey || process.env.GEMINI_API_KEY);
+    if (!apiKey) {
+      throw new Error("THUMBNAIL_PLAN_INVALID: Gemini API key is missing. Please set your Gemini API key in Settings.");
+    }
+    const ai = new genai.GoogleGenAI({ apiKey });
+    const candidateModels = getModelRoute("planning", params.preferredModel || config.preferredModel);
+    let rawOutput = "";
+    let usedModel = "";
+    let lastError = "";
+    for (const modelId of candidateModels) {
+      const normalized = normalizePreferredTextModel(modelId);
+      try {
+        logger.info(`[ThumbnailPlanner] Requesting 5 thumbnail concepts from ${normalized}...`);
+        const response = await ai.models.generateContent({
+          model: normalized,
+          contents: [{ role: "user", parts: [{ text: prompt }] }],
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.3,
+            maxOutputTokens: 8192
+          }
+        });
+        const text = response.text || "";
+        if (text.trim()) {
+          rawOutput = text;
+          usedModel = normalized;
+          recordModelSuccess(normalized);
+          break;
+        }
+      } catch (err) {
+        const classified = classifyGeminiErrorKind(err);
+        recordModelFailure(normalized, classified.kind);
+        lastError = classified.message;
+        logger.warn(`[ThumbnailPlanner] Model ${normalized} failed: ${classified.message}`);
+        if (classified.kind === "RATE_LIMIT") {
+          recordModelRateLimit(normalized);
+        } else if (classified.kind === "SERVICE_UNAVAILABLE") {
+          recordModelUnavailable(normalized);
+        }
+      }
+    }
+    if (!rawOutput) {
+      throw new Error(`THUMBNAIL_PLAN_INVALID: All AI models failed to generate thumbnail plan. Last error: ${lastError}`);
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(cleanJsonFence(rawOutput));
+    } catch (parseErr) {
+      logger.warn(`[ThumbnailPlanner] Initial JSON parse failed: ${parseErr}. Attempting repair with ${usedModel}...`);
+      rawOutput = await this.repairJson(ai, usedModel, rawOutput, String(parseErr));
+      try {
+        parsed = JSON.parse(cleanJsonFence(rawOutput));
+      } catch (secondErr) {
+        throw new Error(`THUMBNAIL_PLAN_INVALID: Model returned malformed JSON that could not be parsed: ${secondErr}`);
+      }
+    }
+    let validation = validateThumbnailPlanSchema(parsed);
+    if (!validation.valid) {
+      logger.warn(`[ThumbnailPlanner] Schema validation failed: ${validation.error}. Attempting repair with ${usedModel}...`);
+      rawOutput = await this.repairJson(ai, usedModel, rawOutput, validation.error || "Invalid schema");
+      try {
+        parsed = JSON.parse(cleanJsonFence(rawOutput));
+        validation = validateThumbnailPlanSchema(parsed);
+      } catch (secondErr) {
+        throw new Error(`THUMBNAIL_PLAN_INVALID: Repaired JSON failed to parse: ${secondErr}`);
+      }
+    }
+    if (!validation.valid || !validation.plan) {
+      throw new Error(`THUMBNAIL_PLAN_INVALID: ${validation.error || "Failed schema validation"}`);
+    }
+    const finalPlan = {
+      ...validation.plan,
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      modelUsed: usedModel,
+      generationRound: params.generationRound || 1
+    };
+    const outPath = getThumbnailPlanPath(projectDir);
+    fs__namespace.mkdirSync(path__namespace.dirname(outPath), { recursive: true });
+    fs__namespace.writeFileSync(outPath, JSON.stringify(finalPlan, null, 2), "utf-8");
+    logger.info(`[ThumbnailPlanner] Successfully created and saved thumbnail plan to ${outPath}`);
+    return finalPlan;
+  }
+  async repairJson(ai, model, badJson, errorMsg) {
+    const repairPrompt = `The previous JSON response for YouTube thumbnail plan was invalid.
+Error reported: ${errorMsg}
+
+Raw output:
+${badJson.slice(0, 4e3)}
+
+Please output the corrected, valid JSON matching the exact schema with 5 options (A, B, C, D, E).
+Return ONLY the raw JSON object. No markdown code fence. No commentary.`;
+    try {
+      const resp = await ai.models.generateContent({
+        model,
+        contents: [{ role: "user", parts: [{ text: repairPrompt }] }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          maxOutputTokens: 8192
+        }
+      });
+      return resp.text || badJson;
+    } catch {
+      return badJson;
+    }
+  }
+  readScript(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "script.txt"),
+      path__namespace.join(projectDir, "inputs", "script.txt"),
+      path__namespace.join(projectDir, "project-state.json"),
+      path__namespace.join(projectDir, "project.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        if (c.endsWith(".json")) {
+          try {
+            const raw = fs__namespace.readFileSync(c, "utf-8");
+            const st = JSON.parse(raw);
+            const p = st?.inputs?.scriptPath;
+            if (p && fs__namespace.existsSync(p)) {
+              return fs__namespace.readFileSync(p, "utf-8");
+            }
+          } catch {
+          }
+        } else {
+          return fs__namespace.readFileSync(c, "utf-8");
+        }
+      }
+    }
+    return "";
+  }
+  readGlobalContext(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "analysis", "global-script-context.json"),
+      path__namespace.join(projectDir, "analysis", "global-visual-context.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        try {
+          return fs__namespace.readFileSync(c, "utf-8");
+        } catch {
+        }
+      }
+    }
+    return "";
+  }
+}
+const thumbnailPlanner = new ThumbnailPlanner();
+function probeImageDimensions(buffer) {
+  if (!buffer || buffer.length < 24) return null;
+  if (buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
+    const width = buffer.readUInt32BE(16);
+    const height = buffer.readUInt32BE(20);
+    return { width, height, format: "png" };
+  }
+  if (buffer[0] === 255 && buffer[1] === 216) {
+    let offset = 2;
+    while (offset < buffer.length) {
+      if (buffer[offset] !== 255) {
+        offset++;
+        continue;
+      }
+      const marker = buffer[offset + 1];
+      if (marker >= 192 && marker <= 195 || marker >= 197 && marker <= 199 || marker >= 201 && marker <= 203 || marker >= 205 && marker <= 207) {
+        if (offset + 8 < buffer.length) {
+          const height = buffer.readUInt16BE(offset + 5);
+          const width = buffer.readUInt16BE(offset + 7);
+          return { width, height, format: "jpeg" };
+        }
+      }
+      if (offset + 3 < buffer.length) {
+        const length = buffer.readUInt16BE(offset + 2);
+        offset += 2 + length;
+      } else {
+        break;
+      }
+    }
+  }
+  if (buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP") {
+    if (buffer.slice(12, 16).toString("ascii") === "VP8 ") {
+      const width = buffer.readUInt16LE(26) & 16383;
+      const height = buffer.readUInt16LE(28) & 16383;
+      return { width, height, format: "webp" };
+    }
+    if (buffer.slice(12, 16).toString("ascii") === "VP8L") {
+      const b1 = buffer[21];
+      const b2 = buffer[22];
+      const b3 = buffer[23];
+      const b4 = buffer[24];
+      const width = 1 + ((b2 & 63) << 8 | b1);
+      const height = 1 + ((b4 & 15) << 10 | b3 << 2 | (b2 & 192) >> 6);
+      return { width, height, format: "webp" };
+    }
+    if (buffer.slice(12, 16).toString("ascii") === "VP8X") {
+      const width = 1 + buffer.readUIntLE(24, 3);
+      const height = 1 + buffer.readUIntLE(27, 3);
+      return { width, height, format: "webp" };
+    }
+  }
+  return null;
+}
+function probeImageFile(filePath) {
+  if (!fs__namespace.existsSync(filePath)) return null;
+  const stat = fs__namespace.statSync(filePath);
+  if (stat.size === 0) return null;
+  const fd = fs__namespace.openSync(filePath, "r");
+  const readLen = Math.min(stat.size, 65536);
+  const buffer = Buffer.alloc(readLen);
+  try {
+    fs__namespace.readSync(fd, buffer, 0, readLen, 0);
+    return probeImageDimensions(buffer);
+  } finally {
+    fs__namespace.closeSync(fd);
+  }
+}
+const probeImageFileDimensions = probeImageFile;
+const DEFAULT_FLOWKIT_BRIDGE_URL = "http://127.0.0.1:8100";
+class GoogleFlowClient {
+  bridgeUrl;
+  constructor(bridgeUrl) {
+    this.bridgeUrl = (bridgeUrl || DEFAULT_FLOWKIT_BRIDGE_URL).replace(/\/+$/, "");
+  }
+  setBridgeUrl(url2) {
+    this.bridgeUrl = (url2 || DEFAULT_FLOWKIT_BRIDGE_URL).replace(/\/+$/, "");
+  }
+  getBridgeUrl() {
+    return this.bridgeUrl;
+  }
+  async checkHealth() {
+    const health = {
+      reachable: false,
+      providerAvailable: false,
+      extensionConnected: false,
+      signedIn: false,
+      supportsImageGeneration: false,
+      requestedExportQuality: "4k",
+      message: "Checking connection..."
+    };
+    try {
+      const healthResp = await this.fetchWithTimeout(`${this.bridgeUrl}/health`, { method: "GET" }, 3e3);
+      if (!healthResp.ok) {
+        health.message = `FlowKit bridge responded with status ${healthResp.status}`;
+        return health;
+      }
+      health.reachable = true;
+      const healthData = await healthResp.json();
+      health.extensionConnected = Boolean(healthData.extension_connected);
+      try {
+        const flowStatusResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: "GET" }, 3e3);
+        if (flowStatusResp.ok) {
+          const flowData = await flowStatusResp.json();
+          if (flowData.connected) {
+            health.extensionConnected = true;
+          }
+          health.details = {
+            version: healthData.version,
+            flowProjectId: flowData.flow_project_id || flowData.session_project?.project_id,
+            generationThrottle: flowData.generation_throttle
+          };
+        }
+      } catch (err) {
+        logger.debug(`[GoogleFlowClient] /api/flow/status check notice: ${err}`);
+      }
+      try {
+        const provResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/providers/status`, { method: "GET" }, 3e3);
+        if (provResp.ok) {
+          const body = await provResp.json();
+          const provsArray = Array.isArray(body) ? body : Array.isArray(body.providers) ? body.providers : [];
+          const flowProv = provsArray.find((p) => p.name === "flow");
+          if (flowProv) {
+            health.providerAvailable = Boolean(flowProv.available);
+            health.supportsImageGeneration = Boolean(flowProv.capabilities?.generate_image);
+          }
+        }
+      } catch (err) {
+        logger.debug(`[GoogleFlowClient] /api/providers/status check notice: ${err}`);
+      }
+      if (health.extensionConnected) {
+        try {
+          const credResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/credits`, { method: "GET" }, 4e3);
+          if (credResp.ok) {
+            health.signedIn = true;
+            health.supportsImageGeneration = true;
+          } else if (credResp.status === 503) {
+            health.extensionConnected = false;
+            health.message = "Google Flow Chrome extension is disconnected.";
+          } else if (credResp.status === 502) {
+            health.signedIn = false;
+            health.message = "Google Flow account not signed in. Open Google Flow in Chrome and log in.";
+          }
+        } catch {
+          health.signedIn = health.extensionConnected;
+        }
+      }
+      if (!health.extensionConnected) {
+        health.message = "Chrome extension disconnected. Open Google Flow in Chrome, reconnect the extension, then retry.";
+      } else if (!health.signedIn) {
+        health.message = "Google Flow is not signed in. Please log into Google Flow in Chrome.";
+      } else {
+        health.message = "FlowKit bridge and Google Flow are connected and ready for 4K thumbnail generation.";
+      }
+      return health;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      health.reachable = false;
+      health.message = `FlowKit bridge unreachable at ${this.bridgeUrl} (${msg}). Ensure FlowKit is running.`;
+      return health;
+    }
+  }
+  async generateImage(request) {
+    const url2 = `${this.bridgeUrl}/api/flow/generate-image`;
+    const payload = {
+      prompt: request.prompt,
+      project_id: request.projectId || "",
+      image_model: request.imageModel || "GEM_PIX_2",
+      aspect_ratio: request.aspectRatio || "16:9",
+      count: 1,
+      reference_media_ids: []
+    };
+    logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`);
+    const callerHeader = request.caller ? `long-form-video-factory/${request.caller}` : "long-form-video-factory/thumbnail-studio";
+    let resp;
+    try {
+      resp = await this.fetchWithTimeout(
+        url2,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-flowkit-caller": callerHeader
+          },
+          body: JSON.stringify(payload)
+        },
+        12e4
+      );
+    } catch (err) {
+      throw err;
+    }
+    if (resp.ok) {
+      const data = await resp.json();
+      const firstMedia = data.media?.[0];
+      const mediaId = firstMedia?.image?.generatedImage?.mediaId || firstMedia?.name;
+      const fifeUrl = firstMedia?.image?.generatedImage?.fifeUrl;
+      if (!mediaId) {
+        throw new Error("FLOW_GENERATION_FAILED: FlowKit returned response without mediaId.");
+      }
+      logger.info(`[GoogleFlowClient] Candidate ${request.optionId} generated media: ${mediaId}`);
+      return {
+        mediaId,
+        projectId: data.project_id || request.projectId || "",
+        fifeUrl,
+        raw: data
+      };
+    }
+    const status = resp.status;
+    let errorBody = {};
+    try {
+      errorBody = await resp.json();
+    } catch {
+    }
+    const errMsg = errorBody.error || errorBody.detail || (typeof errorBody === "string" ? errorBody : "") || `HTTP ${status}`;
+    if (status === 503 || String(errMsg).toLowerCase().includes("extension not connected")) {
+      throw new Error(`FLOW_EXTENSION_DISCONNECTED: Chrome extension is disconnected. Open Google Flow in Chrome and reconnect.`);
+    }
+    if (status === 400 || status === 422) {
+      throw new Error(`FLOW_GENERATION_FAILED: Invalid argument: ${errMsg}`);
+    }
+    if (status === 429 || String(errMsg).toLowerCase().includes("rate limit") || String(errMsg).toLowerCase().includes("cooldown")) {
+      throw new Error(`FLOW_RATE_LIMITED: Google Flow rate limit reached. (${errMsg})`);
+    }
+    if (String(errMsg).toLowerCase().includes("recaptcha")) {
+      throw new Error(`FLOW_RECAPTCHA_FAILED: Google Flow reCAPTCHA verification failed. (${errMsg})`);
+    }
+    throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`);
+  }
+  async getFlowThrottle() {
+    try {
+      const resp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: "GET" }, 3e3);
+      if (resp.ok) {
+        const data = await resp.json();
+        const throttle = data?.generation_throttle;
+        const maxConc = typeof throttle?.max_concurrent === "number" ? throttle.max_concurrent : 1;
+        const minInt = typeof throttle?.min_interval_s === "number" ? throttle.min_interval_s : 3;
+        const cooldown = Boolean(throttle?.cooldown_active);
+        const cooldownRem = typeof throttle?.cooldown_remaining_s === "number" ? throttle.cooldown_remaining_s : 0;
+        return {
+          maxConcurrent: maxConc,
+          minIntervalS: minInt,
+          cooldownActive: cooldown,
+          cooldownRemainingS: cooldownRem
+        };
+      }
+    } catch {
+    }
     return {
-      valid: false,
-      totalScenes: 0,
-      totalSegments: transcript.segments.length,
-      coveredSegmentsCount: 0,
-      missingSegmentIds: transcript.segments.map((s) => s.id),
-      duplicateSegmentIds: [],
-      errors,
-      warnings
+      maxConcurrent: 1,
+      minIntervalS: 3,
+      cooldownActive: false,
+      cooldownRemainingS: 0
     };
   }
-  const sceneIndices = scenes.map((s) => s.sceneIndex);
-  const uniqueIndices = new Set(sceneIndices);
-  if (uniqueIndices.size !== sceneIndices.length) {
-    errors.push(`Duplicate sceneIndex detected: ${sceneIndices.length} scenes but only ${uniqueIndices.size} unique indices.`);
-  }
-  const TIMELINE_TOLERANCE = 0.15;
-  const expectedStart = transcript.segments[0]?.start ?? 0;
-  if (scenes[0].startTime > expectedStart + TIMELINE_TOLERANCE) {
-    errors.push(
-      `First scene startTime (${scenes[0].startTime}s) does not match transcript start (${expectedStart}s).`
-    );
-  }
-  const expectedEnd = transcript.duration;
-  if (Math.abs(scenes[scenes.length - 1].endTime - expectedEnd) > 0.25) {
-    warnings.push(
-      `Last scene endTime (${scenes[scenes.length - 1].endTime}s) differs from transcript duration (${expectedEnd}s) by more than 0.25s.`
-    );
-  }
-  for (let i = 0; i < scenes.length; i++) {
-    const sc = scenes[i];
-    const expectedDur = Number((sc.endTime - sc.startTime).toFixed(2));
-    if (Math.abs(sc.duration - expectedDur) > 0.05) {
-      errors.push(
-        `Scene ${sc.sceneIndex}: duration (${sc.duration}) does not match endTime - startTime (${expectedDur}).`
-      );
+  async exportImage(request) {
+    const destDir = path__namespace.dirname(request.destinationPath);
+    if (!fs__namespace.existsSync(destDir)) {
+      fs__namespace.mkdirSync(destDir, { recursive: true });
     }
-    if (!sc.narrativeText || sc.narrativeText.trim().length === 0) {
-      errors.push(`Scene ${sc.sceneIndex}: narrativeText is empty.`);
-    }
-    if (!sc.visualIntent || sc.visualIntent.trim().length === 0) {
-      warnings.push(`Scene ${sc.sceneIndex}: visualIntent is empty.`);
-    }
-    if (!sc.searchQueries || sc.searchQueries.filter((q) => q.trim().length >= 2).length < 3) {
-      warnings.push(`Scene ${sc.sceneIndex}: searchQueries has fewer than 3 valid queries.`);
-    }
-    if (i < scenes.length - 1) {
-      const nextSc = scenes[i + 1];
-      if (nextSc.startTime < sc.startTime) {
-        errors.push(
-          `Timeline reversal: Scene ${nextSc.sceneIndex} starts at ${nextSc.startTime}s before Scene ${sc.sceneIndex} at ${sc.startTime}s.`
-        );
+    const pref = request.preferredQuality || (request.quality === "2k" ? "2k" : "4k");
+    if (pref === "2k") {
+      const result2k = await this.tryExportAtQuality(request.mediaId, request.projectId, "2k", request.destinationPath);
+      if (result2k.success && result2k.buffer) {
+        fs__namespace.writeFileSync(request.destinationPath, result2k.buffer);
+        const dims = probeImageDimensions(result2k.buffer);
+        const stats = fs__namespace.statSync(request.destinationPath);
+        return {
+          filePath: request.destinationPath,
+          fileSize: stats.size,
+          width: dims?.width || 2560,
+          height: dims?.height || 1440,
+          actualQuality: "2k-fallback"
+        };
       }
-      const gap = nextSc.startTime - sc.endTime;
-      if (gap > TIMELINE_TOLERANCE) {
-        errors.push(
-          `Significant timeline gap (${gap.toFixed(2)}s) between Scene ${sc.sceneIndex} (end ${sc.endTime}s) and Scene ${nextSc.sceneIndex} (start ${nextSc.startTime}s).`
-        );
+      if (request.fallbackToOriginalUrl) {
+        logger.warn(`[GoogleFlowClient] Direct 2K export failed (${result2k.error}). Falling back to original image download from fifeUrl...`);
+        try {
+          const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: "GET" }, 3e4);
+          if (origResp.ok) {
+            const arrayBuf = await origResp.arrayBuffer();
+            const buf = Buffer.from(arrayBuf);
+            fs__namespace.writeFileSync(request.destinationPath, buf);
+            const dims = probeImageDimensions(buf);
+            const stats = fs__namespace.statSync(request.destinationPath);
+            return {
+              filePath: request.destinationPath,
+              fileSize: stats.size,
+              width: dims?.width || 1376,
+              height: dims?.height || 768,
+              actualQuality: "original-fallback",
+              is4kPlanGated: true
+            };
+          }
+        } catch (fifeErr) {
+          logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`);
+        }
       }
-      const overlap = sc.endTime - nextSc.startTime;
-      if (overlap > TIMELINE_TOLERANCE) {
-        errors.push(
-          `Significant timeline overlap (${overlap.toFixed(2)}s) between Scene ${sc.sceneIndex} (end ${sc.endTime}s) and Scene ${nextSc.sceneIndex} (start ${nextSc.startTime}s).`
-        );
+      throw new Error(`FLOW_EXPORT_FAILED: Failed to export 2K image for media ${request.mediaId}: ${result2k.error || "Unknown error"}`);
+    }
+    let result = await this.tryExportAtQuality(request.mediaId, request.projectId, "4k", request.destinationPath);
+    if (result.success && result.buffer) {
+      fs__namespace.writeFileSync(request.destinationPath, result.buffer);
+      const dims = probeImageDimensions(result.buffer);
+      const stats = fs__namespace.statSync(request.destinationPath);
+      return {
+        filePath: request.destinationPath,
+        fileSize: stats.size,
+        width: dims?.width || 3840,
+        height: dims?.height || 2160,
+        actualQuality: "native-4k"
+      };
+    }
+    const is4kGated = result.statusCode === 400 || result.statusCode === 403 || result.statusCode === 502 || String(result.error).toLowerCase().includes("tier") || String(result.error).toLowerCase().includes("plan") || String(result.error).toLowerCase().includes("not supported") || String(result.error).toLowerCase().includes("upscale");
+    logger.warn(`[GoogleFlowClient] 4K export failed (${result.error}). Attempting 2K fallback...`);
+    result = await this.tryExportAtQuality(request.mediaId, request.projectId, "2k", request.destinationPath);
+    if (result.success && result.buffer) {
+      fs__namespace.writeFileSync(request.destinationPath, result.buffer);
+      const dims = probeImageDimensions(result.buffer);
+      const stats = fs__namespace.statSync(request.destinationPath);
+      return {
+        filePath: request.destinationPath,
+        fileSize: stats.size,
+        width: dims?.width || 2560,
+        height: dims?.height || 1440,
+        actualQuality: "2k-fallback",
+        is4kPlanGated: is4kGated
+      };
+    }
+    if (request.fallbackToOriginalUrl) {
+      logger.warn(`[GoogleFlowClient] 2K export failed. Falling back to original image download from fifeUrl...`);
+      try {
+        const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: "GET" }, 3e4);
+        if (origResp.ok) {
+          const arrayBuf = await origResp.arrayBuffer();
+          const buf = Buffer.from(arrayBuf);
+          fs__namespace.writeFileSync(request.destinationPath, buf);
+          const dims = probeImageDimensions(buf);
+          const stats = fs__namespace.statSync(request.destinationPath);
+          return {
+            filePath: request.destinationPath,
+            fileSize: stats.size,
+            width: dims?.width || 1376,
+            height: dims?.height || 768,
+            actualQuality: "original-fallback",
+            is4kPlanGated: true
+          };
+        }
+      } catch (fifeErr) {
+        logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`);
       }
     }
+    throw new Error(`FLOW_EXPORT_FAILED: Failed to export image for media ${request.mediaId}: ${result.error || "Unknown export error"}`);
   }
-  const allTranscriptSegmentIds = new Set(transcript.segments.map((s) => s.id));
-  const sceneSegmentIdUsage = /* @__PURE__ */ new Map();
-  for (const sc of scenes) {
-    for (const segId of sc.transcriptSegmentIds || []) {
-      sceneSegmentIdUsage.set(segId, (sceneSegmentIdUsage.get(segId) ?? 0) + 1);
-    }
-  }
-  const missingSegmentIds = [];
-  for (const id of allTranscriptSegmentIds) {
-    if (!sceneSegmentIdUsage.has(id)) {
-      missingSegmentIds.push(id);
-    }
-  }
-  const duplicateSegmentIds = [];
-  for (const [id, count] of sceneSegmentIdUsage.entries()) {
-    if (count > 1) {
-      const originalSeg = transcript.segments.find((s) => s.id === id);
-      if (originalSeg && originalSeg.duration <= 10) {
-        duplicateSegmentIds.push(id);
-      }
-    }
-  }
-  if (missingSegmentIds.length > 0) {
-    errors.push(
-      `Missing transcript segments (${missingSegmentIds.length}/${transcript.segments.length}): ${missingSegmentIds.slice(0, 10).join(", ")}${missingSegmentIds.length > 10 ? "..." : ""}`
-    );
-  }
-  if (duplicateSegmentIds.length > 0) {
-    errors.push(
-      `Unexpected duplicate transcript segments: ${duplicateSegmentIds.slice(0, 10).join(", ")}${duplicateSegmentIds.length > 10 ? "..." : ""}`
-    );
-  }
-  const coveredSegmentsCount = allTranscriptSegmentIds.size - missingSegmentIds.length;
-  const valid = errors.length === 0;
-  logger.info(
-    `[PLAN][Coverage] valid=${valid} coveredSegments=${coveredSegmentsCount}/${allTranscriptSegmentIds.size} totalScenes=${scenes.length} errors=${errors.length} warnings=${warnings.length}`
-  );
-  return {
-    valid,
-    totalScenes: scenes.length,
-    totalSegments: allTranscriptSegmentIds.size,
-    coveredSegmentsCount,
-    missingSegmentIds,
-    duplicateSegmentIds,
-    errors,
-    warnings
-  };
-}
-function getContextPath(projectDir) {
-  return path.join(projectDir, "analysis", "global-script-context.json");
-}
-function scriptHash(text) {
-  return crypto.createHash("md5").update(text).digest("hex").slice(0, 16);
-}
-const SYSTEM_PROMPT$1 = `You are the Context-Aware Visual Research Engine for a long-form documentary.
-Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
-Rules:
-- Identify primary subject, central thesis, geography, time period, communities from the script.
-- List exactTopicAnchors (proper nouns) that MUST appear in exact-match queries.
-- List contextualAnchors (broader descriptors) for when exact results are unavailable.
-- List forbiddenSubstitutions (visually similar but factually wrong subjects).
-- List negativeKeywords (terms that would return wrong stock).
-- Map the storyArc per chapter.
-- Do NOT invent facts not in the script.
-- Return ONLY valid JSON. No markdown. No explanation.`;
-function buildGeminiPrompt$1(fullScriptText, projectId, language) {
-  return `FULL SCRIPT (analyze completely before responding):
----
-${fullScriptText.slice(0, 4e4)}
----
-PROJECT ID: ${projectId}
-LANGUAGE: ${language}
-
-Return ONLY valid JSON matching this schema:
-{
-  "projectId": "${projectId}",
-  "language": "${language}",
-  "version": 1,
-  "primarySubject": "the single most important subject",
-  "secondarySubjects": ["string"],
-  "globalSynopsis": "2-3 sentence summary",
-  "centralThesis": "the main argument",
-  "documentaryAngle": "journalistic angle",
-  "targetAudience": "audience description",
-  "geography": { "primaryCountry": null, "primaryRegion": null, "secondaryLocations": [] },
-  "timeContext": { "primaryPeriod": "contemporary", "historicalPeriods": [] },
-  "communities": [{ "name": "name", "role": "protagonist", "visualDescription": "desc", "mustNotConfuseWith": [] }],
-  "recurringPeople": [{ "id": "p1", "role": "narrator", "ageRange": null, "gender": null, "appearance": null, "clothing": null }],
-  "visualWorld": { "environment": [], "architecture": [], "clothing": [], "occupations": [], "machinery": [], "recurringObjects": [], "colorMood": "natural", "documentaryStyle": "observational" },
-  "exactTopicAnchors": [],
-  "contextualAnchors": [],
-  "forbiddenSubstitutions": [],
-  "negativeKeywords": [],
-  "recurringVisualMotifs": [],
-  "storyArc": [{ "chapterId": "CH1", "title": "title", "purpose": "purpose", "startText": "first words", "endText": "last words" }]
-}`;
-}
-async function analyzeGlobalContext(params) {
-  const { projectDir, apiKey, forceRegenerate = false } = params;
-  const progress = params.onProgress ?? (() => {
-  });
-  const modelId = params.model ?? "gemini-3.5-flash";
-  const fullText = params.scriptText ?? params.transcript?.fullText ?? params.transcript?.segments.map((s) => s.text).join(" ") ?? "";
-  if (!fullText.trim()) throw new Error("No script or transcript text for global context analysis.");
-  let projectId = "unknown";
-  const language = params.transcript?.language ?? "en";
-  try {
-    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
-    const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-    projectId = st?.id ?? st?.name ?? "unknown";
-  } catch {
-  }
-  const contextPath = getContextPath(projectDir);
-  const hash = scriptHash(fullText);
-  if (!forceRegenerate && fs__namespace.existsSync(contextPath)) {
+  async tryExportAtQuality(mediaId, projectId, quality, _destPath) {
+    const url2 = `${this.bridgeUrl}/api/flow/export-image`;
+    const payload = {
+      media_id: mediaId,
+      project_id: projectId || "",
+      quality: quality.toLowerCase()
+    };
     try {
-      const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
-      if (cached._scriptHash === hash) {
-        logger.info("[GlobalContext] Cache hit");
-        progress("Using cached global script context...", 1);
-        return cached;
+      const resp = await this.fetchWithTimeout(
+        url2,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-flowkit-caller": "long-form-video-factory/thumbnail-studio"
+          },
+          body: JSON.stringify(payload)
+        },
+        9e4
+      );
+      if (resp.ok) {
+        const arrayBuf = await resp.arrayBuffer();
+        const buf = Buffer.from(arrayBuf);
+        if (buf.length > 0) {
+          return { success: true, buffer: buf, statusCode: resp.status };
+        }
+        return { success: false, statusCode: resp.status, error: "Empty binary response returned" };
+      }
+      let errorMsg = `HTTP ${resp.status}`;
+      try {
+        const errJson = await resp.json();
+        errorMsg = String(errJson.error || errJson.detail || errorMsg);
+      } catch {
+      }
+      return { success: false, statusCode: resp.status, error: String(errorMsg) };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+  async fetchWithTimeout(url2, init, timeoutMs = 15e3) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const resp = await fetch(url2, {
+        ...init,
+        signal: controller.signal
+      });
+      return resp;
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`Request timed out after ${timeoutMs}ms: ${url2}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+const googleFlowClient = new GoogleFlowClient();
+class GoogleFlowProvider {
+  name = "google-flow";
+  client;
+  constructor(client) {
+    this.client = client || googleFlowClient;
+  }
+  async healthCheck(bridgeUrl) {
+    if (bridgeUrl) {
+      this.client.setBridgeUrl(bridgeUrl);
+    }
+    return this.client.checkHealth();
+  }
+  async generateImage(request) {
+    return this.client.generateImage(request);
+  }
+  async exportImage(request) {
+    return this.client.exportImage(request);
+  }
+}
+const googleFlowProvider = new GoogleFlowProvider();
+const DEFAULT_SETTINGS = {
+  mode: "external",
+  bridgeUrl: "http://127.0.0.1:8100",
+  autoStartBridge: false,
+  autoOpenGoogleFlow: false
+};
+const HEALTH_POLL_INTERVAL_MS = 2e3;
+const HEALTH_START_TIMEOUT_MS = 3e4;
+const GOOGLE_FLOW_URL = "https://flow.google.com/";
+const CONFIG_FILENAME = "flowkit-runtime-settings.json";
+class FlowKitRuntimeManager {
+  settings = { ...DEFAULT_SETTINGS };
+  managedProcess = null;
+  isStarting = false;
+  /** Guard: only open Google Flow browser tab once per app session */
+  hasOpenedGoogleFlowThisSession = false;
+  /** Reference to GoogleFlowClient for URL sync — set by initialize() */
+  googleFlowClientRef = null;
+  // ─── Initialization ───────────────────────────────────────────────────────
+  /**
+   * Must be called once during app startup BEFORE any IPC handlers fire.
+   * Loads persisted settings and optionally links the GoogleFlowClient for URL sync.
+   */
+  initialize(googleFlowClient2) {
+    if (googleFlowClient2) {
+      this.googleFlowClientRef = googleFlowClient2;
+    }
+    this.loadPersistedSettings();
+    logger.info(`[FlowKitRuntime] Initialized. mode=${this.settings.mode} url=${this.settings.bridgeUrl}`);
+  }
+  // ─── Persistence ──────────────────────────────────────────────────────────
+  getConfigPath() {
+    try {
+      return path__namespace.join(electron.app.getPath("userData"), CONFIG_FILENAME);
+    } catch {
+      return path__namespace.join(process.cwd(), CONFIG_FILENAME);
+    }
+  }
+  loadPersistedSettings() {
+    const configPath = this.getConfigPath();
+    try {
+      if (!fs__namespace.existsSync(configPath)) {
+        logger.info("[FlowKitRuntime] No persisted settings found. Using defaults.");
+        return;
+      }
+      const raw = fs__namespace.readFileSync(configPath, "utf-8");
+      const parsed = JSON.parse(raw);
+      this.applySettings(parsed);
+      logger.info(`[FlowKitRuntime] Loaded persisted settings from ${configPath}`);
+    } catch (err) {
+      logger.warn(`[FlowKitRuntime] Failed to load persisted settings (using defaults): ${err}`);
+    }
+  }
+  savePersistedSettings() {
+    const configPath = this.getConfigPath();
+    const tmpPath = `${configPath}.tmp`;
+    try {
+      const data = JSON.stringify(this.settings, null, 2);
+      fs__namespace.writeFileSync(tmpPath, data, "utf-8");
+      fs__namespace.renameSync(tmpPath, configPath);
+      logger.info(`[FlowKitRuntime] Settings persisted to ${configPath}`);
+    } catch (err) {
+      logger.error(`[FlowKitRuntime] Failed to persist settings: ${err}`);
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+  }
+  // ─── Settings ─────────────────────────────────────────────────────────────
+  getSettings() {
+    return { ...this.settings };
+  }
+  applySettings(settings) {
+    const newUrl = this.normalizeBridgeUrl(settings.bridgeUrl || this.settings.bridgeUrl);
+    this.settings = {
+      ...this.settings,
+      ...settings,
+      // Normalize and sanitize
+      bridgeUrl: newUrl,
+      flowProjectId: (settings.flowProjectId ?? this.settings.flowProjectId ?? "").trim() || void 0,
+      flowKitPath: settings.flowKitPath ?? this.settings.flowKitPath,
+      pythonPath: settings.pythonPath ?? this.settings.pythonPath
+    };
+    if (this.googleFlowClientRef) {
+      this.googleFlowClientRef.setBridgeUrl(newUrl);
+    }
+    logger.info(`[FlowKitRuntime] Settings applied: mode=${this.settings.mode} url=${this.settings.bridgeUrl}`);
+  }
+  /** Save settings and apply them atomically */
+  saveSettings(settings) {
+    this.applySettings(settings);
+    this.savePersistedSettings();
+  }
+  normalizeBridgeUrl(url2) {
+    const raw = (url2 || DEFAULT_SETTINGS.bridgeUrl).replace(/\/+$/, "");
+    if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
+      return DEFAULT_SETTINGS.bridgeUrl;
+    }
+    return raw;
+  }
+  // ─── Status ───────────────────────────────────────────────────────────────
+  getStatus() {
+    return {
+      mode: this.settings.mode,
+      bridgeRunning: this.managedProcess !== null && !this.managedProcess.killed,
+      bridgeUrl: this.settings.bridgeUrl,
+      managedPid: this.managedProcess?.pid ?? void 0,
+      flowProjectId: this.settings.flowProjectId
+    };
+  }
+  // ─── Start Bridge (Managed Mode only) ─────────────────────────────────────
+  async startBridge() {
+    if (this.settings.mode !== "managed") {
+      return { success: false, error: "Bridge is in External mode. Start FlowKit manually.", errorCode: "FLOWKIT_NOT_CONFIGURED" };
+    }
+    if (this.managedProcess && !this.managedProcess.killed) {
+      logger.info("[FlowKitRuntime] Bridge already running.");
+      return { success: true };
+    }
+    if (this.isStarting) {
+      return { success: false, error: "Bridge is already starting." };
+    }
+    const flowKitPath = this.settings.flowKitPath || "";
+    if (!flowKitPath || !fs__namespace.existsSync(flowKitPath)) {
+      return { success: false, error: `FlowKit path not found: "${flowKitPath}"`, errorCode: "FLOWKIT_PATH_INVALID" };
+    }
+    const agentMain = path__namespace.join(flowKitPath, "agent", "main.py");
+    if (!fs__namespace.existsSync(agentMain)) {
+      return {
+        success: false,
+        error: `agent/main.py not found in "${flowKitPath}". Is this the correct FlowKit folder?`,
+        errorCode: "FLOWKIT_PATH_INVALID"
+      };
+    }
+    const pythonExe = await this.resolvePython(flowKitPath);
+    if (!pythonExe) {
+      return {
+        success: false,
+        error: "Python 3.10+ not found. Configure the Python path in settings or install Python.",
+        errorCode: "FLOWKIT_PYTHON_NOT_FOUND"
+      };
+    }
+    const bridgePort = this.parseBridgePort();
+    const flowProjectId = this.settings.flowProjectId || "";
+    await this.freePort(bridgePort);
+    this.isStarting = true;
+    this.broadcastLog(`[FlowKitRuntime] Starting FlowKit bridge...
+Python: ${pythonExe}
+Cwd: ${flowKitPath}
+Port: ${bridgePort}`);
+    try {
+      const env = {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([, v]) => v !== void 0)
+        ),
+        API_HOST: "127.0.0.1",
+        API_PORT: String(bridgePort),
+        MEDIA_PROVIDER: "flow",
+        ...flowProjectId ? { FLOW_PROJECT_ID: flowProjectId } : {}
+      };
+      const child = cp__namespace.spawn(pythonExe, ["-m", "agent.main"], {
+        cwd: flowKitPath,
+        env,
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      this.managedProcess = child;
+      child.stdout?.on("data", (data) => {
+        const text = data.toString("utf-8").trimEnd();
+        this.broadcastLog(`[FlowKit] ${text}`);
+      });
+      child.stderr?.on("data", (data) => {
+        const text = data.toString("utf-8").trimEnd();
+        this.broadcastLog(`[FlowKit:err] ${text}`);
+      });
+      child.on("exit", (code, signal) => {
+        const wasManaged = this.managedProcess === child;
+        if (wasManaged) {
+          this.managedProcess = null;
+        }
+        const msg = `[FlowKitRuntime] Bridge process exited (code=${code ?? signal})`;
+        logger.warn(msg);
+        this.broadcastLog(msg);
+        this.broadcastStatus();
+      });
+      const ready = await this.pollHealth(HEALTH_START_TIMEOUT_MS);
+      if (!ready) {
+        if (this.managedProcess === child && !child.killed) {
+          child.kill("SIGTERM");
+          this.managedProcess = null;
+        }
+        return { success: false, error: `Bridge did not become healthy within ${HEALTH_START_TIMEOUT_MS / 1e3}s.`, errorCode: "FLOWKIT_HEALTH_TIMEOUT" };
+      }
+      this.broadcastLog("[FlowKitRuntime] Bridge is healthy and ready.");
+      this.broadcastStatus();
+      return { success: true };
+    } catch (err) {
+      this.managedProcess = null;
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[FlowKitRuntime] Failed to start bridge: ${msg}`);
+      return { success: false, error: msg, errorCode: "FLOWKIT_START_FAILED" };
+    } finally {
+      this.isStarting = false;
+    }
+  }
+  // ─── Stop Bridge (Managed Mode only) ──────────────────────────────────────
+  stopBridge() {
+    if (!this.managedProcess || this.managedProcess.killed) {
+      return;
+    }
+    logger.info("[FlowKitRuntime] Stopping managed FlowKit bridge...");
+    this.managedProcess.kill("SIGTERM");
+    setTimeout(() => {
+      if (this.managedProcess && !this.managedProcess.killed) {
+        this.managedProcess.kill("SIGKILL");
+      }
+    }, 5e3);
+    this.managedProcess = null;
+    this.broadcastStatus();
+  }
+  /**
+   * Kill any process occupying `port` on localhost so the bridge can bind.
+   * Only acts on the external/zombie case — if we own `managedProcess` on that
+   * port, `stopBridge()` should have been called first.
+   *
+   * macOS/Linux only. No-op on Windows (port conflicts will surface naturally).
+   */
+  async freePort(port) {
+    if (process.platform === "win32") return;
+    return new Promise((resolve) => {
+      const lsof = cp__namespace.spawn("lsof", ["-ti", `:${port}`]);
+      let pids = "";
+      lsof.stdout?.on("data", (d) => {
+        pids += d.toString();
+      });
+      lsof.on("close", () => {
+        const pidList = pids.trim().split("\n").filter(Boolean);
+        if (pidList.length === 0) return resolve();
+        for (const pid of pidList) {
+          try {
+            process.kill(parseInt(pid, 10), "SIGKILL");
+          } catch {
+          }
+        }
+        logger.info(`[FlowKitRuntime] Freed port ${port}: killed PIDs [${pidList.join(", ")}]`);
+        setTimeout(resolve, 500);
+      });
+      lsof.on("error", () => resolve());
+    });
+  }
+  handleAppQuit() {
+    if (this.settings.mode === "managed") {
+      this.stopBridge();
+    }
+  }
+  /**
+   * Open Google Flow in the default browser.
+   * Only opens once per app session regardless of how many times called.
+   */
+  openGoogleFlow(force = false) {
+    if (!force && this.hasOpenedGoogleFlowThisSession) {
+      logger.info("[FlowKitRuntime] Google Flow already opened this session. Skipping.");
+      return;
+    }
+    this.hasOpenedGoogleFlowThisSession = true;
+    electron.shell.openExternal(GOOGLE_FLOW_URL).catch((err) => {
+      logger.warn(`[FlowKitRuntime] Failed to open Google Flow: ${err}`);
+    });
+    logger.info(`[FlowKitRuntime] Opened Google Flow in browser: ${GOOGLE_FLOW_URL}`);
+  }
+  /**
+   * Auto-start FlowKit in the background (non-blocking).
+   * Called from app startup if mode=managed and autoStartBridge=true.
+   */
+  autoStartIfConfigured() {
+    if (this.settings.mode !== "managed" || !this.settings.autoStartBridge) {
+      return;
+    }
+    logger.info("[FlowKitRuntime] Auto-start configured. Starting FlowKit bridge in background...");
+    this.startBridge().then((result) => {
+      if (result.success) {
+        logger.info("[FlowKitRuntime] Auto-start: bridge is healthy.");
+        if (this.settings.autoOpenGoogleFlow) {
+          this.openGoogleFlow();
+        }
+      } else {
+        logger.warn(`[FlowKitRuntime] Auto-start failed: ${result.error}`);
+      }
+    }).catch((err) => {
+      logger.error(`[FlowKitRuntime] Auto-start error: ${err}`);
+    });
+  }
+  // ─── Readiness Preflight ──────────────────────────────────────────────────
+  /**
+   * Run the full readiness preflight check.
+   * MUST be called before any thumbnail generation.
+   * If not ready, returns blockingCode and message.
+   */
+  async ensureFlowReady(bridgeUrl) {
+    const url2 = this.normalizeBridgeUrl(bridgeUrl || this.settings.bridgeUrl);
+    const result = {
+      ready: false,
+      bridgeReachable: false,
+      extensionConnected: false,
+      flowConnected: false,
+      flowProjectIdPresent: Boolean(this.settings.flowProjectId),
+      imageGenerationReady: false,
+      export4kStatus: "unknown",
+      message: "Checking FlowKit connection..."
+    };
+    let healthData = null;
+    try {
+      const resp = await this.fetchWithTimeout(`${url2}/health`, 5e3);
+      if (resp.ok) {
+        result.bridgeReachable = true;
+        healthData = await resp.json();
+        result.extensionConnected = Boolean(healthData?.extension_connected);
+      } else {
+        result.blockingCode = "FLOWKIT_BRIDGE_OFFLINE";
+        result.message = `FlowKit bridge at ${url2} returned HTTP ${resp.status}.`;
+        return result;
+      }
+    } catch (err) {
+      const errCode = this.extractNodeErrorCode(err);
+      result.bridgeReachable = false;
+      result.extensionConnected = false;
+      result.blockingCode = "FLOWKIT_BRIDGE_OFFLINE";
+      result.message = this.buildBridgeOfflineMessage(url2, errCode);
+      result.diagnostics = { errorCode: errCode, bridgeUrl: url2 };
+      return result;
+    }
+    if (!result.extensionConnected) {
+      result.blockingCode = "FLOW_EXTENSION_DISCONNECTED";
+      result.message = "FlowKit bridge is online, but the Chrome extension is not connected. Open Google Flow in Chrome and reload the extension.";
+      return result;
+    }
+    try {
+      const flowResp = await this.fetchWithTimeout(`${url2}/api/flow/status`, 1e4);
+      if (flowResp.ok) {
+        const flowData = await flowResp.json();
+        result.flowConnected = Boolean(flowData.connected);
+        const bridgeProjectId = flowData.flow_project_id || flowData.session_project?.project_id;
+        if (!this.settings.flowProjectId && bridgeProjectId) {
+          result.flowProjectIdPresent = true;
+        }
+      }
+    } catch {
+    }
+    try {
+      const provResp = await this.fetchWithTimeout(`${url2}/api/providers/status`, 5e3);
+      if (provResp.ok) {
+        const body = await provResp.json();
+        const provsArray = Array.isArray(body) ? body : Array.isArray(body?.providers) ? body.providers : [];
+        const flowProv = provsArray.find((p) => p.name === "flow");
+        if (flowProv?.available && flowProv.capabilities?.generate_image) {
+          result.imageGenerationReady = true;
+        }
+      }
+    } catch {
+    }
+    if (!this.settings.flowProjectId && !result.flowProjectIdPresent) {
+      result.blockingCode = "FLOW_PROJECT_ID_MISSING";
+      result.message = "Flow Project ID is not configured. Open Google Flow, create or open a project, copy the UUID from the URL, and paste it in Settings → Thumbnail Studio.";
+      return result;
+    }
+    result.ready = result.bridgeReachable && result.extensionConnected && result.imageGenerationReady;
+    if (result.ready) {
+      result.message = "Google Flow is connected and ready for thumbnail generation.";
+    } else if (!result.imageGenerationReady) {
+      result.blockingCode = "FLOW_IMAGE_GENERATION_UNAVAILABLE";
+      result.message = "FlowKit is connected but the image generation provider is unavailable. Check that Google Flow is open in Chrome.";
+    }
+    return result;
+  }
+  /**
+   * Lightweight bridge liveness check (no extension/project checks).
+   * Use between candidates in a running batch.
+   */
+  async isBridgeStillReachable(bridgeUrl) {
+    const url2 = this.normalizeBridgeUrl(bridgeUrl || this.settings.bridgeUrl);
+    try {
+      const resp = await this.fetchWithTimeout(`${url2}/health`, 5e3);
+      return resp.ok;
+    } catch {
+      return false;
+    }
+  }
+  // ─── Python resolution ─────────────────────────────────────────────────────
+  async resolvePython(flowKitPath) {
+    const candidates = [];
+    if (this.settings.pythonPath) {
+      candidates.push(this.settings.pythonPath);
+    }
+    candidates.push(
+      path__namespace.join(flowKitPath, ".venv", "Scripts", "python.exe"),
+      path__namespace.join(flowKitPath, "venv", "Scripts", "python.exe"),
+      path__namespace.join(flowKitPath, ".venv", "bin", "python"),
+      path__namespace.join(flowKitPath, "venv", "bin", "python")
+    );
+    candidates.push("py", "python", "python3");
+    for (const py of candidates) {
+      const version = await this.checkPythonVersion(py);
+      if (version) {
+        logger.info(`[FlowKitRuntime] Found Python: ${py} (${version})`);
+        return py;
+      }
+    }
+    return null;
+  }
+  async checkPythonVersion(pythonExe) {
+    return new Promise((resolve) => {
+      try {
+        const child = cp__namespace.spawn(pythonExe, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
+        let out = "";
+        child.stdout?.on("data", (d) => {
+          out += d.toString();
+        });
+        child.stderr?.on("data", (d) => {
+          out += d.toString();
+        });
+        child.on("close", (code) => {
+          if (code !== 0) return resolve(null);
+          const match = out.match(/Python (\d+)\.(\d+)/);
+          if (!match) return resolve(null);
+          const major = parseInt(match[1], 10);
+          const minor = parseInt(match[2], 10);
+          if (major >= 3 && minor >= 10) {
+            resolve(out.trim());
+          } else {
+            resolve(null);
+          }
+        });
+        child.on("error", () => resolve(null));
+      } catch {
+        resolve(null);
+      }
+    });
+  }
+  // ─── Helpers ──────────────────────────────────────────────────────────────
+  async pollHealth(timeoutMs) {
+    const start = Date.now();
+    const url2 = this.settings.bridgeUrl;
+    while (Date.now() - start < timeoutMs) {
+      try {
+        const resp = await this.fetchWithTimeout(`${url2}/health`, 3e3);
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data.status === "ok" || resp.ok) return true;
+        }
+      } catch {
+      }
+      await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
+    }
+    return false;
+  }
+  parseBridgePort() {
+    try {
+      const url2 = new URL(this.settings.bridgeUrl);
+      return parseInt(url2.port || "8100", 10);
+    } catch {
+      return 8100;
+    }
+  }
+  extractNodeErrorCode(err) {
+    if (err && typeof err === "object") {
+      const cause = err.cause;
+      if (cause?.code) return cause.code;
+      const code = err.code;
+      if (code) return code;
+    }
+    return "UNKNOWN";
+  }
+  buildBridgeOfflineMessage(url2, code) {
+    if (code === "ECONNREFUSED") {
+      return `FlowKit bridge is not running at ${url2}. Start FlowKit with: python -m agent.main`;
+    }
+    if (code === "ETIMEDOUT" || code === "ECONNABORTED") {
+      return `FlowKit bridge at ${url2} timed out. The process may be starting or hung.`;
+    }
+    if (code === "ENOTFOUND") {
+      return `Cannot resolve host for FlowKit at ${url2}. Check the bridge URL in settings.`;
+    }
+    return `Cannot connect to FlowKit at ${url2} (${code}). Ensure FlowKit is running.`;
+  }
+  async fetchWithTimeout(url2, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url2, { signal: controller.signal });
+    } catch (err) {
+      if (err.name === "AbortError") {
+        throw new Error(`Request timed out after ${timeoutMs}ms: ${url2}`);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  broadcastLog(message) {
+    try {
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        for (const win of electron.BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, { message, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          }
+        }
+      }
+    } catch {
+    }
+    logger.info(message);
+  }
+  broadcastStatus() {
+    const status = this.getStatus();
+    try {
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        for (const win of electron.BrowserWindow.getAllWindows()) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, status);
+          }
+        }
       }
     } catch {
     }
   }
-  let rawJson = "";
-  let aiError = null;
-  let successfulModel = "";
-  const cleanKey = normalizeApiKey(apiKey);
-  if (cleanKey.length > 0) {
-    progress("Analyzing full script for global context...", 0.05);
+}
+const flowkitRuntimeManager = new FlowKitRuntimeManager();
+const APP_INSTANCE_ID$1 = uuid.v4();
+function getThumbnailJobStatePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-job-state.json");
+}
+function getThumbnailJobStateBackupPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "thumbnail-job-state.backup.json");
+}
+function computeThumbnailJobKey(params) {
+  const payload = [
+    params.renderOutputPath,
+    String(params.renderFileSize),
+    String(params.renderMtimeMs),
+    params.scriptHash,
+    params.templateSnapshotHash,
+    String(params.generationRound)
+  ].join("::");
+  return crypto__namespace.createHash("sha256").update(payload, "utf-8").digest("hex");
+}
+function createCandidatesFromPlan(plan, round = 1) {
+  return plan.options.map((opt) => ({
+    id: `cand-${uuid.v4()}`,
+    optionId: opt.id,
+    round,
+    revision: 1,
+    conceptName: opt.conceptName,
+    yellowText: opt.yellowText,
+    whiteText: opt.whiteText,
+    imagePrompt: opt.imagePrompt,
+    titleClear: opt.titleClear,
+    titleCuriosity: opt.titleCuriosity,
+    status: "pending",
+    attempts: 0
+  }));
+}
+function createInitialThumbnailJobState(params) {
+  const round = params.generationRound || 1;
+  const jobKey = computeThumbnailJobKey({
+    renderOutputPath: params.renderOutputPath,
+    renderFileSize: params.renderFileSize || 0,
+    renderMtimeMs: params.renderMtimeMs || 0,
+    scriptHash: params.scriptHash,
+    templateSnapshotHash: params.templateSnapshotHash,
+    generationRound: round
+  });
+  const candidates = params.plan ? createCandidatesFromPlan(params.plan, round) : [];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const jobId = `job-${uuid.v4()}`;
+  return {
+    schemaVersion: 1,
+    version: 1,
+    jobId,
+    jobKey,
+    projectDir: params.projectDir,
+    renderOutputPath: params.renderOutputPath,
+    status: params.plan ? "generating" : "planning",
+    generationRound: round,
+    scriptHash: params.scriptHash,
+    templateSnapshotHash: params.templateSnapshotHash,
+    flowProjectId: params.flowProjectId,
+    candidates,
+    createdAt: now,
+    updatedAt: now,
+    warnings: [],
+    errors: [],
+    lease: {
+      jobId,
+      appInstanceId: APP_INSTANCE_ID$1,
+      pid: process.pid,
+      acquiredAt: now,
+      heartbeatAt: now
+    }
+  };
+}
+function isThumbnailLeaseStale(lease, thresholdMs = 3e4) {
+  if (!lease) return false;
+  if (lease.appInstanceId !== APP_INSTANCE_ID$1) {
+    const age = Date.now() - new Date(lease.heartbeatAt).getTime();
+    if (age > thresholdMs) {
+      return true;
+    }
     try {
-      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
-      const prompt = buildGeminiPrompt$1(fullText, projectId, language);
-      const rawModel = params.model;
-      if (rawModel && DEPRECATED_TEXT_MODELS.has(rawModel)) {
-        logger.warn(`[GeminiModel] Saved model ${rawModel} is unavailable for this account.`);
-        logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(rawModel)}.`);
+      process.kill(lease.pid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }
+  return false;
+}
+function saveThumbnailJobStateAtomic(projectDir, state2) {
+  const filePath = getThumbnailJobStatePath(projectDir);
+  const backupPath = getThumbnailJobStateBackupPath(projectDir);
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  state2.version = (state2.version || 0) + 1;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  if (state2.lease) {
+    state2.lease.heartbeatAt = state2.updatedAt;
+  }
+  const serialized = JSON.stringify(state2, null, 2);
+  const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
+  try {
+    fs__namespace.renameSync(tmpPath, filePath);
+    try {
+      fs__namespace.copyFileSync(filePath, backupPath);
+    } catch {
+    }
+  } finally {
+    if (fs__namespace.existsSync(tmpPath)) {
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
       }
-      const fallbackModels = getAvailableModelsForTask("global_context", rawModel);
-      for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
-        const currentModel = fallbackModels[mIdx];
-        let retryCount = 0;
-        const maxRetries = 1;
-        while (retryCount <= maxRetries) {
-          try {
-            progress(
-              retryCount === 0 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
-              0.05 + mIdx * 0.15 + retryCount * 0.05
-            );
-            const response = await ai.models.generateContent({
-              model: currentModel,
-              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
-              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
-            });
-            rawJson = response.text ?? "";
-            if (rawJson) {
-              successfulModel = currentModel;
-              recordModelSuccess(currentModel);
-              break;
-            }
-          } catch (err) {
-            const { kind, message } = classifyGeminiErrorKind(err);
-            recordModelFailure(currentModel, kind);
-            aiError = message;
-            if (kind === "MODEL_NOT_FOUND") {
-              const nextModel = fallbackModels[mIdx + 1];
-              logger.warn(`[GeminiModel] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`);
-              break;
-            }
-            if (kind === "AUTH_ERROR") {
-              logger.error(`[GlobalContext] Gemini authentication error. Check API key.`);
-              mIdx = fallbackModels.length;
-              break;
-            }
-            if (kind === "BAD_REQUEST") {
-              logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`);
-              break;
-            }
-            if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
-              const nextModel = fallbackModels[mIdx + 1];
-              logger.warn(`[GlobalContext] Gemini ${currentModel} encountered ${kind}. Circuit breaker tripped. Switching immediately to ${nextModel ?? "fallback"}...`);
-              break;
-            }
-            retryCount++;
-            if (retryCount <= maxRetries) {
-              const wait = Math.pow(2, retryCount);
-              progress(`Gemini overloaded, retrying in ${wait}s...`, 0.2);
-              await new Promise((r) => setTimeout(r, wait * 1e3 + Math.floor(Math.random() * 500)));
-              continue;
-            } else {
-              logger.warn(`[GlobalContext] Gemini ${currentModel} exhausted retries, switching model...`);
-              break;
+    }
+  }
+}
+function loadThumbnailJobState(projectDir) {
+  const filePath = getThumbnailJobStatePath(projectDir);
+  const backupPath = getThumbnailJobStateBackupPath(projectDir);
+  if (fs__namespace.existsSync(filePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(filePath, "utf-8");
+      return JSON.parse(raw);
+    } catch (err) {
+      logger.warn(`[ThumbnailState] Primary state corrupted at ${filePath}: ${err}. Attempting recovery from backup...`);
+    }
+  }
+  if (fs__namespace.existsSync(backupPath)) {
+    try {
+      const raw = fs__namespace.readFileSync(backupPath, "utf-8");
+      const recovered = JSON.parse(raw);
+      logger.info(`[ThumbnailState] Successfully recovered thumbnail state from backup for ${projectDir}`);
+      saveThumbnailJobStateAtomic(projectDir, recovered);
+      return recovered;
+    } catch (err) {
+      logger.error(`[ThumbnailState] Backup state also corrupted at ${backupPath}: ${err}`);
+    }
+  }
+  return null;
+}
+function getRoundDirectory(projectDir, round) {
+  const roundStr = `round-${String(round).padStart(3, "0")}`;
+  return path__namespace.join(projectDir, "output", "thumbnails", roundStr);
+}
+function getCandidateImagePath(projectDir, round, optionId, revision = 1) {
+  const roundDir = getRoundDirectory(projectDir, round);
+  const revSuffix = revision > 1 ? `-rev${revision}` : "";
+  return path__namespace.join(roundDir, `thumbnail-${optionId}-master${revSuffix}.png`);
+}
+function getSelectedDirectory(projectDir) {
+  return path__namespace.join(projectDir, "output", "thumbnails", "selected");
+}
+function reconcileThumbnailArtifacts(projectDir, state2) {
+  let changed = false;
+  getRoundDirectory(projectDir, state2.generationRound);
+  for (const cand of state2.candidates) {
+    if (cand.round !== state2.generationRound) continue;
+    const expectedPath = cand.exportedImagePath || getCandidateImagePath(projectDir, cand.round, cand.optionId, cand.revision);
+    if (fs__namespace.existsSync(expectedPath)) {
+      const stat = fs__namespace.statSync(expectedPath);
+      if (stat.size > 0) {
+        const dims = probeImageFile(expectedPath);
+        if (dims && cand.status !== "completed") {
+          cand.status = "completed";
+          cand.exportedImagePath = expectedPath;
+          cand.actualWidth = dims.width;
+          cand.actualHeight = dims.height;
+          cand.exportQuality = cand.exportQuality || (dims.width >= 3840 ? "native-4k" : "2k-fallback");
+          changed = true;
+          logger.info(`[ThumbnailArtifacts] Reconciled candidate ${cand.optionId} to completed from disk artifact (${expectedPath})`);
+        }
+      }
+    }
+  }
+  const allCompleted = state2.candidates.length === 5 && state2.candidates.every((c) => c.status === "completed");
+  if (allCompleted && state2.status !== "completed") {
+    state2.status = "completed";
+    state2.completedAt = state2.completedAt || (/* @__PURE__ */ new Date()).toISOString();
+    changed = true;
+  }
+  return changed;
+}
+function saveThumbnailManifest(projectDir, state2) {
+  const roundDir = getRoundDirectory(projectDir, state2.generationRound);
+  if (!fs__namespace.existsSync(roundDir)) {
+    fs__namespace.mkdirSync(roundDir, { recursive: true });
+  }
+  const manifestPath = path__namespace.join(roundDir, "manifest.json");
+  const manifest = {
+    projectId: path__namespace.basename(projectDir),
+    renderOutput: state2.renderOutputPath,
+    scriptHash: state2.scriptHash,
+    templateSnapshotHash: state2.templateSnapshotHash,
+    generationRound: state2.generationRound,
+    flowModel: "GEM_PIX_2",
+    flowProjectId: state2.flowProjectId,
+    candidates: state2.candidates.map((c) => ({
+      id: c.id,
+      optionId: c.optionId,
+      conceptName: c.conceptName,
+      yellowText: c.yellowText,
+      whiteText: c.whiteText,
+      titleClear: c.titleClear,
+      titleCuriosity: c.titleCuriosity,
+      imagePrompt: c.imagePrompt,
+      mediaId: c.mediaId,
+      actualDimensions: c.actualWidth && c.actualHeight ? { width: c.actualWidth, height: c.actualHeight } : void 0,
+      actualExportQuality: c.exportQuality,
+      filePath: c.exportedImagePath,
+      status: c.status,
+      error: c.error
+    })),
+    selectedCandidateId: state2.selectedCandidateId,
+    createdAt: state2.createdAt,
+    completedAt: state2.completedAt,
+    errors: state2.errors
+  };
+  fs__namespace.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
+  logger.info(`[ThumbnailArtifacts] Saved manifest.json for round ${state2.generationRound} to ${manifestPath}`);
+}
+function selectThumbnailCandidate(projectDir, state2, candidateId) {
+  const candidate = state2.candidates.find((c) => c.id === candidateId);
+  if (!candidate) {
+    return { success: false, error: `Candidate not found: ${candidateId}` };
+  }
+  if (candidate.status !== "completed" || !candidate.exportedImagePath || !fs__namespace.existsSync(candidate.exportedImagePath)) {
+    return { success: false, error: `Candidate ${candidate.optionId} is not completed or missing image file` };
+  }
+  const selectedDir = getSelectedDirectory(projectDir);
+  if (!fs__namespace.existsSync(selectedDir)) {
+    fs__namespace.mkdirSync(selectedDir, { recursive: true });
+  }
+  const ext = path__namespace.extname(candidate.exportedImagePath) || ".png";
+  const destImagePath = path__namespace.join(selectedDir, `selected-thumbnail${ext}`);
+  const destMetaPath = path__namespace.join(selectedDir, "selected-thumbnail.json");
+  fs__namespace.copyFileSync(candidate.exportedImagePath, destImagePath);
+  const meta = {
+    selectedCandidateId: candidate.id,
+    optionId: candidate.optionId,
+    conceptName: candidate.conceptName,
+    yellowText: candidate.yellowText,
+    whiteText: candidate.whiteText,
+    titleClear: candidate.titleClear,
+    titleCuriosity: candidate.titleCuriosity,
+    imagePrompt: candidate.imagePrompt,
+    mediaId: candidate.mediaId,
+    actualDimensions: { width: candidate.actualWidth, height: candidate.actualHeight },
+    exportQuality: candidate.exportQuality,
+    sourceFilePath: candidate.exportedImagePath,
+    selectedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  fs__namespace.writeFileSync(destMetaPath, JSON.stringify(meta, null, 2), "utf-8");
+  state2.selectedCandidateId = candidate.id;
+  saveThumbnailJobStateAtomic(projectDir, state2);
+  saveThumbnailManifest(projectDir, state2);
+  logger.info(`[ThumbnailArtifacts] Selected candidate ${candidate.optionId} copied to ${destImagePath}`);
+  return { success: true, selectedPath: destImagePath };
+}
+class ThumbnailFlowError extends Error {
+  code;
+  retryable;
+  scope;
+  constructor(code, message, retryable, scope) {
+    super(message);
+    this.name = "ThumbnailFlowError";
+    this.code = code;
+    this.retryable = retryable;
+    this.scope = scope;
+  }
+}
+class ThumbnailCancelledError extends Error {
+  constructor() {
+    super("THUMBNAIL_JOB_CANCELLED: Generation was cancelled.");
+    this.name = "ThumbnailCancelledError";
+  }
+}
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject2) => {
+    if (signal.aborted) {
+      reject2(new ThumbnailCancelledError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject2(new ThumbnailCancelledError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+function classifyGenerationError(err, bridgeUrl) {
+  const rawMsg = err instanceof Error ? err.message : String(err);
+  const cause = err instanceof Error ? err.cause : void 0;
+  const causeCode = cause?.code || "";
+  if (rawMsg.startsWith("FLOWKIT_BRIDGE_OFFLINE") || causeCode === "ECONNREFUSED" || rawMsg.includes("ECONNREFUSED")) {
+    return new ThumbnailFlowError(
+      "FLOWKIT_BRIDGE_OFFLINE",
+      `FlowKit is not running at ${bridgeUrl}. Start FlowKit with: python -m agent.main`,
+      false,
+      "connector"
+    );
+  }
+  if (rawMsg.includes("fetch failed") || rawMsg.includes("Failed to fetch") || rawMsg.includes("ENOTFOUND")) {
+    return new ThumbnailFlowError(
+      "FLOWKIT_BRIDGE_OFFLINE",
+      `FlowKit bridge is not running at ${bridgeUrl}. Start FlowKit with: python -m agent.main`,
+      false,
+      "connector"
+    );
+  }
+  if (rawMsg.startsWith("FLOWKIT_TIMEOUT") || rawMsg.includes("ETIMEDOUT") || rawMsg.includes("timed out")) {
+    return new ThumbnailFlowError(
+      "FLOWKIT_TIMEOUT",
+      "FlowKit bridge request timed out. The bridge may be overloaded or unresponsive.",
+      true,
+      "candidate"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_EXTENSION_DISCONNECTED") || rawMsg.includes("FLOW_EXTENSION_DISCONNECTED")) {
+    return new ThumbnailFlowError(
+      "FLOW_EXTENSION_DISCONNECTED",
+      "Chrome extension is disconnected. Open Google Flow in Chrome and reconnect the extension.",
+      false,
+      "connector"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_RATE_LIMITED")) {
+    return new ThumbnailFlowError(
+      "FLOW_RATE_LIMITED",
+      rawMsg.replace("FLOW_RATE_LIMITED:", "").trim() || "Google Flow rate limit reached.",
+      true,
+      "candidate"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_RECAPTCHA_FAILED")) {
+    return new ThumbnailFlowError(
+      "FLOW_RECAPTCHA_FAILED",
+      rawMsg.replace("FLOW_RECAPTCHA_FAILED:", "").trim() || "reCAPTCHA verification failed.",
+      true,
+      "candidate"
+    );
+  }
+  if (rawMsg.startsWith("FLOW_GENERATION_FAILED") || rawMsg.startsWith("FLOW_EXPORT_FAILED")) {
+    const [code, ...rest] = rawMsg.split(":");
+    return new ThumbnailFlowError(code, rest.join(":").trim() || rawMsg, false, "candidate");
+  }
+  if (rawMsg.includes("THUMBNAIL_JOB_CANCELLED") || err instanceof ThumbnailCancelledError) {
+    return new ThumbnailFlowError("THUMBNAIL_JOB_CANCELLED", "Generation was cancelled.", false, "job");
+  }
+  return new ThumbnailFlowError("FLOW_GENERATION_FAILED", rawMsg, false, "candidate");
+}
+function addUniqueDiagnostic(arr, message) {
+  const key2 = message.substring(0, 60);
+  const exists = arr.some((e) => e.substring(0, 60) === key2);
+  if (!exists) {
+    arr.push(message);
+    return true;
+  }
+  return false;
+}
+function reconcileCandidatesForResume(state2, projectDir, hasActiveRun) {
+  let changed = false;
+  for (const c of state2.candidates) {
+    if (c.status === "generating" || c.status === "exporting") {
+      if (!hasActiveRun) {
+        c.status = "pending";
+        c.error = void 0;
+        changed = true;
+      }
+    } else if (c.status === "completed") {
+      const filePath = c.exportedImagePath || getCandidateImagePath(projectDir, c.round, c.optionId, c.revision);
+      if (!fs__namespace.existsSync(filePath) || fs__namespace.statSync(filePath).size === 0) {
+        c.status = "pending";
+        c.error = void 0;
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+function deriveJobStatus(state2, hasActiveRun) {
+  const candidates = state2.candidates;
+  const completedCount = candidates.filter((c) => c.status === "completed").length;
+  const failedCount = candidates.filter((c) => c.status === "failed").length;
+  const runningCount = candidates.filter((c) => c.status === "generating" || c.status === "exporting").length;
+  const pendingCount = candidates.filter((c) => c.status === "pending").length;
+  const total = candidates.length;
+  if (state2.status === "cancelled") return "cancelled";
+  if (completedCount === total && total > 0) return "completed";
+  if (runningCount > 0 || pendingCount > 0 && hasActiveRun) return "generating";
+  if (completedCount > 0 && (failedCount > 0 || pendingCount > 0)) return "partial";
+  if (pendingCount > 0 && !hasActiveRun) return "interrupted";
+  if (failedCount > 0) {
+    const allConnectorFailed = candidates.filter((c) => c.status === "failed").every((c) => c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED")));
+    return allConnectorFailed ? "needs-attention" : "failed";
+  }
+  return state2.status;
+}
+class ThumbnailOrchestrator {
+  /** Single-flight map: projectDir → active run. Only ONE run per project allowed. */
+  activeJobs = /* @__PURE__ */ new Map();
+  provider;
+  defaultCooldownMs = 8e3;
+  runtimeManager;
+  constructor(provider, runtimeManager) {
+    this.provider = provider || googleFlowProvider;
+    this.runtimeManager = runtimeManager || flowkitRuntimeManager;
+  }
+  setRuntimeManager(rm) {
+    this.runtimeManager = rm;
+  }
+  setCooldownMs(ms) {
+    this.defaultCooldownMs = ms;
+  }
+  // ─── getJobState ─────────────────────────────────────────────────────────
+  async getJobState(projectDir) {
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) return null;
+    const hasActiveRun = this.activeJobs.has(projectDir);
+    const changed1 = reconcileThumbnailArtifacts(projectDir, state2);
+    const changed2 = reconcileCandidatesForResume(state2, projectDir, hasActiveRun);
+    let changed3 = false;
+    if (state2.status === "generating" && !hasActiveRun) {
+      const derived = deriveJobStatus(state2, false);
+      if (derived !== state2.status) {
+        logger.info(`[ThumbnailOrchestrator] Reconciled stuck job for ${projectDir}: ${state2.status}→${derived}`);
+        state2.status = derived;
+        changed3 = true;
+      }
+    }
+    if (changed1 || changed2 || changed3) {
+      saveThumbnailJobStateAtomic(projectDir, state2);
+    }
+    return state2;
+  }
+  // ─── startJob ────────────────────────────────────────────────────────────
+  async startJob(params) {
+    const { projectDir } = params;
+    const existing = this.activeJobs.get(projectDir);
+    if (existing) {
+      logger.info(`[ThumbnailOrchestrator] Job already actively running for ${projectDir} (jobId=${existing.jobId}). Returning existing.`);
+      return existing.promise;
+    }
+    const settings = await loadProjectThumbnailSettings(projectDir);
+    const script = this.resolveScriptText(projectDir, params.scriptPath);
+    const scriptHash2 = computeSha256(script || "no-script");
+    const templateSnapshot = params.templateSnapshot || settings.templateSnapshot || "";
+    const templateSnapshotHash = computeSha256(templateSnapshot);
+    const renderOutputPath = params.renderOutputPath || this.resolveRenderOutputPath(projectDir);
+    let renderFileSize = 0;
+    let renderMtimeMs = 0;
+    if (renderOutputPath && fs__namespace.existsSync(renderOutputPath)) {
+      const st = fs__namespace.statSync(renderOutputPath);
+      renderFileSize = st.size;
+      renderMtimeMs = st.mtimeMs;
+    }
+    const round = params.generationRound || 1;
+    const existingState = loadThumbnailJobState(projectDir);
+    if (existingState && !params.forceRestart) {
+      if (existingState.status === "completed" && existingState.generationRound === round) {
+        logger.info(`[ThumbnailOrchestrator] Completed job found for round ${round}. Skipping.`);
+        return existingState;
+      }
+      if (existingState.status === "generating" && isThumbnailLeaseStale(existingState.lease)) {
+        logger.info(`[ThumbnailOrchestrator] Stale lease detected. Reconciling to interrupted state.`);
+        existingState.status = "interrupted";
+        for (const c of existingState.candidates) {
+          if (c.status === "generating" || c.status === "exporting") {
+            c.status = "pending";
+            c.error = void 0;
+          }
+        }
+        if (existingState.lease) delete existingState.lease;
+        saveThumbnailJobStateAtomic(projectDir, existingState);
+        return existingState;
+      }
+    }
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      logger.warn(`[ThumbnailOrchestrator] startJob preflight failed: ${readiness.blockingCode} — ${readiness.message}`);
+      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash: scriptHash2, templateSnapshotHash, round, params, settings, templateSnapshot });
+    }
+    const abortController = new AbortController();
+    const jobIdPlaceholder = `job-${Date.now()}`;
+    const executionPromise = (async () => {
+      try {
+        let state2;
+        if (existingState && existingState.candidates.length === 5 && existingState.generationRound === round && !params.forceRestart) {
+          state2 = existingState;
+          reconcileCandidatesForResume(state2, projectDir, true);
+          state2.status = "generating";
+          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+          saveThumbnailJobStateAtomic(projectDir, state2);
+        } else {
+          this.broadcastProgress({
+            projectDir,
+            jobId: jobIdPlaceholder,
+            status: "planning",
+            stage: "planning",
+            completedCount: 0,
+            totalCount: 5,
+            progress: 0.1,
+            message: "Generating 5 distinct thumbnail concepts from script..."
+          });
+          const plan = await thumbnailPlanner.plan({
+            projectDir,
+            templateId: params.templateId || settings.selectedTemplateId,
+            templateSnapshot,
+            preferredModel: params.preferredModel,
+            generationRound: round
+          });
+          state2 = createInitialThumbnailJobState({
+            projectDir,
+            renderOutputPath,
+            renderFileSize,
+            renderMtimeMs,
+            scriptHash: scriptHash2,
+            templateSnapshotHash,
+            generationRound: round,
+            plan
+          });
+          saveThumbnailJobStateAtomic(projectDir, state2);
+        }
+        reconcileThumbnailArtifacts(projectDir, state2);
+        saveThumbnailJobStateAtomic(projectDir, state2);
+        const cooldown = params.cooldownMs ?? this.defaultCooldownMs;
+        await this.runConcurrentCandidates(state2, abortController.signal, cooldown);
+        return this.finalizeJob(state2, projectDir);
+      } finally {
+        this.activeJobs.delete(projectDir);
+      }
+    })();
+    this.activeJobs.set(projectDir, { abortController, promise: executionPromise, jobId: jobIdPlaceholder });
+    return executionPromise;
+  }
+  // ─── resumeJob ───────────────────────────────────────────────────────────
+  async resumeJob(projectDir) {
+    const existing = this.activeJobs.get(projectDir);
+    if (existing) {
+      logger.info(`[ThumbnailOrchestrator] Resume requested but job already running (jobId=${existing.jobId}). Returning existing.`);
+      return existing.promise;
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) {
+      throw new Error(`No thumbnail job state found to resume for ${projectDir}`);
+    }
+    reconcileThumbnailArtifacts(projectDir, state2);
+    reconcileCandidatesForResume(state2, projectDir, false);
+    const incomplete = state2.candidates.filter((c) => c.status !== "completed");
+    if (incomplete.length === 0) {
+      state2.status = "completed";
+      state2.completedAt = state2.completedAt || (/* @__PURE__ */ new Date()).toISOString();
+      saveThumbnailJobStateAtomic(projectDir, state2);
+      return state2;
+    }
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      logger.warn(`[ThumbnailOrchestrator] Resume preflight failed: ${readiness.blockingCode}`);
+      for (const c of state2.candidates) {
+        if (c.status === "generating" || c.status === "exporting") {
+          c.status = "pending";
+          c.error = void 0;
+        }
+      }
+      state2.status = "needs-attention";
+      state2.errors = state2.errors || [];
+      addUniqueDiagnostic(state2.errors, `[${readiness.blockingCode}] ${readiness.message}`);
+      saveThumbnailJobStateAtomic(projectDir, state2);
+      this.broadcastProgress({
+        projectDir,
+        jobId: state2.jobId,
+        status: "needs-attention",
+        stage: "idle",
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: 0,
+        message: readiness.message,
+        jobState: state2
+      });
+      return state2;
+    }
+    for (const c of incomplete) {
+      if (c.status === "failed") {
+        const isConnectorError = c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED"));
+        if (isConnectorError || !c.error) {
+          c.status = "pending";
+          c.error = void 0;
+        }
+      }
+    }
+    state2.status = "generating";
+    state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const abortController = new AbortController();
+    const executionPromise = (async () => {
+      try {
+        await this.runConcurrentCandidates(state2, abortController.signal, this.defaultCooldownMs);
+        return this.finalizeJob(state2, projectDir);
+      } finally {
+        this.activeJobs.delete(projectDir);
+      }
+    })();
+    this.activeJobs.set(projectDir, { abortController, promise: executionPromise, jobId: state2.jobId });
+    return executionPromise;
+  }
+  // ─── cancelJob ───────────────────────────────────────────────────────────
+  async cancelJob(projectDir) {
+    const active = this.activeJobs.get(projectDir);
+    if (active) {
+      active.abortController.abort();
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (state2 && (state2.status === "generating" || state2.status === "planning")) {
+      state2.status = "cancelled";
+      for (const c of state2.candidates) {
+        if (c.status === "generating" || c.status === "exporting") {
+          c.status = "pending";
+        }
+      }
+      saveThumbnailJobStateAtomic(projectDir, state2);
+      this.broadcastProgress({
+        projectDir,
+        jobId: state2.jobId,
+        status: "cancelled",
+        stage: "idle",
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: 0,
+        message: "Thumbnail generation cancelled by user.",
+        jobState: state2
+      });
+      return true;
+    }
+    return false;
+  }
+  // ─── generateMore ─────────────────────────────────────────────────────────
+  async generateMore(projectDir, templateId, templateSnapshot) {
+    if (this.activeJobs.has(projectDir)) {
+      const state2 = loadThumbnailJobState(projectDir);
+      if (state2) return state2;
+      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Generation already in progress.");
+    }
+    const existing = loadThumbnailJobState(projectDir);
+    const nextRound = (existing?.generationRound || 1) + 1;
+    const previousConceptsList = [];
+    if (existing?.candidates) {
+      for (const c of existing.candidates) {
+        previousConceptsList.push(`- [${c.optionId}] ${c.conceptName}: "${c.yellowText} / ${c.whiteText}"`);
+      }
+    }
+    logger.info(`[ThumbnailOrchestrator] Generating 5 More thumbnails for round ${nextRound}...`);
+    return this.startJob({
+      projectDir,
+      templateId,
+      templateSnapshot,
+      generationRound: nextRound,
+      forceRestart: true
+    });
+  }
+  // ─── retryCandidate ───────────────────────────────────────────────────────
+  async retryCandidate(projectDir, candidateId) {
+    if (this.activeJobs.has(projectDir)) {
+      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Cannot retry individual candidate while batch is running.");
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    const candidate = state2.candidates.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      throw new ThumbnailFlowError(
+        readiness.blockingCode || "FLOWKIT_BRIDGE_OFFLINE",
+        readiness.message || "FlowKit is not ready.",
+        false,
+        "connector"
+      );
+    }
+    logger.info(`[ThumbnailOrchestrator] Retrying candidate ${candidate.optionId}...`);
+    candidate.status = "generating";
+    candidate.attempts = (candidate.attempts || 0) + 1;
+    candidate.error = void 0;
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const abortController = new AbortController();
+    try {
+      await this.processSingleCandidate(state2, candidate, abortController.signal);
+    } catch (err) {
+      const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+      candidate.status = "failed";
+      candidate.error = `${structured.code}: ${structured.message}`;
+    }
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    return candidate;
+  }
+  // ─── regenerateCandidate ─────────────────────────────────────────────────
+  async regenerateCandidate(projectDir, candidateId, customPrompt) {
+    if (this.activeJobs.has(projectDir)) {
+      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Cannot regenerate individual candidate while batch is running.");
+    }
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    const candidate = state2.candidates.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
+    const readiness = await this.runtimeManager.ensureFlowReady();
+    if (!readiness.ready) {
+      throw new ThumbnailFlowError(
+        readiness.blockingCode || "FLOWKIT_BRIDGE_OFFLINE",
+        readiness.message || "FlowKit is not ready.",
+        false,
+        "connector"
+      );
+    }
+    candidate.revision = (candidate.revision || 1) + 1;
+    if (customPrompt) {
+      candidate.imagePrompt = customPrompt.trim();
+    }
+    candidate.status = "generating";
+    candidate.error = void 0;
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const abortController = new AbortController();
+    try {
+      await this.processSingleCandidate(state2, candidate, abortController.signal);
+    } catch (err) {
+      const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+      candidate.status = "failed";
+      candidate.error = `${structured.code}: ${structured.message}`;
+    }
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    return candidate;
+  }
+  // ─── exportCandidate4k ────────────────────────────────────────────────────
+  async exportCandidate4k(projectDir, candidateId) {
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    const candidate = state2.candidates.find((c) => c.id === candidateId);
+    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
+    if (!candidate.mediaId) {
+      throw new Error(`Candidate ${candidate.optionId} does not have a mediaId yet. Generate it first.`);
+    }
+    candidate.status = "exporting";
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    const destPath = getCandidateImagePath(projectDir, candidate.round, candidate.optionId, candidate.revision);
+    const exportRes = await this.provider.exportImage({
+      mediaId: candidate.mediaId,
+      projectId: state2.flowProjectId,
+      quality: "4k",
+      fallbackToOriginalUrl: candidate.originalImagePath,
+      destinationPath: destPath
+    });
+    candidate.status = "completed";
+    candidate.exportedImagePath = exportRes.filePath;
+    candidate.actualWidth = exportRes.width;
+    candidate.actualHeight = exportRes.height;
+    candidate.exportQuality = exportRes.actualQuality;
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    return candidate;
+  }
+  // ─── selectCandidate ─────────────────────────────────────────────────────
+  selectCandidate(projectDir, candidateId) {
+    const state2 = loadThumbnailJobState(projectDir);
+    if (!state2) throw new Error("No thumbnail job found");
+    return selectThumbnailCandidate(projectDir, state2, candidateId);
+  }
+  // ─── handleAppQuit ────────────────────────────────────────────────────────
+  handleAppQuit() {
+    logger.info("[ThumbnailOrchestrator] App quitting. Marking running thumbnail jobs as interrupted...");
+    for (const [projectDir, active] of this.activeJobs.entries()) {
+      active.abortController.abort();
+      const state2 = loadThumbnailJobState(projectDir);
+      if (state2 && (state2.status === "generating" || state2.status === "planning")) {
+        state2.status = "interrupted";
+        for (const c of state2.candidates) {
+          if (c.status === "generating" || c.status === "exporting") {
+            c.status = "pending";
+          }
+        }
+        if (state2.lease) delete state2.lease;
+        saveThumbnailJobStateAtomic(projectDir, state2);
+      }
+    }
+    this.activeJobs.clear();
+  }
+  // ─── Private: runSequentialCandidates ─────────────────────────────────────
+  /**
+   * Run candidates strictly sequentially, one at a time.
+   * Uses ONE retry loop here in the orchestrator. GoogleFlowClient does NOT retry.
+   * @deprecated Kept as fallback. Active path uses runConcurrentCandidates.
+   */
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  async runSequentialCandidates(state2, signal, cooldownMs) {
+    const candidates = state2.candidates;
+    const MAX_CANDIDATE_ATTEMPTS = 4;
+    for (let i = 0; i < candidates.length; i++) {
+      if (signal.aborted) {
+        logger.info("[ThumbnailOrchestrator] Abort signal received. Stopping candidate loop.");
+        state2.status = "cancelled";
+        saveThumbnailJobStateAtomic(state2.projectDir, state2);
+        return;
+      }
+      const candidate = candidates[i];
+      if (candidate.status === "completed") {
+        logger.info(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} already completed, skipping.`);
+        continue;
+      }
+      if (!await this.runtimeManager.isBridgeStillReachable()) {
+        logger.warn(`[ThumbnailOrchestrator] Bridge went offline before candidate ${candidate.optionId}. Pausing batch.`);
+        this.pauseBatchForBridgeOffline(state2, i, candidates);
+        return;
+      }
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: (candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
+        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
+        candidate,
+        jobState: state2
+      });
+      let succeeded = false;
+      let lastError = null;
+      const attemptsAtStart = candidate.attempts || 0;
+      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
+        if (signal.aborted) {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+        logger.info(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} (runId=${state2.jobId})`);
+        try {
+          await this.processSingleCandidate(state2, candidate, signal);
+          succeeded = true;
+          break;
+        } catch (err) {
+          if (err instanceof ThumbnailCancelledError) {
+            state2.status = "cancelled";
+            saveThumbnailJobStateAtomic(state2.projectDir, state2);
+            return;
+          }
+          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+          lastError = structured;
+          logger.error(
+            `[ThumbnailOrchestrator] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
+          );
+          if (structured.scope === "connector") {
+            logger.warn(`[ThumbnailOrchestrator] Connector error on candidate ${candidate.optionId}. Aborting batch.`);
+            candidate.status = "pending";
+            candidate.error = void 0;
+            candidate.attempts = attemptsAtStart;
+            this.pauseBatchForBridgeOffline(state2, i, candidates, structured);
+            return;
+          }
+          if (!structured.retryable) {
+            break;
+          }
+          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
+            const backoffMs = Math.min(3e3 * attempt, 15e3);
+            logger.warn(`[ThumbnailOrchestrator] Retryable error. Waiting ${backoffMs}ms before attempt ${attempt + 1}...`);
+            try {
+              await abortableDelay(backoffMs, signal);
+            } catch {
+              state2.status = "cancelled";
+              saveThumbnailJobStateAtomic(state2.projectDir, state2);
+              return;
             }
           }
         }
-        if (rawJson) break;
       }
-    } catch (outerErr) {
-      aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
-      logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
+      if (!succeeded && lastError) {
+        candidate.status = "failed";
+        candidate.error = `${lastError.code}: ${lastError.message}`;
+        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
+        logger.error(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
+      }
+      saveThumbnailJobStateAtomic(state2.projectDir, state2);
+      saveThumbnailManifest(state2.projectDir, state2);
+      const updatedCompleted = candidates.filter((c) => c.status === "completed").length;
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: candidate.status === "completed" ? "exporting" : "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: updatedCompleted,
+        totalCount: 5,
+        progress: updatedCompleted / 5,
+        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
+        candidate,
+        jobState: state2
+      });
+      if (i < candidates.length - 1 && !signal.aborted) {
+        logger.info(`[ThumbnailOrchestrator] Cooldown ${cooldownMs}ms before next candidate...`);
+        try {
+          await abortableDelay(cooldownMs, signal);
+        } catch {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+      }
     }
-  } else {
-    logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
   }
-  let ctx;
-  if (rawJson) {
+  // ─── Private: runConcurrentCandidates ─────────────────────────────────────
+  /**
+   * Run all pending candidates in parallel (Promise.allSettled).
+   * Each candidate gets its own retry loop (MAX_CANDIDATE_ATTEMPTS).
+   * Progress is broadcast immediately when each candidate completes.
+   * Connector errors (bridge offline) abort ALL siblings via AbortController.
+   */
+  async runConcurrentCandidates(state2, signal, _cooldownMs) {
+    const candidates = state2.candidates.filter((c) => c.status !== "completed");
+    if (candidates.length === 0) return;
+    const MAX_CANDIDATE_ATTEMPTS = 4;
+    const innerAbort = new AbortController();
+    signal.addEventListener("abort", () => innerAbort.abort(), { once: true });
+    const runOne = async (candidate) => {
+      if (signal.aborted || innerAbort.signal.aborted) {
+        state2.status = "cancelled";
+        return;
+      }
+      const attemptsAtStart = candidate.attempts || 0;
+      let succeeded = false;
+      let lastError = null;
+      if (!await this.runtimeManager.isBridgeStillReachable()) {
+        logger.warn(`[ThumbnailOrchestrator] Bridge offline before concurrent candidate ${candidate.optionId}.`);
+        innerAbort.abort();
+        this.pauseBatchForBridgeOffline(state2, 0, state2.candidates);
+        return;
+      }
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+        totalCount: 5,
+        progress: (state2.candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
+        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
+        candidate,
+        jobState: state2
+      });
+      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
+        if (signal.aborted || innerAbort.signal.aborted) {
+          state2.status = "cancelled";
+          saveThumbnailJobStateAtomic(state2.projectDir, state2);
+          return;
+        }
+        logger.info(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS}`);
+        try {
+          await this.processSingleCandidate(state2, candidate, innerAbort.signal);
+          succeeded = true;
+          break;
+        } catch (err) {
+          if (err instanceof ThumbnailCancelledError) {
+            state2.status = "cancelled";
+            saveThumbnailJobStateAtomic(state2.projectDir, state2);
+            return;
+          }
+          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
+          lastError = structured;
+          logger.error(
+            `[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
+          );
+          if (structured.scope === "connector") {
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Connector error on ${candidate.optionId}. Aborting all concurrent candidates.`);
+            candidate.status = "pending";
+            candidate.error = void 0;
+            candidate.attempts = attemptsAtStart;
+            innerAbort.abort();
+            this.pauseBatchForBridgeOffline(state2, 0, state2.candidates, structured);
+            return;
+          }
+          if (!structured.retryable) break;
+          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
+            const backoffMs = Math.min(3e3 * attempt, 15e3);
+            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Retryable error on ${candidate.optionId}. Waiting ${backoffMs}ms...`);
+            try {
+              await abortableDelay(backoffMs, innerAbort.signal);
+            } catch {
+              state2.status = "cancelled";
+              saveThumbnailJobStateAtomic(state2.projectDir, state2);
+              return;
+            }
+          }
+        }
+      }
+      if (!succeeded && lastError) {
+        candidate.status = "failed";
+        candidate.error = `${lastError.code}: ${lastError.message}`;
+        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
+        logger.error(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
+      }
+      saveThumbnailJobStateAtomic(state2.projectDir, state2);
+      saveThumbnailManifest(state2.projectDir, state2);
+      const updatedCompleted = state2.candidates.filter((c) => c.status === "completed").length;
+      this.broadcastProgress({
+        projectDir: state2.projectDir,
+        jobId: state2.jobId,
+        status: "generating",
+        stage: candidate.status === "completed" ? "exporting" : "generating",
+        currentOptionId: candidate.optionId,
+        completedCount: updatedCompleted,
+        totalCount: 5,
+        progress: updatedCompleted / 5,
+        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
+        candidate,
+        jobState: state2
+      });
+    };
+    await Promise.allSettled(candidates.map((c) => runOne(c)));
+  }
+  // ─── Private: processSingleCandidate ──────────────────────────────────────
+  /**
+   * Process a single candidate: generate + export.
+   * DOES NOT retry. Orchestrator owns retry policy.
+   * Accepts AbortSignal to stop immediately.
+   */
+  async processSingleCandidate(state2, candidate, signal) {
+    if (signal?.aborted) throw new ThumbnailCancelledError();
+    candidate.status = "generating";
+    candidate.attempts = (candidate.attempts || 0) + 1;
+    saveThumbnailJobStateAtomic(state2.projectDir, state2);
+    const genRes = await this.provider.generateImage({
+      prompt: candidate.imagePrompt,
+      projectId: state2.flowProjectId,
+      candidateId: candidate.id,
+      optionId: candidate.optionId
+    });
+    if (signal?.aborted) throw new ThumbnailCancelledError();
+    candidate.mediaId = genRes.mediaId;
+    candidate.originalImagePath = genRes.fifeUrl;
+    if (genRes.projectId && !state2.flowProjectId) {
+      state2.flowProjectId = genRes.projectId;
+    }
+    candidate.status = "exporting";
+    saveThumbnailJobStateAtomic(state2.projectDir, state2);
+    if (signal?.aborted) throw new ThumbnailCancelledError();
+    const destPath = getCandidateImagePath(state2.projectDir, candidate.round, candidate.optionId, candidate.revision);
+    const exportRes = await this.provider.exportImage({
+      mediaId: genRes.mediaId,
+      projectId: state2.flowProjectId,
+      quality: "4k",
+      fallbackToOriginalUrl: genRes.fifeUrl,
+      destinationPath: destPath
+    });
+    if (!fs__namespace.existsSync(exportRes.filePath) || fs__namespace.statSync(exportRes.filePath).size === 0) {
+      throw new Error(`Downloaded image file is missing or 0 bytes: ${exportRes.filePath}`);
+    }
+    candidate.status = "completed";
+    candidate.exportedImagePath = exportRes.filePath;
+    candidate.actualWidth = exportRes.width;
+    candidate.actualHeight = exportRes.height;
+    candidate.exportQuality = exportRes.actualQuality;
+    candidate.error = void 0;
+  }
+  // ─── Private: pauseBatchForBridgeOffline ─────────────────────────────────
+  pauseBatchForBridgeOffline(state2, fromIndex, candidates, error) {
+    for (let j = fromIndex; j < candidates.length; j++) {
+      if (candidates[j].status !== "completed") {
+        candidates[j].status = "pending";
+        candidates[j].error = void 0;
+      }
+    }
+    state2.status = "needs-attention";
+    state2.errors = state2.errors || [];
+    const errMsg = error ? `${error.code}: ${error.message}` : "FLOWKIT_BRIDGE_OFFLINE: Bridge went offline during generation.";
+    addUniqueDiagnostic(state2.errors, errMsg);
+    saveThumbnailJobStateAtomic(state2.projectDir, state2);
+    saveThumbnailManifest(state2.projectDir, state2);
+    this.broadcastProgress({
+      projectDir: state2.projectDir,
+      jobId: state2.jobId,
+      status: "needs-attention",
+      stage: "idle",
+      completedCount: candidates.filter((c) => c.status === "completed").length,
+      totalCount: 5,
+      progress: candidates.filter((c) => c.status === "completed").length / 5,
+      message: error?.message || "FlowKit connection lost. Fix the connection and click Resume.",
+      jobState: state2
+    });
+  }
+  // ─── Private: finalizeJob ─────────────────────────────────────────────────
+  finalizeJob(state2, projectDir) {
+    reconcileThumbnailArtifacts(projectDir, state2);
+    saveThumbnailManifest(projectDir, state2);
+    const completedCount = state2.candidates.filter((c) => c.status === "completed").length;
+    const failedCount = state2.candidates.filter((c) => c.status === "failed").length;
+    const pendingCount = state2.candidates.filter((c) => c.status === "pending").length;
+    const allConnectorFailed = failedCount > 0 && state2.candidates.filter((c) => c.status === "failed").every((c) => c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED")));
+    if (state2.status !== "cancelled" && state2.status !== "needs-attention") {
+      state2.status = completedCount === 5 ? "completed" : completedCount > 0 ? "partial" : pendingCount > 0 ? "needs-attention" : allConnectorFailed ? "needs-attention" : "failed";
+    }
+    if (completedCount === 5) {
+      state2.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    }
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    this.broadcastProgress({
+      projectDir,
+      jobId: state2.jobId,
+      status: state2.status,
+      stage: completedCount === 5 ? "completed" : state2.status === "needs-attention" ? "idle" : "failed",
+      completedCount,
+      totalCount: 5,
+      progress: completedCount / 5,
+      message: completedCount === 5 ? "All 5 thumbnails generated and exported successfully." : state2.status === "needs-attention" ? "FlowKit connection failed. Fix the connection and click Resume." : `${completedCount}/5 thumbnails generated. Some candidates require attention.`,
+      jobState: state2
+    });
+    return state2;
+  }
+  // ─── Private: markNeedsAttention ─────────────────────────────────────────
+  async markNeedsAttention(projectDir, readiness, ctx) {
+    let state2;
+    const loadedState = loadThumbnailJobState(projectDir);
+    if (loadedState && loadedState.candidates.length === 5) {
+      state2 = loadedState;
+      for (const c of state2.candidates) {
+        if (c.status === "generating" || c.status === "exporting") {
+          c.status = "pending";
+          c.error = void 0;
+        }
+      }
+    } else {
+      const plan = await thumbnailPlanner.plan({
+        projectDir,
+        templateId: ctx.params.templateId || ctx.settings.selectedTemplateId,
+        templateSnapshot: ctx.templateSnapshot,
+        preferredModel: ctx.params.preferredModel,
+        generationRound: ctx.round
+      }).catch(() => void 0);
+      state2 = createInitialThumbnailJobState({
+        projectDir,
+        renderOutputPath: ctx.renderOutputPath,
+        renderFileSize: ctx.renderFileSize,
+        renderMtimeMs: ctx.renderMtimeMs,
+        scriptHash: ctx.scriptHash,
+        templateSnapshotHash: ctx.templateSnapshotHash,
+        generationRound: ctx.round,
+        plan
+      });
+    }
+    state2.status = "needs-attention";
+    state2.errors = state2.errors || [];
+    addUniqueDiagnostic(state2.errors, `[${readiness.blockingCode}] ${readiness.message}`);
+    saveThumbnailJobStateAtomic(projectDir, state2);
+    this.broadcastProgress({
+      projectDir,
+      jobId: state2.jobId,
+      status: "needs-attention",
+      stage: "idle",
+      completedCount: state2.candidates.filter((c) => c.status === "completed").length,
+      totalCount: 5,
+      progress: 0,
+      message: readiness.message,
+      jobState: state2
+    });
+    return state2;
+  }
+  // ─── Private: resolve helpers ─────────────────────────────────────────────
+  resolveScriptText(projectDir, customPath) {
+    if (customPath && fs__namespace.existsSync(customPath)) {
+      try {
+        return fs__namespace.readFileSync(customPath, "utf-8");
+      } catch {
+      }
+    }
+    const candidates = [
+      path__namespace.join(projectDir, "script.txt"),
+      path__namespace.join(projectDir, "inputs", "script.txt"),
+      path__namespace.join(projectDir, "project-state.json"),
+      path__namespace.join(projectDir, "project.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        if (c.endsWith(".json")) {
+          try {
+            const raw = fs__namespace.readFileSync(c, "utf-8");
+            const st = JSON.parse(raw);
+            if (st?.inputs?.scriptPath && fs__namespace.existsSync(st.inputs.scriptPath)) {
+              return fs__namespace.readFileSync(st.inputs.scriptPath, "utf-8");
+            }
+          } catch {
+          }
+        } else {
+          return fs__namespace.readFileSync(c, "utf-8");
+        }
+      }
+    }
+    return "";
+  }
+  resolveRenderOutputPath(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "output", "final_video.mp4"),
+      path__namespace.join(projectDir, "output", "video.mp4"),
+      path__namespace.join(projectDir, "output", "render.mp4")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) return c;
+    }
+    return candidates[0];
+  }
+  broadcastProgress(payload) {
     try {
-      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      ctx = JSON.parse(clean);
-      ctx.modelUsed = successfulModel || modelId;
+      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
+        const windows = electron.BrowserWindow.getAllWindows();
+        for (const win of windows) {
+          if (!win.isDestroyed()) {
+            win.webContents.send(IPC_CHANNELS.THUMBNAIL_PROGRESS, payload);
+          }
+        }
+      }
     } catch {
-      logger.warn("[GlobalContext] JSON parse failed, using fallback context");
-      ctx = buildFallbackContext(projectId, language, fullText);
-      ctx.modelUsed = "algorithmic (JSON parse fallback)";
     }
-  } else {
-    logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
-    progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.7);
-    ctx = buildFallbackContext(projectId, language, fullText);
-    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
   }
-  ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ctx.version = 1;
-  ctx._scriptHash = hash;
-  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
-  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
-  progress(`Global context ready - "${ctx.primarySubject}"`, 1);
-  return ctx;
 }
-function buildFallbackContext(projectId, language, text) {
-  const STOP_WORDS = /* @__PURE__ */ new Set([
-    "about",
-    "above",
-    "after",
-    "again",
-    "against",
-    "all",
-    "another",
-    "any",
-    "are",
-    "aren't",
-    "because",
-    "been",
-    "before",
-    "being",
-    "below",
-    "between",
-    "both",
-    "but",
-    "can",
-    "cannot",
-    "could",
-    "couldn't",
-    "did",
-    "didn't",
-    "does",
-    "doesn't",
-    "doing",
-    "don't",
-    "down",
-    "during",
-    "each",
-    "few",
-    "for",
-    "from",
-    "further",
-    "had",
-    "hadn't",
-    "has",
-    "hasn't",
-    "have",
-    "haven't",
-    "having",
-    "here",
-    "here's",
-    "hers",
-    "herself",
-    "himself",
-    "how",
-    "how's",
-    "into",
-    "it's",
-    "its",
-    "itself",
-    "let's",
-    "more",
-    "most",
-    "mustn't",
-    "myself",
-    "never",
-    "only",
-    "other",
-    "ought",
-    "our",
-    "ours",
-    "ourselves",
-    "out",
-    "over",
-    "own",
-    "same",
-    "shan't",
-    "should",
-    "shouldn't",
-    "some",
-    "such",
-    "than",
-    "that",
-    "that's",
-    "the",
-    "their",
-    "theirs",
-    "them",
-    "themselves",
-    "then",
-    "there",
-    "there's",
-    "these",
-    "they",
-    "they'd",
-    "they'll",
-    "they're",
-    "they've",
-    "this",
-    "those",
-    "through",
-    "until",
-    "very",
-    "was",
-    "wasn't",
-    "we'd",
-    "we'll",
-    "we're",
-    "we've",
-    "were",
-    "weren't",
-    "what",
-    "what's",
-    "when",
-    "when's",
-    "where",
-    "where's",
-    "which",
-    "while",
-    "who",
-    "who's",
-    "whom",
-    "why",
-    "why's",
-    "with",
-    "won't",
-    "would",
-    "wouldn't",
-    "you",
-    "you'd",
-    "you'll",
-    "you're",
-    "you've",
-    "your",
-    "yours",
-    "yourself",
-    "yourselves",
-    "video",
-    "channel",
-    "going",
-    "first",
-    "today",
-    "finally",
-    "place",
-    "entire",
-    "exact",
-    "thing",
-    "things",
-    "really",
-    "almost",
-    "turns",
-    "right",
-    "breakdown",
-    // Vietnamese common stop words
-    "những",
-    "chúng",
-    "trong",
-    "người",
-    "không",
-    "được",
-    "nhiều",
-    "chính",
-    "thực",
-    "thấy",
-    "video",
-    "kênh",
-    "hoặc",
-    "cũng",
-    "này",
-    "đang",
-    "phải",
-    "theo",
-    "cùng",
-    "nhau"
-  ]);
-  const properMatches = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
-  const properFreq = {};
-  for (const p of properMatches) {
-    const lower = p.toLowerCase();
-    if (!STOP_WORDS.has(lower) && lower.length > 3) {
-      properFreq[p] = (properFreq[p] ?? 0) + 1;
+const thumbnailOrchestrator = new ThumbnailOrchestrator();
+class ThumbnailAutoTrigger {
+  triggeredKeys = /* @__PURE__ */ new Set();
+  /**
+   * Safe, non-blocking auto-trigger entry point.
+   * NEVER throws an error to the caller, never interferes with video pipeline status.
+   */
+  async startIfEligible(params) {
+    try {
+      const { projectDir } = params;
+      if (!projectDir || !fs__namespace.existsSync(projectDir)) {
+        logger.info("[ThumbnailAutoTrigger] Project directory does not exist. Skipping.");
+        return false;
+      }
+      const settings = await loadProjectThumbnailSettings(projectDir);
+      if (!settings.enabled || !settings.autoGenerateAfterRender) {
+        logger.info(`[ThumbnailAutoTrigger] Thumbnail automation disabled for ${projectDir}. Skipping.`);
+        return false;
+      }
+      const renderPath = params.renderOutputPath || this.findRenderOutput(projectDir);
+      if (!renderPath || !fs__namespace.existsSync(renderPath)) {
+        logger.warn(`[ThumbnailAutoTrigger] Render output file not found at "${renderPath}". Skipping thumbnail generation.`);
+        return false;
+      }
+      const st = fs__namespace.statSync(renderPath);
+      const renderFileSize = st.size;
+      const renderMtimeMs = st.mtimeMs;
+      const script = this.readScriptText(projectDir, params.scriptPath);
+      const scriptHash2 = computeSha256(script || "no-script");
+      const templateSnapshotHash = settings.templateSnapshotHash || computeSha256(settings.templateSnapshot || "");
+      const round = 1;
+      const jobKey = computeThumbnailJobKey({
+        renderOutputPath: renderPath,
+        renderFileSize,
+        renderMtimeMs,
+        scriptHash: scriptHash2,
+        templateSnapshotHash,
+        generationRound: round
+      });
+      if (this.triggeredKeys.has(jobKey)) {
+        logger.info(`[ThumbnailAutoTrigger] Job key ${jobKey} already triggered in-memory. Skipping duplicate trigger.`);
+        return false;
+      }
+      const existingState = loadThumbnailJobState(projectDir);
+      if (existingState && existingState.jobKey === jobKey) {
+        if (existingState.status === "completed" || existingState.status === "generating") {
+          logger.info(`[ThumbnailAutoTrigger] Job with key ${jobKey} is already ${existingState.status}. Skipping duplicate.`);
+          return false;
+        }
+      }
+      if (!settings.selectedTemplateId || !settings.templateSnapshot) {
+        logger.warn(`[ThumbnailAutoTrigger] Automation enabled but no template selected for ${projectDir}. Setting status to needs-attention.`);
+        const attentionState = existingState || createInitialThumbnailJobState({
+          projectDir,
+          renderOutputPath: renderPath,
+          renderFileSize,
+          renderMtimeMs,
+          scriptHash: scriptHash2,
+          templateSnapshotHash,
+          generationRound: round
+        });
+        attentionState.status = "needs-attention";
+        attentionState.warnings.push("No master prompt template selected. Please choose a template in Thumbnail Studio.");
+        saveThumbnailJobStateAtomic(projectDir, attentionState);
+        return false;
+      }
+      this.triggeredKeys.add(jobKey);
+      logger.info(`[ThumbnailAutoTrigger] Video completed. Spawning companion thumbnail generation for ${projectDir}...`);
+      void (async () => {
+        try {
+          await thumbnailOrchestrator.startJob({
+            projectDir,
+            renderOutputPath: renderPath,
+            scriptPath: params.scriptPath,
+            templateId: settings.selectedTemplateId,
+            templateSnapshot: settings.templateSnapshot,
+            generationRound: round
+          });
+        } catch (jobErr) {
+          logger.error(`[ThumbnailAutoTrigger] Companion thumbnail run failed: ${jobErr}`);
+          const state2 = loadThumbnailJobState(projectDir);
+          if (state2 && state2.status !== "completed") {
+            state2.status = "failed";
+            state2.errors.push(jobErr instanceof Error ? jobErr.message : String(jobErr));
+            saveThumbnailJobStateAtomic(projectDir, state2);
+          }
+        }
+      })();
+      return true;
+    } catch (outerErr) {
+      logger.error(`[ThumbnailAutoTrigger] Unexpected error in startIfEligible: ${outerErr}`);
+      return false;
     }
   }
-  const topProper = Object.entries(properFreq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
-  const words = text.split(/\s+/);
-  const freq = {};
-  for (const w of words) {
-    const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "");
-    if (clean.length > 3 && !STOP_WORDS.has(clean)) {
-      freq[clean] = (freq[clean] ?? 0) + 1;
+  findRenderOutput(projectDir) {
+    const candidates = [
+      path__namespace.join(projectDir, "output", "final_video.mp4"),
+      path__namespace.join(projectDir, "output", "video.mp4"),
+      path__namespace.join(projectDir, "output", "render.mp4")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) return c;
     }
+    return null;
   }
-  const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
-  const primarySubject = topProper[0] || topWords[0] || "Documentary Subject";
-  const exactTopicAnchors = topProper.length > 0 ? topProper.slice(0, 5) : topWords.slice(0, 5);
-  const contextualAnchors = topWords.filter((w) => !exactTopicAnchors.map((x) => x.toLowerCase()).includes(w)).slice(0, 8);
-  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.?!])\s+/).filter(Boolean);
-  const centralThesis = sentences.slice(0, 2).join(" ") || text.slice(0, 250);
-  const globalSynopsis = sentences.slice(0, 4).join(" ") || text.slice(0, 350);
+  readScriptText(projectDir, customPath) {
+    if (customPath && fs__namespace.existsSync(customPath)) {
+      try {
+        return fs__namespace.readFileSync(customPath, "utf-8");
+      } catch {
+      }
+    }
+    const candidates = [
+      path__namespace.join(projectDir, "script.txt"),
+      path__namespace.join(projectDir, "inputs", "script.txt"),
+      path__namespace.join(projectDir, "project-state.json"),
+      path__namespace.join(projectDir, "project.json")
+    ];
+    for (const c of candidates) {
+      if (fs__namespace.existsSync(c)) {
+        if (c.endsWith(".json")) {
+          try {
+            const raw = fs__namespace.readFileSync(c, "utf-8");
+            const st = JSON.parse(raw);
+            if (st?.inputs?.scriptPath && fs__namespace.existsSync(st.inputs.scriptPath)) {
+              return fs__namespace.readFileSync(st.inputs.scriptPath, "utf-8");
+            }
+          } catch {
+          }
+        } else {
+          return fs__namespace.readFileSync(c, "utf-8");
+        }
+      }
+    }
+    return "";
+  }
+}
+const thumbnailAutoTrigger = new ThumbnailAutoTrigger();
+const PIPELINE_SCHEMA_VERSION = 1;
+const PIPELINE_EXECUTION_STAGES = [
+  "validating",
+  "transcribing",
+  "planning",
+  "captions",
+  "global-context",
+  "stock-search",
+  "audio-search",
+  "preflight",
+  "rendering",
+  "postflight"
+];
+const APP_INSTANCE_ID = uuid.v4();
+function normalizeProjectDir(projectDir) {
+  if (!projectDir) return "";
+  const resolved = path__namespace.resolve(projectDir);
+  return path__namespace.normalize(resolved);
+}
+function getPipelineStatePath(projectDir) {
+  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.json");
+}
+function getPipelineStateBackupPath(projectDir) {
+  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.backup.json");
+}
+function isProcessAlive(pid) {
+  if (!pid || pid <= 0) return false;
+  try {
+    return process.kill(pid, 0);
+  } catch (err) {
+    const code = err.code;
+    return code === "EPERM";
+  }
+}
+function createLease(runId, currentStage) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
   return {
-    projectId,
-    language,
-    version: 1,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: "algorithmic-fallback",
-    primarySubject,
-    secondarySubjects: topWords.slice(1, 5),
-    globalSynopsis,
-    centralThesis,
-    documentaryAngle: "observational documentary",
-    targetAudience: "general audience",
-    geography: {
-      primaryCountry: "",
-      secondaryLocations: []
-    },
-    timeContext: {
-      primaryPeriod: "contemporary",
-      historicalPeriods: []
-    },
-    communities: [],
-    recurringPeople: [],
-    visualWorld: {
-      environment: [],
-      architecture: [],
-      clothing: [],
-      occupations: [],
-      machinery: [],
-      recurringObjects: [],
-      colorMood: "natural cinematics",
-      documentaryStyle: "observational"
-    },
-    exactTopicAnchors,
-    contextualAnchors,
-    forbiddenSubstitutions: [],
-    negativeKeywords: ["cartoon", "cgi", "animation", "vlog", "generic"],
-    recurringVisualMotifs: [],
-    storyArc: []
+    runId,
+    appInstanceId: APP_INSTANCE_ID,
+    pid: process.pid,
+    acquiredAt: now,
+    heartbeatAt: now,
+    currentStage
   };
 }
-function loadGlobalContext(projectDir) {
-  const p = getContextPath(projectDir);
-  if (!fs__namespace.existsSync(p)) return null;
+function updateHeartbeat(state2) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (state2.lease) {
+    state2.lease.heartbeatAt = now;
+    state2.lease.currentStage = state2.currentStage;
+  } else {
+    state2.lease = createLease(state2.runId, state2.currentStage);
+  }
+  state2.updatedAt = now;
+}
+function releaseLease(state2) {
+  delete state2.lease;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+}
+function isLeaseStale(lease, heartbeatTimeoutMs = 15e3) {
+  if (!lease) return false;
+  if (lease.appInstanceId !== APP_INSTANCE_ID) {
+    if (!isProcessAlive(lease.pid)) {
+      return true;
+    }
+    const lastHeartbeat2 = new Date(lease.heartbeatAt).getTime();
+    if (isNaN(lastHeartbeat2) || Date.now() - lastHeartbeat2 > heartbeatTimeoutMs) {
+      return true;
+    }
+    return true;
+  }
+  const lastHeartbeat = new Date(lease.heartbeatAt).getTime();
+  if (!isNaN(lastHeartbeat) && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
+    return true;
+  }
+  return false;
+}
+function toSnapshot(state2) {
+  return {
+    version: state2.version,
+    runId: state2.runId,
+    projectDir: state2.projectDir,
+    currentStage: state2.currentStage,
+    overallStatus: state2.overallStatus,
+    stages: state2.stages,
+    updatedAt: state2.updatedAt,
+    lease: state2.lease,
+    warnings: state2.warnings,
+    fatalErrors: state2.fatalErrors,
+    renderOutputPath: state2.renderOutputPath,
+    preflightReportPath: state2.preflightReportPath,
+    postflightReportPath: state2.postflightReportPath
+  };
+}
+function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
+  let scriptHash2;
+  if (scriptPath && fs__namespace.existsSync(scriptPath)) {
+    try {
+      const content = fs__namespace.readFileSync(scriptPath);
+      scriptHash2 = crypto__namespace.createHash("md5").update(content).digest("hex");
+    } catch {
+    }
+  }
+  let voiceoverSize;
+  let voiceoverMtimeMs;
+  if (voiceoverPath && fs__namespace.existsSync(voiceoverPath)) {
+    try {
+      const stat = fs__namespace.statSync(voiceoverPath);
+      voiceoverSize = stat.size;
+      voiceoverMtimeMs = stat.mtimeMs;
+    } catch {
+    }
+  }
+  return {
+    scriptPath,
+    scriptHash: scriptHash2,
+    voiceoverPath,
+    voiceoverSize,
+    voiceoverMtimeMs
+  };
+}
+function createDefaultStageStates() {
+  const stages = {};
+  for (const stage of PIPELINE_EXECUTION_STAGES) {
+    stages[stage] = {
+      status: "pending",
+      progress: 0
+    };
+  }
+  return stages;
+}
+function createInitialPipelineState(options, fingerprint, runId) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const rId = runId ?? uuid.v4();
+  return {
+    schemaVersion: PIPELINE_SCHEMA_VERSION,
+    version: 1,
+    runId: rId,
+    projectDir: normalizeProjectDir(options.projectDir),
+    currentStage: "idle",
+    overallStatus: "idle",
+    startedAt: now,
+    updatedAt: now,
+    inputFingerprint: fingerprint,
+    options: {
+      ...options,
+      projectDir: normalizeProjectDir(options.projectDir)
+    },
+    stages: createDefaultStageStates(),
+    warnings: [],
+    fatalErrors: []
+  };
+}
+function loadPipelineState(projectDir) {
+  const statePath = getPipelineStatePath(projectDir);
+  const backupPath = getPipelineStateBackupPath(projectDir);
+  if (fs__namespace.existsSync(statePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(statePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && parsed.stages) {
+        if (!parsed.version) parsed.version = 1;
+        return parsed;
+      }
+    } catch (err) {
+      logger.warn(`[PipelineState] Primary state corrupt, trying backup: ${String(err)}`);
+    }
+  }
+  if (fs__namespace.existsSync(backupPath)) {
+    try {
+      const rawBackup = fs__namespace.readFileSync(backupPath, "utf-8");
+      const parsedBackup = JSON.parse(rawBackup);
+      if (parsedBackup && typeof parsedBackup === "object" && parsedBackup.stages) {
+        logger.info(`[PipelineState] Successfully recovered pipeline state from backup`);
+        if (!parsedBackup.version) parsedBackup.version = 1;
+        return parsedBackup;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function savePipelineStateAtomic(projectDir, state2) {
+  const normDir = normalizeProjectDir(projectDir);
+  state2.projectDir = normDir;
+  state2.version = (state2.version || 0) + 1;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const finalPath = getPipelineStatePath(normDir);
+  const backupPath = getPipelineStateBackupPath(normDir);
+  const dir = path__namespace.dirname(finalPath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  if (fs__namespace.existsSync(finalPath)) {
+    try {
+      fs__namespace.copyFileSync(finalPath, backupPath);
+    } catch {
+    }
+  }
+  const tmpPath = path__namespace.join(
+    dir,
+    `auto-pipeline-state.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+  );
+  const content = JSON.stringify(state2, null, 2);
+  fs__namespace.writeFileSync(tmpPath, content, "utf-8");
+  fs__namespace.renameSync(tmpPath, finalPath);
   try {
-    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    fs__namespace.copyFileSync(finalPath, backupPath);
+  } catch {
+  }
+}
+function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
+  const invalidated = /* @__PURE__ */ new Set();
+  const voiceoverChanged = oldState.inputFingerprint.voiceoverPath !== newFingerprint.voiceoverPath || oldState.inputFingerprint.voiceoverSize !== newFingerprint.voiceoverSize || oldState.inputFingerprint.voiceoverMtimeMs !== newFingerprint.voiceoverMtimeMs;
+  const scriptChanged = oldState.inputFingerprint.scriptPath !== newFingerprint.scriptPath || oldState.inputFingerprint.scriptHash !== newFingerprint.scriptHash;
+  if (voiceoverChanged) {
+    return [
+      "transcribing",
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (scriptChanged) {
+    return [
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (oldState.options.whisperModel !== newOptions.whisperModel && newOptions.whisperModel) {
+    return [
+      "transcribing",
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (oldState.options.forceRegenerateCaptions !== newOptions.forceRegenerateCaptions && newOptions.forceRegenerateCaptions) {
+    invalidated.add("captions");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.preferredStockProvider !== newOptions.preferredStockProvider) {
+    invalidated.add("stock-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldProfileMode = resolveContentProfileMode(oldState.options);
+  const newProfileMode = resolveContentProfileMode(newOptions);
+  const oldContentType = oldState.options.contentType ?? "default";
+  const newContentType = newOptions.contentType ?? "default";
+  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
+    invalidated.add("stock-search");
+    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === "health" ? "custom-mix" : "legacy");
+  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === "health" ? "custom-mix" : "legacy");
+  if (oldVisualMode !== newVisualMode) {
+    invalidated.add("stock-search");
+    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: oldState.options.visualSourceMode,
+    visualMixConfig: oldState.options.visualMixConfig,
+    contentType: oldContentType
+  }) : void 0;
+  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: newOptions.visualSourceMode,
+    visualMixConfig: newOptions.visualMixConfig,
+    contentType: newContentType
+  }) : void 0;
+  const stripDefaultAiMode = (cfg) => {
+    if (!cfg || typeof cfg !== "object" || !("aiImageMode" in cfg)) return cfg;
+    const { aiImageMode, ...rest } = cfg;
+    return aiImageMode === "prompt" ? { ...rest, aiImageMode } : rest;
+  };
+  const oldVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
+  );
+  const newVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
+  );
+  const visualConfigChanged = oldVisualConfigStr !== newVisualConfigStr || oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio || oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio || oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution || oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior || resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig);
+  if (visualConfigChanged) {
+    invalidated.add("stock-search");
+    if (oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
+    invalidated.add("audio-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.fps !== newOptions.fps || oldState.options.resolution?.width !== newOptions.resolution?.width || oldState.options.resolution?.height !== newOptions.resolution?.height || oldState.options.outputName !== newOptions.outputName) {
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  return Array.from(invalidated);
+}
+function applyInvalidation(state2, invalidatedStages) {
+  for (const stage of invalidatedStages) {
+    if (state2.stages[stage]) {
+      state2.stages[stage] = {
+        status: "pending",
+        progress: 0,
+        message: "Invalidated due to input/setting change"
+      };
+    }
+  }
+}
+const HEALTH_SCHEMA_VERSION = 1;
+const DEFAULT_HEALTH_CONFIG = {
+  aiRatio: 0.8,
+  stockRatio: 0.2,
+  width: 1920,
+  height: 1080,
+  motionEnabled: true
+};
+function getHealthManifestPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "health-generated-assets.json");
+}
+function computeHealthConfigHash(config) {
+  const merged = { ...DEFAULT_HEALTH_CONFIG, ...config };
+  return crypto__namespace.createHash("md5").update(JSON.stringify(merged)).digest("hex");
+}
+function computeHealthGenerationHash(sceneIndex, narration, visualIntent, imagePrompt, config) {
+  const width = config?.width ?? DEFAULT_HEALTH_CONFIG.width;
+  const height = config?.height ?? DEFAULT_HEALTH_CONFIG.height;
+  const payload = [
+    String(sceneIndex),
+    (narration || "").trim().toLowerCase(),
+    (visualIntent || "").trim().toLowerCase(),
+    (imagePrompt || "").trim(),
+    `${width}x${height}`,
+    "GEM_PIX_2",
+    "health"
+  ].join("||");
+  return crypto__namespace.createHash("sha256").update(payload).digest("hex");
+}
+function computeHealthMotionHash(plan) {
+  const parts = (plan.scenes || []).map((s) => {
+    const motionStr = s.motion ? `${s.motion.preset}:${s.motion.intensity}:${s.motion.zoomEnd}` : s.motionPreset || "none";
+    const sfxStr = s.sfxCue ? `${s.sfxCue.type}:${s.sfxCue.volumeDb}` : "none";
+    return `${s.sceneIndex}:${s.category}:${motionStr}:${sfxStr}`;
+  });
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function loadHealthGeneratedManifest(projectDir) {
+  const manifestPath = getHealthManifestPath(projectDir);
+  if (fs__namespace.existsSync(manifestPath)) {
+    try {
+      const data = JSON.parse(fs__namespace.readFileSync(manifestPath, "utf-8"));
+      if (data && typeof data === "object" && data.scenes) {
+        return data;
+      }
+    } catch (err) {
+      logger.warn(`[HealthVisualCache] Failed to parse ${manifestPath}: ${err}`);
+    }
+  }
+  return {
+    schemaVersion: HEALTH_SCHEMA_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    configHash: computeHealthConfigHash(),
+    scenes: {}
+  };
+}
+function saveHealthGeneratedManifest(projectDir, manifest) {
+  const manifestPath = getHealthManifestPath(projectDir);
+  const dir = path__namespace.dirname(manifestPath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const tmpPath = `${manifestPath}.tmp.${Date.now()}`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs__namespace.renameSync(tmpPath, manifestPath);
+}
+const ffmpegStaticPath = require("ffmpeg-static");
+function getFfmpegBinary() {
+  return ffmpegStaticPath;
+}
+function getFfprobeBinary() {
+  try {
+    const ffp = require("ffprobe-static");
+    if (ffp?.path && fs__namespace.existsSync(ffp.path)) return ffp.path;
+  } catch {
+  }
+  return null;
+}
+class RenderCancelledError extends Error {
+  constructor(message = "Render cancelled") {
+    super(message);
+    this.name = "AbortError";
+  }
+}
+function isRenderCancelledError(err) {
+  if (!err) return false;
+  if (err instanceof RenderCancelledError) return true;
+  const e = err;
+  return e.name === "AbortError" || /cancelled|canceled/i.test(String(e.message ?? ""));
+}
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw new RenderCancelledError();
+}
+class LineRingBuffer {
+  constructor(maxLines = 200, maxBytes = 1024 * 1024) {
+    this.maxLines = maxLines;
+    this.maxBytes = maxBytes;
+  }
+  lines = [];
+  bytes = 0;
+  partial = "";
+  push(chunk) {
+    const data = this.partial + chunk;
+    const parts = data.split(/\r?\n|\r/);
+    this.partial = parts.pop() ?? "";
+    if (this.partial.length > this.maxBytes) {
+      this.partial = this.partial.slice(-this.maxBytes);
+    }
+    for (const line of parts) {
+      if (!line) continue;
+      this.lines.push(line);
+      this.bytes += line.length + 1;
+    }
+    while (this.lines.length > this.maxLines || this.bytes > this.maxBytes) {
+      const removed = this.lines.shift();
+      if (removed === void 0) break;
+      this.bytes -= removed.length + 1;
+    }
+  }
+  get lineCount() {
+    return this.lines.length + (this.partial ? 1 : 0);
+  }
+  get byteSize() {
+    return this.bytes + this.partial.length;
+  }
+  tail(n = 8) {
+    const all = this.partial ? [...this.lines, this.partial] : this.lines;
+    return all.slice(-n).join("\n");
+  }
+}
+const liveProcesses = /* @__PURE__ */ new Set();
+function getLiveRenderProcessCount() {
+  return liveProcesses.size;
+}
+function getLiveRenderProcessPids() {
+  return Array.from(liveProcesses).map((p) => p.proc.pid).filter((pid) => typeof pid === "number");
+}
+function killWithGrace(proc, graceMs) {
+  return new Promise((resolve) => {
+    if (proc.exitCode !== null || proc.signalCode !== null) {
+      resolve();
+      return;
+    }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    proc.once("close", finish);
+    proc.once("exit", finish);
+    try {
+      proc.kill("SIGTERM");
+    } catch {
+    }
+    const timer = setTimeout(() => {
+      try {
+        if (proc.exitCode === null && proc.signalCode === null) proc.kill("SIGKILL");
+      } catch {
+      }
+      setTimeout(finish, 250);
+    }, graceMs);
+  });
+}
+async function terminateAllRenderProcesses(graceMs = 2500) {
+  const all = Array.from(liveProcesses);
+  if (all.length === 0) return 0;
+  logger.info(`[FFmpegProcess] Terminating ${all.length} live render process(es)`);
+  await Promise.all(all.map((p) => killWithGrace(p.proc, graceMs)));
+  return all.length;
+}
+function isStreamCopyOnly(args) {
+  for (let i = 0; i < args.length - 1; i++) {
+    if ((args[i] === "-c" || args[i] === "-codec") && args[i + 1] === "copy") return true;
+  }
+  const vCopy = args.some((a, i) => (a === "-c:v" || a === "-vcodec") && args[i + 1] === "copy");
+  const hasVideoFilter = args.includes("-vf") || args.includes("-filter_complex");
+  return vCopy && !hasVideoFilter;
+}
+function buildFfmpegArgs(args, options = {}) {
+  if (args.length === 0) throw new Error("FFmpeg called without arguments");
+  const output = args[args.length - 1];
+  if (output.startsWith("-")) {
+    throw new Error(`FFmpeg output path must be the last argument (got "${output}")`);
+  }
+  const globals = ["-hide_banner", "-nostdin", "-nostats", "-progress", "pipe:1"];
+  if (options.filterThreads && options.filterThreads > 0) {
+    const ft = String(Math.floor(options.filterThreads));
+    globals.push("-filter_threads", ft, "-filter_complex_threads", ft);
+  }
+  const body = args.slice(0, -1);
+  const outputOpts = [];
+  if (options.threads && options.threads > 0 && !isStreamCopyOnly(args) && !body.includes("-threads")) {
+    outputOpts.push("-threads", String(Math.floor(options.threads)));
+  }
+  return [...globals, ...body, ...outputOpts, output];
+}
+function parseProgressBlock(block) {
+  const outUs = Number(block["out_time_us"] ?? block["out_time_ms"] ?? 0);
+  const speedRaw = (block["speed"] ?? "").replace("x", "").trim();
+  const speed = speedRaw && speedRaw !== "N/A" ? Number(speedRaw) : null;
+  return {
+    // FFmpeg's "out_time_ms" is actually microseconds (historic quirk)
+    outTimeMs: Number.isFinite(outUs) ? Math.max(0, Math.round(outUs / 1e3)) : 0,
+    frame: Number(block["frame"] ?? 0) || 0,
+    speed: speed !== null && Number.isFinite(speed) ? speed : null,
+    done: block["progress"] === "end"
+  };
+}
+function ffmpegRun$4(args, options = {}) {
+  const { signal } = options;
+  if (signal?.aborted) return Promise.reject(new RenderCancelledError());
+  const finalArgs = buildFfmpegArgs(args, options);
+  const throttleMs = options.progressThrottleMs ?? 500;
+  return new Promise((resolve, reject2) => {
+    let proc;
+    try {
+      proc = cp.spawn(getFfmpegBinary(), finalArgs, { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (err) {
+      reject2(err);
+      return;
+    }
+    const entry = { proc, jobId: options.jobId, phase: options.phase, startedAt: Date.now() };
+    liveProcesses.add(entry);
+    if (typeof options.niceLevel === "number" && options.niceLevel > 0 && proc.pid) {
+      try {
+        os__namespace.setPriority(proc.pid, Math.min(19, Math.max(0, Math.floor(options.niceLevel))));
+      } catch {
+      }
+    }
+    const stderr = new LineRingBuffer(200, 1024 * 1024);
+    let progressBuf = "";
+    let block = {};
+    let lastEmit = 0;
+    let aborted = false;
+    proc.stdout?.on("data", (d) => {
+      progressBuf += d.toString();
+      if (progressBuf.length > 64 * 1024) progressBuf = progressBuf.slice(-16 * 1024);
+      let idx;
+      while ((idx = progressBuf.indexOf("\n")) >= 0) {
+        const line = progressBuf.slice(0, idx).trim();
+        progressBuf = progressBuf.slice(idx + 1);
+        if (!line) continue;
+        const eq = line.indexOf("=");
+        if (eq <= 0) continue;
+        const key2 = line.slice(0, eq);
+        const value = line.slice(eq + 1);
+        block[key2] = value;
+        if (key2 === "progress") {
+          const parsed = parseProgressBlock(block);
+          block = {};
+          const now = Date.now();
+          if (options.onProgress && (parsed.done || now - lastEmit >= throttleMs)) {
+            lastEmit = now;
+            try {
+              options.onProgress(parsed);
+            } catch {
+            }
+          }
+        }
+      }
+    });
+    proc.stderr?.on("data", (d) => stderr.push(d.toString()));
+    const onAbort = () => {
+      aborted = true;
+      void killWithGrace(proc, options.killGraceMs ?? 2500);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const cleanup = () => {
+      liveProcesses.delete(entry);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    proc.on("error", (err) => {
+      cleanup();
+      reject2(err);
+    });
+    proc.on("close", (code, sig) => {
+      cleanup();
+      if (aborted || signal?.aborted) {
+        reject2(new RenderCancelledError());
+        return;
+      }
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject2(new Error(`FFmpeg exited ${code ?? sig}: ${stderr.tail(6)}`));
+    });
+  });
+}
+function parseRate(rate) {
+  if (!rate) return 0;
+  const [n, d] = rate.split("/").map(Number);
+  if (!d) return Number.isFinite(n) ? n : 0;
+  const v = n / d;
+  return Number.isFinite(v) ? v : 0;
+}
+function probeMedia$1(filePath, opts = {}) {
+  const ffprobe = getFfprobeBinary();
+  if (!ffprobe || !filePath || !fs__namespace.existsSync(filePath)) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const proc = cp.spawn(
+      ffprobe,
+      [
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,width,height,duration,r_frame_rate,avg_frame_rate,nb_frames:format=duration",
+        "-of",
+        "json",
+        filePath
+      ],
+      { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+    );
+    const entry = { proc, phase: "probe", startedAt: Date.now() };
+    liveProcesses.add(entry);
+    let stdout = "";
+    let settled = false;
+    const finish = (val) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      liveProcesses.delete(entry);
+      opts.signal?.removeEventListener("abort", onAbort);
+      resolve(val);
+    };
+    const onAbort = () => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+      finish(null);
+    };
+    opts.signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+      finish(null);
+    }, opts.timeoutMs ?? 3e4);
+    proc.stdout?.on("data", (d) => {
+      if (stdout.length < 512 * 1024) stdout += d.toString();
+    });
+    proc.on("error", () => finish(null));
+    proc.on("close", (code) => {
+      if (code !== 0) return finish(null);
+      try {
+        const data = JSON.parse(stdout);
+        const streams = data.streams ?? [];
+        const v = streams.find((s) => s.codec_type === "video");
+        const a = streams.find((s) => s.codec_type === "audio");
+        const duration = parseFloat(String(data.format?.duration ?? "")) || parseFloat(String(v?.duration ?? "")) || 0;
+        const nb = v?.nb_frames !== void 0 ? Number(v.nb_frames) : NaN;
+        finish({
+          hasVideo: !!v,
+          hasAudio: !!a,
+          width: Number(v?.width) || 0,
+          height: Number(v?.height) || 0,
+          duration,
+          fps: parseRate(String(v?.avg_frame_rate ?? "")) || parseRate(String(v?.r_frame_rate ?? "")),
+          frames: Number.isFinite(nb) && nb > 0 ? nb : null
+        });
+      } catch {
+        finish(null);
+      }
+    });
+  });
+}
+const DEFAULT_RESOURCE_PROFILE = "balanced";
+const MB = 1024 * 1024;
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+function normalizeResourceProfile(p) {
+  return p === "low-power" || p === "fast" || p === "balanced" ? p : DEFAULT_RESOURCE_PROFILE;
+}
+function computeResourceLimits(profileInput, logicalCpus = os__namespace.cpus().length || 4, totalMemBytes = os__namespace.totalmem()) {
+  const profile = normalizeResourceProfile(profileInput);
+  const n = Math.max(1, Math.floor(logicalCpus));
+  const lowMemMachine = totalMemBytes > 0 && totalMemBytes < 12 * 1024 * MB;
+  switch (profile) {
+    case "low-power":
+      return {
+        profile,
+        logicalCpus: n,
+        ffmpegThreads: clamp(Math.floor(n / 4), 1, 2),
+        ffmpegFilterThreads: 1,
+        remotionConcurrency: 1,
+        offthreadVideoThreads: 1,
+        mediaCacheSizeInBytes: 256 * MB,
+        offthreadVideoCacheSizeInBytes: 256 * MB,
+        niceLevel: 15,
+        assemblyMaxScenesPerSegment: 8,
+        loadAverageFactor: 1
+      };
+    case "fast":
+      return {
+        profile,
+        logicalCpus: n,
+        ffmpegThreads: clamp(n - 2, 2, 6),
+        ffmpegFilterThreads: clamp(Math.floor(n / 2), 1, 4),
+        remotionConcurrency: clamp(Math.floor(n * 0.5), 1, 16),
+        offthreadVideoThreads: 2,
+        mediaCacheSizeInBytes: (lowMemMachine ? 384 : 512) * MB,
+        offthreadVideoCacheSizeInBytes: (lowMemMachine ? 384 : 512) * MB,
+        niceLevel: 0,
+        assemblyMaxScenesPerSegment: 24,
+        loadAverageFactor: 2
+      };
+    case "balanced":
+    default:
+      return {
+        profile: "balanced",
+        logicalCpus: n,
+        ffmpegThreads: clamp(Math.floor(n / 2), 2, 4),
+        ffmpegFilterThreads: clamp(Math.floor(n / 3), 1, 3),
+        remotionConcurrency: clamp(Math.floor(n / 4), 1, 2),
+        offthreadVideoThreads: 1,
+        mediaCacheSizeInBytes: (lowMemMachine ? 256 : 384) * MB,
+        offthreadVideoCacheSizeInBytes: (lowMemMachine ? 256 : 384) * MB,
+        niceLevel: 5,
+        assemblyMaxScenesPerSegment: 12,
+        loadAverageFactor: 1.5
+      };
+  }
+}
+function assessLoad(sample, limits) {
+  const reasons = [];
+  if (sample.availableMemRatio > 0 && sample.availableMemRatio < 0.15) {
+    reasons.push(`available memory ${(sample.availableMemRatio * 100).toFixed(0)}%`);
+  }
+  if (sample.eventLoopLagMs > 250) {
+    reasons.push(`event-loop lag ${Math.round(sample.eventLoopLagMs)}ms`);
+  }
+  if (sample.loadAvg1 > sample.logicalCpus * limits.loadAverageFactor) {
+    reasons.push(`load average ${sample.loadAvg1.toFixed(1)}`);
+  }
+  return { underPressure: reasons.length > 0, reasons };
+}
+function readAvailableMemoryRatio() {
+  const total = os__namespace.totalmem();
+  const fallback = total > 0 ? os__namespace.freemem() / total : 1;
+  if (process.platform !== "darwin") return Promise.resolve(fallback);
+  return new Promise((resolve) => {
+    cp.execFile("sysctl", ["-n", "kern.memorystatus_level"], { timeout: 2e3 }, (sErr, sOut) => {
+      const level = Number(String(sOut ?? "").trim());
+      if (!sErr && Number.isFinite(level) && level > 0 && level <= 100) return resolve(level / 100);
+      readVmStatRatio(total, fallback).then(resolve, () => resolve(fallback));
+    });
+  });
+}
+function readVmStatRatio(total, fallback) {
+  return new Promise((resolve) => {
+    cp.execFile("vm_stat", { timeout: 2e3 }, (err, stdout) => {
+      if (err || !stdout) return resolve(fallback);
+      try {
+        const pageSize = Number(/page size of (\d+) bytes/.exec(stdout)?.[1] ?? 4096);
+        const get = (label) => {
+          const m = new RegExp(`${label}:\\s+(\\d+)`).exec(stdout);
+          return m ? Number(m[1]) : 0;
+        };
+        const availPages = get("Pages free") + get("Pages inactive") + get("Pages speculative") + get("Pages purgeable");
+        const ratio = availPages * pageSize / total;
+        resolve(Number.isFinite(ratio) && ratio > 0 ? Math.min(1, ratio) : fallback);
+      } catch {
+        resolve(fallback);
+      }
+    });
+  });
+}
+class SystemLoadMonitor {
+  histogram = null;
+  start() {
+    if (this.histogram) return;
+    try {
+      this.histogram = perf_hooks.monitorEventLoopDelay({ resolution: 20 });
+      this.histogram.enable();
+    } catch {
+      this.histogram = null;
+    }
+  }
+  stop() {
+    try {
+      this.histogram?.disable();
+    } catch {
+    }
+    this.histogram = null;
+  }
+  async sample() {
+    let lagMs = 0;
+    if (this.histogram) {
+      lagMs = Math.max(0, this.histogram.percentile(95) / 1e6 - 20);
+      this.histogram.reset();
+    }
+    return {
+      loadAvg1: os__namespace.loadavg()[0] ?? 0,
+      logicalCpus: os__namespace.cpus().length || 1,
+      availableMemRatio: await readAvailableMemoryRatio(),
+      eventLoopLagMs: lagMs,
+      liveRenderProcesses: getLiveRenderProcessCount(),
+      sampledAt: Date.now()
+    };
+  }
+}
+function cancellableDelay(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+class AdaptiveThrottle {
+  constructor(limits, onNotice, sampler) {
+    this.limits = limits;
+    this.onNotice = onNotice;
+    this.sampler = sampler;
+  }
+  reducedSteps = 0;
+  monitor = new SystemLoadMonitor();
+  start() {
+    this.monitor.start();
+  }
+  stop() {
+    this.monitor.stop();
+  }
+  /** Remotion concurrency to use for the next job. */
+  currentRemotionConcurrency() {
+    return Math.max(1, this.limits.remotionConcurrency - this.reducedSteps);
+  }
+  /** Total time (ms) this render may spend waiting for the system to calm down. */
+  waitBudgetMs = 6e4;
+  async beforeNextJob(signal, maxWaits = 2, waitMs = 2500) {
+    let last = { underPressure: false, reasons: [] };
+    for (let attempt = 0; attempt <= maxWaits; attempt++) {
+      if (signal?.aborted) return last;
+      const sample = this.sampler ? await this.sampler() : await this.monitor.sample();
+      last = assessLoad(sample, this.limits);
+      if (!last.underPressure) {
+        if (this.reducedSteps > 0 && attempt === 0) this.reducedSteps--;
+        return last;
+      }
+      if (attempt === 0) {
+        this.reducedSteps = Math.min(this.reducedSteps + 1, Math.max(0, this.limits.remotionConcurrency - 1));
+        this.onNotice?.(`System under load — reducing render concurrency (${last.reasons.join(", ")})`);
+      }
+      if (attempt < maxWaits && this.waitBudgetMs > 0) {
+        const ms = Math.min(waitMs, this.waitBudgetMs);
+        this.waitBudgetMs -= ms;
+        await cancellableDelay(ms, signal);
+      } else {
+        break;
+      }
+    }
+    return last;
+  }
+}
+const MANIFEST_SCHEMA_VERSION = 2;
+function emptyCheckpoint(fingerprint = "") {
+  return { status: "pending", fingerprint };
+}
+function createManifest(params) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  return {
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    renderFingerprint: params.renderFingerprint,
+    projectDir: params.projectDir,
+    outputName: params.outputName,
+    status: "initializing",
+    createdAt: now,
+    updatedAt: now,
+    settings: params.settings,
+    scenes: [],
+    assembly: emptyCheckpoint(),
+    audioMix: emptyCheckpoint(),
+    overlayBlocks: [],
+    composite: emptyCheckpoint(),
+    finalOutput: emptyCheckpoint(),
+    progress: {
+      completedScenes: 0,
+      totalScenes: 0,
+      completedOverlayBlocks: 0,
+      totalOverlayBlocks: 0,
+      currentPhase: "initializing"
+    },
+    invalidationReasons: [],
+    warnings: []
+  };
+}
+function recomputeManifestProgress(m) {
+  m.progress.totalScenes = m.scenes.length;
+  m.progress.completedScenes = m.scenes.filter((s) => s.status === "completed").length;
+  m.progress.totalOverlayBlocks = m.overlayBlocks.length;
+  m.progress.completedOverlayBlocks = m.overlayBlocks.filter((b) => b.status === "completed").length;
+}
+function fsyncDirBestEffort(dir) {
+  let fd = null;
+  try {
+    fd = fs__namespace.openSync(dir, "r");
+    fs__namespace.fsyncSync(fd);
+  } catch {
+  } finally {
+    if (fd !== null) {
+      try {
+        fs__namespace.closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+function writeJsonAtomic(filePath, data) {
+  const dir = path__namespace.dirname(filePath);
+  fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  const content = JSON.stringify(data, null, 2);
+  const fd = fs__namespace.openSync(tmpPath, "w");
+  try {
+    fs__namespace.writeSync(fd, content, 0, "utf-8");
+    fs__namespace.fsyncSync(fd);
+  } finally {
+    fs__namespace.closeSync(fd);
+  }
+  fs__namespace.renameSync(tmpPath, filePath);
+  fsyncDirBestEffort(dir);
+}
+function tryParse(filePath) {
+  try {
+    if (!fs__namespace.existsSync(filePath)) return null;
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
   } catch {
     return null;
   }
 }
-function saveGlobalContext(projectDir, ctx) {
-  const p = getContextPath(projectDir);
-  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
-}
-function extractVisualQueries(text) {
-  const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
-  const words = clean.split(/\s+/).filter((w) => w.length > 2);
-  const queries = [];
-  if (words.length >= 3) {
-    queries.push(words.slice(0, 4).join(" "));
-    const mid = Math.floor(words.length / 2);
-    queries.push(words.slice(mid, mid + 3).join(" "));
-    queries.push(words.slice(-3).join(" "));
-  } else {
-    queries.push(clean || "documentary cinematic shot");
-  }
-  return queries.filter((q) => q.length >= 3).slice(0, 3);
-}
-function inferEnergyLevelFromText(text) {
-  const lower = text.toLowerCase();
-  const highCues = ["conflict", "battle", "crisis", "explosion", "urgent", "reveal", "shocking", "protest", "disaster", "death"];
-  if (highCues.some((c) => lower.includes(c))) return "high";
-  const lowCues = ["peaceful", "quiet", "meditation", "reflection", "landscape", "slow", "history", "archive"];
-  if (lowCues.some((c) => lower.includes(c))) return "low";
-  return "medium";
-}
-function inferShotTypeFromText(text) {
-  const lower = text.toLowerCase();
-  if (lower.includes("close") || lower.includes("face") || lower.includes("detail") || lower.includes("hand")) return "close-up";
-  if (lower.includes("aerial") || lower.includes("wide") || lower.includes("landscape") || lower.includes("panorama")) return "wide";
-  if (lower.includes("abstract") || lower.includes("symbol") || lower.includes("silhouette")) return "abstract";
-  return "medium";
-}
-function buildAlgorithmicOutline(skeletons, totalDuration) {
-  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)));
-  const scenesPerChapter = Math.ceil(skeletons.length / numChapters);
-  const chapters = [];
-  for (let chIdx = 0; chIdx < numChapters; chIdx++) {
-    const chStartIdx = chIdx * scenesPerChapter;
-    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length);
-    const chScenes = skeletons.slice(chStartIdx, chEndIdx);
-    if (chScenes.length === 0) continue;
-    const startSceneIndex = chScenes[0].sceneIndex;
-    const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex;
-    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)));
-    const scenesPerSeq = Math.ceil(chScenes.length / numSequences);
-    const sequences = [];
-    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
-      const seqStartIdx = seqIdx * scenesPerSeq;
-      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length);
-      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx);
-      if (seqScenes.length === 0) continue;
-      sequences.push({
-        sequenceIndex: seqIdx + 1,
-        title: `Sequence ${seqIdx + 1}`,
-        startSceneIndex: seqScenes[0].sceneIndex,
-        endSceneIndex: seqScenes[seqScenes.length - 1].sceneIndex
-      });
-    }
-    chapters.push({
-      chapterIndex: chIdx + 1,
-      title: chIdx === 0 ? "Chapter 1: Introduction & Premise" : chIdx === numChapters - 1 ? `Chapter ${chIdx + 1}: Conclusion & Legacy` : `Chapter ${chIdx + 1}: Narrative Progression`,
-      purpose: "Documentary narrative arc",
-      startSceneIndex,
-      endSceneIndex,
-      sequences
-    });
-  }
-  return chapters;
-}
-async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, onProgress) {
-  const firstIndex = skeletons[0].sceneIndex;
-  const lastIndex = skeletons[skeletons.length - 1].sceneIndex;
-  const step = Math.max(1, Math.floor(skeletons.length / 10));
-  const sampleScenes = skeletons.filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0).map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`).join("\n");
-  const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
-Video Duration: ${totalDuration.toFixed(0)}s
-Total Scenes: ${skeletons.length} (Scene ${firstIndex} to Scene ${lastIndex})
-
-${globalContextSummary ? `## GLOBAL CONTEXT
-${globalContextSummary}
-` : ""}
-## SAMPLE SCENE TIMELINE
-${sampleScenes}
-
-## YOUR TASK
-Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
-Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
-Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
-
-Return ONLY valid JSON matching this schema:
-{
-  "chapters": [
-    {
-      "chapterIndex": 1,
-      "title": "Meaningful Chapter Title",
-      "purpose": "Narrative purpose",
-      "startSceneIndex": 1,
-      "endSceneIndex": 25,
-      "sequences": [
-        {
-          "sequenceIndex": 1,
-          "title": "Sequence title",
-          "startSceneIndex": 1,
-          "endSceneIndex": 12
-        }
-      ]
-    }
-  ]
-}`;
-  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
-    const model = modelChain[attempt];
-    try {
-      onProgress?.(`Generating story arc outline (${model})...`, 0.2);
-      const res = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 4096
-        }
-      });
-      const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      const data = JSON.parse(clean);
-      if (data.chapters && data.chapters.length >= 2) {
-        const covered = /* @__PURE__ */ new Set();
-        let valid = true;
-        for (const ch of data.chapters) {
-          if (!ch.sequences || ch.sequences.length === 0) {
-            valid = false;
-            break;
-          }
-          for (const seq of ch.sequences) {
-            if (seq.startSceneIndex > seq.endSceneIndex) {
-              valid = false;
-              break;
-            }
-            for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
-              if (covered.has(idx)) {
-                valid = false;
-                break;
-              }
-              covered.add(idx);
-            }
-          }
-        }
-        if (valid && covered.size === skeletons.length && !skeletons.some((s) => !covered.has(s.sceneIndex))) {
-          recordModelSuccess(model);
-          logger.info(`[PLAN] Gemini chapter outline successfully generated: ${data.chapters.length} chapters`);
-          return data.chapters;
-        }
-      }
-    } catch (err) {
-      const { kind } = classifyGeminiErrorKind(err);
-      recordModelFailure(model, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = modelChain[attempt + 1];
-        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic outline fallback"}.`);
-      } else {
-        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
-      }
-    }
-  }
-  logger.info("[PLAN] Using algorithmic chapter outline fallback");
-  return buildAlgorithmicOutline(skeletons, totalDuration);
-}
-function buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles) {
-  const hasLocalMedia = mediaFiles.length > 0;
-  const mediaList = hasLocalMedia ? [
-    ...mediaFiles.filter((m) => m.type === "video").map((v) => `  VIDEO: ${v.filename}`),
-    ...mediaFiles.filter((m) => m.type === "image").map((i) => `  IMAGE: ${i.filename}`)
-  ].join("\n") : "";
-  const mediaSection = hasLocalMedia ? `## AVAILABLE LOCAL MEDIA FILES (Match exact filename to localAsset if appropriate, otherwise null):
-${mediaList}
-` : `## MEDIA MODE: STOCK SEARCH ONLY
-No local media files. Set localAsset to null for all scenes. Default mediaType to "video".
-`;
-  const scenesJson = JSON.stringify(
-    batchScenes.map((s) => ({
-      sceneIndex: s.sceneIndex,
-      startTime: s.startTime,
-      endTime: s.endTime,
-      duration: s.duration,
-      narrativeText: s.narrativeText,
-      transcriptSegmentIds: s.transcriptSegmentIds
-    })),
-    null,
-    2
-  );
-  return `You are enriching a PRE-DETERMINED documentary scene timeline.
-
-CRITICAL RULES:
-- Do not add scenes.
-- Do not remove scenes.
-- Do not merge scenes.
-- Do not split scenes.
-- Do not renumber scenes.
-- Return exactly one result for every provided sceneIndex.
-- Keep results in the same order.
-- Only provide visual metadata.
-- Each visualIntent must describe one visible concept (3-10 words).
-- Search queries must remain visually searchable (3-5 queries per scene, each query 2-6 words).
-- Do not use abstract narration sentences as stock queries.
-  BAD:  "family has to borrow money to cover funeral expenses"
-  GOOD: ["worried family bills", "financial stress loan", "credit card bills debt"]
-- Maintain global documentary context across all batches.
-- Avoid repeating the same stock concept for consecutive scenes.
-- Prefer real-life documentary footage.
-- Use transitionIn="cut" for most scenes. Use dissolve/fade sparingly.
-- Vary shotType ("wide", "medium", "close-up", "abstract") across consecutive scenes.
-- Hook scenes should use visually strong and specific footage.
-- mediaType must be "video" or "image" (default "video").
-
-${globalContextSummary ? `## GLOBAL DOCUMENTARY CONTEXT
-${globalContextSummary}
-` : ""}
-${mediaSection}
-## SCENES TO ENRICH (${batchScenes.length} scenes)
-${scenesJson}
-
-Return ONLY valid JSON array matching this exact schema:
-[
-  {
-    "sceneIndex": 1,
-    "visualIntent": "3-10 words visual description",
-    "visualNote": "Director suggestion for visual tone and camera angle",
-    "searchQueries": ["short query 1", "short query 2", "short query 3"],
-    "mediaType": "video",
-    "transitionIn": "cut",
-    "energyLevel": "medium",
-    "shotType": "medium",
-    "localAsset": null
-  }
-]`;
-}
-async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, onProgress) {
-  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
-  const enrichedMap = /* @__PURE__ */ new Map();
-  let activeModelIndex = 0;
-  let lastError = "";
-  let successModel = modelChain[0];
-  let usedFallback = false;
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    const currentModel = modelChain[activeModelIndex];
-    try {
-      onProgress?.(
-        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
-        0.25 + batchIndex / totalBatches * 0.55
-      );
-      const res = await ai.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.3,
-          maxOutputTokens: 8192
-        }
-      });
-      const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      const items = JSON.parse(clean);
-      if (Array.isArray(items)) {
-        for (const item of items) {
-          if (typeof item.sceneIndex === "number") {
-            enrichedMap.set(item.sceneIndex, item);
-          }
-        }
-        recordModelSuccess(currentModel);
-        successModel = currentModel;
-        break;
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      lastError = msg;
-      const { kind } = classifyGeminiErrorKind(err);
-      recordModelFailure(currentModel, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = modelChain[activeModelIndex + 1];
-        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic fallback"}.`);
-        if (activeModelIndex + 1 < modelChain.length) {
-          activeModelIndex++;
-          continue;
-        } else {
-          break;
-        }
-      }
-      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`);
-      const isOverloaded = kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE" || msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
-      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
-        activeModelIndex++;
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      if (attempt < 4) {
-        await new Promise((r) => setTimeout(r, 2e3));
-      }
-    }
-  }
-  let fallbackCount = 0;
-  for (const skel of batchScenes) {
-    if (!enrichedMap.has(skel.sceneIndex)) {
-      fallbackCount++;
-      usedFallback = true;
-      const queries = extractVisualQueries(skel.narrativeText);
-      enrichedMap.set(skel.sceneIndex, {
-        sceneIndex: skel.sceneIndex,
-        visualIntent: queries[0] ?? "Documentary cinematic b-roll",
-        visualNote: `Visual shot: ${queries[0]}`,
-        searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
-        mediaType: "video",
-        transitionIn: "cut",
-        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
-        shotType: inferShotTypeFromText(skel.narrativeText)
-      });
-    }
-  }
-  if (fallbackCount > 0) {
-    logger.warn(
-      `[PLAN] Batch ${batchIndex + 1}: ${fallbackCount}/${batchScenes.length} scenes used algorithmic fallback (${lastError || "missing AI data"})`
-    );
-  }
-  return { enrichedMap, modelUsed: successModel, usedFallback };
-}
-function applyLocalMediaMatching(scene, localAssetSuggestion, mediaFiles) {
-  if (localAssetSuggestion && mediaFiles.length > 0) {
-    const cleanSuggestion = localAssetSuggestion.trim().toLowerCase();
-    const matched = mediaFiles.find(
-      (m) => m.filename.toLowerCase() === cleanSuggestion || m.filename.toLowerCase().includes(cleanSuggestion)
-    );
-    if (matched) {
-      scene.localAsset = matched.filename;
-      scene.mediaFile = matched.filename;
-      scene.localPath = matched.filePath;
-      const ext = path.extname(matched.filename).toLowerCase();
-      if ([".mp4", ".mov", ".webm", ".mkv", ".avi"].includes(ext)) {
-        scene.mediaType = "video";
-      } else if ([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"].includes(ext)) {
-        scene.mediaType = "image";
-      }
-      return;
-    }
-  }
-  scene.mediaFile = "";
-  scene.mediaType = "video";
-  scene.localAsset = void 0;
-}
-function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
-  const skeletons = buildSceneSkeleton(transcript, pacing);
-  const outline = buildAlgorithmicOutline(skeletons, transcript.duration);
-  const skeletonMap = /* @__PURE__ */ new Map();
-  for (const skel of skeletons) {
-    skeletonMap.set(skel.sceneIndex, skel);
-  }
-  const chapters = outline.map((ch) => ({
-    chapterIndex: ch.chapterIndex,
-    title: ch.title,
-    startTime: 0,
-    endTime: 0,
-    sequences: ch.sequences.map((seq) => {
-      const scenes = [];
-      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
-        const skel = skeletonMap.get(idx);
-        if (!skel) continue;
-        const queries = extractVisualQueries(skel.narrativeText);
-        scenes.push({
-          sceneIndex: skel.sceneIndex,
-          mediaFile: "",
-          mediaType: "video",
-          startTime: skel.startTime,
-          endTime: skel.endTime,
-          duration: skel.duration,
-          narrativeText: skel.narrativeText,
-          transcriptSegmentIds: [...skel.transcriptSegmentIds],
-          transitionIn: "cut",
-          visualNote: `Visual shot: ${queries[0]}`,
-          visualIntent: queries[0] ?? "Documentary cinematic b-roll",
-          searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
-          energyLevel: inferEnergyLevelFromText(skel.narrativeText),
-          shotType: inferShotTypeFromText(skel.narrativeText)
-        });
-      }
-      const seqStart = scenes[0]?.startTime ?? 0;
-      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0;
-      return {
-        sequenceIndex: seq.sequenceIndex,
-        title: seq.title,
-        startTime: seqStart,
-        endTime: seqEnd,
-        scenes
-      };
-    })
-  }));
-  for (const ch of chapters) {
-    const allSeqScenes = ch.sequences.flatMap((s) => s.scenes);
-    ch.startTime = allSeqScenes[0]?.startTime ?? 0;
-    ch.endTime = allSeqScenes[allSeqScenes.length - 1]?.endTime ?? 0;
-  }
-  let globalSceneIndex = 1;
-  for (const ch of chapters) {
-    for (const seq of ch.sequences) {
-      seq.scenes.sort((a, b) => a.startTime - b.startTime);
-      for (const sc of seq.scenes) {
-        sc.sceneIndex = globalSceneIndex++;
-      }
-    }
-  }
-  const allScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
-  let pacingIssues = [];
-  try {
-    const flatScenes = flattenPlanScenes({ chapters });
-    pacingIssues = analyzePacing(flatScenes);
-  } catch (err) {
-    logger.warn(`[PLAN] Algorithmic plan pacing guard warning: ${err}`);
-  }
-  const initialFlags = pacingIssues.map((issue) => ({
-    sceneId: issue.sceneId,
-    severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
-    issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
-    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type for visual variety`
-  }));
-  return {
-    projectName,
-    totalDuration: transcript.duration,
-    totalScenes: allScenes.length,
-    language: transcript.language,
-    chapters,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: "rule-based-segmenter",
-    openLoops: [],
-    motifRegistry: [],
-    retentionFlags: initialFlags
-  };
-}
-async function buildEditPlan(params) {
-  const { projectDir, apiKey, onProgress } = params;
-  const modelId = params.model ?? "gemini-3.8-flash";
-  const progress = (msg, pct) => {
-    logger.info(`[PLAN] ${msg}`);
-    onProgress?.(msg, pct);
-  };
-  progress("Loading transcript...", 0.05);
-  const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
-  if (!fs__namespace.existsSync(transcriptPath)) {
-    throw new Error("No transcript found. Run transcription first.");
-  }
-  const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-  progress("Loading media library...", 0.07);
-  const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
-  let mediaFiles = [];
-  if (fs__namespace.existsSync(mediaIndexPath)) {
-    try {
-      const rawItems = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
-      mediaFiles = rawItems.map((item) => ({
-        filePath: item.path ?? "",
-        filename: item.filename,
-        type: item.type === "video" ? "video" : "image",
-        durationSecs: item.durationSecs,
-        fps: item.fps,
-        width: item.width,
-        height: item.height
-      }));
-    } catch {
-    }
-  }
-  let scriptText = null;
-  let projectName = "Unnamed";
-  let projectPacing = "balanced";
-  try {
-    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
-    if (fs__namespace.existsSync(stateFile)) {
-      const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-      projectName = st?.name ?? "Unnamed";
-      if (st?.settings?.pacing && ["slow", "balanced", "fast", "cinematic"].includes(st.settings.pacing)) {
-        projectPacing = st.settings.pacing;
-      }
-      const scriptPathFromState = st?.inputs?.scriptPath;
-      const resolvedScriptPath = params.scriptPath ?? scriptPathFromState;
-      if (resolvedScriptPath && fs__namespace.existsSync(resolvedScriptPath)) {
-        scriptText = fs__namespace.readFileSync(resolvedScriptPath, "utf-8");
-      }
-    }
-  } catch (err) {
-    logger.warn(`Could not load script text or project settings: ${err}`);
-  }
-  progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.1);
-  const skeletons = buildSceneSkeleton(transcript, projectPacing);
-  progress(
-    `Created ${skeletons.length} scene skeletons (avg ${(transcript.duration / skeletons.length).toFixed(1)}s/scene)...`,
-    0.14
-  );
-  const cleanApiKey = normalizeApiKey(apiKey);
-  if (!cleanApiKey) {
-    logger.warn("[PLAN] No API key provided, creating algorithmic edit plan");
-    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing);
-    const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
-    fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
-    progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
-    return fallbackPlan;
-  }
-  let globalContextSummary = "";
-  try {
-    progress("Preparing global documentary context...", 0.16);
-    const ctx = await analyzeGlobalContext({
-      projectDir,
-      apiKey: cleanApiKey,
-      model: modelId,
-      scriptText,
-      transcript,
-      onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
-    });
-    globalContextSummary = [
-      `Primary Subject: ${ctx.primarySubject}`,
-      `Central Thesis: ${ctx.centralThesis}`,
-      ctx.geography?.primaryCountry ? `Geography: ${ctx.geography.primaryCountry} (${ctx.geography.primaryRegion ?? ""})` : "",
-      ctx.timeContext?.primaryPeriod ? `Period: ${ctx.timeContext.primaryPeriod}` : "",
-      ctx.exactTopicAnchors?.length ? `Topic Anchors: ${ctx.exactTopicAnchors.join(", ")}` : "",
-      ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(", ")}` : "",
-      ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ""
-    ].filter(Boolean).join("\n");
-  } catch (err) {
-    logger.warn(`[PLAN] Global context extraction failed: ${err}`);
-  }
-  const ai = new genai.GoogleGenAI({
-    apiKey: cleanApiKey,
-    httpOptions: { apiVersion: "v1beta" }
-  });
-  if (modelId && DEPRECATED_TEXT_MODELS.has(modelId)) {
-    logger.warn(`[GeminiModel] Saved model ${modelId} is unavailable for this account.`);
-    logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(modelId)}.`);
-  }
-  const fallbackModelChain = getAvailableModelsForTask("planning", modelId);
-  progress("Creating chapter and sequence outline...", 0.2);
-  const outline = await generateChapterOutlineWithGemini(
-    ai,
-    fallbackModelChain,
-    skeletons,
-    globalContextSummary,
-    transcript.duration,
-    (m, p) => progress(m, p)
-  );
-  const BATCH_SIZE = 20;
-  const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE);
-  const allEnrichedMap = /* @__PURE__ */ new Map();
-  let hadAnyBatchFallback = false;
-  let primaryModelUsed = fallbackModelChain[0];
-  for (let b = 0; b < totalBatches; b++) {
-    const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
-    const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
-      ai,
-      fallbackModelChain,
-      batchScenes,
-      globalContextSummary,
-      mediaFiles,
-      b,
-      totalBatches,
-      progress
-    );
-    for (const [idx, data] of enrichedMap.entries()) {
-      allEnrichedMap.set(idx, data);
-    }
-    if (usedFallback) hadAnyBatchFallback = true;
-    if (b === 0) primaryModelUsed = modelUsed;
-  }
-  progress("Assembling master edit plan...", 0.85);
-  const skeletonMap = /* @__PURE__ */ new Map();
-  for (const skel of skeletons) {
-    skeletonMap.set(skel.sceneIndex, skel);
-  }
-  const chapters = outline.map((ch) => ({
-    chapterIndex: ch.chapterIndex,
-    title: ch.title,
-    startTime: 0,
-    endTime: 0,
-    sequences: ch.sequences.map((seq) => {
-      const scenes = [];
-      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
-        const skel = skeletonMap.get(idx);
-        if (!skel) continue;
-        const aiData = allEnrichedMap.get(skel.sceneIndex);
-        const rawQueries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
-        const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)));
-        const sc = {
-          sceneIndex: skel.sceneIndex,
-          // will be globally normalized below
-          mediaFile: "",
-          mediaType: aiData?.mediaType === "image" ? "image" : "video",
-          startTime: skel.startTime,
-          endTime: skel.endTime,
-          duration: skel.duration,
-          narrativeText: skel.narrativeText,
-          transcriptSegmentIds: [...skel.transcriptSegmentIds],
-          transitionIn: aiData?.transitionIn ?? "cut",
-          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
-          visualIntent: aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll",
-          searchQueries: queries,
-          energyLevel: aiData?.energyLevel ?? inferEnergyLevelFromText(skel.narrativeText),
-          shotType: aiData?.shotType ?? inferShotTypeFromText(skel.narrativeText)
-        };
-        applyLocalMediaMatching(sc, aiData?.localAsset, mediaFiles);
-        scenes.push(sc);
-      }
-      const seqStart = scenes[0]?.startTime ?? 0;
-      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0;
-      return {
-        sequenceIndex: seq.sequenceIndex,
-        title: seq.title,
-        startTime: seqStart,
-        endTime: seqEnd,
-        scenes
-      };
-    })
-  }));
-  for (const ch of chapters) {
-    const chScenes = ch.sequences.flatMap((s) => s.scenes);
-    ch.startTime = chScenes[0]?.startTime ?? 0;
-    ch.endTime = chScenes[chScenes.length - 1]?.endTime ?? 0;
-  }
-  let globalSceneIndex = 1;
-  for (const ch of chapters) {
-    for (const seq of ch.sequences) {
-      seq.scenes.sort((a, b) => a.startTime - b.startTime);
-      for (const sc of seq.scenes) {
-        sc.sceneIndex = globalSceneIndex++;
-      }
-    }
-  }
-  const allFinalScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
-  const sceneIds = allFinalScenes.map((s) => s.sceneIndex);
-  if (new Set(sceneIds).size !== sceneIds.length) {
-    throw new Error("Duplicate global sceneIndex detected after assembly");
-  }
-  progress("Validating transcript coverage...", 0.88);
-  const coverageResult = validateScenePlanCoverage(transcript, allFinalScenes);
-  if (!coverageResult.valid) {
-    logger.error("[PLAN] Transcript coverage validation encountered issues:", { errors: coverageResult.errors });
-    if (coverageResult.missingSegmentIds.length > 0) {
-      throw new Error(`Transcript coverage validation failed: missing segments [${coverageResult.missingSegmentIds.join(", ")}]`);
-    }
-  }
-  progress("Running Pacing Guard analysis...", 0.9);
-  let pacingIssues = [];
-  try {
-    const flatScenes = flattenPlanScenes({ chapters });
-    pacingIssues = analyzePacing(flatScenes);
-    logger.info(`[PLAN] Pacing Guard: ${pacingIssues.length} issues found, scenes annotated in-place`);
-  } catch (pgErr) {
-    logger.warn(`[PLAN] Pacing Guard error (non-fatal): ${pgErr instanceof Error ? pgErr.message : String(pgErr)}`);
-  }
-  const initialFlags = pacingIssues.map((issue) => ({
-    sceneId: issue.sceneId,
-    severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
-    issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
-    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type to "${allFinalScenes[Number(issue.sceneId) - 1]?.shotType ?? "wide"}" for visual variety`
-  }));
-  const finalModelUsed = hadAnyBatchFallback ? `${primaryModelUsed} + partial-fallback` : primaryModelUsed;
-  const plan = {
-    projectName,
-    totalDuration: transcript.duration,
-    totalScenes: allFinalScenes.length,
-    language: transcript.language,
-    chapters,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    modelUsed: finalModelUsed,
-    openLoops: [],
-    motifRegistry: [],
-    retentionFlags: initialFlags
-  };
-  progress("Saving master edit plan...", 0.95);
-  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  logger.info("Edit plan saved", {
-    chapters: plan.chapters.length,
-    scenes: plan.totalScenes,
-    pacingIssues: pacingIssues.length,
-    model: finalModelUsed
-  });
-  progress(
-    `Done — ${plan.chapters.length} chapters, ${plan.totalScenes} scenes (${(plan.totalDuration / plan.totalScenes).toFixed(1)}s/scene), ${initialFlags.length} pacing flags`,
-    1
-  );
-  return plan;
-}
-const CONFIG_PATH = path.join(
-  electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd(),
-  "app-config.json"
-);
-function loadConfig() {
-  try {
-    if (fs__namespace.existsSync(CONFIG_PATH)) {
-      const cfg = JSON.parse(fs__namespace.readFileSync(CONFIG_PATH, "utf-8"));
-      if (cfg.preferredModel) {
-        cfg.preferredModel = normalizePreferredTextModel(cfg.preferredModel);
-      }
-      return cfg;
-    }
-  } catch {
-    logger.warn("Failed to read app config, using defaults");
-  }
-  return {};
-}
-function saveConfig(config) {
-  try {
-    fs__namespace.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2), "utf-8");
-    logger.info("App config saved", { hasGeminiKey: !!config.geminiApiKey });
-  } catch (err) {
-    logger.error(`Failed to save config: ${err}`);
-  }
-}
-function registerPlannerHandlers(ipcMain) {
-  ipcMain.handle(IPC_CHANNELS.CONFIG_SET, (_event, key, value) => {
-    const config = loadConfig();
-    const cleanValue = normalizeApiKey(value);
-    config[key] = cleanValue;
-    saveConfig(config);
-    return { success: true };
-  });
-  ipcMain.handle(IPC_CHANNELS.CONFIG_GET, (_event, key) => {
-    const config = loadConfig();
-    return config[key] ?? null;
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.CONFIG_VERIFY_KEY,
-    async (_event, params) => {
-      const { key, configKey, model } = params;
-      if (configKey === "geminiApiKey" || !configKey) {
-        return await verifyGeminiApiKey(key, model);
-      }
-      const clean = normalizeApiKey(key);
-      if (!clean) {
-        return { valid: false, status: "EMPTY", message: "API key is empty" };
-      }
-      return { valid: true, status: "SAVED_NOT_VERIFIED" };
-    }
-  );
-  ipcMain.handle(IPC_CHANNELS.PLAN_GET, (_event, projectDir) => {
-    const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-    if (!fs__namespace.existsSync(planPath)) return null;
-    try {
-      return JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    } catch {
-      return null;
-    }
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.PLAN_GENERATE,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const config = loadConfig();
-      const apiKey = normalizeApiKey(config.geminiApiKey ?? "");
-      if (!apiKey) {
-        return { success: false, error: "Gemini API key not configured. Go to Settings to add it." };
-      }
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.PLAN_PROGRESS, { message, progress });
-      };
+function readJsonWithRecovery(filePath, validate = () => true) {
+  const tmpPath = `${filePath}.tmp`;
+  const primary = tryParse(filePath);
+  if (primary !== null && validate(primary)) {
+    if (fs__namespace.existsSync(tmpPath)) {
       try {
-        const plan = await buildEditPlan({
-          projectDir: params.projectDir,
-          apiKey,
-          model: params.model,
-          onProgress: sendProgress
-        });
-        return { success: true, plan };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Edit planning failed: ${msg}`);
-        return { success: false, error: msg };
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
       }
     }
-  );
+    return primary;
+  }
+  const tmp = tryParse(tmpPath);
+  if (tmp !== null && validate(tmp)) {
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+    } catch {
+    }
+    return tmp;
+  }
+  return null;
+}
+function isValidManifest(v) {
+  const m = v;
+  return !!m && typeof m === "object" && m.schemaVersion === 2 && typeof m.renderFingerprint === "string" && Array.isArray(m.scenes) && Array.isArray(m.overlayBlocks) && !!m.assembly && !!m.audioMix;
+}
+function writeManifest(manifestPath, manifest) {
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  recomputeManifestProgress(manifest);
+  writeJsonAtomic(manifestPath, manifest);
+}
+function readManifest(manifestPath) {
+  return readJsonWithRecovery(manifestPath, isValidManifest);
+}
+function metaPathFor(artifactPath) {
+  return artifactPath.replace(/\.mp4$/i, "") + ".meta.json";
+}
+function writeArtifactMeta(artifactPath, meta) {
+  writeJsonAtomic(metaPathFor(artifactPath), meta);
+}
+function readArtifactMeta(artifactPath) {
+  return readJsonWithRecovery(metaPathFor(artifactPath), (v) => {
+    const m = v;
+    return !!m && typeof m.fingerprint === "string";
+  });
+}
+const DEFAULT_RENDER_PREFERENCES = {
+  resourceProfile: "balanced",
+  videoEncoder: "software-h264",
+  remotionHardwareAcceleration: false,
+  autoResumeAfterCrash: true,
+  maxCacheBytes: 30 * 1024 * 1024 * 1024
+};
+function prefsPath() {
+  const base = electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd();
+  return path__namespace.join(base, "render-preferences.json");
+}
+function normalizeRenderPreferences(raw) {
+  const r = raw ?? {};
+  return {
+    resourceProfile: normalizeResourceProfile(r.resourceProfile),
+    videoEncoder: r.videoEncoder === "videotoolbox-h264" ? "videotoolbox-h264" : "software-h264",
+    remotionHardwareAcceleration: r.remotionHardwareAcceleration === true,
+    autoResumeAfterCrash: r.autoResumeAfterCrash !== false,
+    maxCacheBytes: typeof r.maxCacheBytes === "number" && r.maxCacheBytes > 1024 * 1024 * 1024 ? r.maxCacheBytes : DEFAULT_RENDER_PREFERENCES.maxCacheBytes
+  };
+}
+function loadRenderPreferences() {
+  try {
+    const p = prefsPath();
+    if (!fs__namespace.existsSync(p)) return { ...DEFAULT_RENDER_PREFERENCES };
+    return normalizeRenderPreferences(readJsonWithRecovery(p));
+  } catch {
+    return { ...DEFAULT_RENDER_PREFERENCES };
+  }
+}
+function saveRenderPreferences(patch) {
+  const next = normalizeRenderPreferences({ ...loadRenderPreferences(), ...patch });
+  writeJsonAtomic(prefsPath(), next);
+  return next;
+}
+class HardwareEncoderError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HardwareEncoderError";
+  }
+}
+function bitrateForCrf(width, height, fps, crf) {
+  const bpp = 0.16 * Math.pow(0.89, crf - 20);
+  const bps = width * height * Math.max(1, fps) * bpp;
+  return Math.round(Math.min(8e7, Math.max(1e6, bps)));
+}
+function softwareEncoder() {
+  return {
+    mode: "software-h264",
+    key: "libx264",
+    videoArgs: (crf, preset) => ["-c:v", "libx264", "-preset", preset, "-crf", String(crf)]
+  };
+}
+function videoToolboxEncoder(width, height, fps) {
+  return {
+    mode: "videotoolbox-h264",
+    key: `h264_videotoolbox:${width}x${height}@${fps}`,
+    videoArgs: (crf) => {
+      const br = bitrateForCrf(width, height, fps, crf);
+      return [
+        "-c:v",
+        "h264_videotoolbox",
+        "-b:v",
+        String(br),
+        "-maxrate",
+        String(Math.round(br * 1.5)),
+        "-bufsize",
+        String(Math.round(br * 2)),
+        "-profile:v",
+        "high",
+        "-allow_sw",
+        "0"
+      ];
+    }
+  };
+}
+let vtProbeResult = null;
+function listEncoders() {
+  return new Promise((resolve) => {
+    const proc = cp.spawn(getFfmpegBinary(), ["-hide_banner", "-encoders"], { windowsHide: true });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      if (out.length < 1024 * 1024) out += d.toString();
+    });
+    proc.on("error", () => resolve(""));
+    proc.on("close", () => resolve(out));
+  });
+}
+async function probeVideoToolbox(force = false) {
+  if (vtProbeResult && !force) return vtProbeResult;
+  if (process.platform !== "darwin") {
+    vtProbeResult = { ok: false, reason: "VideoToolbox is only available on macOS" };
+    return vtProbeResult;
+  }
+  const encoders = await listEncoders();
+  if (!/\bh264_videotoolbox\b/.test(encoders)) {
+    vtProbeResult = { ok: false, reason: "h264_videotoolbox not present in this FFmpeg build" };
+    return vtProbeResult;
+  }
+  const tmp = path__namespace.join(os__namespace.tmpdir(), `vt-probe-${process.pid}-${Date.now()}.mp4`);
+  try {
+    await ffmpegRun$4([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=size=320x240:rate=30:duration=1",
+      ...videoToolboxEncoder(320, 240, 30).videoArgs(20, "fast"),
+      "-pix_fmt",
+      "yuv420p",
+      tmp
+    ], { phase: "vt-probe" });
+    const probe = await probeMedia$1(tmp);
+    vtProbeResult = probe && probe.hasVideo && probe.width === 320 && probe.frames !== 0 ? { ok: true } : { ok: false, reason: "sample encode produced an invalid file" };
+  } catch (err) {
+    vtProbeResult = { ok: false, reason: `sample encode failed: ${String(err).slice(0, 200)}` };
+  } finally {
+    try {
+      if (fs__namespace.existsSync(tmp)) fs__namespace.unlinkSync(tmp);
+    } catch {
+    }
+  }
+  logger.info(`[VideoEncoder] VideoToolbox probe: ${JSON.stringify(vtProbeResult)}`);
+  return vtProbeResult;
+}
+async function resolveEncoder(requested, geometry, warnings) {
+  if (requested !== "videotoolbox-h264") return softwareEncoder();
+  const probe = await probeVideoToolbox();
+  if (!probe.ok) {
+    warnings.push(`Apple VideoToolbox unavailable (${probe.reason}); using Software H.264.`);
+    return softwareEncoder();
+  }
+  return videoToolboxEncoder(geometry.width, geometry.height, geometry.fps);
+}
+function asHardwareError(err, profile) {
+  if (profile.mode === "videotoolbox-h264" && !err?.name?.includes("Abort")) {
+    return new HardwareEncoderError(`VideoToolbox encode failed: ${String(err?.message ?? err).slice(0, 300)}`);
+  }
+  return err;
 }
 let cachedBundleUrl = null;
 async function getBundle(onProgress) {
@@ -3171,14 +5244,24 @@ async function renderCaptionsOverlay(options) {
     onBundleProgress,
     onRenderProgress
   } = options;
+  if (options.signal?.aborted) throw new RenderCancelledError();
   fs__namespace.mkdirSync(path__namespace.dirname(outputPath), { recursive: true });
   const bundleUrl = await getBundle(onBundleProgress);
   const durationInFrames = Math.ceil(videoDurationInSeconds * fps);
-  logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)`);
+  const defaults = computeResourceLimits(loadRenderPreferences().resourceProfile);
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? defaults.remotionConcurrency));
+  const offthreadVideoThreads = Math.max(1, Math.floor(options.offthreadVideoThreads ?? defaults.offthreadVideoThreads));
+  const mediaCacheSizeInBytes = options.mediaCacheSizeInBytes ?? defaults.mediaCacheSizeInBytes;
+  const offthreadVideoCacheSizeInBytes = options.offthreadVideoCacheSizeInBytes ?? defaults.offthreadVideoCacheSizeInBytes;
+  const hardwareAcceleration = options.hardwareAcceleration === "if-possible" && process.platform === "darwin" ? "if-possible" : "disable";
+  logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)` + (options.frameRange ? ` range=${options.frameRange[0]}-${options.frameRange[1]}` : ""));
   logger.info(`[RemotionRenderer] Resolution: ${resolution.width}x${resolution.height}`);
   logger.info(`[RemotionRenderer] Phrases: ${captionPlan?.phrases?.length ?? 0}`);
   logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`);
   logger.info(`[RemotionRenderer] VisualGrammar: ${visualGrammar?.length ?? 0}`);
+  logger.info(
+    `[RemotionRenderer] concurrency=${concurrency} offthreadThreads=${offthreadVideoThreads} mediaCache=${Math.round(mediaCacheSizeInBytes / 1048576)}MB offthreadCache=${Math.round(offthreadVideoCacheSizeInBytes / 1048576)}MB hw=${hardwareAcceleration}`
+  );
   const inputProps = {
     captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
     proofVisuals: proofVisuals ?? [],
@@ -3189,27 +5272,61 @@ async function renderCaptionsOverlay(options) {
     id: "CaptionsOverlay",
     inputProps
   });
-  await renderer.renderMedia({
-    composition: {
-      ...composition,
-      durationInFrames,
-      fps,
-      width: resolution.width,
-      height: resolution.height
-    },
-    serveUrl: bundleUrl,
-    codec: "h264",
-    outputLocation: outputPath,
-    inputProps,
-    onProgress: ({ progress }) => {
-      const pct = Math.round(progress * 100);
-      onRenderProgress?.(progress);
-      logger.debug(`[RemotionRenderer] Render: ${pct}%`);
+  const runOnce = async (hw) => {
+    const { cancelSignal, cancel } = renderer.makeCancelSignal();
+    const onAbort = () => cancel();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      await renderer.renderMedia({
+        composition: {
+          ...composition,
+          durationInFrames,
+          fps,
+          width: resolution.width,
+          height: resolution.height
+        },
+        serveUrl: bundleUrl,
+        codec: "h264",
+        outputLocation: outputPath,
+        inputProps,
+        frameRange: options.frameRange ?? null,
+        concurrency,
+        offthreadVideoThreads,
+        mediaCacheSizeInBytes,
+        offthreadVideoCacheSizeInBytes,
+        hardwareAcceleration: hw,
+        // Hardware encoders do not support CRF — use an equivalent bitrate instead
+        ...hw === "if-possible" ? { videoBitrate: String(bitrateForCrf(resolution.width, resolution.height, fps, 18)) } : {},
+        cancelSignal,
+        onProgress: ({ progress }) => {
+          const pct = Math.round(progress * 100);
+          onRenderProgress?.(progress);
+          logger.debug(`[RemotionRenderer] Render: ${pct}%`);
+        }
+      });
+    } catch (err) {
+      if (options.signal?.aborted) throw new RenderCancelledError();
+      throw err;
+    } finally {
+      options.signal?.removeEventListener("abort", onAbort);
     }
-  });
+  };
+  let hardwareFallback = false;
+  if (hardwareAcceleration === "if-possible") {
+    try {
+      await runOnce("if-possible");
+    } catch (err) {
+      if (options.signal?.aborted) throw err;
+      logger.warn(`[RemotionRenderer] Hardware-accelerated render failed, retrying with software: ${String(err)}`);
+      hardwareFallback = true;
+      await runOnce("disable");
+    }
+  } else {
+    await runOnce("disable");
+  }
   logger.info(`[RemotionRenderer] Overlay complete: ${outputPath}`);
+  return { hardwareFallback };
 }
-const ffmpegPath$3 = require("ffmpeg-static");
 function normalizeTransitionType(raw) {
   if (!raw || typeof raw !== "string") return "dissolve";
   const clean = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
@@ -3465,17 +5582,74 @@ async function probeVideoDuration(filePath) {
     return null;
   }
 }
-function ffmpegRun$3(args) {
-  return new Promise((resolve, reject2) => {
-    const proc = cp.spawn(ffmpegPath$3, args, { windowsHide: true });
-    const stderr = [];
-    proc.stderr.on("data", (d) => stderr.push(d.toString()));
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join("")}`));
+function ffmpegRun$3(args, options) {
+  return ffmpegRun$4(args, options ?? {});
+}
+function planTransitionSegments(scenes, transitions, fps, maxScenesPerSegment) {
+  const count = scenes.length;
+  const starts = [];
+  let acc = 0;
+  for (const s of scenes) {
+    starts.push(acc);
+    acc += s.duration;
+  }
+  const total = Math.round(acc * 1e4) / 1e4;
+  const totalFrames = Math.ceil(total * fps - 1e-6);
+  const splitScenes = [];
+  const maxPer = Math.max(2, Math.floor(maxScenesPerSegment));
+  let lastSplitScene = 0;
+  for (let k = 1; k < count; k++) {
+    if (k - lastSplitScene < maxPer) continue;
+    const incoming = transitions[k - 1];
+    const dIn = incoming && incoming.type !== "cut" ? incoming.duration : 0;
+    const pureStart = starts[k] + dIn;
+    const pureEnd = k + 1 < count ? starts[k + 1] : total;
+    const frame = Math.ceil(pureStart * fps - 1e-6) + 1;
+    if (frame / fps >= pureEnd - 1 / fps || frame >= totalFrames) continue;
+    splitScenes.push({ scene: k, frame });
+    lastSplitScene = k;
+  }
+  const segments = [];
+  let curScene = 0;
+  let curFrame = 0;
+  for (let i = 0; i <= splitScenes.length; i++) {
+    const next = splitScenes[i];
+    const endFrame = next ? next.frame : totalFrames;
+    const lastScene = next ? next.scene : count - 1;
+    segments.push({
+      segmentIndex: segments.length + 1,
+      firstScene: curScene,
+      lastScene,
+      shiftSec: starts[curScene],
+      startSec: curFrame / fps,
+      endSec: next ? endFrame / fps : total,
+      startFrame: curFrame,
+      endFrameExclusive: endFrame
     });
-    proc.on("error", reject2);
-  });
+    if (next) {
+      curScene = next.scene;
+      curFrame = next.frame;
+    }
+  }
+  return segments;
+}
+function buildSegmentFilterGraph(allScenes, allTransitions, seg, fps) {
+  const subScenes = allScenes.slice(seg.firstScene, seg.lastScene + 1);
+  const subTransitions = allTransitions.slice(seg.firstScene, seg.lastScene);
+  let body;
+  if (subScenes.length === 1) {
+    body = `[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[seg0]`;
+  } else {
+    const { filterComplex } = buildTransitionFilterGraph(subScenes, subTransitions, fps);
+    const lines = filterComplex.split(";\n");
+    lines.pop();
+    const lastLabelMatch = /(\[[a-z]\d+\])$/.exec(lines[lines.length - 1]);
+    const lastLabel = lastLabelMatch ? lastLabelMatch[1] : "[v0]";
+    lines.push(`${lastLabel}null[seg0]`);
+    body = lines.join(";\n");
+  }
+  return `${body};
+[seg0]setpts=PTS+${seg.shiftSec.toFixed(6)}/TB,trim=start=${seg.startSec.toFixed(6)}:end=${seg.endSec.toFixed(6)},setpts=PTS-STARTPTS[vout]`;
 }
 async function concatSceneClipsWithTransitions(params) {
   const {
@@ -3508,35 +5682,79 @@ async function concatSceneClipsWithTransitions(params) {
     return false;
   }
   onProgress?.("Applying scene transitions...", 0.78);
-  const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps);
-  logger.debug(`[Transitions] FFmpeg filter_complex:
+  const codecArgs = params.videoCodecArgs ?? ["-c:v", "libx264", "-preset", "fast", "-crf", "20"];
+  const maxPer = params.maxScenesPerSegment ?? 0;
+  const useSegments = !!params.segmentRunner && maxPer >= 2 && sceneClips.length > maxPer + 1;
+  if (!useSegments) {
+    const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps);
+    logger.debug(`[Transitions] FFmpeg filter_complex:
 ${filterComplex}`);
-  const inputArgs = [];
-  for (const clip of sceneClips) {
-    inputArgs.push("-i", clip);
+    const inputArgs = [];
+    for (const clip of sceneClips) {
+      inputArgs.push("-i", clip);
+    }
+    const args = [
+      "-y",
+      ...inputArgs,
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "[vout]",
+      ...codecArgs,
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      String(fps),
+      "-movflags",
+      "+faststart",
+      rawVideoPath
+    ];
+    await ffmpegRun$3(args, params.ffmpegOptions);
+  } else {
+    const segments = planTransitionSegments(scenes, transitions, fps, maxPer);
+    logger.info(`[Transitions] Segmented assembly: ${segments.length} segments (≤${maxPer + 1} inputs each)`);
+    const segmentFiles = [];
+    for (const seg of segments) {
+      onProgress?.(
+        `Assembling scene segment ${seg.segmentIndex}/${segments.length}...`,
+        0.78 + seg.segmentIndex / segments.length * 0.05
+      );
+      const file = await params.segmentRunner(seg, async (outputPath) => {
+        const inputArgs = [];
+        for (let i = seg.firstScene; i <= seg.lastScene; i++) inputArgs.push("-i", sceneClips[i]);
+        const filterComplex = buildSegmentFilterGraph(scenes, transitions, seg, fps);
+        await ffmpegRun$3([
+          "-y",
+          ...inputArgs,
+          "-filter_complex",
+          filterComplex,
+          "-map",
+          "[vout]",
+          ...codecArgs,
+          "-pix_fmt",
+          "yuv420p",
+          "-r",
+          String(fps),
+          outputPath
+        ], params.ffmpegOptions);
+      });
+      segmentFiles.push(file);
+    }
+    const listPath = path__namespace.join(params.tmpDir, `assembly-concat-${Date.now()}.txt`);
+    fs__namespace.writeFileSync(
+      listPath,
+      segmentFiles.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f.replace(/'/g, "'\\''")}'`).join("\n"),
+      "utf-8"
+    );
+    try {
+      await ffmpegRun$3(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", rawVideoPath], params.ffmpegOptions);
+    } finally {
+      try {
+        fs__namespace.unlinkSync(listPath);
+      } catch {
+      }
+    }
   }
-  const args = [
-    "-y",
-    ...inputArgs,
-    "-filter_complex",
-    filterComplex,
-    "-map",
-    "[vout]",
-    "-c:v",
-    "libx264",
-    "-preset",
-    "fast",
-    "-crf",
-    "20",
-    "-pix_fmt",
-    "yuv420p",
-    "-r",
-    String(fps),
-    "-movflags",
-    "+faststart",
-    rawVideoPath
-  ];
-  await ffmpegRun$3(args);
   const outputDuration = await probeVideoDuration(rawVideoPath);
   if (outputDuration !== null) {
     const diff = Math.abs(outputDuration - expectedDuration);
@@ -3861,6 +6079,14 @@ function resolveVisualBeats(scene, ctx, level) {
     const seed = seedInt(scene.sceneIndex, 2);
     targetBeats = seed < 60 ? 1 : 2;
   }
+  const hint = scene.retentionHint;
+  if (hint) {
+    if (hint.beatPacing === "fast" && isLongEnough) {
+      targetBeats = Math.min(cfg.maxBeatsPerScene, Math.max(targetBeats, 2));
+    } else if (hint.beatPacing === "slow") {
+      targetBeats = duration >= 9 ? Math.min(targetBeats, 2) : 1;
+    }
+  }
   targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
   if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
     targetBeats = Math.min(targetBeats, 1);
@@ -3881,12 +6107,13 @@ function resolveVisualBeats(scene, ctx, level) {
       beatPurpose = "establish";
     } else if (i === 1) {
       const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
-      if (hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+      if (cfg.proofVisualAllowed && hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+        const maxPvDur = hint?.proofPriority === "high" ? 3.5 : 2.5;
         const pv = detectProofVisual(
           scene.narrativeText,
           sceneId,
           relStart,
-          Math.min(beatDuration, 2.5)
+          Math.min(beatDuration, maxPvDur)
         );
         if (pv) {
           proofVisualFound = pv;
@@ -3895,7 +6122,7 @@ function resolveVisualBeats(scene, ctx, level) {
         }
       }
       if (beatType === "main_shot") {
-        {
+        if (cfg.cropAllowed) {
           const cropParams = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i);
           if (cropParams) {
             beatType = "detail_crop";
@@ -3906,13 +6133,14 @@ function resolveVisualBeats(scene, ctx, level) {
       }
     } else {
       const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
-      if (scene.isPatternInterrupt && timeSinceInterrupt >= cfg.patternInterruptCooldown) {
+      const shouldTriggerInterrupt = (scene.isPatternInterrupt || hint?.patternInterrupt) && timeSinceInterrupt >= cfg.patternInterruptCooldown;
+      if (shouldTriggerInterrupt) {
         beatType = "pattern_interrupt";
         beatPurpose = "reset_attention";
       } else {
         beatType = "secondary_asset";
         beatPurpose = "explain";
-        {
+        if (cfg.cropAllowed) {
           crop = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i + 5);
         }
       }
@@ -3964,11 +6192,21 @@ function createDefaultContext() {
     consecutiveSameShot: 0,
     consecutiveStrongEffect: 0,
     accumulatedVisualLoad: 0,
-    sceneIndex: 0
+    sceneIndex: 0,
+    timeSinceLastRehook: 999,
+    timeSinceLastPatternInterrupt: 999,
+    recentNoveltyScores: [],
+    recentSceneRoles: [],
+    recentMotionPresets: [],
+    recentVisualCategories: [],
+    openLoopIds: []
   };
 }
 function resolveSceneRetention(scene, ctx, settings) {
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  if (!settings.enabled) {
+    return makeSingleBeatDecision(sceneId, scene);
+  }
   try {
     return _resolveRetention(scene, ctx, settings);
   } catch (err) {
@@ -4052,10 +6290,27 @@ function updateRetentionContext(ctx, scene, decision) {
   ctx.timeSinceLastStrongEffect += scene.duration;
   ctx.timeSinceLastProofVisual += scene.duration;
   ctx.timeSinceLastHumanShot += scene.duration;
+  const hint = scene.retentionHint;
+  if (hint?.role === "re-hook" || hint?.role === "hook") {
+    ctx.timeSinceLastRehook = 0;
+  } else {
+    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration;
+  }
+  if (hint?.patternInterrupt || scene.isPatternInterrupt) {
+    ctx.timeSinceLastPatternInterrupt = 0;
+  } else {
+    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
+  }
+  if (hint?.noveltyScore !== void 0) {
+    ctx.recentNoveltyScores = [...ctx.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
+  }
+  if (hint?.role) {
+    ctx.recentSceneRoles = [...ctx.recentSceneRoles || [], hint.role].slice(-10);
+  }
   if (decision.proofVisual) {
     ctx.timeSinceLastProofVisual = 0;
   }
-  if (scene.isPatternInterrupt) {
+  if (scene.isPatternInterrupt || hint?.patternInterrupt) {
     ctx.timeSinceLastStrongEffect = 0;
     ctx.previousPatternInterruptType = "pattern_interrupt";
   }
@@ -4076,7 +6331,7 @@ const PROOF_REGEX = /\$[\d,]+|\d+\.?\d*\s*%|\b(1[0-9]{3}|20[0-9]{2})\b|\d{1,3}(,
 function makeFlag(sceneId, flagType, severity, description, suggestion) {
   return { sceneId, flagType, severity, description, suggestion };
 }
-function runRetentionQA(scenes) {
+function runRetentionQA(scenes, retentionPlan) {
   const flags = [];
   for (const scene of scenes) {
     const sceneId = scene.sceneId ?? String(scene.sceneIndex);
@@ -4160,6 +6415,89 @@ function runRetentionQA(scenes) {
       noResetSeconds = 0;
     }
   }
+  if (retentionPlan) {
+    const plans = retentionPlan.scenes || [];
+    for (let i = 2; i < plans.length; i++) {
+      const p0 = plans[i - 2];
+      const p1 = plans[i - 1];
+      const p2 = plans[i];
+      if (p0.noveltyScore < 0.4 && p1.noveltyScore < 0.4 && p2.noveltyScore < 0.4) {
+        flags.push(makeFlag(
+          p2.sceneId,
+          "LOW_NOVELTY_STREAK",
+          "warning",
+          `Low novelty streak across 3 consecutive scenes (${p0.noveltyScore.toFixed(2)}, ${p1.noveltyScore.toFixed(2)}, ${p2.noveltyScore.toFixed(2)})`,
+          "Vary camera motion, apply detail crop, or introduce a proof visual"
+        ));
+      }
+    }
+    const motionHistory = [];
+    for (const sc of scenes) {
+      const motion = sc.motionPreset || sc.motion?.preset;
+      if (motion) {
+        motionHistory.push({ sceneId: sc.sceneId ?? String(sc.sceneIndex), motion });
+      }
+    }
+    for (let i = 2; i < motionHistory.length; i++) {
+      const m0 = motionHistory[i - 2].motion;
+      const m1 = motionHistory[i - 1].motion;
+      const m2 = motionHistory[i].motion;
+      if (m0 && m1 === m0 && m2 === m0) {
+        flags.push(makeFlag(
+          motionHistory[i].sceneId,
+          "REPEATED_MOTION",
+          "warning",
+          `3 consecutive AI still scenes use identical motion preset "${m0}"`,
+          "Use alternate motion preset or subtle pan to increase visual variety"
+        ));
+      }
+    }
+    for (let i = 2; i < scenes.length; i++) {
+      const c0 = scenes[i - 2].category;
+      const c1 = scenes[i - 1].category;
+      const c2 = scenes[i].category;
+      if (c0 && c1 === c0 && c2 === c0 && c0 !== "conceptual") {
+        flags.push(makeFlag(
+          scenes[i].sceneId ?? String(scenes[i].sceneIndex),
+          "REPEATED_VISUAL_CATEGORY",
+          "info",
+          `3 consecutive scenes share the same visual category "${c0}"`,
+          "Ensure camera angles or framing vary between scenes"
+        ));
+      }
+    }
+    for (const loop of retentionPlan.openLoops || []) {
+      if (loop.status === "open" && loop.confidence >= 0.85) {
+        flags.push(makeFlag(
+          String(loop.openedAtSceneIndex),
+          "OPEN_LOOP_UNRESOLVED",
+          "info",
+          `Open loop "${loop.question}" has no identified payoff scene`,
+          "Consider addressing or answering the open question in a later scene"
+        ));
+      }
+    }
+    const targetGap = retentionPlan.strategy?.targetRehookGapSecs || 35;
+    let timeSinceLastRehook = 0;
+    for (const p of plans) {
+      const sc = scenes.find((s) => s.sceneIndex === p.sceneIndex);
+      const dur = sc?.duration || 4;
+      if (p.role === "hook" || p.role === "re-hook" || p.role === "surprise" || p.patternInterrupt) {
+        if (timeSinceLastRehook > targetGap * 1.5) {
+          flags.push(makeFlag(
+            p.sceneId,
+            "REHOOK_GAP_TOO_LONG",
+            "warning",
+            `Re-hook gap of ${Math.round(timeSinceLastRehook)}s exceeded recommended target (${targetGap}s)`,
+            "Add an engaging narrative question or pattern interrupt earlier"
+          ));
+        }
+        timeSinceLastRehook = 0;
+      } else {
+        timeSinceLastRehook += dur;
+      }
+    }
+  }
   const bySeverity = {
     error: flags.filter((f) => f.severity === "error").length,
     warning: flags.filter((f) => f.severity === "warning").length,
@@ -4169,6 +6507,853 @@ function runRetentionQA(scenes) {
     `[RetentionQA] ${flags.length} flags: ${bySeverity.error} errors, ${bySeverity.warning} warnings, ${bySeverity.info} info`
   );
   return flags;
+}
+function generateRetentionSummary(scenes, retentionPlan, flags = []) {
+  let totalDuration = 0;
+  for (const s of scenes) {
+    totalDuration += s.duration || 0;
+  }
+  const lowNoveltyFlags = flags.filter((f) => f.flagType === "LOW_NOVELTY_STREAK").length;
+  const longRehookFlags = flags.filter((f) => f.flagType === "REHOOK_GAP_TOO_LONG").length;
+  const repeatedMotionFlags = flags.filter((f) => f.flagType === "REPEATED_MOTION").length;
+  const overeditedFlags = flags.filter((f) => f.flagType === "OVEREDITED" || f.flagType === "EFFECT_OVERLOAD").length;
+  const detectedLoops = retentionPlan?.openLoops?.length || 0;
+  const resolvedLoops = retentionPlan?.openLoops?.filter((l) => l.status === "resolved").length || 0;
+  const unresolvedLoops = detectedLoops - resolvedLoops;
+  const patternInterrupts = retentionPlan?.summary?.patternInterrupts ?? scenes.filter((s) => s.isPatternInterrupt).length;
+  let avgNovelty = 0.7;
+  if (retentionPlan?.scenes && retentionPlan.scenes.length > 0) {
+    const sum = retentionPlan.scenes.reduce((acc, sp) => acc + (sp.noveltyScore || 0), 0);
+    avgNovelty = Math.round(sum / retentionPlan.scenes.length * 100) / 100;
+  }
+  let healthScore = 100;
+  healthScore -= lowNoveltyFlags * 5;
+  healthScore -= longRehookFlags * 5;
+  healthScore -= repeatedMotionFlags * 3;
+  healthScore -= unresolvedLoops * 4;
+  healthScore -= overeditedFlags * 4;
+  healthScore = Math.max(40, Math.min(100, healthScore));
+  return {
+    schemaVersion: 1,
+    sceneCount: scenes.length,
+    durationSecs: Math.round(totalDuration * 10) / 10,
+    retentionHealthScore: healthScore,
+    riskCounts: {
+      lowNovelty: lowNoveltyFlags,
+      longRehookGap: longRehookFlags,
+      repeatedMotion: repeatedMotionFlags,
+      overedited: overeditedFlags
+    },
+    openLoops: {
+      detected: detectedLoops,
+      resolved: resolvedLoops,
+      unresolved: unresolvedLoops
+    },
+    patternInterrupts,
+    averageNoveltyScore: avgNovelty
+  };
+}
+function saveRetentionSummary(projectDir, summary) {
+  try {
+    const summaryPath = path__namespace.join(projectDir, "analysis", "retention-summary.json");
+    const dir = path__namespace.dirname(summaryPath);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    fs__namespace.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf-8");
+    logger.info(`[RetentionQA] Retention summary saved to retention-summary.json (score=${summary.retentionHealthScore})`);
+  } catch (err) {
+    logger.warn(`[RetentionQA] Failed to save retention summary: ${String(err)}`);
+  }
+}
+const STOP_WORDS = /* @__PURE__ */ new Set([
+  "a",
+  "an",
+  "the",
+  "in",
+  "on",
+  "at",
+  "of",
+  "for",
+  "with",
+  "by",
+  "about",
+  "against",
+  "between",
+  "into",
+  "through",
+  "during",
+  "before",
+  "after",
+  "above",
+  "below",
+  "to",
+  "from",
+  "up",
+  "down",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "and",
+  "but",
+  "if",
+  "or",
+  "because",
+  "as",
+  "until",
+  "while",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "its",
+  "show",
+  "showing",
+  "shot",
+  "view",
+  "close",
+  "up",
+  "scene",
+  "visual",
+  "cinematic",
+  "high",
+  "quality",
+  "you",
+  "your",
+  "we",
+  "our",
+  "us",
+  "they",
+  "them",
+  "their",
+  "he",
+  "him",
+  "his",
+  "she",
+  "her",
+  "now",
+  "right",
+  "here",
+  "there",
+  "just",
+  "even",
+  "also",
+  "any",
+  "all",
+  "some",
+  "many",
+  "much",
+  "more",
+  "most",
+  "very",
+  "really",
+  "however",
+  "furthermore",
+  "what",
+  "why",
+  "how",
+  "when",
+  "where",
+  "which",
+  "who",
+  "whose",
+  "whom",
+  "can",
+  "could",
+  "will",
+  "would",
+  "should",
+  "may",
+  "might",
+  "must",
+  "without",
+  "well",
+  "like"
+]);
+function extractNormalizedKeywords(text) {
+  if (!text || typeof text !== "string") return [];
+  const tokens = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+  return Array.from(new Set(tokens));
+}
+function classifySubjectType(visualIntent, category, narrativeText) {
+  const combined = `${category || ""} ${visualIntent || ""} ${narrativeText || ""}`.toLowerCase();
+  if (combined.includes("anatomy") || combined.includes("organ") || combined.includes("kidney") || combined.includes("heart") || combined.includes("liver") || combined.includes("artery") || combined.includes("blood") || combined.includes("cell") || combined.includes("neuron") || combined.includes("tissue") || combined.includes("vessel") || combined.includes("microscopic")) {
+    return "anatomy";
+  }
+  if (combined.includes("person") || combined.includes("doctor") || combined.includes("patient") || combined.includes("man") || combined.includes("woman") || combined.includes("face") || combined.includes("hand") || combined.includes("worker") || combined.includes("lifestyle") || combined.includes("human")) {
+    return "human";
+  }
+  if (combined.includes("data") || combined.includes("chart") || combined.includes("graph") || combined.includes("study") || combined.includes("stat") || combined.includes("evidence") || combined.includes("percentage") || combined.includes("number")) {
+    return "data";
+  }
+  if (combined.includes("landscape") || combined.includes("hospital") || combined.includes("clinic") || combined.includes("room") || combined.includes("city") || combined.includes("outdoor") || combined.includes("nature") || combined.includes("environment")) {
+    return "environment";
+  }
+  if (combined.includes("pill") || combined.includes("bottle") || combined.includes("food") || combined.includes("equipment") || combined.includes("machine") || combined.includes("tool") || combined.includes("object")) {
+    return "object";
+  }
+  if (combined.includes("conceptual") || combined.includes("mechanism")) {
+    return "conceptual";
+  }
+  return "unknown";
+}
+function computeKeywordJaccard(kw1, kw2) {
+  if (kw1.length === 0 || kw2.length === 0) return 0;
+  const set1 = new Set(kw1);
+  const set2 = new Set(kw2);
+  let intersection = 0;
+  for (const w of set1) {
+    if (set2.has(w)) intersection++;
+  }
+  const union = set1.size + set2.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+function computeSignatureSimilarity(current, previous, isIntentionalMotif = false) {
+  let sim = 0;
+  if (current.visualSource && previous.visualSource && current.visualSource === previous.visualSource) {
+    sim += 0.15;
+  }
+  if (current.shotType && previous.shotType && current.shotType.toLowerCase() === previous.shotType.toLowerCase()) {
+    sim += 0.2;
+  }
+  const sameCategory = Boolean(
+    current.category && previous.category && current.category.toLowerCase() === previous.category.toLowerCase()
+  );
+  const sameSubject = Boolean(
+    current.subjectType && previous.subjectType && current.subjectType !== "unknown" && current.subjectType === previous.subjectType
+  );
+  let categorySim = sameCategory ? 0.3 : sameSubject ? 0.2 : 0;
+  if (isIntentionalMotif && (sameCategory || sameSubject)) {
+    categorySim *= 0.4;
+  }
+  sim += categorySim;
+  const kwOverlap = computeKeywordJaccard(current.visualIntentKeywords, previous.visualIntentKeywords);
+  sim += kwOverlap * (isIntentionalMotif ? 0.12 : 0.25);
+  if (current.motionPreset && previous.motionPreset && current.motionPreset === previous.motionPreset) {
+    sim += 0.1;
+  }
+  return Math.min(0.88, Math.max(0, sim));
+}
+function computeNoveltyScore(current, recentHistory, motifsOrWindowSize = [], windowSizeOpt = 4) {
+  if (recentHistory.length === 0) {
+    return 1;
+  }
+  let motifs = [];
+  let windowSize = 4;
+  if (typeof motifsOrWindowSize === "number") {
+    windowSize = motifsOrWindowSize;
+  } else if (Array.isArray(motifsOrWindowSize)) {
+    motifs = motifsOrWindowSize;
+    windowSize = windowSizeOpt;
+  }
+  const window = recentHistory.slice(-windowSize);
+  const weights = [0.45, 0.25, 0.18, 0.12].slice(0, window.length);
+  let totalWeight = 0;
+  let weightedDistanceSum = 0;
+  let highSimStreak = 0;
+  for (let idx = 0; idx < window.length; idx++) {
+    const prev = window[window.length - 1 - idx];
+    const weight = weights[idx] || 0.1;
+    const isMotif = Boolean(
+      current.motifId && prev.motifId && current.motifId === prev.motifId || current.motifId && motifs.some((m) => m.id === current.motifId && m.recurringSceneIndices.includes(prev.sceneIndex)) || current.motifId && (prev.category === current.category || prev.visualIntentKeywords.some((kw) => current.motifId?.includes(kw)))
+    );
+    const similarity = computeSignatureSimilarity(current, prev, isMotif);
+    if (similarity >= 0.5) {
+      highSimStreak++;
+    }
+    const distance = 1 - similarity;
+    weightedDistanceSum += distance * weight;
+    totalWeight += weight;
+  }
+  let score = totalWeight > 0 ? weightedDistanceSum / totalWeight : 1;
+  if (highSimStreak >= 2) {
+    const fatiguePenalty = (highSimStreak - 1) * 0.04;
+    score = Math.max(0.01, score - fatiguePenalty);
+  }
+  return Math.round(score * 100) / 100;
+}
+function isLowNoveltyStreak(noveltyScores, minStreakOrThreshold = 3, thresholdOrMinStreak) {
+  let minStreak = 3;
+  let threshold = 0.4;
+  {
+    {
+      threshold = minStreakOrThreshold;
+      minStreak = thresholdOrMinStreak;
+    }
+  }
+  if (noveltyScores.length < minStreak) return false;
+  const lastN = noveltyScores.slice(-minStreak);
+  return lastN.every((s) => s < threshold);
+}
+const RETENTION_PLAN_SCHEMA_VERSION = 1;
+function sha256$3(text) {
+  return crypto__namespace.createHash("sha256").update(text).digest("hex");
+}
+function writeFileAtomic$2(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function getSceneText(scene) {
+  return (scene.narrativeText || scene.narration || "").trim();
+}
+const QUESTION_STARTERS = /^(why|how|what|could|can|is\s+it\s+true|where|when|which|who|what\s+if)\b/i;
+const TEASER_PATTERNS = [
+  /\bthe\s+real\s+(reason|problem|truth|cause)\b/i,
+  /\bthere\s+is\s+another\s+(reason|problem|factor)\b/i,
+  /\bwhat\s+happens\s+next\b/i,
+  /\blater\s+(we('ll| will)|in\s+this)\b/i,
+  /\bas\s+we('ll| will)\s+(see|discover|learn|find\s+out)\b/i,
+  /\bthe\s+truth\s+is\s+far\s+more\b/i,
+  /\bwait\s+until\s+you\s+(see|hear|discover)\b/i,
+  /\bthe\s+secret\s+behind\b/i
+];
+const PAYOFF_SIGNALS = [
+  /\bthe\s+reason\b.*\b(is|was)\b/i,
+  /\bthis\s+happens\s+because\b/i,
+  /\bthe\s+answer\b.*\b(is|comes\s+down\s+to|lies\s+in)\b/i,
+  /\bit\s+turns\s+out\b/i,
+  /\bhere('s| is)\s+why\b/i,
+  /\bthat('s| is)\s+why\b/i,
+  /\bnow\s+we\s+(understand|know)\b/i,
+  /\bresearchers\s+(discovered|found|proved)\b/i,
+  /\bthe\s+solution\s+(is|was)\b/i
+];
+function detectOpenLoops(scenes) {
+  const loops = [];
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const text = getSceneText(scene);
+    if (!text || text.length < 10) continue;
+    const hasQuestionMark = text.includes("?");
+    const isQuestionSentence = QUESTION_STARTERS.test(text);
+    const hasTeaserPhrase = TEASER_PATTERNS.some((p) => p.test(text));
+    if (!hasQuestionMark && !isQuestionSentence && !hasTeaserPhrase) {
+      continue;
+    }
+    if (i === 0 && !hasTeaserPhrase) {
+      continue;
+    }
+    const isPureDeclarative = !hasQuestionMark && !hasTeaserPhrase && !isQuestionSentence;
+    if (isPureDeclarative) continue;
+    const keywords = extractNormalizedKeywords(text).filter(
+      (k) => !["why", "how", "what", "when", "where", "next", "reason", "happen"].includes(k)
+    );
+    if (keywords.length === 0) continue;
+    const loopId = `loop_${i + 1}`;
+    loops.push({
+      id: loopId,
+      openedAtSceneIndex: scene.sceneIndex,
+      question: text.slice(0, 120),
+      confidence: hasTeaserPhrase || hasQuestionMark ? 0.9 : 0.75,
+      status: "open",
+      keywords
+    });
+  }
+  for (const loop of loops) {
+    let bestPayoffIndex;
+    let maxOverlap = 0;
+    for (let j = 0; j < scenes.length; j++) {
+      const candidate = scenes[j];
+      if (candidate.sceneIndex <= loop.openedAtSceneIndex) continue;
+      const candidateText = getSceneText(candidate).toLowerCase();
+      const hasPayoffSignal = PAYOFF_SIGNALS.some((p) => p.test(candidateText));
+      const candidateKeywords = extractNormalizedKeywords(candidateText);
+      let overlapCount = 0;
+      for (const kw of loop.keywords) {
+        const matches = candidateKeywords.some(
+          (ck) => ck === kw || ck.length >= 4 && kw.length >= 4 && (ck.startsWith(kw) || kw.startsWith(ck))
+        );
+        if (matches) {
+          overlapCount++;
+        }
+      }
+      const distance = candidate.sceneIndex - loop.openedAtSceneIndex;
+      if (hasPayoffSignal) {
+        if (overlapCount >= 1 || distance <= 4) {
+          if (overlapCount >= maxOverlap) {
+            maxOverlap = overlapCount;
+            bestPayoffIndex = candidate.sceneIndex;
+          }
+        }
+      } else if (overlapCount >= 2 && distance > 1) {
+        if (overlapCount > maxOverlap) {
+          maxOverlap = overlapCount;
+          bestPayoffIndex = candidate.sceneIndex;
+        }
+      }
+    }
+    if (bestPayoffIndex !== void 0) {
+      loop.payoffSceneIndex = bestPayoffIndex;
+      loop.status = "resolved";
+    }
+  }
+  return loops;
+}
+function detectMotifs(scenes) {
+  const keywordSceneMap = /* @__PURE__ */ new Map();
+  for (const s of scenes) {
+    const text = `${s.visualIntent || ""} ${getSceneText(s)}`;
+    const kws = extractNormalizedKeywords(text);
+    for (const kw of kws) {
+      if (kw.length < 4) continue;
+      const list = keywordSceneMap.get(kw) || [];
+      list.push(s.sceneIndex);
+      keywordSceneMap.set(kw, list);
+    }
+  }
+  const motifs = [];
+  for (const [kw, indices] of keywordSceneMap.entries()) {
+    const uniqueIndices = Array.from(new Set(indices));
+    if (uniqueIndices.length >= 3 && uniqueIndices.length <= scenes.length * 0.6) {
+      motifs.push({
+        id: `motif_${kw}`,
+        label: kw,
+        conceptKeywords: [kw],
+        firstSeenSceneIndex: uniqueIndices[0],
+        recurringSceneIndices: uniqueIndices
+      });
+    }
+  }
+  motifs.sort((a, b) => b.recurringSceneIndices.length - a.recurringSceneIndices.length);
+  return motifs.slice(0, 5);
+}
+const PROOF_KEYWORDS = /\b(percent|%|\$|study|studies|trial|trials|data|researchers|university|published|patients|statistics|proven|evidence|hospital|dr\.|doctor|clinical)\b/i;
+const MECHANISM_KEYWORDS = /\b(pathway|process|filters|absorbs|produces|mechanism|triggers|causes|functions|cells|vessels|bloodstream|molecules|artery|system|organ|tissue)\b/i;
+const COMPARISON_KEYWORDS = /\b(compared\s+to|unlike|versus|vs|in\s+contrast|differently|while|on\s+the\s+other\s+hand|standard|traditional)\b/i;
+const SURPRISE_KEYWORDS = /\b(unexpectedly|surprisingly|strange|shocking|twist|catch|ironically|little\s+known|hidden|secret)\b/i;
+const SOLUTION_KEYWORDS = /\b(solution|prevent|treat|treatment|protocol|action|step|remedy|cure|how\s+to|takeaway)\b/i;
+const BRIDGE_KEYWORDS = /\b(meanwhile|moving\s+on|next|furthermore|now\s+let's|turning\s+to)\b/i;
+const RECAP_KEYWORDS = /\b(to\s+summarize|in\s+summary|we\s+have\s+seen|remember|recap)\b/i;
+const CONCLUSION_KEYWORDS = /\b(finally|in\s+conclusion|ultimately|final\s+thought|takeaway|in\s+the\s+end)\b/i;
+function classifySceneRole(scene, totalScenes, elapsedSecs, openLoop, isPayoffScene, arrayIndex) {
+  const text = getSceneText(scene).toLowerCase();
+  (scene.visualIntent || "").toLowerCase();
+  const isFirst = arrayIndex !== void 0 ? arrayIndex === 0 : scene.sceneIndex <= 1;
+  if (isFirst) {
+    return { role: "hook", reason: "Opening hook: establish strong core intrigue" };
+  }
+  if (isPayoffScene) {
+    return { role: "payoff", reason: "Resolves previously established open loop question" };
+  }
+  if (openLoop && openLoop.openedAtSceneIndex === scene.sceneIndex) {
+    return { role: "open-loop", reason: `Introduces open loop: "${openLoop.question}"` };
+  }
+  const isLast = arrayIndex !== void 0 ? arrayIndex === totalScenes - 1 : scene.sceneIndex >= totalScenes;
+  if (isLast || CONCLUSION_KEYWORDS.test(text)) {
+    return { role: "conclusion", reason: "Final takeaway / conclusion of narrative" };
+  }
+  if (RECAP_KEYWORDS.test(text)) {
+    return { role: "recap", reason: "Synthesizes previous insights" };
+  }
+  if (SOLUTION_KEYWORDS.test(text)) {
+    return { role: "solution", reason: "Presents actionable remedy or solution" };
+  }
+  if (SURPRISE_KEYWORDS.test(text)) {
+    return { role: "surprise", reason: "Presents counter-intuitive or surprising fact" };
+  }
+  if (PROOF_KEYWORDS.test(text) || /\b\d+(\.\d+)?%|\$\d+|\b\d{1,3}(,\d{3})+\b/.test(text)) {
+    return { role: "proof", reason: "Narrative presents factual data, study, or statistics" };
+  }
+  if (COMPARISON_KEYWORDS.test(text)) {
+    return { role: "comparison", reason: "Compares alternatives, contrast, or duality" };
+  }
+  if (MECHANISM_KEYWORDS.test(text)) {
+    return { role: "mechanism", reason: "Explains internal workings or biological mechanism" };
+  }
+  if (scene.sceneIndex <= 2) {
+    return { role: "setup", reason: "Establishes foundational context" };
+  }
+  if (BRIDGE_KEYWORDS.test(text)) {
+    return { role: "bridge", reason: "Narrative bridge between topics" };
+  }
+  if (text.includes("problem") || text.includes("danger") || text.includes("risk") || text.includes("fail")) {
+    return { role: "problem", reason: "Highlights conflict, obstacle, or risk" };
+  }
+  return { role: "setup", reason: "Narrative context" };
+}
+function analyzeRetentionPlan(rawScenes, options = {}) {
+  const level = options.level || "balanced";
+  const targetRehookGapSecs = options.targetRehookGapSecs || (level === "high" ? 25 : level === "low" ? 50 : 35);
+  const maxNoResetSecs = options.maxNoResetSecs || (level === "high" ? 30 : level === "low" ? 60 : 42);
+  const noveltyWindowScenes = options.noveltyWindowScenes || 4;
+  const totalScenes = rawScenes.length;
+  let totalDuration = 0;
+  for (const s of rawScenes) {
+    totalDuration += s.duration || 0;
+  }
+  const openLoops = detectOpenLoops(rawScenes);
+  const payoffSceneSet = /* @__PURE__ */ new Set();
+  const loopByOpenedScene = /* @__PURE__ */ new Map();
+  for (const l of openLoops) {
+    loopByOpenedScene.set(l.openedAtSceneIndex, l);
+    if (l.payoffSceneIndex !== void 0) {
+      payoffSceneSet.add(l.payoffSceneIndex);
+    }
+  }
+  const motifs = detectMotifs(rawScenes);
+  const motifSceneMap = /* @__PURE__ */ new Map();
+  for (const m of motifs) {
+    for (const scIdx of m.recurringSceneIndices) {
+      if (!motifSceneMap.has(scIdx)) {
+        motifSceneMap.set(scIdx, m.id);
+      }
+    }
+  }
+  const signatures = [];
+  const scenePlans = [];
+  const recentNoveltyScores = [];
+  let elapsedSecs = 0;
+  let timeSinceLastReset = 0;
+  let timeSinceLastPatternInterrupt = 999;
+  let hookCount = 0;
+  let rehookCount = 0;
+  let payoffCount = 0;
+  let interruptCount = 0;
+  let lowNoveltyCount = 0;
+  for (let i = 0; i < rawScenes.length; i++) {
+    const scene = rawScenes[i];
+    const sceneId = scene.sceneId || String(scene.sceneIndex);
+    const duration = scene.duration || 4;
+    const openLoop = loopByOpenedScene.get(scene.sceneIndex);
+    const isPayoff = payoffSceneSet.has(scene.sceneIndex);
+    let { role, reason } = classifySceneRole(
+      scene,
+      totalScenes,
+      elapsedSecs,
+      openLoop,
+      isPayoff,
+      i
+    );
+    const canBeRehook = role !== "hook" && role !== "payoff" && role !== "conclusion" && role !== "recap" && timeSinceLastReset >= targetRehookGapSecs;
+    if (canBeRehook) {
+      const text = getSceneText(scene).toLowerCase();
+      const hasTurnSignal = text.includes("?") || text.startsWith("now") || text.startsWith("here") || text.startsWith("wait") || text.startsWith("notice") || text.startsWith("surprisingly") || text.startsWith("what about") || SURPRISE_KEYWORDS.test(text) || COMPARISON_KEYWORDS.test(text);
+      if (hasTurnSignal || timeSinceLastReset >= maxNoResetSecs) {
+        role = "re-hook";
+        reason = `Re-hook: attention refreshed after ${Math.round(timeSinceLastReset)}s neutral stretch`;
+        rehookCount++;
+        timeSinceLastReset = 0;
+      }
+    }
+    if (role === "hook") hookCount++;
+    if (role === "payoff") payoffCount++;
+    const sceneText = getSceneText(scene);
+    const kws = extractNormalizedKeywords(`${scene.visualIntent || ""} ${sceneText}`);
+    const subject = classifySubjectType(scene.visualIntent, scene.category, sceneText);
+    const sig = {
+      sceneIndex: scene.sceneIndex,
+      sceneId,
+      visualSource: scene.visualStrategy || (scene.localPath?.includes("generated") ? "ai-still" : "stock"),
+      shotType: scene.shotType || "medium",
+      energyLevel: scene.energyLevel || "medium",
+      visualIntentKeywords: kws,
+      category: scene.category,
+      motionPreset: scene.motionPreset,
+      subjectType: subject,
+      role,
+      motifId: motifSceneMap.get(scene.sceneIndex)
+    };
+    const noveltyScore = computeNoveltyScore(sig, signatures, motifs, noveltyWindowScenes);
+    signatures.push(sig);
+    recentNoveltyScores.push(noveltyScore);
+    if (noveltyScore < 0.4) {
+      lowNoveltyCount++;
+    }
+    const hasLowNoveltyStreak = isLowNoveltyStreak(recentNoveltyScores, 0.4, 3);
+    const interruptCooldown = level === "high" ? 15 : level === "low" ? 45 : 25;
+    let shouldInterrupt = false;
+    let interruptReason;
+    if (timeSinceLastPatternInterrupt >= interruptCooldown) {
+      if (role === "surprise") {
+        shouldInterrupt = true;
+        interruptReason = "Narrative surprise pivot";
+      } else if (role === "re-hook") {
+        shouldInterrupt = true;
+        interruptReason = "Re-hook attention refresh";
+      } else if (hasLowNoveltyStreak) {
+        shouldInterrupt = true;
+        interruptReason = "Low novelty streak across consecutive scenes";
+      } else if (timeSinceLastReset >= maxNoResetSecs) {
+        shouldInterrupt = true;
+        interruptReason = `Reset attention after ${Math.round(timeSinceLastReset)}s neutral stretch`;
+      } else if (scene.isPatternInterrupt) {
+        shouldInterrupt = true;
+        interruptReason = "Edit plan designated pattern interrupt";
+      }
+    }
+    if (shouldInterrupt) {
+      interruptCount++;
+      timeSinceLastPatternInterrupt = 0;
+      timeSinceLastReset = 0;
+    } else {
+      timeSinceLastPatternInterrupt += duration;
+    }
+    const isResetEvent = role === "hook" || role === "re-hook" || role === "surprise" || role === "payoff" || shouldInterrupt;
+    if (isResetEvent) {
+      timeSinceLastReset = 0;
+    } else {
+      timeSinceLastReset += duration;
+    }
+    let avoidSpoiler = false;
+    for (const l of openLoops) {
+      if (l.payoffSceneIndex !== void 0 && scene.sceneIndex > l.openedAtSceneIndex && scene.sceneIndex < l.payoffSceneIndex) {
+        avoidSpoiler = true;
+        break;
+      }
+    }
+    let intensity = "medium";
+    if (role === "hook" || role === "surprise" || role === "payoff") {
+      intensity = "high";
+    } else if (role === "bridge" || role === "conclusion" || role === "recap") {
+      intensity = "low";
+    }
+    let beatPacing = "normal";
+    if (role === "hook" || role === "re-hook" || role === "surprise") {
+      beatPacing = "fast";
+    } else if (role === "proof" || role === "payoff" || role === "bridge" || role === "conclusion") {
+      beatPacing = "slow";
+    }
+    let preferredVisualChange = "none";
+    if (shouldInterrupt) {
+      if (role === "proof") preferredVisualChange = "proof";
+      else if (role === "re-hook" || role === "surprise") preferredVisualChange = "motion";
+      else if (hasLowNoveltyStreak) preferredVisualChange = "crop";
+      else preferredVisualChange = "hard-cut";
+    }
+    let overlayPriority = "none";
+    if (role === "proof") overlayPriority = "high";
+    else if (role === "hook" || role === "payoff" || role === "surprise") overlayPriority = "medium";
+    else if (role === "re-hook") overlayPriority = "low";
+    const proofPriority = role === "proof" || role === "payoff" && PROOF_KEYWORDS.test(getSceneText(scene)) ? "high" : "normal";
+    const motionEnergy = role === "hook" || role === "re-hook" || role === "surprise" ? "elevated" : role === "proof" || role === "bridge" || role === "conclusion" ? "calm" : "normal";
+    scenePlans.push({
+      sceneIndex: scene.sceneIndex,
+      sceneId,
+      role,
+      intensity,
+      reason,
+      noveltyScore,
+      noveltyTarget: 0.5,
+      patternInterrupt: shouldInterrupt,
+      patternInterruptReason: interruptReason,
+      openLoopId: openLoop?.id,
+      payoffForLoopId: isPayoff ? openLoops.find((l) => l.payoffSceneIndex === scene.sceneIndex)?.id : void 0,
+      avoidSpoiler,
+      motionEnergy,
+      beatPacing,
+      overlayPriority,
+      proofPriority,
+      preferredVisualChange,
+      notes: [
+        `role=${role}`,
+        `novelty=${noveltyScore.toFixed(2)}`,
+        `resetTime=${Math.round(timeSinceLastReset)}s`
+      ]
+    });
+    elapsedSecs += duration;
+  }
+  const hashPayload = JSON.stringify({
+    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
+    level,
+    totalScenes,
+    scenes: rawScenes.map((s) => ({
+      i: s.sceneIndex,
+      dur: s.duration,
+      text: getSceneText(s),
+      intent: s.visualIntent,
+      e: s.energyLevel,
+      sh: s.shotType
+    }))
+  });
+  const inputHash = sha256$3(hashPayload);
+  return {
+    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    inputHash,
+    totalScenes,
+    totalDuration: Math.round(totalDuration * 100) / 100,
+    strategy: {
+      level,
+      targetRehookGapSecs,
+      maxNoResetSecs,
+      noveltyWindowScenes
+    },
+    openLoops,
+    motifs,
+    scenes: scenePlans,
+    summary: {
+      hooks: hookCount,
+      rehooks: rehookCount,
+      payoffs: payoffCount,
+      patternInterrupts: interruptCount,
+      lowNoveltyScenes: lowNoveltyCount,
+      openLoops: openLoops.length
+    }
+  };
+}
+function getRetentionPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "retention-plan.json");
+}
+function loadRetentionPlan(projectDir) {
+  try {
+    const p = getRetentionPlanPath(projectDir);
+    if (!fs__namespace.existsSync(p)) return null;
+    const content = fs__namespace.readFileSync(p, "utf-8");
+    return JSON.parse(content);
+  } catch (err) {
+    logger.warn(`[RetentionDirector] Failed to load retention plan: ${String(err)}`);
+    return null;
+  }
+}
+function saveRetentionPlan(projectDir, plan) {
+  const p = getRetentionPlanPath(projectDir);
+  writeFileAtomic$2(p, JSON.stringify(plan, null, 2));
+  logger.info(
+    `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
+  );
+}
+async function ensureRetentionPlan(projectDir, options) {
+  try {
+    let scenes = options?.scenes;
+    if (!scenes || scenes.length === 0) {
+      const editPlanPath = path__namespace.join(projectDir, "edit-plan", "master-edit-plan.json");
+      if (fs__namespace.existsSync(editPlanPath)) {
+        try {
+          const raw = JSON.parse(fs__namespace.readFileSync(editPlanPath, "utf-8"));
+          scenes = raw.scenes || [];
+        } catch {
+        }
+      }
+    }
+    if (!scenes || scenes.length === 0) {
+      logger.info("[RetentionDirector] No scenes provided or found in edit-plan. Skipping retention plan.");
+      return null;
+    }
+    let globalContext;
+    const globalContextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+    if (fs__namespace.existsSync(globalContextPath)) {
+      try {
+        globalContext = JSON.parse(fs__namespace.readFileSync(globalContextPath, "utf-8"));
+      } catch {
+      }
+    }
+    const cached = loadRetentionPlan(projectDir);
+    if (cached && !options?.force) {
+      if (cached.totalScenes === scenes.length) {
+        return cached;
+      }
+    }
+    const plan = analyzeRetentionPlan(scenes, {
+      level: options?.level || "balanced",
+      globalContext
+    });
+    saveRetentionPlan(projectDir, plan);
+    return plan;
+  } catch (err) {
+    logger.warn(`[RetentionDirector] Failed to ensure retention plan (falling open): ${String(err)}`);
+    return null;
+  }
+}
+const SAFE_PRESET_VARIATIONS = {
+  "push-in-center": ["slow-push-in", "push-in-left", "pan-left", "micro-drift"],
+  "slow-push-in": ["push-in-center", "micro-drift", "pan-right", "still-hold"],
+  "pan-left": ["pan-right", "push-in-center", "slow-push-in", "micro-drift"],
+  "pan-right": ["pan-left", "push-in-center", "slow-push-out", "micro-drift"],
+  "micro-drift": ["slow-push-in", "pan-left", "still-hold", "push-in-center"],
+  "slow-push-out": ["micro-drift", "pan-right", "still-hold", "slow-push-in"],
+  "push-out-center": ["slow-push-out", "micro-drift", "pan-left", "still-hold"],
+  "pan-up": ["pan-down", "push-in-center", "micro-drift", "slow-push-in"],
+  "pan-down": ["pan-up", "slow-push-in", "pan-right", "micro-drift"],
+  "still-hold": ["micro-drift", "slow-push-in", "pan-left"]
+};
+function pickAlternativePreset(repeatedPreset, role) {
+  const alternatives = SAFE_PRESET_VARIATIONS[repeatedPreset] || ["slow-push-in", "pan-left", "micro-drift"];
+  if (role === "proof" || role === "payoff") {
+    if (alternatives.includes("slow-push-in")) return "slow-push-in";
+    if (alternatives.includes("still-hold")) return "still-hold";
+    if (alternatives.includes("micro-drift")) return "micro-drift";
+  }
+  if (role === "hook" || role === "re-hook" || role === "surprise") {
+    if (alternatives.includes("push-in-center")) return "push-in-center";
+    if (alternatives.includes("push-in-left")) return "push-in-left";
+    if (alternatives.includes("pan-right")) return "pan-right";
+  }
+  return alternatives[0] || "micro-drift";
+}
+function applyRetentionMotionHint(baseMotion, retentionHint, recentMotionHistory = []) {
+  if (!retentionHint) {
+    return baseMotion;
+  }
+  try {
+    const isSpecObject = typeof baseMotion === "object" && baseMotion !== null && "preset" in baseMotion;
+    let currentPreset = isSpecObject ? baseMotion.preset : baseMotion;
+    const isGenericDefault = currentPreset === "push-in-center" || currentPreset === "slow-push-in";
+    if (isGenericDefault) {
+      switch (retentionHint.role) {
+        case "hook":
+        case "surprise":
+          currentPreset = "push-in-center";
+          break;
+        case "mechanism":
+          currentPreset = "pan-left";
+          break;
+        case "proof":
+          currentPreset = "still-hold";
+          break;
+        case "payoff":
+          currentPreset = "slow-push-in";
+          break;
+        case "bridge":
+        case "recap":
+        case "conclusion":
+          currentPreset = "micro-drift";
+          break;
+        case "re-hook":
+          currentPreset = "pan-right";
+          break;
+      }
+    }
+    if (recentMotionHistory.length >= 2) {
+      const lastTwo = recentMotionHistory.slice(-2);
+      if (lastTwo[0] === currentPreset && lastTwo[1] === currentPreset) {
+        const alt = pickAlternativePreset(currentPreset, retentionHint.role);
+        logger.info(
+          `[RetentionMotion] Scene ${retentionHint.sceneIndex}: repeated motion '${currentPreset}' detected, switching to '${alt}' for novelty`
+        );
+        currentPreset = alt;
+      }
+    }
+    if (isSpecObject) {
+      const spec = baseMotion;
+      let intensity = spec.intensity;
+      if (retentionHint.motionEnergy === "elevated" && intensity === "subtle") {
+        intensity = "medium";
+      } else if (retentionHint.motionEnergy === "calm" && intensity === "medium") {
+        intensity = "subtle";
+      }
+      return {
+        ...spec,
+        preset: currentPreset,
+        intensity
+      };
+    }
+    return currentPreset;
+  } catch (err) {
+    logger.warn(`[RetentionMotion] Failed to apply hint: ${String(err)}, using base motion`);
+    return baseMotion;
+  }
 }
 const DEFAULT_RETENTION_SETTINGS = {
   enabled: true,
@@ -5425,186 +8610,6 @@ async function generateContactSheet(videoPath, outputPath, durationSecs) {
     return false;
   }
 }
-async function runRenderPreflight(options) {
-  const {
-    projectDir,
-    voiceoverPath,
-    captionPlan,
-    resolution = { width: 1920, height: 1080 },
-    fps = 30
-  } = options;
-  const prodSettings = options.settings ?? loadProductionSettings(projectDir);
-  const strictMode = options.strictMissingMedia ?? prodSettings.strictMissingMedia ?? false;
-  const issues = [];
-  let issueId = 1;
-  function addIssue(severity, category, message, suggestion, sceneId, sceneIndex, details) {
-    issues.push({
-      id: `preflight_${issueId++}`,
-      stage: "preflight",
-      severity,
-      category,
-      message,
-      suggestion,
-      sceneId,
-      sceneIndex,
-      details
-    });
-  }
-  const outputDir = path.join(projectDir, "output");
-  try {
-    fs__namespace.mkdirSync(outputDir, { recursive: true });
-    const testFile = path.join(outputDir, `.qa_write_test_${Date.now()}`);
-    fs__namespace.writeFileSync(testFile, "ok", "utf-8");
-    fs__namespace.unlinkSync(testFile);
-  } catch (err) {
-    addIssue("fatal", "output", `Output directory is not writable: ${outputDir} (${String(err)})`, "Check folder permissions");
-  }
-  if (resolution.width <= 0 || resolution.height <= 0 || fps <= 0) {
-    addIssue("fatal", "output", `Invalid render output configuration: ${resolution.width}x${resolution.height} @ ${fps}fps`, "Use standard resolution (e.g. 1920x1080 @ 30fps)");
-  }
-  let planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-  if (!fs__namespace.existsSync(planPath)) {
-    const rootPlan = path.join(projectDir, "master-edit-plan.json");
-    if (fs__namespace.existsSync(rootPlan)) {
-      planPath = rootPlan;
-    } else {
-      addIssue("fatal", "plan", "master-edit-plan.json not found. Run AI Planning first.", "Generate an edit plan in AI Planning step");
-      return buildReport$1(0, 0, 0, issues);
-    }
-  }
-  let plan;
-  try {
-    plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-  } catch (err) {
-    addIssue("fatal", "plan", `Failed to parse master-edit-plan.json: ${String(err)}`, "Re-run AI Planning");
-    return buildReport$1(0, 0, 0, issues);
-  }
-  const flattened = flattenEditPlanScenes(plan);
-  if (flattened.length === 0) {
-    addIssue("fatal", "plan", "Edit plan contains 0 scenes.", "Run AI Planning to generate scenes");
-    return buildReport$1(0, 0, 0, issues);
-  }
-  const seenIndices = /* @__PURE__ */ new Set();
-  let expectedTotalDuration = 0;
-  for (let i = 0; i < flattened.length; i++) {
-    const entry = flattened[i];
-    const { scene, sceneIndex, sceneId } = entry;
-    if (seenIndices.has(sceneIndex)) {
-      addIssue("fatal", "plan", `Duplicate sceneIndex ${sceneIndex} detected.`, "Ensure all scenes have unique scene indices", sceneId, sceneIndex);
-    }
-    seenIndices.add(sceneIndex);
-    const dur = scene.duration ?? (scene.endTime ?? 0) - (scene.startTime ?? 0);
-    if (dur <= 0) {
-      addIssue("fatal", "plan", `Scene ${sceneIndex} has invalid duration: ${dur}s`, "Ensure scene duration is greater than 0", sceneId, sceneIndex);
-    } else {
-      expectedTotalDuration += dur;
-    }
-  }
-  let mediaIndex = [];
-  const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
-  if (fs__namespace.existsSync(mediaIndexPath)) {
-    mediaIndex = readJsonSafe$1(mediaIndexPath, []);
-  }
-  let resolvedScenesCount = 0;
-  for (const entry of flattened) {
-    const { scene, sceneIndex, sceneId } = entry;
-    const resolved = resolveSceneMediaWithSource(
-      scene,
-      mediaIndex,
-      projectDir
-    );
-    if (resolved.mediaPath && fs__namespace.existsSync(resolved.mediaPath) && fs__namespace.statSync(resolved.mediaPath).size > 0) {
-      resolvedScenesCount++;
-      const probe = await probeMediaDetailed(resolved.mediaPath);
-      if (probe) {
-        if (probe.hasVideo && probe.durationSecs < (scene.duration ?? 2) * 0.5) {
-          addIssue("warning", "media", `Scene ${sceneIndex} video asset duration (${probe.durationSecs.toFixed(1)}s) is shorter than scene duration`, "Stock video may loop or freeze", sceneId, sceneIndex);
-        }
-        if (probe.hasVideo && (probe.width < 720 || probe.height < 480)) {
-          addIssue("warning", "media", `Scene ${sceneIndex} has low resolution asset: ${probe.width}x${probe.height}`, "Replace with higher quality footage in Stock Media", sceneId, sceneIndex);
-        }
-      }
-    } else {
-      const severity = strictMode ? "fatal" : "warning";
-      addIssue(
-        severity,
-        "media",
-        `Scene ${sceneIndex} media is missing (${resolved.source}). ${strictMode ? "Strict mode on: render blocked." : "Black placeholder fallback will be used."}`,
-        "Search or upload media in Stock Media tab",
-        sceneId,
-        sceneIndex
-      );
-    }
-  }
-  if (resolvedScenesCount === 0 && flattened.length > 0) {
-    addIssue("fatal", "media", "All scenes are missing media files. Cannot render video without footage.", "Run Stock Media search or upload media");
-  }
-  if (voiceoverPath) {
-    if (!fs__namespace.existsSync(voiceoverPath) || fs__namespace.statSync(voiceoverPath).size === 0) {
-      addIssue("fatal", "audio", `Specified voiceover file not found or empty: ${voiceoverPath}`, "Check Voiceover path in Inputs step");
-    } else {
-      const voProbe = await probeMediaDetailed(voiceoverPath);
-      if (!voProbe || !voProbe.hasAudio) {
-        addIssue("warning", "audio", "Voiceover file could not be verified as valid audio stream", "Check audio format");
-      }
-    }
-  }
-  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
-  if (fs__namespace.existsSync(audioPlanPath)) {
-    const audioPlan = readJsonSafe$1(audioPlanPath, {});
-    if (audioPlan.musicTrack?.filePath && !fs__namespace.existsSync(audioPlan.musicTrack.filePath)) {
-      addIssue("warning", "audio", `Approved background music file missing: ${audioPlan.musicTrack.filePath}`, "Check audio library");
-    }
-  }
-  if (captionPlan?.enabled && captionPlan.phrases) {
-    for (const phrase of captionPlan.phrases) {
-      if (phrase.startTime < 0 || phrase.endTime < 0 || phrase.endTime < phrase.startTime) {
-        addIssue("warning", "caption", `Caption phrase "${phrase.text.slice(0, 30)}" has invalid timing: ${phrase.startTime}s - ${phrase.endTime}s`, "Adjust timing in Captions step");
-      }
-      if (expectedTotalDuration > 0 && phrase.startTime > expectedTotalDuration + 2) {
-        addIssue("warning", "caption", `Caption phrase starts after video ends (${phrase.startTime.toFixed(1)}s > ${expectedTotalDuration.toFixed(1)}s)`, "Trim caption plan");
-      }
-    }
-  }
-  for (const entry of flattened) {
-    const { scene, sceneIndex, sceneId } = entry;
-    if (scene.transitionIn && scene.transitionIn !== "none" && scene.transitionIn !== "cut") {
-      const dur = scene.duration ?? (scene.endTime ?? 0) - (scene.startTime ?? 0);
-      if (dur < 1) {
-        addIssue("info", "transition", `Scene ${sceneIndex} is short (${dur.toFixed(1)}s). Transition will automatically fallback to clean cut.`, void 0, sceneId, sceneIndex);
-      }
-    }
-  }
-  const report = buildReport$1(expectedTotalDuration, flattened.length, resolvedScenesCount, issues);
-  const reportPath = path.join(projectDir, "analysis", "render-preflight.json");
-  atomicWriteJson(reportPath, report);
-  logger.info(`[QA-Preflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning, ${report.infoCount} info)`);
-  return report;
-}
-function buildReport$1(expectedDuration, totalScenes, resolvedScenes, issues) {
-  const fatalCount = issues.filter((i) => i.severity === "fatal").length;
-  const warningCount = issues.filter((i) => i.severity === "warning").length;
-  const infoCount = issues.filter((i) => i.severity === "info").length;
-  let status = "passed";
-  if (fatalCount > 0) {
-    status = "failed";
-  } else if (warningCount > 0) {
-    status = "passed_with_warnings";
-  }
-  return {
-    version: 1,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    status,
-    expectedDuration: Math.round(expectedDuration * 100) / 100,
-    totalScenes,
-    resolvedScenes,
-    missingScenes: totalScenes - resolvedScenes,
-    fatalCount,
-    warningCount,
-    infoCount,
-    issues
-  };
-}
 const POSTFLIGHT_THRESHOLDS = {
   MAX_BENIGN_BLACK_SEGMENT_SECS: 2,
   // Black transition dip <= 2s is benign
@@ -5641,12 +8646,12 @@ async function runRenderPostflight(options) {
   }
   if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
     addIssue("fatal", "output", "Render output file is missing or has 0 bytes.", "Check FFmpeg logs for render crash");
-    return buildReport(expectedDuration, 0, totalScenes, issues);
+    return buildReport$1(expectedDuration, 0, totalScenes, issues);
   }
   const probe = await probeMediaDetailed(workingOutputPath);
   if (!probe) {
     addIssue("fatal", "output", "FFprobe failed to inspect render output.", "The output file is corrupt or unreadable");
-    return buildReport(expectedDuration, 0, totalScenes, issues);
+    return buildReport$1(expectedDuration, 0, totalScenes, issues);
   }
   if (!probe.hasVideo || probe.durationSecs <= 0) {
     addIssue("fatal", "output", "Render output has no valid video stream or duration is 0.", "Ensure input media files are valid and FFmpeg arguments are correct");
@@ -5722,13 +8727,13 @@ async function runRenderPostflight(options) {
   } catch (err) {
     addIssue("warning", "output", `Contact sheet error: ${String(err)} (non-fatal)`);
   }
-  const report = buildReport(expectedDuration, probe.durationSecs, totalScenes, issues);
+  const report = buildReport$1(expectedDuration, probe.durationSecs, totalScenes, issues);
   const reportPath = path.join(projectDir, "analysis", "render-qa.json");
   atomicWriteJson(reportPath, report);
   logger.info(`[QA-Postflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning)`);
   return report;
 }
-function buildReport(expectedDuration, actualDuration, totalScenes, issues) {
+function buildReport$1(expectedDuration, actualDuration, totalScenes, issues) {
   const fatalCount = issues.filter((i) => i.severity === "fatal").length;
   const warningCount = issues.filter((i) => i.severity === "warning").length;
   const infoCount = issues.filter((i) => i.severity === "info").length;
@@ -6027,74 +9032,6 @@ function resolvePresetDefaults(preset, duration) {
       };
   }
 }
-function probeImageDimensions(buffer) {
-  if (!buffer || buffer.length < 24) return null;
-  if (buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
-    const width = buffer.readUInt32BE(16);
-    const height = buffer.readUInt32BE(20);
-    return { width, height, format: "png" };
-  }
-  if (buffer[0] === 255 && buffer[1] === 216) {
-    let offset = 2;
-    while (offset < buffer.length) {
-      if (buffer[offset] !== 255) {
-        offset++;
-        continue;
-      }
-      const marker = buffer[offset + 1];
-      if (marker >= 192 && marker <= 195 || marker >= 197 && marker <= 199 || marker >= 201 && marker <= 203 || marker >= 205 && marker <= 207) {
-        if (offset + 8 < buffer.length) {
-          const height = buffer.readUInt16BE(offset + 5);
-          const width = buffer.readUInt16BE(offset + 7);
-          return { width, height, format: "jpeg" };
-        }
-      }
-      if (offset + 3 < buffer.length) {
-        const length = buffer.readUInt16BE(offset + 2);
-        offset += 2 + length;
-      } else {
-        break;
-      }
-    }
-  }
-  if (buffer.slice(0, 4).toString("ascii") === "RIFF" && buffer.slice(8, 12).toString("ascii") === "WEBP") {
-    if (buffer.slice(12, 16).toString("ascii") === "VP8 ") {
-      const width = buffer.readUInt16LE(26) & 16383;
-      const height = buffer.readUInt16LE(28) & 16383;
-      return { width, height, format: "webp" };
-    }
-    if (buffer.slice(12, 16).toString("ascii") === "VP8L") {
-      const b1 = buffer[21];
-      const b2 = buffer[22];
-      const b3 = buffer[23];
-      const b4 = buffer[24];
-      const width = 1 + ((b2 & 63) << 8 | b1);
-      const height = 1 + ((b4 & 15) << 10 | b3 << 2 | (b2 & 192) >> 6);
-      return { width, height, format: "webp" };
-    }
-    if (buffer.slice(12, 16).toString("ascii") === "VP8X") {
-      const width = 1 + buffer.readUIntLE(24, 3);
-      const height = 1 + buffer.readUIntLE(27, 3);
-      return { width, height, format: "webp" };
-    }
-  }
-  return null;
-}
-function probeImageFile(filePath) {
-  if (!fs__namespace.existsSync(filePath)) return null;
-  const stat = fs__namespace.statSync(filePath);
-  if (stat.size === 0) return null;
-  const fd = fs__namespace.openSync(filePath, "r");
-  const readLen = Math.min(stat.size, 65536);
-  const buffer = Buffer.alloc(readLen);
-  try {
-    fs__namespace.readSync(fd, buffer, 0, readLen, 0);
-    return probeImageDimensions(buffer);
-  } finally {
-    fs__namespace.closeSync(fd);
-  }
-}
-const probeImageFileDimensions = probeImageFile;
 const MANUAL_AI_PROMPT_SCHEMA_VERSION = 1;
 const MANUAL_AI_MANIFEST_SCHEMA_VERSION = 1;
 const MANUAL_AI_SUPPORTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
@@ -6165,8 +9102,8 @@ function writeManifestAtomic(projectDir, manifest) {
   fs__namespace.renameSync(tmp, p);
 }
 function updateManualAiManifest(projectDir, mutator, counts) {
-  const key = queueKey(projectDir);
-  const previous = queues.get(key) ?? Promise.resolve();
+  const key2 = queueKey(projectDir);
+  const previous = queues.get(key2) ?? Promise.resolve();
   const next = previous.catch(() => void 0).then(() => {
     const manifest = loadManualAiManifest(projectDir);
     mutator(manifest);
@@ -6179,7 +9116,7 @@ function updateManualAiManifest(projectDir, mutator, counts) {
     writeManifestAtomic(projectDir, manifest);
     return manifest;
   });
-  queues.set(key, next);
+  queues.set(key2, next);
   return next;
 }
 function upsertManualAiRecord(projectDir, record, counts) {
@@ -6243,73 +9180,6 @@ function buildGeneralImagePrompt(params) {
     contextualAnchor = `context: ${globalContext.primarySubject.slice(0, 50)}, `;
   }
   return `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`;
-}
-const HEALTH_SCHEMA_VERSION = 1;
-const DEFAULT_HEALTH_CONFIG = {
-  aiRatio: 0.8,
-  stockRatio: 0.2,
-  width: 1920,
-  height: 1080,
-  motionEnabled: true
-};
-function getHealthManifestPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "health-generated-assets.json");
-}
-function computeHealthConfigHash(config) {
-  const merged = { ...DEFAULT_HEALTH_CONFIG, ...config };
-  return crypto__namespace.createHash("md5").update(JSON.stringify(merged)).digest("hex");
-}
-function computeHealthGenerationHash(sceneIndex, narration, visualIntent, imagePrompt, config) {
-  const width = config?.width ?? DEFAULT_HEALTH_CONFIG.width;
-  const height = config?.height ?? DEFAULT_HEALTH_CONFIG.height;
-  const payload = [
-    String(sceneIndex),
-    (narration || "").trim().toLowerCase(),
-    (visualIntent || "").trim().toLowerCase(),
-    (imagePrompt || "").trim(),
-    `${width}x${height}`,
-    "GEM_PIX_2",
-    "health"
-  ].join("||");
-  return crypto__namespace.createHash("sha256").update(payload).digest("hex");
-}
-function computeHealthMotionHash(plan) {
-  const parts = (plan.scenes || []).map((s) => {
-    const motionStr = s.motion ? `${s.motion.preset}:${s.motion.intensity}:${s.motion.zoomEnd}` : s.motionPreset || "none";
-    const sfxStr = s.sfxCue ? `${s.sfxCue.type}:${s.sfxCue.volumeDb}` : "none";
-    return `${s.sceneIndex}:${s.category}:${motionStr}:${sfxStr}`;
-  });
-  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
-}
-function loadHealthGeneratedManifest(projectDir) {
-  const manifestPath = getHealthManifestPath(projectDir);
-  if (fs__namespace.existsSync(manifestPath)) {
-    try {
-      const data = JSON.parse(fs__namespace.readFileSync(manifestPath, "utf-8"));
-      if (data && typeof data === "object" && data.scenes) {
-        return data;
-      }
-    } catch (err) {
-      logger.warn(`[HealthVisualCache] Failed to parse ${manifestPath}: ${err}`);
-    }
-  }
-  return {
-    schemaVersion: HEALTH_SCHEMA_VERSION,
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    configHash: computeHealthConfigHash(),
-    scenes: {}
-  };
-}
-function saveHealthGeneratedManifest(projectDir, manifest) {
-  const manifestPath = getHealthManifestPath(projectDir);
-  const dir = path__namespace.dirname(manifestPath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const tmpPath = `${manifestPath}.tmp.${Date.now()}`;
-  fs__namespace.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), "utf-8");
-  fs__namespace.renameSync(tmpPath, manifestPath);
 }
 const HEART_PULSE_REGEX = /\b(heart|cardiac|pulse|pulsat|beat|rhythm|blood\s*pressure|arterial\s*pulse|systol|diastol)\b/i;
 const DOWNWARD_REGEX = /\b(down|downward|digest|digestive|stomach|gut|intestine|colon|waste|excret|sink|lower|absorb|drop)\b/i;
@@ -7458,7 +10328,8 @@ class HealthVisualPlanner {
   }
 }
 function cleanText$1(text) {
-  return (text || "").replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
 function truncateWords(text, maxWords) {
   const words = text.split(/\s+/).filter(Boolean);
@@ -7471,7 +10342,7 @@ function countWords(text) {
 function normWs$1(text) {
   return (text || "").replace(/\s+/g, " ").trim();
 }
-function sha256$1(parts) {
+function sha256$2(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
 function sanitizePromptLine(prompt) {
@@ -7751,7 +10622,7 @@ function buildManualScenePrompt(params) {
   return prompt;
 }
 function computeManualPromptHash(params) {
-  return sha256$1([
+  return sha256$2([
     normWs$1(params.narration),
     normWs$1(params.visualIntent),
     params.profile,
@@ -7761,7 +10632,7 @@ function computeManualPromptHash(params) {
   ]);
 }
 function computeInputHash(params) {
-  return sha256$1([
+  return sha256$2([
     String(params.sceneIndex),
     normWs$1(params.narration),
     normWs$1(params.visualIntent),
@@ -8058,8 +10929,8 @@ function evaluateManualAiStatus(params) {
   };
 }
 function evaluateManualAiStatusForProject(projectDir, imageMode = "prompt") {
-  const norm = projectDir ? path__namespace.normalize(path__namespace.resolve(projectDir)) : "";
-  return evaluateManualAiStatus({ projectDir: norm, pack: loadManualAiPromptPack(norm), imageMode });
+  const norm2 = projectDir ? path__namespace.normalize(path__namespace.resolve(projectDir)) : "";
+  return evaluateManualAiStatus({ projectDir: norm2, pack: loadManualAiPromptPack(norm2), imageMode });
 }
 function readJsonSafe(p) {
   try {
@@ -8100,18 +10971,932 @@ function findMissingManualAiScenes(projectDir) {
   }
   return missing;
 }
-const ffmpegPath$2 = require("ffmpeg-static");
-function ffmpegRun$2(args) {
-  return new Promise((resolve, reject2) => {
-    const proc = cp.spawn(ffmpegPath$2, args, { windowsHide: true });
-    const stderr = [];
-    proc.stderr.on("data", (d) => stderr.push(d.toString()));
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-5).join("")}`));
-    });
-    proc.on("error", reject2);
+const SCENE_RENDERER_VERSION = "scene-v2.0";
+const RENDERER_SCHEMA_VERSION = "render-v2.0";
+const OVERLAY_RENDERER_VERSION = "overlay-v2.0";
+function normalizeForCanonical(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return String(value);
+    return Math.round(value * 1e6) / 1e6;
+  }
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(normalizeForCanonical);
+  if (typeof value === "object") {
+    const out = {};
+    for (const key2 of Object.keys(value).sort()) {
+      const v = value[key2];
+      if (v === void 0 || typeof v === "function") continue;
+      out[key2] = normalizeForCanonical(v);
+    }
+    return out;
+  }
+  return String(value);
+}
+function canonicalJson(value) {
+  return JSON.stringify(normalizeForCanonical(value));
+}
+function sha256$1(input) {
+  return crypto__namespace.createHash("sha256").update(input).digest("hex");
+}
+function fingerprintOf(value) {
+  return sha256$1(canonicalJson(value));
+}
+function normalizeSignaturePath(p) {
+  return path__namespace.normalize(path__namespace.resolve(p));
+}
+function fileSignature(filePath) {
+  if (!filePath) return null;
+  const normalizedPath = normalizeSignaturePath(filePath);
+  try {
+    const st = fs__namespace.statSync(normalizedPath);
+    return { normalizedPath, size: st.size, mtimeMs: Math.floor(st.mtimeMs) };
+  } catch {
+    return { normalizedPath, size: 0, mtimeMs: 0, missing: true };
+  }
+}
+const SMALL_JSON_LIMIT = 8 * 1024 * 1024;
+function hashFileContent(filePath) {
+  try {
+    const st = fs__namespace.statSync(filePath);
+    if (st.size <= SMALL_JSON_LIMIT) {
+      return sha256$1(fs__namespace.readFileSync(filePath));
+    }
+    return fingerprintOf(fileSignature(filePath));
+  } catch {
+    return "absent";
+  }
+}
+function hashJsonValue(value) {
+  return value === void 0 || value === null ? "none" : fingerprintOf(value);
+}
+function computeSceneFingerprint(input) {
+  return fingerprintOf({
+    v: SCENE_RENDERER_VERSION,
+    // NOTE: sceneOrdinal is intentionally excluded — clip pixels do not depend on
+    // render position, so inserting a scene elsewhere must not invalidate this clip.
+    sceneIndex: input.sceneIndex,
+    duration: input.duration,
+    startTime: input.startTime,
+    mediaType: input.mediaType,
+    media: input.mediaSignature,
+    beats: input.visualBeats ?? null,
+    filter: input.filterChain,
+    multiBeat: input.multiBeat,
+    semanticCrop: input.semanticCrop,
+    base: input.base
   });
+}
+function computeAssemblyFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "assembly", ...input });
+}
+function computeAudioFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "audio", ...input });
+}
+function computeOverlayBlockFingerprint(input) {
+  return fingerprintOf({ v: OVERLAY_RENDERER_VERSION, kind: "overlay-block", ...input });
+}
+function computeCompositeFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "composite", ...input });
+}
+function computeRenderFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "render", ...input });
+}
+function shortFingerprint(fp, len = 16) {
+  return fp.replace(/[^a-f0-9]/gi, "").slice(0, len);
+}
+function computeDirectorySignature(dir, maxEntries = 2e3) {
+  const entries = [];
+  const walk = (d) => {
+    if (entries.length >= maxEntries) return;
+    let list;
+    try {
+      list = fs__namespace.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of list) {
+      if (entries.length >= maxEntries) return;
+      if (ent.name === "node_modules" || ent.name.startsWith(".")) continue;
+      const full = path__namespace.join(d, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else {
+        try {
+          const st = fs__namespace.statSync(full);
+          entries.push([path__namespace.relative(dir, full), st.size, Math.floor(st.mtimeMs)]);
+        } catch {
+        }
+      }
+    }
+  };
+  walk(dir);
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  return entries.length ? fingerprintOf(entries) : "absent";
+}
+const RENDER_CACHE_RELATIVE = path__namespace.join(".cache", "render-v2");
+function getRenderCacheRoot(projectDir) {
+  return path__namespace.join(path__namespace.resolve(projectDir), RENDER_CACHE_RELATIVE);
+}
+function isInsideCacheRoot(projectDir, target) {
+  const root = path__namespace.resolve(getRenderCacheRoot(projectDir));
+  const resolved = path__namespace.resolve(target);
+  const rel = path__namespace.relative(root, resolved);
+  if (!rel || rel.startsWith("..") || path__namespace.isAbsolute(rel)) return false;
+  try {
+    const realRoot = fs__namespace.existsSync(root) ? fs__namespace.realpathSync(root) : root;
+    let probe = resolved;
+    while (!fs__namespace.existsSync(probe) && probe !== path__namespace.dirname(probe)) probe = path__namespace.dirname(probe);
+    const realProbe = fs__namespace.realpathSync(probe);
+    const relReal = path__namespace.relative(realRoot, realProbe);
+    if (relReal.startsWith("..") || path__namespace.isAbsolute(relReal)) return false;
+  } catch {
+    return false;
+  }
+  return true;
+}
+function assertInsideCacheRoot(projectDir, target) {
+  if (!isInsideCacheRoot(projectDir, target)) {
+    throw new Error(`Refusing to modify path outside render cache: ${target}`);
+  }
+}
+function safeRemoveCachePath(projectDir, target) {
+  assertInsideCacheRoot(projectDir, target);
+  try {
+    if (!fs__namespace.existsSync(target)) return false;
+    const st = fs__namespace.lstatSync(target);
+    if (st.isDirectory()) fs__namespace.rmSync(target, { recursive: true, force: true });
+    else fs__namespace.unlinkSync(target);
+    return true;
+  } catch (err) {
+    logger.warn(`[RenderCache] Could not remove ${target}: ${String(err)}`);
+    return false;
+  }
+}
+function linkOrClone(src, dst) {
+  fs__namespace.mkdirSync(path__namespace.dirname(dst), { recursive: true });
+  const tmp = `${dst}.linktmp`;
+  try {
+    if (fs__namespace.existsSync(tmp)) fs__namespace.unlinkSync(tmp);
+  } catch {
+  }
+  try {
+    fs__namespace.linkSync(src, tmp);
+  } catch {
+    fs__namespace.copyFileSync(src, tmp, fs__namespace.constants.COPYFILE_FICLONE);
+  }
+  fs__namespace.renameSync(tmp, dst);
+}
+function getActiveRenderPath(projectDir) {
+  return path__namespace.join(getRenderCacheRoot(projectDir), "active-render.json");
+}
+function readActiveRender(projectDir) {
+  return readJsonWithRecovery(getActiveRenderPath(projectDir), (v) => {
+    const r = v;
+    return !!r && r.schemaVersion === 1 && typeof r.renderFingerprint === "string";
+  });
+}
+function writeActiveRender(projectDir, record) {
+  writeJsonAtomic(getActiveRenderPath(projectDir), record);
+}
+function reconcileActiveRender(projectDir, isJobActiveInThisProcess) {
+  const rec = readActiveRender(projectDir);
+  if (!rec) return null;
+  if (rec.status !== "running") return rec;
+  const ownedHere = rec.appInstanceId === APP_INSTANCE_ID;
+  if (ownedHere && isJobActiveInThisProcess) return rec;
+  const ownerAlive = !ownedHere && isProcessAlive(rec.pid);
+  const heartbeatAge = Date.now() - new Date(rec.heartbeatAt).getTime();
+  if (ownerAlive && heartbeatAge < 3e4) return rec;
+  rec.status = "interrupted";
+  rec.interruptionReason = "crashed";
+  rec.endedAt = (/* @__PURE__ */ new Date()).toISOString();
+  try {
+    writeActiveRender(projectDir, rec);
+  } catch {
+  }
+  killOrphanedRenderChildren(rec);
+  try {
+    const manifestPath = path__namespace.join(getRenderCacheRoot(projectDir), rec.workspace, "manifest.json");
+    const m = readManifest(manifestPath);
+    if (m && m.status !== "completed" && m.status !== "cancelled") {
+      m.status = "interrupted";
+      m.interruptionReason = "crashed";
+      m.interruptedAt = rec.endedAt;
+      writeManifest(manifestPath, m);
+    }
+  } catch {
+  }
+  logger.info(`[RenderCache] Detected crashed render for ${projectDir} → marked interrupted`);
+  return rec;
+}
+function killOrphanedRenderChildren(rec) {
+  if (!rec.childPids?.length || process.platform === "win32") return 0;
+  let killed = 0;
+  for (const pid of rec.childPids) {
+    if (!pid || pid === process.pid || !isProcessAlive(pid)) continue;
+    try {
+      const { execFileSync } = require("child_process");
+      const comm = execFileSync("ps", ["-p", String(pid), "-o", "comm="], { encoding: "utf-8", timeout: 2e3 }).trim();
+      if (!/ffmpeg|ffprobe|chrome|chromium|remotion|compositor/i.test(comm)) continue;
+      process.kill(pid, "SIGKILL");
+      killed++;
+      logger.warn(`[RenderCache] Killed orphaned render process pid=${pid} (${comm})`);
+    } catch {
+    }
+  }
+  return killed;
+}
+function listRenderDescendantPids() {
+  if (process.platform === "win32") return Promise.resolve([]);
+  return new Promise((resolve) => {
+    const { execFile } = require("child_process");
+    execFile("ps", ["-A", "-o", "pid=,ppid=,comm="], { timeout: 3e3, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      if (err || !stdout) return resolve([]);
+      const children = /* @__PURE__ */ new Map();
+      for (const line of stdout.split("\n")) {
+        const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+        if (!m) continue;
+        const pid = Number(m[1]);
+        const ppid = Number(m[2]);
+        const list = children.get(ppid) ?? [];
+        list.push({ pid, comm: m[3] });
+        children.set(ppid, list);
+      }
+      const result = [];
+      const stack = [process.pid];
+      const seen = /* @__PURE__ */ new Set();
+      while (stack.length) {
+        const p = stack.pop();
+        for (const c of children.get(p) ?? []) {
+          if (seen.has(c.pid)) continue;
+          seen.add(c.pid);
+          stack.push(c.pid);
+          if (/ffmpeg|ffprobe|chrome|chromium|remotion|compositor/i.test(c.comm)) result.push(c.pid);
+        }
+      }
+      resolve(result);
+    });
+  });
+}
+function emptyIndex() {
+  return { schemaVersion: 1, entries: {}, workspaces: {} };
+}
+function getCacheIndexPath(projectDir) {
+  return path__namespace.join(getRenderCacheRoot(projectDir), "cache-index.json");
+}
+function readCacheIndex(projectDir) {
+  return readJsonWithRecovery(getCacheIndexPath(projectDir), (v) => {
+    const i = v;
+    return !!i && i.schemaVersion === 1 && typeof i.entries === "object";
+  }) ?? emptyIndex();
+}
+function writeCacheIndex(projectDir, index) {
+  writeJsonAtomic(getCacheIndexPath(projectDir), index);
+}
+function checkProbeAgainstExpectation(probe, expect) {
+  if (!probe) return "ffprobe failed";
+  if (!probe.hasVideo) return "no video stream";
+  if (expect.lenient) {
+    if (probe.width <= 0 || probe.height <= 0) return "invalid video dimensions";
+    if (probe.duration <= 0) return "zero duration";
+    if (expect.requireAudio && !probe.hasAudio) return "missing audio stream";
+    return null;
+  }
+  if (expect.width && probe.width !== expect.width) return `width ${probe.width} != ${expect.width}`;
+  if (expect.height && probe.height !== expect.height) return `height ${probe.height} != ${expect.height}`;
+  if (probe.duration <= 0) return "zero duration";
+  if (typeof expect.durationSecs === "number" && expect.durationSecs > 0) {
+    const tol = expect.durationTolerance ?? Math.max(0.12, (expect.fps ? 2 / expect.fps : 0.1) + 0.05);
+    if (Math.abs(probe.duration - expect.durationSecs) > tol) {
+      return `duration ${probe.duration.toFixed(3)} != ${expect.durationSecs.toFixed(3)} (±${tol.toFixed(3)})`;
+    }
+  }
+  if (expect.fps && probe.fps > 0 && Math.abs(probe.fps - expect.fps) > 0.5) return `fps ${probe.fps} != ${expect.fps}`;
+  if (expect.fps && probe.fps <= 0) return "invalid fps";
+  if (typeof expect.frames === "number" && probe.frames !== null && Math.abs(probe.frames - expect.frames) > 1) {
+    return `frames ${probe.frames} != ${expect.frames}`;
+  }
+  if (expect.requireAudio && !probe.hasAudio) return "missing audio stream";
+  return null;
+}
+async function validateCompletedArtifact(artifactPath, expect, signal) {
+  try {
+    if (!fs__namespace.existsSync(artifactPath)) return { ok: false, reason: "missing" };
+    const st = fs__namespace.statSync(artifactPath);
+    if (st.size <= 0) return { ok: false, reason: "empty file" };
+    const meta = readArtifactMeta(artifactPath);
+    if (!meta) return { ok: false, reason: "missing meta" };
+    if (meta.fingerprint !== expect.fingerprint) return { ok: false, reason: "fingerprint mismatch", meta };
+    if (meta.sizeBytes && meta.sizeBytes !== st.size) return { ok: false, reason: "size changed since completion", meta };
+    const probe = await probeMedia$1(artifactPath, { signal });
+    const problem = checkProbeAgainstExpectation(probe, expect) ?? (expect.lenient ? compareWithMeta(probe, meta) : null);
+    if (problem) return { ok: false, reason: problem, meta, probe: probe ?? void 0 };
+    return { ok: true, probe, meta };
+  } catch (err) {
+    return { ok: false, reason: String(err) };
+  }
+}
+function compareWithMeta(probe, meta) {
+  if (meta.width && probe.width !== meta.width) return `width ${probe.width} != recorded ${meta.width}`;
+  if (meta.height && probe.height !== meta.height) return `height ${probe.height} != recorded ${meta.height}`;
+  if (typeof meta.durationSecs === "number" && meta.durationSecs > 0 && Math.abs(probe.duration - meta.durationSecs) > 0.1) {
+    return `duration ${probe.duration.toFixed(3)} != recorded ${meta.durationSecs.toFixed(3)}`;
+  }
+  return null;
+}
+class RenderWorkspace {
+  constructor(projectDir, renderFingerprint) {
+    this.projectDir = projectDir;
+    this.renderFingerprint = renderFingerprint;
+    this.root = getRenderCacheRoot(projectDir);
+    this.name = shortFingerprint(renderFingerprint, 24);
+    this.dir = path__namespace.join(this.root, this.name);
+    this.index = readCacheIndex(projectDir);
+  }
+  root;
+  dir;
+  name;
+  index;
+  eventsBytes = 0;
+  ensure() {
+    for (const sub of ["scenes", "assembly", path__namespace.join("assembly", "segments"), "audio", "overlays", "composite", "logs"]) {
+      fs__namespace.mkdirSync(path__namespace.join(this.dir, sub), { recursive: true });
+    }
+  }
+  get manifestPath() {
+    return path__namespace.join(this.dir, "manifest.json");
+  }
+  scenePath(ordinal) {
+    return path__namespace.join(this.dir, "scenes", `scene-${String(ordinal).padStart(4, "0")}.mp4`);
+  }
+  assemblySegmentPath(i) {
+    return path__namespace.join(this.dir, "assembly", "segments", `segment-${String(i).padStart(4, "0")}.mp4`);
+  }
+  get rawVideoPath() {
+    return path__namespace.join(this.dir, "assembly", "raw-video.mp4");
+  }
+  get mixedVideoPath() {
+    return path__namespace.join(this.dir, "audio", "mixed-video.mp4");
+  }
+  overlayBlockPath(i) {
+    return path__namespace.join(this.dir, "overlays", `block-${String(i).padStart(4, "0")}.mp4`);
+  }
+  get overlayFullPath() {
+    return path__namespace.join(this.dir, "overlays", "overlay-full.mp4");
+  }
+  get compositePath() {
+    return path__namespace.join(this.dir, "composite", "composited-working.mp4");
+  }
+  get eventsPath() {
+    return path__namespace.join(this.dir, "logs", "render-events.jsonl");
+  }
+  loadManifest() {
+    return readManifest(this.manifestPath);
+  }
+  saveManifest(m) {
+    writeManifest(this.manifestPath, m);
+  }
+  logEvent(event) {
+    try {
+      const line = JSON.stringify({ t: (/* @__PURE__ */ new Date()).toISOString(), ...event }) + "\n";
+      if (this.eventsBytes === 0 && fs__namespace.existsSync(this.eventsPath)) this.eventsBytes = fs__namespace.statSync(this.eventsPath).size;
+      if (this.eventsBytes > 4 * 1024 * 1024) {
+        const rotated = this.eventsPath + ".1";
+        try {
+          fs__namespace.renameSync(this.eventsPath, rotated);
+        } catch {
+        }
+        this.eventsBytes = 0;
+      }
+      fs__namespace.appendFileSync(this.eventsPath, line);
+      this.eventsBytes += line.length;
+    } catch {
+    }
+  }
+  touch(meta = {}) {
+    this.index.workspaces[this.name] = {
+      ...this.index.workspaces[this.name] ?? { renderFingerprint: this.renderFingerprint },
+      renderFingerprint: this.renderFingerprint,
+      lastUsedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      ...meta
+    };
+    this.flushIndex();
+  }
+  flushIndex() {
+    try {
+      writeCacheIndex(this.projectDir, this.index);
+    } catch (err) {
+      logger.warn(`[RenderCache] Could not write cache index: ${String(err)}`);
+    }
+  }
+  /**
+   * Deletes stale *.partial.mp4 / *.linktmp files left by an interrupted run.
+   * Completed artifacts are never touched.
+   */
+  cleanupStalePartials() {
+    const removed = [];
+    const walk = (d) => {
+      let list;
+      try {
+        list = fs__namespace.readdirSync(d, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const ent of list) {
+        const full = path__namespace.join(d, ent.name);
+        if (ent.isDirectory()) walk(full);
+        else if (/\.partial\.mp4$|\.linktmp$|\.partial\.txt$/i.test(ent.name)) {
+          if (safeRemoveCachePath(this.projectDir, full)) removed.push(full);
+        }
+      }
+    };
+    if (fs__namespace.existsSync(this.dir)) walk(this.dir);
+    if (removed.length) logger.info(`[RenderCache] Removed ${removed.length} stale partial artifact(s) in ${this.name}`);
+    return removed;
+  }
+  /**
+   * Try to reuse an artifact: first in this workspace, then any workspace via the index.
+   * Returns the probe of the reusable artifact, or null if it must be (re)rendered.
+   */
+  async tryReuse(artifactPath, expect, signal) {
+    const local = await validateCompletedArtifact(artifactPath, expect, signal);
+    if (local.ok) {
+      this.register(artifactPath, expect.kind, local.meta?.sizeBytes ?? 0, expect.fingerprint);
+      return local;
+    }
+    const entry = this.index.entries[expect.fingerprint];
+    if (entry) {
+      const candidate = path__namespace.join(this.root, entry.path);
+      if (path__namespace.resolve(candidate) !== path__namespace.resolve(artifactPath) && isInsideCacheRoot(this.projectDir, candidate)) {
+        const remote = await validateCompletedArtifact(candidate, expect, signal);
+        if (remote.ok) {
+          try {
+            linkOrClone(candidate, artifactPath);
+            writeArtifactMeta(artifactPath, { ...remote.meta, sizeBytes: fs__namespace.statSync(artifactPath).size });
+            return { ...remote, ok: true };
+          } catch (err) {
+            logger.warn(`[RenderCache] Could not link cached artifact ${candidate}: ${String(err)}`);
+          }
+        } else {
+          delete this.index.entries[expect.fingerprint];
+        }
+      }
+    }
+    return local;
+  }
+  /**
+   * Validate a freshly rendered .partial.mp4 and atomically promote it to its final name.
+   */
+  async commitPartial(partialPath, finalPath, expect, extra = {}) {
+    if (!fs__namespace.existsSync(partialPath) || fs__namespace.statSync(partialPath).size <= 0) {
+      throw new Error(`${expect.kind} did not produce a valid file`);
+    }
+    const probe = await probeMedia$1(partialPath, { signal: extra.signal });
+    const problem = checkProbeAgainstExpectation(probe, expect);
+    if (problem) {
+      safeRemoveCachePath(this.projectDir, partialPath);
+      throw new Error(`${expect.kind} validation failed: ${problem}`);
+    }
+    try {
+      if (fs__namespace.existsSync(metaPathFor(finalPath))) fs__namespace.unlinkSync(metaPathFor(finalPath));
+    } catch {
+    }
+    fs__namespace.renameSync(partialPath, finalPath);
+    const size = fs__namespace.statSync(finalPath).size;
+    writeArtifactMeta(finalPath, {
+      fingerprint: expect.fingerprint,
+      kind: expect.kind,
+      sizeBytes: size,
+      durationSecs: probe.duration,
+      width: probe.width,
+      height: probe.height,
+      fps: probe.fps,
+      frames: probe.frames,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      encoder: extra.encoder
+    });
+    this.register(finalPath, expect.kind, size, expect.fingerprint);
+    return probe;
+  }
+  register(artifactPath, kind, sizeBytes, fingerprint) {
+    const rel = path__namespace.relative(this.root, artifactPath);
+    const existing = this.index.entries[fingerprint];
+    if (existing && existing.path === rel) return;
+    this.index.entries[fingerprint] = { path: rel, kind, sizeBytes, updatedAt: (/* @__PURE__ */ new Date()).toISOString() };
+    this.flushIndex();
+  }
+}
+function getRenderCacheSizeBytes(projectDir) {
+  const root = getRenderCacheRoot(projectDir);
+  if (!fs__namespace.existsSync(root)) return 0;
+  const seen = /* @__PURE__ */ new Set();
+  let total = 0;
+  const walk = (d) => {
+    let list;
+    try {
+      list = fs__namespace.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of list) {
+      const full = path__namespace.join(d, ent.name);
+      try {
+        const st = fs__namespace.lstatSync(full);
+        if (st.isDirectory()) walk(full);
+        else {
+          const key2 = `${st.dev}:${st.ino}`;
+          if (seen.has(key2)) continue;
+          seen.add(key2);
+          total += st.size;
+        }
+      } catch {
+      }
+    }
+  };
+  walk(root);
+  return total;
+}
+function pruneRenderCache(projectDir, opts) {
+  const root = getRenderCacheRoot(projectDir);
+  if (!fs__namespace.existsSync(root)) return [];
+  const index = readCacheIndex(projectDir);
+  const active = readActiveRender(projectDir);
+  const keep = new Set(opts.keepWorkspaces);
+  if (active?.workspace) keep.add(active.workspace);
+  const mostRecentCompleted = Object.entries(index.workspaces).filter(([, w]) => !!w.completedAt).sort((a, b) => (b[1].completedAt ?? "").localeCompare(a[1].completedAt ?? ""))[0]?.[0];
+  if (mostRecentCompleted) keep.add(mostRecentCompleted);
+  const dirs = fs__namespace.readdirSync(root, { withFileTypes: true }).filter((d) => d.isDirectory() && /^[a-f0-9]{8,64}$/i.test(d.name) && !keep.has(d.name)).map((d) => ({ name: d.name, lastUsed: index.workspaces[d.name]?.lastUsedAt ?? "" })).sort((a, b) => a.lastUsed.localeCompare(b.lastUsed));
+  const removed = [];
+  for (const d of dirs) {
+    if (getRenderCacheSizeBytes(projectDir) <= opts.maxBytes) break;
+    const full = path__namespace.join(root, d.name);
+    if (safeRemoveCachePath(projectDir, full)) {
+      removed.push(d.name);
+      delete index.workspaces[d.name];
+    }
+  }
+  if (removed.length) {
+    for (const [fp, e] of Object.entries(index.entries)) {
+      const top = e.path.split(/[\\/]/)[0];
+      if (removed.includes(top)) delete index.entries[fp];
+    }
+    writeCacheIndex(projectDir, index);
+    logger.info(`[RenderCache] Pruned ${removed.length} old render workspace(s)`);
+  }
+  return removed;
+}
+function clearRenderCache(projectDir) {
+  const root = getRenderCacheRoot(projectDir);
+  if (!fs__namespace.existsSync(root)) return 0;
+  let removed = 0;
+  for (const ent of fs__namespace.readdirSync(root)) {
+    if (safeRemoveCachePath(projectDir, path__namespace.join(root, ent))) removed++;
+  }
+  return removed;
+}
+function cleanupOrphanOutputPartials(projectDir) {
+  const outputDir = path__namespace.join(path__namespace.resolve(projectDir), "output");
+  const removed = [];
+  if (!fs__namespace.existsSync(outputDir)) return removed;
+  for (const f of fs__namespace.readdirSync(outputDir)) {
+    if (!f.endsWith(".partial.mp4")) continue;
+    const full = path__namespace.join(outputDir, f);
+    try {
+      fs__namespace.unlinkSync(full);
+      removed.push(full);
+    } catch {
+    }
+  }
+  if (removed.length) logger.info(`[RenderCache] Removed ${removed.length} orphan output partial file(s)`);
+  return removed;
+}
+function planOverlayBlocks(input) {
+  const { totalFrames, fps } = input;
+  const targetF = Math.round((input.targetSecs ?? 90) * fps);
+  const minF = Math.round((input.minSecs ?? 60) * fps);
+  const maxF = Math.round((input.maxSecs ?? 120) * fps);
+  if (totalFrames <= 0) return [];
+  if (totalFrames <= maxF) return [{ blockIndex: 1, startFrame: 0, endFrameExclusive: totalFrames }];
+  const ranges = input.protectedIntervals.filter((iv) => Number.isFinite(iv.start) && Number.isFinite(iv.end) && iv.end > iv.start).map((iv) => [Math.floor(iv.start * fps), Math.ceil(iv.end * fps)]).sort((a, b) => a[0] - b[0]);
+  const isSafe = (f) => {
+    for (const [s, e] of ranges) {
+      if (s >= f) break;
+      if (s < f && f < e) return false;
+    }
+    return true;
+  };
+  const sceneFrames = Array.from(
+    new Set(input.sceneBoundariesSecs.map((t) => Math.round(t * fps)).filter((f) => f > 0 && f < totalFrames))
+  ).sort((a, b) => a - b);
+  const blocks = [];
+  let cur = 0;
+  while (totalFrames - cur > maxF) {
+    const lo = cur + minF;
+    const hi = cur + maxF;
+    const target = cur + targetF;
+    let cut = null;
+    let best = null;
+    for (const f of sceneFrames) {
+      if (f < lo || f > hi) continue;
+      if (!isSafe(f)) continue;
+      if (best === null || Math.abs(f - target) < Math.abs(best - target)) best = f;
+    }
+    cut = best;
+    if (cut === null) {
+      for (let delta = 0; delta <= Math.max(target - lo, hi - target); delta++) {
+        if (target + delta <= hi && isSafe(target + delta)) {
+          cut = target + delta;
+          break;
+        }
+        if (target - delta >= lo && isSafe(target - delta)) {
+          cut = target - delta;
+          break;
+        }
+      }
+    }
+    if (cut === null) {
+      for (let f = hi + 1; f < totalFrames; f++) {
+        if (isSafe(f)) {
+          cut = f;
+          break;
+        }
+      }
+    }
+    if (cut === null || cut <= cur || cut >= totalFrames) break;
+    blocks.push({ blockIndex: blocks.length + 1, startFrame: cur, endFrameExclusive: cut });
+    cur = cut;
+  }
+  blocks.push({ blockIndex: blocks.length + 1, startFrame: cur, endFrameExclusive: totalFrames });
+  return blocks;
+}
+function collectProtectedIntervals(params) {
+  const out = [];
+  for (const p of params.captionPhrases ?? []) out.push({ start: p.startTime, end: p.endTime });
+  for (const p of params.proofVisuals ?? []) {
+    if (typeof p.absoluteStartTime === "number" && typeof p.absoluteEndTime === "number") {
+      out.push({ start: p.absoluteStartTime, end: p.absoluteEndTime });
+    }
+  }
+  for (const v of params.visualGrammar ?? []) {
+    if (typeof v.absoluteStartTime === "number" && typeof v.absoluteEndTime === "number") {
+      out.push({ start: v.absoluteStartTime, end: v.absoluteEndTime });
+    }
+  }
+  return out;
+}
+async function runRenderPreflight(options) {
+  const {
+    projectDir,
+    voiceoverPath,
+    captionPlan,
+    resolution = { width: 1920, height: 1080 },
+    fps = 30
+  } = options;
+  const prodSettings = options.settings ?? loadProductionSettings(projectDir);
+  const strictMode = options.strictMissingMedia ?? prodSettings.strictMissingMedia ?? false;
+  const issues = [];
+  let issueId = 1;
+  function addIssue(severity, category, message, suggestion, sceneId, sceneIndex, details) {
+    issues.push({
+      id: `preflight_${issueId++}`,
+      stage: "preflight",
+      severity,
+      category,
+      message,
+      suggestion,
+      sceneId,
+      sceneIndex,
+      details
+    });
+  }
+  const outputDir = path.join(projectDir, "output");
+  try {
+    fs__namespace.mkdirSync(outputDir, { recursive: true });
+    const testFile = path.join(outputDir, `.qa_write_test_${Date.now()}`);
+    fs__namespace.writeFileSync(testFile, "ok", "utf-8");
+    fs__namespace.unlinkSync(testFile);
+  } catch (err) {
+    addIssue("fatal", "output", `Output directory is not writable: ${outputDir} (${String(err)})`, "Check folder permissions");
+  }
+  if (resolution.width <= 0 || resolution.height <= 0 || fps <= 0) {
+    addIssue("fatal", "output", `Invalid render output configuration: ${resolution.width}x${resolution.height} @ ${fps}fps`, "Use standard resolution (e.g. 1920x1080 @ 30fps)");
+  }
+  let planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    const rootPlan = path.join(projectDir, "master-edit-plan.json");
+    if (fs__namespace.existsSync(rootPlan)) {
+      planPath = rootPlan;
+    } else {
+      addIssue("fatal", "plan", "master-edit-plan.json not found. Run AI Planning first.", "Generate an edit plan in AI Planning step");
+      return buildReport(0, 0, 0, issues);
+    }
+  }
+  let plan;
+  try {
+    plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  } catch (err) {
+    addIssue("fatal", "plan", `Failed to parse master-edit-plan.json: ${String(err)}`, "Re-run AI Planning");
+    return buildReport(0, 0, 0, issues);
+  }
+  const flattened = flattenEditPlanScenes(plan);
+  if (flattened.length === 0) {
+    addIssue("fatal", "plan", "Edit plan contains 0 scenes.", "Run AI Planning to generate scenes");
+    return buildReport(0, 0, 0, issues);
+  }
+  const seenIndices = /* @__PURE__ */ new Set();
+  let expectedTotalDuration = 0;
+  for (let i = 0; i < flattened.length; i++) {
+    const entry = flattened[i];
+    const { scene, sceneIndex, sceneId } = entry;
+    if (seenIndices.has(sceneIndex)) {
+      addIssue("fatal", "plan", `Duplicate sceneIndex ${sceneIndex} detected.`, "Ensure all scenes have unique scene indices", sceneId, sceneIndex);
+    }
+    seenIndices.add(sceneIndex);
+    const dur = scene.duration ?? (scene.endTime ?? 0) - (scene.startTime ?? 0);
+    if (dur <= 0) {
+      addIssue("fatal", "plan", `Scene ${sceneIndex} has invalid duration: ${dur}s`, "Ensure scene duration is greater than 0", sceneId, sceneIndex);
+    } else {
+      expectedTotalDuration += dur;
+    }
+  }
+  let mediaIndex = [];
+  const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
+  if (fs__namespace.existsSync(mediaIndexPath)) {
+    mediaIndex = readJsonSafe$1(mediaIndexPath, []);
+  }
+  let resolvedScenesCount = 0;
+  for (const entry of flattened) {
+    const { scene, sceneIndex, sceneId } = entry;
+    const resolved = resolveSceneMediaWithSource(
+      scene,
+      mediaIndex,
+      projectDir
+    );
+    if (resolved.mediaPath && fs__namespace.existsSync(resolved.mediaPath) && fs__namespace.statSync(resolved.mediaPath).size > 0) {
+      resolvedScenesCount++;
+      const probe = await probeMediaDetailed(resolved.mediaPath);
+      if (probe) {
+        if (probe.hasVideo && probe.durationSecs < (scene.duration ?? 2) * 0.5) {
+          addIssue("warning", "media", `Scene ${sceneIndex} video asset duration (${probe.durationSecs.toFixed(1)}s) is shorter than scene duration`, "Stock video may loop or freeze", sceneId, sceneIndex);
+        }
+        if (probe.hasVideo && (probe.width < 720 || probe.height < 480)) {
+          addIssue("warning", "media", `Scene ${sceneIndex} has low resolution asset: ${probe.width}x${probe.height}`, "Replace with higher quality footage in Stock Media", sceneId, sceneIndex);
+        }
+      }
+    } else {
+      const severity = strictMode ? "fatal" : "warning";
+      addIssue(
+        severity,
+        "media",
+        `Scene ${sceneIndex} media is missing (${resolved.source}). ${strictMode ? "Strict mode on: render blocked." : "Black placeholder fallback will be used."}`,
+        "Search or upload media in Stock Media tab",
+        sceneId,
+        sceneIndex
+      );
+    }
+  }
+  if (resolvedScenesCount === 0 && flattened.length > 0) {
+    addIssue("fatal", "media", "All scenes are missing media files. Cannot render video without footage.", "Run Stock Media search or upload media");
+  }
+  if (voiceoverPath) {
+    if (!fs__namespace.existsSync(voiceoverPath) || fs__namespace.statSync(voiceoverPath).size === 0) {
+      addIssue("fatal", "audio", `Specified voiceover file not found or empty: ${voiceoverPath}`, "Check Voiceover path in Inputs step");
+    } else {
+      const voProbe = await probeMediaDetailed(voiceoverPath);
+      if (!voProbe || !voProbe.hasAudio) {
+        addIssue("warning", "audio", "Voiceover file could not be verified as valid audio stream", "Check audio format");
+      }
+    }
+  }
+  const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
+  if (fs__namespace.existsSync(audioPlanPath)) {
+    const audioPlan = readJsonSafe$1(audioPlanPath, {});
+    if (audioPlan.musicTrack?.filePath && !fs__namespace.existsSync(audioPlan.musicTrack.filePath)) {
+      addIssue("warning", "audio", `Approved background music file missing: ${audioPlan.musicTrack.filePath}`, "Check audio library");
+    }
+  }
+  if (captionPlan?.enabled && captionPlan.phrases) {
+    for (const phrase of captionPlan.phrases) {
+      if (phrase.startTime < 0 || phrase.endTime < 0 || phrase.endTime < phrase.startTime) {
+        addIssue("warning", "caption", `Caption phrase "${phrase.text.slice(0, 30)}" has invalid timing: ${phrase.startTime}s - ${phrase.endTime}s`, "Adjust timing in Captions step");
+      }
+      if (expectedTotalDuration > 0 && phrase.startTime > expectedTotalDuration + 2) {
+        addIssue("warning", "caption", `Caption phrase starts after video ends (${phrase.startTime.toFixed(1)}s > ${expectedTotalDuration.toFixed(1)}s)`, "Trim caption plan");
+      }
+    }
+  }
+  for (const entry of flattened) {
+    const { scene, sceneIndex, sceneId } = entry;
+    if (scene.transitionIn && scene.transitionIn !== "none" && scene.transitionIn !== "cut") {
+      const dur = scene.duration ?? (scene.endTime ?? 0) - (scene.startTime ?? 0);
+      if (dur < 1) {
+        addIssue("info", "transition", `Scene ${sceneIndex} is short (${dur.toFixed(1)}s). Transition will automatically fallback to clean cut.`, void 0, sceneId, sceneIndex);
+      }
+    }
+  }
+  const report = buildReport(expectedTotalDuration, flattened.length, resolvedScenesCount, issues);
+  const reportPath = path.join(projectDir, "analysis", "render-preflight.json");
+  atomicWriteJson(reportPath, report);
+  logger.info(`[QA-Preflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning, ${report.infoCount} info)`);
+  return report;
+}
+function buildReport(expectedDuration, totalScenes, resolvedScenes, issues) {
+  const fatalCount = issues.filter((i) => i.severity === "fatal").length;
+  const warningCount = issues.filter((i) => i.severity === "warning").length;
+  const infoCount = issues.filter((i) => i.severity === "info").length;
+  let status = "passed";
+  if (fatalCount > 0) {
+    status = "failed";
+  } else if (warningCount > 0) {
+    status = "passed_with_warnings";
+  }
+  return {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status,
+    expectedDuration: Math.round(expectedDuration * 100) / 100,
+    totalScenes,
+    resolvedScenes,
+    missingScenes: totalScenes - resolvedScenes,
+    fatalCount,
+    warningCount,
+    infoCount,
+    issues
+  };
+}
+const MAX_REUSE_AGE_MS = 30 * 60 * 1e3;
+function stockDirSignature(projectDir) {
+  const dir = path__namespace.join(projectDir, "assets", "stock");
+  try {
+    return fs__namespace.readdirSync(dir).sort().map((f) => {
+      try {
+        const st = fs__namespace.statSync(path__namespace.join(dir, f));
+        return [f, st.size, Math.floor(st.mtimeMs)];
+      } catch {
+        return [f, 0, 0];
+      }
+    });
+  } catch {
+    return null;
+  }
+}
+function computePreflightFingerprint(options) {
+  const { projectDir } = options;
+  const analysis = path__namespace.join(projectDir, "analysis");
+  const cp2 = options.captionPlan;
+  return fingerprintOf({
+    v: "preflight-v1",
+    plan: hashFileContent(path__namespace.join(analysis, "master-edit-plan.json")),
+    mediaIndex: hashFileContent(path__namespace.join(analysis, "media-index.json")),
+    stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json")),
+    audio: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
+    prod: hashFileContent(path__namespace.join(analysis, "production-settings.json")),
+    captions: cp2 && cp2.enabled && (cp2.phrases?.length ?? 0) > 0 ? fingerprintOf(cp2) : null,
+    voiceover: fileSignature(options.voiceoverPath),
+    resolution: options.resolution ?? { width: 1920, height: 1080 },
+    fps: options.fps ?? 30,
+    stockDir: stockDirSignature(projectDir)
+  });
+}
+function metaPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "render-preflight.meta.json");
+}
+async function runRenderPreflightCached(options, opts = {}) {
+  const fingerprint = computePreflightFingerprint(options);
+  const reportPath = path__namespace.join(options.projectDir, "analysis", "render-preflight.json");
+  if (!opts.force) {
+    const meta = readJsonWithRecovery(metaPath(options.projectDir));
+    const age = meta ? Date.now() - new Date(meta.generatedAt).getTime() : Infinity;
+    if (meta && meta.fingerprint === fingerprint && age < MAX_REUSE_AGE_MS && fs__namespace.existsSync(reportPath)) {
+      const report2 = readJsonWithRecovery(reportPath);
+      if (report2 && report2.status && report2.status !== "failed") {
+        logger.info("[PreflightCache] Inputs unchanged — reusing preflight report");
+        return { report: report2, reused: true };
+      }
+    }
+  }
+  const report = await runRenderPreflight(options);
+  try {
+    writeJsonAtomic(metaPath(options.projectDir), { fingerprint, generatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+  } catch {
+  }
+  return { report, reused: false };
+}
+let overlayRenderer = renderCaptionsOverlay;
+let transitionAssembler = concatSceneClipsWithTransitions;
+function ffmpegRun$2(args, ctx) {
+  return ffmpegRun$4(args, ctx?.ffmpeg ?? {});
+}
+async function encodeRun(args, ctx) {
+  try {
+    await ffmpegRun$4(args, ctx.ffmpeg);
+  } catch (err) {
+    if (isRenderCancelledError(err)) throw err;
+    throw asHardwareError(err, ctx.encoder);
+  }
+}
+function vcodec(ctx, crf) {
+  return ctx.encoder.videoArgs(crf, "fast");
 }
 function safeUnlink(filePath) {
   if (!filePath) return;
@@ -8125,62 +11910,24 @@ function safeUnlink(filePath) {
     );
   }
 }
-async function probeVideoInfo(filePath) {
+function moveFile(src, dst) {
   try {
-    const ffp = require("ffprobe-static");
-    if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
-    return new Promise((resolve) => {
-      const proc = cp.spawn(
-        ffp.path,
-        [
-          "-v",
-          "error",
-          "-select_streams",
-          "v:0",
-          "-show_entries",
-          "stream=codec_type,width,height,duration:format=duration",
-          "-of",
-          "json",
-          filePath
-        ],
-        { windowsHide: true }
-      );
-      let stdout = "";
-      proc.stdout.on("data", (d) => {
-        stdout += d.toString();
-      });
-      proc.on("close", (code) => {
-        if (code === 0) {
-          try {
-            const data = JSON.parse(stdout);
-            const stream = data.streams?.[0];
-            const duration = parseFloat(data.format?.duration) || parseFloat(stream?.duration) || 0;
-            if (stream && stream.codec_type === "video") {
-              resolve({
-                hasVideo: true,
-                width: Number(stream.width) || 0,
-                height: Number(stream.height) || 0,
-                duration
-              });
-              return;
-            }
-          } catch {
-          }
-        }
-        resolve(null);
-      });
-      proc.on("error", () => resolve(null));
-    });
-  } catch {
-    return null;
+    fs__namespace.renameSync(src, dst);
+  } catch (err) {
+    if (err.code !== "EXDEV") throw err;
+    fs__namespace.copyFileSync(src, dst);
+    safeUnlink(src);
   }
 }
-async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath) {
+function concatListLine(f) {
+  return `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`;
+}
+async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx) {
   const concatList = path__namespace.join(tmpDir, "concat.txt");
   fs__namespace.writeFileSync(
     concatList,
     // On macOS, paths are already using forward slashes. On Windows, convert backslashes.
-    sceneClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
+    sceneClips.map(concatListLine).join("\n"),
     "utf-8"
   );
   await ffmpegRun$2([
@@ -8194,7 +11941,7 @@ async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath) {
     "-c",
     "copy",
     rawVideoPath
-  ]);
+  ], ctx);
   safeUnlink(concatList);
 }
 function normalizePathForFFmpeg(p) {
@@ -8321,7 +12068,7 @@ function resolveSceneMedia(scene, mediaIndex, projectDir) {
   return resolveSceneMediaWithSource(scene, mediaIndex, projectDir).mediaPath;
 }
 async function renderVisualBeatsToClip(params) {
-  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex } = params;
+  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex, ctx } = params;
   const beatClips = [];
   const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
   let isImage;
@@ -8342,6 +12089,7 @@ async function renderVisualBeatsToClip(params) {
   }
   try {
     for (let bi = 0; bi < beats.length; bi++) {
+      throwIfAborted(ctx.ffmpeg.signal);
       const beat = beats[bi];
       const beatDuration = beat.relativeEnd - beat.relativeStart;
       const beatClip = path__namespace.join(tmpDir, `beat_${String(sceneIndex).padStart(4, "0")}_${bi}.mp4`);
@@ -8351,7 +12099,7 @@ async function renderVisualBeatsToClip(params) {
         if (zf) vfFilter = `${scaleFilt},${zf}`;
       }
       if (isImage) {
-        await ffmpegRun$2([
+        await encodeRun([
           "-y",
           "-loop",
           "1",
@@ -8359,12 +12107,7 @@ async function renderVisualBeatsToClip(params) {
           mediaPath,
           "-vf",
           vfFilter,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "20",
+          ...vcodec(ctx, 20),
           "-t",
           String(beatDuration),
           "-r",
@@ -8372,10 +12115,10 @@ async function renderVisualBeatsToClip(params) {
           "-pix_fmt",
           "yuv420p",
           beatClip
-        ]);
+        ], ctx);
       } else {
         const ssOffset = beat.relativeStart;
-        await ffmpegRun$2([
+        await encodeRun([
           "-y",
           "-ss",
           String(ssOffset),
@@ -8383,12 +12126,7 @@ async function renderVisualBeatsToClip(params) {
           mediaPath,
           "-vf",
           `${vfFilter},tpad=stop_mode=clone:stop_duration=${beatDuration},trim=duration=${beatDuration},setpts=PTS-STARTPTS`,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "20",
+          ...vcodec(ctx, 20),
           "-t",
           String(beatDuration),
           "-r",
@@ -8397,18 +12135,18 @@ async function renderVisualBeatsToClip(params) {
           "-pix_fmt",
           "yuv420p",
           beatClip
-        ]);
+        ], ctx);
       }
       beatClips.push(beatClip);
     }
     if (beatClips.length === 1) {
       safeUnlink(outClip);
-      fs__namespace.renameSync(beatClips[0], outClip);
+      moveFile(beatClips[0], outClip);
     } else {
       const beatConcatList = path__namespace.join(tmpDir, `beat_concat_${sceneIndex}.txt`);
       fs__namespace.writeFileSync(
         beatConcatList,
-        beatClips.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`).join("\n"),
+        beatClips.map(concatListLine).join("\n"),
         "utf-8"
       );
       await ffmpegRun$2([
@@ -8422,12 +12160,16 @@ async function renderVisualBeatsToClip(params) {
         "-c",
         "copy",
         outClip
-      ]);
+      ], ctx);
       for (const bc of beatClips) safeUnlink(bc);
       safeUnlink(beatConcatList);
     }
     logger.info(`[RetentionEngine] scene ${sceneIndex}: ${beats.length} beats rendered and concatenated`);
   } catch (err) {
+    if (isRenderCancelledError(err) || err instanceof HardwareEncoderError) {
+      for (const bc of beatClips) safeUnlink(bc);
+      throw err;
+    }
     const errMsg = String(err);
     if (errMsg.includes("Media classification error") || errMsg.includes("Option loop not found")) {
       throw err;
@@ -8439,7 +12181,7 @@ async function renderVisualBeatsToClip(params) {
     const baseFilt = scaleFilt;
     const fallbackDur = beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0);
     if (isImage) {
-      await ffmpegRun$2([
+      await encodeRun([
         "-y",
         "-loop",
         "1",
@@ -8447,12 +12189,7 @@ async function renderVisualBeatsToClip(params) {
         mediaPath,
         "-vf",
         baseFilt,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
+        ...vcodec(ctx, 20),
         "-t",
         String(fallbackDur),
         "-r",
@@ -8460,20 +12197,15 @@ async function renderVisualBeatsToClip(params) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ]);
+      ], ctx);
     } else {
-      await ffmpegRun$2([
+      await encodeRun([
         "-y",
         "-i",
         mediaPath,
         "-vf",
         `${baseFilt},tpad=stop_mode=clone:stop_duration=${fallbackDur},trim=duration=${fallbackDur},setpts=PTS-STARTPTS`,
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
+        ...vcodec(ctx, 20),
         "-t",
         String(fallbackDur),
         "-r",
@@ -8482,83 +12214,345 @@ async function renderVisualBeatsToClip(params) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ]);
+      ], ctx);
     }
   }
 }
+function encoderKeyFor(mode, resolution, fps) {
+  return mode === "videotoolbox-h264" ? videoToolboxEncoder(resolution.width, resolution.height, fps).key : softwareEncoder().key;
+}
+function prepareRenderPlan(params) {
+  const outputName = params.outputName ?? "final_output";
+  const resolution = params.resolution ?? { width: 1920, height: 1080 };
+  const fps = params.fps ?? 30;
+  const projectDir = normalizePathForFFmpeg(params.projectDir);
+  const voiceoverPath = normalizePathForFFmpeg(params.voiceoverPath);
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) throw new Error("No edit plan found. Run AI Planning first.");
+  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
+  const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
+  const sceneEntries = [];
+  plan.chapters.forEach((ch, chIdx) => {
+    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+    let isFirstInCh = true;
+    seqs.forEach((seq, seqIdx) => {
+      let isFirstInSeq = true;
+      const scList = seq.scenes ?? [];
+      scList.forEach((scene) => {
+        sceneEntries.push({
+          scene,
+          chapterIndex: chIdx,
+          sequenceIndex: seqIdx,
+          isFirstInChapter: isFirstInCh,
+          isFirstInSequence: isFirstInSeq
+        });
+        isFirstInCh = false;
+        isFirstInSeq = false;
+      });
+    });
+  });
+  const scenes = sceneEntries.map((entry) => entry.scene);
+  let resolvedMediaCount = 0;
+  let missingMediaCount = 0;
+  for (const scene of scenes) {
+    const resolved = resolveSceneMediaWithSource(scene, mediaIndex, projectDir);
+    if (resolved.mediaPath && fs__namespace.existsSync(resolved.mediaPath)) {
+      resolvedMediaCount++;
+      scene.localPath = resolved.mediaPath;
+      if (!scene.mediaFile) {
+        scene.mediaFile = path__namespace.basename(resolved.mediaPath);
+      }
+      const detectedKind = detectMediaKind(resolved.mediaPath, scene.mediaType);
+      if (scene.mediaType !== detectedKind) {
+        logger.warn(
+          `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${scene.mediaType ?? "unknown"}, but file extension indicates ${detectedKind}. Syncing memory mediaType to ${detectedKind}.`
+        );
+        scene.mediaType = detectedKind;
+      }
+      logger.debug(
+        `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} mediaKind=${detectedKind} exists=true path=${resolved.mediaPath}`
+      );
+    } else {
+      missingMediaCount++;
+      logger.warn(
+        `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} exists=false`
+      );
+    }
+  }
+  const visualPlanMap = /* @__PURE__ */ new Map();
+  const visualMixPlanPath = path__namespace.join(projectDir, "analysis", "visual-mix-plan.json");
+  if (fs__namespace.existsSync(visualMixPlanPath)) {
+    try {
+      const vp = JSON.parse(fs__namespace.readFileSync(visualMixPlanPath, "utf-8"));
+      for (const sc of vp.scenes || []) {
+        if (sc && typeof sc.sceneIndex === "number") {
+          visualPlanMap.set(sc.sceneIndex, sc);
+        }
+      }
+    } catch {
+    }
+  }
+  const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
+  if (fs__namespace.existsSync(healthPlanPath)) {
+    try {
+      const hp = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+      for (const sc of hp.scenes || []) {
+        if (sc && typeof sc.sceneIndex === "number" && !visualPlanMap.has(sc.sceneIndex)) {
+          visualPlanMap.set(sc.sceneIndex, sc);
+        }
+      }
+    } catch {
+    }
+  }
+  const retentionSettings = DEFAULT_RETENTION_SETTINGS;
+  const retCtx = createDefaultContext();
+  const retentionPlanMap = /* @__PURE__ */ new Map();
+  let retentionPlan = null;
+  try {
+    const rawScenes = scenes.map((s, idx) => ({
+      sceneIndex: s.sceneIndex ?? idx,
+      sceneId: String(s.sceneIndex ?? idx),
+      duration: s.duration,
+      narrativeText: s.narrativeText,
+      visualIntent: s.visualIntent,
+      energyLevel: s.energyLevel,
+      shotType: s.shotType,
+      isPatternInterrupt: s.isPatternInterrupt,
+      isFirstInChapter: idx === 0 || s.isFirstInChapter,
+      visualStrategy: visualPlanMap.get(s.sceneIndex)?.strategy,
+      category: visualPlanMap.get(s.sceneIndex)?.category,
+      motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+      localPath: s.localPath
+    }));
+    retentionPlan = ensureRetentionPlan(projectDir, {
+      scenes: rawScenes,
+      level: retentionSettings.level
+    });
+    if (retentionPlan) {
+      for (const sp of retentionPlan.scenes) {
+        retentionPlanMap.set(sp.sceneIndex, sp);
+      }
+    }
+  } catch (err) {
+    logger.warn(`[RENDER] Failed to ensure retention plan (falling open to legacy): ${String(err)}`);
+    retentionPlan = null;
+  }
+  const retentionDecisions = /* @__PURE__ */ new Map();
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const retentionHint = retentionPlanMap.get(scene.sceneIndex) ?? retentionPlanMap.get(i);
+    const sceneInput = {
+      sceneId: String(scene.sceneIndex),
+      sceneIndex: i,
+      duration: scene.duration,
+      energyLevel: scene.energyLevel,
+      shotType: scene.shotType,
+      narrativeText: scene.narrativeText,
+      visualIntent: scene.visualIntent,
+      isPatternInterrupt: scene.isPatternInterrupt || retentionHint?.patternInterrupt,
+      localPath: scene.localPath,
+      isNewChapter: i === 0 || scene.isFirstInChapter,
+      retentionHint
+    };
+    const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings);
+    retentionDecisions.set(i, decision);
+    updateRetentionContext(retCtx, sceneInput, decision);
+  }
+  const { width, height } = resolution;
+  const base = { width, height, fps, encoderProfile: params.encoderKey };
+  const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+  const sceneJobs = scenes.map((scene, i) => {
+    const mediaPath = scene.localPath && fs__namespace.existsSync(scene.localPath) ? scene.localPath : resolveSceneMedia(scene, mediaIndex, projectDir);
+    const hasMedia = !!mediaPath && fs__namespace.existsSync(mediaPath);
+    const mediaName = scene.localPath ? path__namespace.basename(scene.localPath) : scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`;
+    const mediaKind = hasMedia ? detectMediaKind(mediaPath, scene.mediaType) : "placeholder";
+    const beats = retentionDecisions.get(i)?.visualBeats ?? [];
+    const useBeats = hasMedia && beats.length > 1 && retentionSettings.enabled;
+    const visualScene = visualPlanMap.get(scene.sceneIndex);
+    const isAiStill = mediaKind === "image" && (visualScene?.strategy === "ai-still" || mediaPath && (mediaPath.includes(path__namespace.join("assets", "generated", "health")) || mediaPath.includes("/assets/generated/health/") || mediaPath.includes(path__namespace.join("assets", "generated", "general")) || mediaPath.includes("/assets/generated/general/")));
+    const motionPreset = isAiStill ? visualScene?.motionPreset || visualScene?.motion || "push-in-center" : "";
+    const effectiveFilter = isAiStill ? `${scaleFilt}:motion=${typeof motionPreset === "object" ? motionPreset.preset : motionPreset}` : scaleFilt;
+    const fingerprint = computeSceneFingerprint({
+      sceneIndex: scene.sceneIndex,
+      duration: scene.duration,
+      startTime: scene.startTime,
+      mediaType: mediaKind,
+      mediaSignature: hasMedia ? fileSignature(mediaPath) : null,
+      visualBeats: hasMedia ? beats.map((b) => ({ s: b.relativeStart, e: b.relativeEnd, crop: b.crop ?? null })) : null,
+      filterChain: effectiveFilter,
+      multiBeat: useBeats,
+      semanticCrop: !!retentionSettings.semanticCropEnabled,
+      base
+    });
+    return {
+      ordinal: i + 1,
+      scene,
+      mediaPath: hasMedia ? mediaPath : null,
+      mediaName,
+      mediaKind,
+      beats,
+      useBeats,
+      scaleFilt,
+      fingerprint
+    };
+  });
+  const validTransitionSettings = validateTransitionSettings(params.transitionSettings);
+  const analysis = path__namespace.join(projectDir, "analysis");
+  const cp2 = params.captionPlan;
+  const hashes = {
+    plan: hashFileContent(planPath),
+    mediaIndex: hashFileContent(mediaIndexPath),
+    stockAssignments: hashFileContent(path__namespace.join(analysis, "stock-assignments.json")),
+    captionPlan: cp2 ? hashJsonValue(cp2) : "none",
+    audioPlan: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
+    productionSettings: hashFileContent(path__namespace.join(analysis, "production-settings.json")),
+    visualGrammarPlan: hashFileContent(path__namespace.join(analysis, "visual-grammar-plan.json"))
+  };
+  const assemblyFingerprint = computeAssemblyFingerprint({
+    sceneFingerprints: sceneJobs.map((j) => j.fingerprint),
+    sceneBoundaryMeta: sceneEntries.map((e) => ({
+      c: e.chapterIndex,
+      s: e.sequenceIndex,
+      fc: e.isFirstInChapter,
+      fs: e.isFirstInSequence,
+      t: e.scene.transitionIn,
+      d: e.scene.duration
+    })),
+    transitionSettings: validTransitionSettings ?? null,
+    base
+  });
+  const renderFingerprint = computeRenderFingerprint({
+    masterEditPlanHash: hashes.plan,
+    mediaIndexHash: hashes.mediaIndex,
+    stockAssignmentsHash: hashes.stockAssignments,
+    captionPlanHash: hashes.captionPlan,
+    audioPlanHash: hashes.audioPlan,
+    voiceover: fileSignature(voiceoverPath),
+    base,
+    transitionSettings: validTransitionSettings ?? null,
+    retentionSettings,
+    proofVisualSettings: { enabled: retentionSettings.proofVisualsEnabled, prod: hashes.productionSettings },
+    // visual-grammar-plan.json may be auto-generated BY the render itself, so it is not
+    // part of the workspace key; the resolved decisions are hashed into every overlay
+    // block fingerprint (overlayPropsHash) instead, which invalidates overlays correctly.
+    visualGrammarSettings: { prod: hashes.productionSettings },
+    sceneFingerprints: sceneJobs.map((j) => j.fingerprint)
+  });
+  return {
+    projectDir,
+    voiceoverPath,
+    outputName,
+    resolution,
+    fps,
+    transitionSettings: params.transitionSettings,
+    validTransitionSettings,
+    plan,
+    mediaIndex,
+    sceneEntries,
+    scenes,
+    resolvedMediaCount,
+    missingMediaCount,
+    retentionSettings,
+    retentionDecisions,
+    retentionPlan,
+    retentionPlanMap,
+    visualPlanMap,
+    sceneJobs,
+    base,
+    hashes,
+    renderFingerprint,
+    assemblyFingerprint,
+    totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0)
+  };
+}
+function computeRenderRequestKey(params) {
+  const projectDir = normalizePathForFFmpeg(params.projectDir);
+  const analysis = path__namespace.join(projectDir, "analysis");
+  return fingerprintOf({
+    projectDir,
+    voiceover: fileSignature(params.voiceoverPath ? normalizePathForFFmpeg(params.voiceoverPath) : null),
+    outputName: params.outputName ?? "final_output",
+    resolution: params.resolution ?? { width: 1920, height: 1080 },
+    fps: params.fps ?? 30,
+    transitions: validateTransitionSettings(params.transitionSettings) ?? null,
+    captions: params.captionPlan ? hashJsonValue(params.captionPlan) : "none",
+    plan: hashFileContent(path__namespace.join(analysis, "master-edit-plan.json")),
+    audio: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
+    stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json"))
+  });
+}
 async function renderVideo(params) {
+  try {
+    return await renderVideoV2(params, void 0);
+  } catch (err) {
+    if (err instanceof HardwareEncoderError && !params.signal?.aborted) {
+      logger.warn(`[RENDER] ${err.message} — falling back to Software H.264`);
+      params.onProgress?.({ stage: "Hardware encoder failed — retrying with Software H.264...", progress: 0.05 });
+      return renderVideoV2(params, "software-h264", [`Hardware encoder failed and was replaced by Software H.264: ${err.message}`]);
+    }
+    throw err;
+  }
+}
+async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
+  const prefs = loadRenderPreferences();
+  const signal = params.signal;
+  const resourceProfile = params.resourceProfile ?? prefs.resourceProfile;
+  const requestedEncoder = encoderOverride ?? params.encoderMode ?? prefs.videoEncoder;
+  const remotionHw = params.remotionHardwareAcceleration ?? prefs.remotionHardwareAcceleration;
+  const limits = computeResourceLimits(resourceProfile);
+  const warnings = [...carriedWarnings];
   const {
     outputName = "final_output",
     resolution = { width: 1920, height: 1080 },
     fps = 30,
     onProgress
   } = params;
-  const projectDir = normalizePathForFFmpeg(params.projectDir);
-  const voiceoverPath = normalizePathForFFmpeg(params.voiceoverPath);
   const progress = (stage, pct, extra = {}) => {
     logger.info(`[RENDER] ${stage} (${Math.round(pct * 100)}%)`);
     onProgress?.({ stage, progress: pct, ...extra });
   };
   let tmpDir = void 0;
-  let workingOutputPath = void 0;
+  let publishPartial = void 0;
+  let workspace;
+  let manifest;
+  let activeRecord;
+  let heartbeat;
+  const throttle = new AdaptiveThrottle(limits, (msg) => progress(msg, lastPct));
+  let lastPct = 0.02;
+  const setPct = (stage, pct, extra = {}) => {
+    lastPct = pct;
+    progress(stage, pct, extra);
+  };
   try {
-    progress("Loading edit plan...", 0.02);
-    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-    if (!fs__namespace.existsSync(planPath)) throw new Error("No edit plan found. Run AI Planning first.");
-    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    progress("Loading media index...", 0.04);
-    const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
-    const mediaIndex = fs__namespace.existsSync(mediaIndexPath) ? JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8")) : [];
-    const sceneEntries = [];
-    plan.chapters.forEach((ch, chIdx) => {
-      const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-      let isFirstInCh = true;
-      seqs.forEach((seq, seqIdx) => {
-        let isFirstInSeq = true;
-        const scList = seq.scenes ?? [];
-        scList.forEach((scene) => {
-          sceneEntries.push({
-            scene,
-            chapterIndex: chIdx,
-            sequenceIndex: seqIdx,
-            isFirstInChapter: isFirstInCh,
-            isFirstInSequence: isFirstInSeq
-          });
-          isFirstInCh = false;
-          isFirstInSeq = false;
-        });
-      });
+    const encoder = await resolveEncoder(requestedEncoder, { ...resolution, fps }, warnings);
+    const ffmpegOpts = {
+      signal,
+      threads: limits.ffmpegThreads,
+      filterThreads: limits.ffmpegFilterThreads,
+      niceLevel: limits.niceLevel
+    };
+    const ctx = { ffmpeg: ffmpegOpts, encoder };
+    logger.info(
+      `[RENDER] Resource profile=${limits.profile} ffmpegThreads=${limits.ffmpegThreads} filterThreads=${limits.ffmpegFilterThreads} remotionConcurrency=${limits.remotionConcurrency} encoder=${encoder.key}`
+    );
+    setPct("Loading edit plan...", 0.02);
+    setPct("Loading media index...", 0.04);
+    const prepared = prepareRenderPlan({
+      projectDir: params.projectDir,
+      voiceoverPath: params.voiceoverPath,
+      outputName,
+      resolution,
+      fps,
+      captionPlan: params.captionPlan,
+      transitionSettings: params.transitionSettings,
+      encoderKey: encoder.key
     });
-    const scenes = sceneEntries.map((entry) => entry.scene);
+    const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions, retentionPlan, retentionPlanMap, visualPlanMap } = prepared;
     const totalScenes = scenes.length;
-    progress(`Processing ${totalScenes} scenes...`, 0.06);
-    const visualPlanMap = /* @__PURE__ */ new Map();
-    const visualMixPlanPath = path__namespace.join(projectDir, "analysis", "visual-mix-plan.json");
-    if (fs__namespace.existsSync(visualMixPlanPath)) {
-      try {
-        const vp = JSON.parse(fs__namespace.readFileSync(visualMixPlanPath, "utf-8"));
-        for (const sc of vp.scenes || []) {
-          if (sc && typeof sc.sceneIndex === "number") {
-            visualPlanMap.set(sc.sceneIndex, sc);
-          }
-        }
-      } catch {
-      }
-    }
-    const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
-    if (fs__namespace.existsSync(healthPlanPath)) {
-      try {
-        const hp = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
-        for (const sc of hp.scenes || []) {
-          if (sc && typeof sc.sceneIndex === "number" && !visualPlanMap.has(sc.sceneIndex)) {
-            visualPlanMap.set(sc.sceneIndex, sc);
-          }
-        }
-      } catch {
-      }
-    }
-    progress("Running preflight QA checks...", 0.07);
-    const preflightReport = await runRenderPreflight({
+    setPct(`Processing ${totalScenes} scenes...`, 0.06);
+    setPct("Running preflight QA checks...", 0.07);
+    const { report: preflightReport } = await runRenderPreflightCached({
       projectDir,
       voiceoverPath,
       captionPlan: params.captionPlan,
@@ -8570,76 +12564,21 @@ async function renderVideo(params) {
       const msg = fatalIssues.map((i) => i.message).join("; ");
       throw new Error(`Render Preflight QA failed: ${msg}`);
     }
+    throwIfAborted(signal);
     const missingManualAiScenes = findMissingManualAiScenes(projectDir);
     if (missingManualAiScenes.length > 0) {
       throw new Error(
         `Manual AI images missing for scenes: ${missingManualAiScenes.join(", ")}. Import the missing images (Production → Find Visuals → Import AI Images) before rendering.`
       );
     }
-    progress("Validating scene media...", 0.08);
-    const preflightResults = [];
-    let resolvedMediaCount = 0;
-    let missingMediaCount = 0;
-    for (const scene of scenes) {
-      const resolved = resolveSceneMediaWithSource(scene, mediaIndex, projectDir);
-      preflightResults.push(resolved);
-      if (resolved.mediaPath && fs__namespace.existsSync(resolved.mediaPath)) {
-        resolvedMediaCount++;
-        scene.localPath = resolved.mediaPath;
-        if (!scene.mediaFile) {
-          scene.mediaFile = path__namespace.basename(resolved.mediaPath);
-        }
-        const detectedKind = detectMediaKind(resolved.mediaPath, scene.mediaType);
-        if (scene.mediaType !== detectedKind) {
-          logger.warn(
-            `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${scene.mediaType ?? "unknown"}, but file extension indicates ${detectedKind}. Syncing memory mediaType to ${detectedKind}.`
-          );
-          scene.mediaType = detectedKind;
-        }
-        logger.info(
-          `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} mediaKind=${detectedKind} exists=true path=${resolved.mediaPath}`
-        );
-      } else {
-        missingMediaCount++;
-        logger.warn(
-          `[RENDER][Media] scene=${scene.sceneIndex} source=${resolved.source} exists=false`
-        );
-      }
-    }
+    setPct("Validating scene media...", 0.08);
     logger.info(
-      `[RENDER][Media] resolved=${resolvedMediaCount} missing=${missingMediaCount} total=${scenes.length}`
+      `[RENDER][Media] resolved=${prepared.resolvedMediaCount} missing=${prepared.missingMediaCount} total=${scenes.length}`
     );
-    if (scenes.length > 0 && resolvedMediaCount === 0) {
+    if (scenes.length > 0 && prepared.resolvedMediaCount === 0) {
       throw new Error(
         "No scene media could be resolved. Refusing to render an all-black video. Check master-edit-plan.json, media-index.json and stock-assignments.json."
       );
-    }
-    const projectHash = Buffer.from(projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
-    const tmpBaseDir = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${projectHash}-`);
-    tmpDir = fs__namespace.mkdtempSync(tmpBaseDir);
-    logger.info(`[RENDER] Temporary directory: ${tmpDir}`);
-    const sceneClips = [];
-    const { width, height } = resolution;
-    const retentionSettings = DEFAULT_RETENTION_SETTINGS;
-    const retCtx = createDefaultContext();
-    const retentionDecisions = /* @__PURE__ */ new Map();
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = scenes[i];
-      const sceneInput = {
-        sceneId: String(scene.sceneIndex),
-        sceneIndex: i,
-        duration: scene.duration,
-        energyLevel: scene.energyLevel,
-        shotType: scene.shotType,
-        narrativeText: scene.narrativeText,
-        visualIntent: scene.visualIntent,
-        isPatternInterrupt: scene.isPatternInterrupt,
-        localPath: scene.localPath,
-        isNewChapter: i === 0 || scene.isFirstInChapter
-      };
-      const decision = resolveSceneRetention(sceneInput, retCtx, retentionSettings);
-      retentionDecisions.set(i, decision);
-      updateRetentionContext(retCtx, sceneInput, decision);
     }
     try {
       const qaScenes = scenes.map((s, i) => ({
@@ -8650,251 +12589,310 @@ async function renderVideo(params) {
         shotType: s.shotType,
         narrativeText: s.narrativeText,
         visualIntent: s.visualIntent,
-        isPatternInterrupt: s.isPatternInterrupt,
-        visualBeats: retentionDecisions.get(i)?.visualBeats
+        isPatternInterrupt: s.isPatternInterrupt || retentionPlanMap.get(i)?.patternInterrupt,
+        visualBeats: retentionDecisions.get(i)?.visualBeats,
+        motionPreset: visualPlanMap.get(s.sceneIndex)?.motionPreset,
+        category: visualPlanMap.get(s.sceneIndex)?.category
       }));
-      const qaFlags = runRetentionQA(qaScenes);
+      const qaFlags = runRetentionQA(qaScenes, retentionPlan);
       if (qaFlags.length > 0) {
         const qaPath = path__namespace.join(projectDir, "analysis", "retention-qa.json");
         fs__namespace.writeFileSync(qaPath, JSON.stringify(qaFlags, null, 2), "utf-8");
         logger.info(`[RENDER] Retention QA: ${qaFlags.length} flags saved to retention-qa.json`);
       }
+      const summary = generateRetentionSummary(qaScenes, retentionPlan, qaFlags);
+      saveRetentionSummary(projectDir, summary);
     } catch (err) {
       logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`);
     }
-    for (let i = 0; i < scenes.length; i++) {
-      const scene = scenes[i];
-      const mediaName = scene.localPath ? path__namespace.basename(scene.localPath) : scene.mediaFile || scene.localAsset || scene.visualIntent || `Scene_${scene.sceneIndex}`;
+    workspace = new RenderWorkspace(projectDir, prepared.renderFingerprint);
+    workspace.ensure();
+    const stale = workspace.cleanupStalePartials();
+    const previousActive = readActiveRender(projectDir);
+    const existing = workspace.loadManifest();
+    const resuming = !!existing && existing.status !== "completed";
+    manifest = existing ?? createManifest({
+      renderFingerprint: prepared.renderFingerprint,
+      projectDir,
+      outputName,
+      settings: {
+        resolution,
+        fps,
+        transitionSettings: prepared.validTransitionSettings ?? null,
+        resourceProfile: limits.profile,
+        encoderMode: encoder.mode
+      }
+    });
+    manifest.outputName = outputName;
+    manifest.settings.resourceProfile = limits.profile;
+    manifest.settings.encoderMode = encoder.mode;
+    manifest.status = "rendering-scenes";
+    manifest.interruptedAt = void 0;
+    manifest.interruptionReason = void 0;
+    manifest.warnings = [...warnings];
+    if (stale.length) manifest.warnings.push(`Discarded ${stale.length} incomplete partial file(s) from an interrupted run`);
+    workspace.saveManifest(manifest);
+    workspace.touch();
+    workspace.logEvent({ event: resuming ? "render-resume" : "render-start", fingerprint: prepared.renderFingerprint, profile: limits.profile, encoder: encoder.key });
+    activeRecord = {
+      schemaVersion: 1,
+      renderFingerprint: prepared.renderFingerprint,
+      workspace: workspace.name,
+      status: "running",
+      source: params.source ?? "manual",
+      pid: process.pid,
+      appInstanceId: APP_INSTANCE_ID,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      heartbeatAt: (/* @__PURE__ */ new Date()).toISOString(),
+      params: {
+        voiceoverPath,
+        outputName,
+        resolution,
+        fps,
+        transitionSettings: params.transitionSettings
+      },
+      autoResumeAfterCrash: prefs.autoResumeAfterCrash,
+      autoResumeCount: params.isAutoResume ? (previousActive?.autoResumeCount ?? 0) + 1 : params.source === "pipeline" && previousActive?.renderFingerprint === prepared.renderFingerprint && previousActive.status !== "completed" ? previousActive.autoResumeCount ?? 0 : 0,
+      pipelineRunId: params.pipelineRunId
+    };
+    writeActiveRender(projectDir, activeRecord);
+    heartbeat = setInterval(() => {
+      void (async () => {
+        if (!activeRecord || activeRecord.status !== "running") return;
+        activeRecord.heartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
+        activeRecord.childPids = await listRenderDescendantPids();
+        try {
+          writeActiveRender(projectDir, activeRecord);
+        } catch {
+        }
+      })();
+    }, 5e3);
+    heartbeat.unref?.();
+    throttle.start();
+    const projectHash = Buffer.from(projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16);
+    tmpDir = fs__namespace.mkdtempSync(path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${projectHash}-`));
+    logger.info(`[RENDER] Render workspace: ${workspace.dir} (resuming=${resuming})`);
+    const { width, height } = resolution;
+    const sceneClips = [];
+    let reusedScenes = 0;
+    const prevScenes = new Map((existing?.scenes ?? []).map((s) => [s.ordinal, s]));
+    manifest.scenes = sceneJobs.map((job) => {
+      const prev = prevScenes.get(job.ordinal);
+      if (prev && prev.fingerprint === job.fingerprint && prev.status === "completed") return { ...prev, reused: false };
+      return {
+        ordinal: job.ordinal,
+        sceneIndex: job.scene.sceneIndex,
+        expectedDuration: job.scene.duration,
+        status: "pending",
+        fingerprint: job.fingerprint,
+        artifactPath: workspace.scenePath(job.ordinal)
+      };
+    });
+    workspace.saveManifest(manifest);
+    const recentAiMotionPresets = [];
+    for (let i = 0; i < sceneJobs.length; i++) {
+      throwIfAborted(signal);
+      const job = sceneJobs[i];
+      const scene = job.scene;
+      const cp2 = manifest.scenes[i];
+      const outClip = workspace.scenePath(job.ordinal);
       const pct = 0.08 + i / totalScenes * 0.68;
-      progress(`Scene ${i + 1}/${totalScenes}: ${mediaName}`, pct, {
-        sceneIndex: i + 1,
-        totalScenes
+      const expect = {
+        fingerprint: job.fingerprint,
+        kind: "scene",
+        width,
+        height,
+        fps,
+        durationSecs: scene.duration,
+        // Clips are frame-quantized per beat; the legacy renderer only warned on drift
+        durationTolerance: Math.max(0.5, (job.beats.length + 2) / fps),
+        lenient: true
+      };
+      const reuse = await workspace.tryReuse(outClip, expect, signal);
+      if (reuse.ok) {
+        reusedScenes++;
+        cp2.status = "completed";
+        cp2.reused = true;
+        cp2.artifactPath = outClip;
+        cp2.sizeBytes = reuse.meta?.sizeBytes;
+        cp2.durationSecs = reuse.probe?.duration;
+        cp2.width = reuse.probe?.width;
+        cp2.height = reuse.probe?.height;
+        cp2.fps = reuse.probe?.fps;
+        sceneClips.push(outClip);
+        setPct(`Reusing cached scene ${i + 1}/${totalScenes}`, pct, { sceneIndex: i + 1, totalScenes });
+        if (i % 10 === 0) workspace.saveManifest(manifest);
+        continue;
+      }
+      await throttle.beforeNextJob(signal);
+      setPct(`Rendering scene ${i + 1}/${totalScenes}: ${job.mediaName}`, pct, { sceneIndex: i + 1, totalScenes });
+      cp2.status = "running";
+      cp2.startedAt = (/* @__PURE__ */ new Date()).toISOString();
+      workspace.saveManifest(manifest);
+      const partial = outClip.replace(/\.mp4$/, ".partial.mp4");
+      safeUnlink(partial);
+      await renderSceneClip({
+        job,
+        outClip: partial,
+        width,
+        height,
+        fps,
+        tmpDir,
+        ctx,
+        retentionSettings,
+        sceneOrdinalIndex: i,
+        visualPlanMap,
+        retentionPlanMap,
+        recentAiMotionPresets
       });
-      const mediaPath = scene.localPath && fs__namespace.existsSync(scene.localPath) ? scene.localPath : resolveSceneMedia(scene, mediaIndex, projectDir);
-      const outClip = path__namespace.join(tmpDir, `scene_${String(i + 1).padStart(4, "0")}.mp4`);
-      const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
-      if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
-        logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${mediaName}, using black placeholder`);
-        await ffmpegRun$2([
-          "-y",
-          "-f",
-          "lavfi",
-          "-i",
-          `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
-          "-c:v",
-          "libx264",
-          "-preset",
-          "fast",
-          "-crf",
-          "23",
-          "-t",
-          String(scene.duration),
-          "-pix_fmt",
-          "yuv420p",
-          outClip
-        ]);
-      } else {
-        const mediaKind = detectMediaKind(mediaPath, scene.mediaType);
-        const isImage = mediaKind === "image";
-        const declaredType = scene.mediaType;
-        const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
-        const extensionType = VIDEO_EXTENSIONS.has(cleanExt) ? "video" : IMAGE_EXTENSIONS.has(cleanExt) ? "image" : void 0;
-        if (declaredType && extensionType && declaredType !== extensionType) {
-          logger.warn(
-            `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${declaredType}, but file extension indicates ${extensionType}. Using ${extensionType}.`
-          );
-        }
-        if (scene.mediaType !== mediaKind) {
-          scene.mediaType = mediaKind;
-        }
-        logger.info(
-          `[RENDER] Scene ${scene.sceneIndex}: mediaKind=${mediaKind}, declaredType=${declaredType ?? "unknown"}, extension=${cleanExt}, path=${mediaPath}`
-        );
-        if (isImage && VIDEO_EXTENSIONS.has(cleanExt)) {
-          throw new Error(
-            `Media classification error: video file was about to be rendered as image: ${mediaPath}`
-          );
-        }
-        if (!isImage && IMAGE_EXTENSIONS.has(cleanExt)) {
-          throw new Error(
-            `Media classification error: image file was about to be rendered as video: ${mediaPath}`
-          );
-        }
-        const decision = retentionDecisions.get(i);
-        const beats = decision?.visualBeats ?? [];
-        const hasMultipleBeats = beats.length > 1;
-        const visualScene = visualPlanMap.get(scene.sceneIndex);
-        const isAiStillImage = isImage && (visualScene?.strategy === "ai-still" || mediaPath.includes(path__namespace.join("assets", "generated", "health")) || mediaPath.includes("/assets/generated/health/") || mediaPath.includes(path__namespace.join("assets", "generated", "general")) || mediaPath.includes("/assets/generated/general/"));
-        if (isAiStillImage) {
-          const motionParam = visualScene?.motion || visualScene?.motionPreset || "push-in-center";
-          const motionFilter = buildHealthMotionFilter(motionParam, width, height, scene.duration, fps);
-          const presetName = typeof motionParam === "object" ? motionParam.preset : motionParam;
-          logger.info(`[VisualMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`);
-          await ffmpegRun$2([
-            "-y",
-            "-loop",
-            "1",
-            "-i",
-            mediaPath,
-            "-vf",
-            motionFilter,
-            "-c:v",
-            "libx264",
-            "-preset",
-            "fast",
-            "-crf",
-            "20",
-            "-t",
-            String(scene.duration),
-            "-r",
-            String(fps),
-            "-pix_fmt",
-            "yuv420p",
-            outClip
-          ]);
-        } else if (hasMultipleBeats && retentionSettings.enabled) {
-          await renderVisualBeatsToClip({
-            beats,
-            mediaPath,
-            isImage,
-            outClip,
-            width,
-            height,
-            fps,
-            scaleFilt,
-            tmpDir,
-            sceneIndex: i
-          });
-        } else {
-          const singleBeat = beats[0];
-          let vfFilter = scaleFilt;
-          if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
-            const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps);
-            if (zf) {
-              vfFilter = `${scaleFilt},${zf}`;
-              logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`);
-            }
-          }
-          if (isImage) {
-            await ffmpegRun$2([
-              "-y",
-              "-loop",
-              "1",
-              "-i",
-              mediaPath,
-              "-vf",
-              vfFilter,
-              "-c:v",
-              "libx264",
-              "-preset",
-              "fast",
-              "-crf",
-              "20",
-              "-t",
-              String(scene.duration),
-              "-r",
-              String(fps),
-              "-pix_fmt",
-              "yuv420p",
-              outClip
-            ]);
-          } else {
-            const durationGuard = `tpad=stop_mode=clone:stop_duration=${scene.duration},trim=duration=${scene.duration},setpts=PTS-STARTPTS`;
-            const videoFilter = `${vfFilter},${durationGuard}`;
-            await ffmpegRun$2([
-              "-y",
-              "-i",
-              mediaPath,
-              "-vf",
-              videoFilter,
-              "-c:v",
-              "libx264",
-              "-preset",
-              "fast",
-              "-crf",
-              "20",
-              "-t",
-              String(scene.duration),
-              "-r",
-              String(fps),
-              "-an",
-              "-pix_fmt",
-              "yuv420p",
-              outClip
-            ]);
-          }
-        }
+      let probe;
+      try {
+        probe = await workspace.commitPartial(partial, outClip, expect, { encoder: encoder.key, signal });
+      } catch (err) {
+        if (isRenderCancelledError(err)) throw err;
+        throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip. ${String(err.message ?? err)}`);
       }
-      if (!fs__namespace.existsSync(outClip) || fs__namespace.statSync(outClip).size === 0) {
-        throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip.`);
-      }
-      const clipProbe = await probeVideoInfo(outClip);
-      if (clipProbe) {
-        if (!clipProbe.hasVideo || clipProbe.width <= 0 || clipProbe.height <= 0 || clipProbe.duration <= 0) {
-          throw new Error(`Scene ${scene.sceneIndex} did not produce a valid video clip (invalid stream).`);
-        }
-        const maxAllowedDiff = 1 / fps + 0.05;
-        const diff = Math.abs(clipProbe.duration - scene.duration);
-        if (diff > maxAllowedDiff) {
-          logger.warn(
-            `[RENDER] Scene ${scene.sceneIndex} duration deviation: expected=${scene.duration.toFixed(3)}s actual=${clipProbe.duration.toFixed(3)}s diff=${diff.toFixed(3)}s (tolerance=${maxAllowedDiff.toFixed(3)}s)`
-          );
-        }
-        logger.info(
-          `[RENDER] Scene ${scene.sceneIndex} clip validated: path=${outClip} sizeBytes=${fs__namespace.statSync(outClip).size} duration=${clipProbe.duration.toFixed(3)}s resolution=${clipProbe.width}x${clipProbe.height}`
-        );
-      } else {
-        logger.info(
-          `[RENDER] Scene ${scene.sceneIndex} clip created: path=${outClip} sizeBytes=${fs__namespace.statSync(outClip).size}`
+      const maxAllowedDiff = 1 / fps + 0.05;
+      const diff = Math.abs(probe.duration - scene.duration);
+      if (diff > maxAllowedDiff) {
+        logger.warn(
+          `[RENDER] Scene ${scene.sceneIndex} duration deviation: expected=${scene.duration.toFixed(3)}s actual=${probe.duration.toFixed(3)}s diff=${diff.toFixed(3)}s (tolerance=${maxAllowedDiff.toFixed(3)}s)`
         );
       }
+      logger.info(
+        `[RENDER] Scene ${scene.sceneIndex} clip validated: path=${outClip} duration=${probe.duration.toFixed(3)}s resolution=${probe.width}x${probe.height}`
+      );
+      cp2.status = "completed";
+      cp2.reused = false;
+      cp2.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+      cp2.sizeBytes = fs__namespace.statSync(outClip).size;
+      cp2.durationSecs = probe.duration;
+      cp2.width = probe.width;
+      cp2.height = probe.height;
+      cp2.fps = probe.fps;
+      workspace.saveManifest(manifest);
+      workspace.logEvent({ event: "scene-completed", ordinal: job.ordinal, sceneIndex: scene.sceneIndex });
       sceneClips.push(outClip);
     }
-    progress("Concatenating scenes...", 0.78);
-    const rawVideo = path__namespace.join(tmpDir, "raw_video.mp4");
-    const validSettings = validateTransitionSettings(params.transitionSettings);
-    const shouldAttemptTransitions = validSettings && validSettings.enabled && sceneEntries.length > 1;
-    let rawVideoCreated = false;
-    if (shouldAttemptTransitions) {
-      try {
-        progress("Resolving scene transitions...", 0.78);
-        rawVideoCreated = await concatSceneClipsWithTransitions({
-          sceneEntries,
-          sceneClips,
-          settings: validSettings,
-          fps,
-          tmpDir,
-          rawVideoPath: rawVideo,
-          onProgress: (stage, pct) => progress(stage, pct)
-        });
-        if (rawVideoCreated) {
-          logger.info("[RENDER] Scene assembly method=transitions");
+    workspace.saveManifest(manifest);
+    throwIfAborted(signal);
+    manifest.status = "assembling-scenes";
+    manifest.progress.currentPhase = "assembling-scenes";
+    const rawVideo = workspace.rawVideoPath;
+    const assemblyExpect = {
+      fingerprint: prepared.assemblyFingerprint,
+      kind: "assembly",
+      width,
+      height,
+      fps,
+      durationSecs: prepared.totalDurationSecs,
+      durationTolerance: Math.max(1, sceneJobs.length * 1.5 / fps),
+      lenient: true
+    };
+    let reusedAssembly = false;
+    const assemblyReuse = await workspace.tryReuse(rawVideo, assemblyExpect, signal);
+    let rawProbe = assemblyReuse.probe;
+    if (assemblyReuse.ok) {
+      reusedAssembly = true;
+      setPct(reusedScenes === totalScenes ? "Reusing assembled scene video" : "Reusing cached scene assembly", 0.78);
+    } else {
+      setPct("Assembling cached scene clips", 0.78);
+      manifest.assembly = { status: "running", fingerprint: prepared.assemblyFingerprint, startedAt: (/* @__PURE__ */ new Date()).toISOString(), artifactPath: rawVideo };
+      workspace.saveManifest(manifest);
+      const rawPartial = rawVideo.replace(/\.mp4$/, ".partial.mp4");
+      safeUnlink(rawPartial);
+      const validSettings = prepared.validTransitionSettings;
+      const shouldAttemptTransitions = validSettings && validSettings.enabled && sceneEntries.length > 1;
+      let rawVideoCreated = false;
+      if (shouldAttemptTransitions) {
+        try {
+          setPct("Resolving scene transitions...", 0.78);
+          rawVideoCreated = await transitionAssembler({
+            sceneEntries,
+            sceneClips,
+            settings: validSettings,
+            fps,
+            tmpDir,
+            rawVideoPath: rawPartial,
+            onProgress: (stage, pct) => setPct(stage, pct),
+            ffmpegOptions: ffmpegOpts,
+            videoCodecArgs: vcodec(ctx, 20),
+            maxScenesPerSegment: limits.assemblyMaxScenesPerSegment,
+            segmentRunner: async (seg, render) => {
+              const segPath = workspace.assemblySegmentPath(seg.segmentIndex);
+              const segExpect = {
+                fingerprint: fingerprintOf({ assembly: prepared.assemblyFingerprint, seg }),
+                kind: "assembly-segment",
+                width,
+                height,
+                fps,
+                frames: seg.endFrameExclusive - seg.startFrame,
+                durationSecs: seg.endSec - seg.startSec,
+                durationTolerance: 2 / fps + 0.05,
+                lenient: true
+              };
+              const segReuse = await workspace.tryReuse(segPath, segExpect, signal);
+              if (segReuse.ok) {
+                setPct(`Reusing assembled segment ${seg.segmentIndex}`, lastPct);
+                return segPath;
+              }
+              await throttle.beforeNextJob(signal);
+              const segPartial = segPath.replace(/\.mp4$/, ".partial.mp4");
+              safeUnlink(segPartial);
+              try {
+                await render(segPartial);
+              } catch (err) {
+                if (isRenderCancelledError(err)) throw err;
+                throw asHardwareError(err, encoder);
+              }
+              await workspace.commitPartial(segPartial, segPath, segExpect, { encoder: encoder.key, signal });
+              workspace.logEvent({ event: "assembly-segment-completed", segment: seg.segmentIndex });
+              return segPath;
+            }
+          });
+          if (rawVideoCreated) {
+            logger.info("[RENDER] Scene assembly method=transitions");
+          }
+        } catch (err) {
+          if (isRenderCancelledError(err) || err instanceof HardwareEncoderError) throw err;
+          logger.warn(
+            `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
+          );
+          setPct("Transitions failed — using standard cuts...", 0.79);
+          safeUnlink(rawPartial);
+          rawVideoCreated = false;
         }
-      } catch (err) {
-        logger.warn(
-          `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
-        );
-        progress("Transitions failed — using standard cuts...", 0.79);
-        safeUnlink(rawVideo);
-        rawVideoCreated = false;
       }
+      if (!rawVideoCreated) {
+        const method = shouldAttemptTransitions ? "legacy-fallback" : "legacy-concat";
+        logger.info(`[RENDER] Scene assembly method=${method}`);
+        await concatSceneClipsLegacy(sceneClips, tmpDir, rawPartial, ctx);
+        rawVideoCreated = true;
+      }
+      try {
+        rawProbe = await workspace.commitPartial(rawPartial, rawVideo, assemblyExpect, { encoder: encoder.key, signal });
+      } catch (err) {
+        if (isRenderCancelledError(err)) throw err;
+        throw new Error(
+          `The scene assembly step produced an invalid raw video. Audio and captions were not applied. (${String(err.message ?? err)})`
+        );
+      }
+      workspace.logEvent({ event: "assembly-completed" });
     }
-    if (!rawVideoCreated) {
-      const method = shouldAttemptTransitions ? "legacy-fallback" : "legacy-concat";
-      logger.info(`[RENDER] Scene assembly method=${method}`);
-      await concatSceneClipsLegacy(sceneClips, tmpDir, rawVideo);
-      rawVideoCreated = true;
-    }
-    if (!fs__namespace.existsSync(rawVideo) || fs__namespace.statSync(rawVideo).size === 0) {
-      throw new Error("Raw video was not created or is empty.");
-    }
-    const rawProbe = await probeVideoInfo(rawVideo);
-    if (!rawProbe || !rawProbe.hasVideo || rawProbe.duration <= 0 || rawProbe.width <= 0 || rawProbe.height <= 0) {
-      throw new Error(
-        "The scene assembly step produced an invalid raw video. Audio and captions were not applied."
-      );
-    }
-    if (rawProbe.width !== width || rawProbe.height !== height) {
+    manifest.assembly = {
+      status: "completed",
+      fingerprint: prepared.assemblyFingerprint,
+      artifactPath: rawVideo,
+      reused: reusedAssembly,
+      durationSecs: rawProbe?.duration,
+      width: rawProbe?.width,
+      height: rawProbe?.height,
+      fps: rawProbe?.fps,
+      sizeBytes: fs__namespace.statSync(rawVideo).size,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    workspace.saveManifest(manifest);
+    if (rawProbe && (rawProbe.width !== width || rawProbe.height !== height)) {
       logger.warn(
         `[RENDER] Raw video resolution ${rawProbe.width}x${rawProbe.height} does not match target ${width}x${height}`
       );
@@ -8902,11 +12900,12 @@ async function renderVideo(params) {
     logger.info(
       `[RENDER] Raw video validated:
 path=${rawVideo}
-duration=${rawProbe.duration.toFixed(3)}s
-resolution=${rawProbe.width}x${rawProbe.height}
+duration=${rawProbe?.duration.toFixed(3)}s
+resolution=${rawProbe?.width}x${rawProbe?.height}
 sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     );
-    progress("Loading audio plan…", 0.86);
+    throwIfAborted(signal);
+    setPct("Loading audio plan…", 0.86);
     const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
     const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;
     const approvedMusic = audioPlan?.sections.filter(
@@ -8918,144 +12917,180 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     const hasAudio = fs__namespace.existsSync(voiceoverPath);
     const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0;
     logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`);
-    progress("Mixing audio tracks…", 0.9);
-    const outputDir = path__namespace.join(projectDir, "output");
-    fs__namespace.mkdirSync(outputDir, { recursive: true });
-    const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
-    workingOutputPath = path__namespace.join(outputDir, `_${outputName}_working.mp4`);
-    safeUnlink(workingOutputPath);
-    if (!hasAudio && !hasMusicOrSfx) {
-      fs__namespace.copyFileSync(rawVideo, workingOutputPath);
-    } else if (!hasMusicOrSfx && hasAudio) {
-      await ffmpegRun$2([
-        "-y",
-        "-i",
-        rawVideo,
-        "-i",
-        voiceoverPath,
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a:0",
-        "-shortest",
-        workingOutputPath
-      ]);
+    manifest.status = "mixing-audio";
+    manifest.progress.currentPhase = "mixing-audio";
+    const audioFingerprint = computeAudioFingerprint({
+      assemblyFingerprint: prepared.assemblyFingerprint,
+      voiceover: hasAudio ? fileSignature(voiceoverPath) : null,
+      audioPlanHash: hasMusicOrSfx ? prepared.hashes.audioPlan : "none",
+      musicSignatures: approvedMusic.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath))),
+      sfxSignatures: approvedSfx.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath)))
+    });
+    const mixedVideo = workspace.mixedVideoPath;
+    const mixExpect = {
+      fingerprint: audioFingerprint,
+      kind: "audio-mix",
+      width,
+      height,
+      requireAudio: hasAudio || hasMusicOrSfx,
+      lenient: true
+    };
+    let reusedAudioMix = false;
+    const mixReuse = await workspace.tryReuse(mixedVideo, mixExpect, signal);
+    let audioProbe = mixReuse.probe;
+    if (mixReuse.ok) {
+      reusedAudioMix = true;
+      setPct("Reusing completed audio mix", 0.9);
     } else {
-      const ffArgs = ["-y", "-i", rawVideo];
-      let inputIdx = 1;
-      const voiceoverIdx = hasAudio ? inputIdx++ : -1;
-      if (hasAudio) ffArgs.push("-i", voiceoverPath);
-      const musicInputs = [];
-      for (const sec of approvedMusic) {
-        ffArgs.push("-i", normalizePathForFFmpeg(sec.approvedLocalPath));
-        musicInputs.push({ idx: inputIdx++, section: sec });
-      }
-      const sfxInputs = [];
-      for (const sfx of approvedSfx) {
-        ffArgs.push("-i", normalizePathForFFmpeg(sfx.approvedLocalPath));
-        sfxInputs.push({ idx: inputIdx++, sfx });
-      }
-      const filterParts = [];
-      if (hasAudio) {
-        filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`);
-      }
-      const musicLabels = [];
-      for (const { idx, section } of musicInputs) {
-        const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6);
-        const fadeIn = section.fadeInSecs ?? 2;
-        const fadeOut = section.fadeOutSecs ?? 3;
-        const dur = section.durationSecs;
-        const label = `music_${idx}`;
-        filterParts.push(
-          `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(section.startTime * 1e3)}|${Math.round(section.startTime * 1e3)},apad[${label}]`
-        );
-        musicLabels.push(`[${label}]`);
-      }
-      const sfxLabels = [];
-      for (const { idx, sfx } of sfxInputs) {
-        const vol = Math.pow(10, (sfx.volumeDb ?? -24) / 20).toFixed(6);
-        const fadeIn = sfx.fadeInSecs ?? 0.05;
-        const fadeOut = sfx.fadeOutSecs ?? 0.15;
-        const dur = sfx.endTime - sfx.startTime;
-        const label = `sfx_${idx}`;
-        filterParts.push(
-          `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(sfx.startTime * 1e3)}|${Math.round(sfx.startTime * 1e3)},apad[${label}]`
-        );
-        sfxLabels.push(`[${label}]`);
-      }
-      if (sfxInputs.length === 0) {
-        const mixLabels = [];
-        if (hasAudio) mixLabels.push("[vo]");
-        mixLabels.push(...musicLabels);
-        const nInputs = mixLabels.length;
-        filterParts.push(
-          `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
-        );
+      setPct("Mixing audio tracks…", 0.9);
+      manifest.audioMix = { status: "running", fingerprint: audioFingerprint, startedAt: (/* @__PURE__ */ new Date()).toISOString(), artifactPath: mixedVideo };
+      workspace.saveManifest(manifest);
+      const workingOutputPath = mixedVideo.replace(/\.mp4$/, ".partial.mp4");
+      safeUnlink(workingOutputPath);
+      if (!hasAudio && !hasMusicOrSfx) {
+        fs__namespace.copyFileSync(rawVideo, workingOutputPath);
+      } else if (!hasMusicOrSfx && hasAudio) {
+        await ffmpegRun$2([
+          "-y",
+          "-i",
+          rawVideo,
+          "-i",
+          voiceoverPath,
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          "-shortest",
+          workingOutputPath
+        ], ctx);
       } else {
-        const finalBuses = [];
-        if (hasAudio) finalBuses.push("[vo]");
-        if (musicLabels.length === 1) {
-          filterParts.push(`${musicLabels[0]}asplit=1[music_bus]`);
-          finalBuses.push("[music_bus]");
-        } else if (musicLabels.length > 1) {
-          filterParts.push(
-            `${musicLabels.join("")}amix=inputs=${musicLabels.length}:duration=longest:normalize=0[music_bus]`
-          );
-          finalBuses.push("[music_bus]");
+        const ffArgs = ["-y", "-i", rawVideo];
+        let inputIdx = 1;
+        const voiceoverIdx = hasAudio ? inputIdx++ : -1;
+        if (hasAudio) ffArgs.push("-i", voiceoverPath);
+        const musicInputs = [];
+        for (const sec of approvedMusic) {
+          ffArgs.push("-i", normalizePathForFFmpeg(sec.approvedLocalPath));
+          musicInputs.push({ idx: inputIdx++, section: sec });
         }
-        if (sfxLabels.length === 1) {
-          filterParts.push(`${sfxLabels[0]}asplit=1[sfx_bus]`);
-          finalBuses.push("[sfx_bus]");
-        } else if (sfxLabels.length > 1) {
-          filterParts.push(
-            `${sfxLabels.join("")}amix=inputs=${sfxLabels.length}:duration=longest:normalize=0[sfx_bus]`
-          );
-          finalBuses.push("[sfx_bus]");
+        const sfxInputs = [];
+        for (const sfx of approvedSfx) {
+          ffArgs.push("-i", normalizePathForFFmpeg(sfx.approvedLocalPath));
+          sfxInputs.push({ idx: inputIdx++, sfx });
         }
-        filterParts.push(
-          `${finalBuses.join("")}amix=inputs=${finalBuses.length}:duration=first:normalize=0,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
-        );
+        const filterParts = [];
+        if (hasAudio) {
+          filterParts.push(`[${voiceoverIdx}:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo]`);
+        }
+        const musicLabels = [];
+        for (const { idx, section } of musicInputs) {
+          const vol = Math.pow(10, (section.volumeDb ?? -30) / 20).toFixed(6);
+          const fadeIn = section.fadeInSecs ?? 2;
+          const fadeOut = section.fadeOutSecs ?? 3;
+          const dur = section.durationSecs;
+          const label = `music_${idx}`;
+          filterParts.push(
+            `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(section.startTime * 1e3)}|${Math.round(section.startTime * 1e3)},apad[${label}]`
+          );
+          musicLabels.push(`[${label}]`);
+        }
+        const sfxLabels = [];
+        for (const { idx, sfx } of sfxInputs) {
+          const vol = Math.pow(10, (sfx.volumeDb ?? -24) / 20).toFixed(6);
+          const fadeIn = sfx.fadeInSecs ?? 0.05;
+          const fadeOut = sfx.fadeOutSecs ?? 0.15;
+          const dur = sfx.endTime - sfx.startTime;
+          const label = `sfx_${idx}`;
+          filterParts.push(
+            `[${idx}:a]volume=${vol},afade=t=in:ss=0:d=${fadeIn},afade=t=out:st=${Math.max(0, dur - fadeOut)}:d=${fadeOut},adelay=${Math.round(sfx.startTime * 1e3)}|${Math.round(sfx.startTime * 1e3)},apad[${label}]`
+          );
+          sfxLabels.push(`[${label}]`);
+        }
+        if (sfxInputs.length === 0) {
+          const mixLabels = [];
+          if (hasAudio) mixLabels.push("[vo]");
+          mixLabels.push(...musicLabels);
+          const nInputs = mixLabels.length;
+          filterParts.push(
+            `${mixLabels.join("")}amix=inputs=${nInputs}:duration=first:normalize=1,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+          );
+        } else {
+          const finalBuses = [];
+          if (hasAudio) finalBuses.push("[vo]");
+          if (musicLabels.length === 1) {
+            filterParts.push(`${musicLabels[0]}asplit=1[music_bus]`);
+            finalBuses.push("[music_bus]");
+          } else if (musicLabels.length > 1) {
+            filterParts.push(
+              `${musicLabels.join("")}amix=inputs=${musicLabels.length}:duration=longest:normalize=0[music_bus]`
+            );
+            finalBuses.push("[music_bus]");
+          }
+          if (sfxLabels.length === 1) {
+            filterParts.push(`${sfxLabels[0]}asplit=1[sfx_bus]`);
+            finalBuses.push("[sfx_bus]");
+          } else if (sfxLabels.length > 1) {
+            filterParts.push(
+              `${sfxLabels.join("")}amix=inputs=${sfxLabels.length}:duration=longest:normalize=0[sfx_bus]`
+            );
+            finalBuses.push("[sfx_bus]");
+          }
+          filterParts.push(
+            `${finalBuses.join("")}amix=inputs=${finalBuses.length}:duration=first:normalize=0,alimiter=limit=0.891:attack=5:release=50:level=disabled[amixed]`
+          );
+        }
+        const filterComplex = filterParts.join(";");
+        logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`);
+        await ffmpegRun$2([
+          ...ffArgs,
+          "-filter_complex",
+          filterComplex,
+          "-map",
+          "0:v:0",
+          "-map",
+          "[amixed]",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-shortest",
+          workingOutputPath
+        ], ctx);
       }
-      const filterComplex = filterParts.join(";");
-      logger.info(`[RENDER] filter_complex: ${filterComplex.slice(0, 200)}...`);
-      await ffmpegRun$2([
-        ...ffArgs,
-        "-filter_complex",
-        filterComplex,
-        "-map",
-        "0:v:0",
-        "-map",
-        "[amixed]",
-        "-c:v",
-        "copy",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "192k",
-        "-shortest",
-        workingOutputPath
-      ]);
+      try {
+        audioProbe = await workspace.commitPartial(workingOutputPath, mixedVideo, mixExpect, { signal });
+      } catch (err) {
+        if (isRenderCancelledError(err)) throw err;
+        throw new Error(`The audio mixing step produced an invalid video. (${String(err.message ?? err)})`);
+      }
+      workspace.logEvent({ event: "audio-mix-completed" });
     }
-    if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
-      throw new Error("Audio mixing step failed to produce a valid video file.");
-    }
-    const audioProbe = await probeVideoInfo(workingOutputPath);
-    if (!audioProbe || !audioProbe.hasVideo || audioProbe.duration <= 0) {
-      throw new Error("The audio mixing step produced an invalid video. Video stream is missing.");
-    }
+    manifest.audioMix = {
+      status: "completed",
+      fingerprint: audioFingerprint,
+      artifactPath: mixedVideo,
+      reused: reusedAudioMix,
+      durationSecs: audioProbe?.duration,
+      sizeBytes: fs__namespace.statSync(mixedVideo).size,
+      completedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    workspace.saveManifest(manifest);
     logger.info(
-      `[RENDER] Audio mixing output validated: path=${workingOutputPath} sizeBytes=${fs__namespace.statSync(workingOutputPath).size} duration=${audioProbe.duration.toFixed(3)}s`
+      `[RENDER] Audio mixing output validated: path=${mixedVideo} sizeBytes=${fs__namespace.statSync(mixedVideo).size} duration=${audioProbe?.duration.toFixed(3)}s`
     );
+    throwIfAborted(signal);
     let proofVisuals = [];
     if (retentionSettings.proofVisualsEnabled) {
       try {
-        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan);
+        proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan ?? { enabled: false, activeRanges: [], phrases: [] });
         logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
         try {
           const pvPlanPath = path__namespace.join(projectDir, "analysis", "proof-visual-plan.json");
@@ -9081,7 +13116,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         if (!vgPlan) {
           vgPlan = generateVisualGrammarPlan({
             projectDir,
-            editPlan: plan,
+            editPlan: prepared.plan,
             captionPlan: params.captionPlan,
             proofVisuals,
             settings: prodSettings
@@ -9106,78 +13141,256 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     const hasCaptions = !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0);
     const hasProofVisuals = proofVisuals.length > 0;
     const hasVisualGrammar = visualGrammar.length > 0;
-    if (hasCaptions || hasProofVisuals || hasVisualGrammar) {
-      progress("Rendering video overlay (Remotion)...", 0.91);
-      const captionsDir = path__namespace.join(projectDir, "assets", "captions");
-      fs__namespace.mkdirSync(captionsDir, { recursive: true });
-      const overlayPath = path__namespace.join(captionsDir, "overlay.mp4");
+    const hasOverlay = hasCaptions || hasProofVisuals || hasVisualGrammar;
+    let finalWorkingPath = mixedVideo;
+    let reusedOverlayBlocks = 0;
+    let reusedComposite = false;
+    let overlayBlockFps = null;
+    if (hasOverlay) {
+      manifest.status = "rendering-overlays";
+      manifest.progress.currentPhase = "rendering-overlays";
+      const captionPlanForOverlay = params.captionPlan ?? { enabled: true, activeRanges: [], phrases: [] };
       const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
-      await renderCaptionsOverlay({
-        captionPlan: params.captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
-        proofVisuals,
-        visualGrammar,
-        videoDurationInSeconds: videoDurationSecs,
-        outputPath: overlayPath,
+      const totalFrames = Math.ceil(videoDurationSecs * fps);
+      const overlayPropsHash = fingerprintOf({ captionPlan: captionPlanForOverlay, proofVisuals, visualGrammar });
+      const remotionSourceHash = computeDirectorySignature(path__namespace.join(__dirname, "../../src/remotion"));
+      const hwMode = remotionHw && process.platform === "darwin" ? "if-possible" : "disable";
+      const sceneBoundaries = [];
+      let cum = 0;
+      for (const s of scenes) {
+        cum += s.duration;
+        sceneBoundaries.push(cum);
+      }
+      const blocks = planOverlayBlocks({
+        totalFrames,
         fps,
-        resolution,
-        onBundleProgress: (pct) => {
-          progress(`Bundling Remotion composition... ${Math.round(pct)}%`, 0.91 + pct * 2e-3);
-        },
-        onRenderProgress: (pct) => {
-          progress(`Rendering overlays... ${Math.round(pct * 100)}%`, 0.915 + pct * 0.01);
-        }
+        sceneBoundariesSecs: sceneBoundaries,
+        protectedIntervals: collectProtectedIntervals({
+          captionPhrases: hasCaptions ? captionPlanForOverlay.phrases : [],
+          proofVisuals,
+          visualGrammar
+        })
       });
-      progress("Compositing captions overlay...", 0.93);
-      const captionedPath = path__namespace.join(outputDir, "_captioned_tmp.mp4");
-      safeUnlink(captionedPath);
-      logger.info(`[RENDER] Overlay merge: ${overlayPath} -> ${workingOutputPath} (${params.captionPlan.phrases.length} phrases, ${proofVisuals.length} proofs)`);
-      await ffmpegRun$2([
-        "-y",
-        "-i",
-        workingOutputPath,
-        // [0] video có audio
-        "-i",
-        overlayPath,
-        // [1] caption MP4 green screen từ Remotion
-        "-filter_complex",
-        "[1:v]format=rgba,colorkey=0x00ff00:0.12:0.05[ov];[0:v][ov]overlay=0:0:shortest=1:eof_action=pass,format=yuv420p[outv]",
-        "-map",
-        "[outv]",
-        "-map",
-        "0:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "fast",
-        "-crf",
-        "20",
-        "-c:a",
-        "copy",
-        captionedPath
-      ]);
-      if (!fs__namespace.existsSync(captionedPath) || fs__namespace.statSync(captionedPath).size === 0) {
-        safeUnlink(captionedPath);
-        throw new Error("Caption overlay compositing failed to produce a valid file.");
+      const prevBlocks = new Map((existing?.overlayBlocks ?? []).map((b) => [b.blockIndex, b]));
+      manifest.overlayBlocks = blocks.map((b) => {
+        const fp = computeOverlayBlockFingerprint({
+          overlayPropsHash,
+          startFrame: b.startFrame,
+          endFrameExclusive: b.endFrameExclusive,
+          totalFrames,
+          base: prepared.base,
+          remotionSourceHash,
+          hardwareAcceleration: hwMode
+        });
+        const prev = prevBlocks.get(b.blockIndex);
+        if (prev && prev.fingerprint === fp && prev.status === "completed") return { ...prev, reused: false };
+        return {
+          blockIndex: b.blockIndex,
+          startFrame: b.startFrame,
+          endFrameExclusive: b.endFrameExclusive,
+          status: "pending",
+          fingerprint: fp,
+          artifactPath: workspace.overlayBlockPath(b.blockIndex)
+        };
+      });
+      overlayBlockFps = manifest.overlayBlocks.map((b) => b.fingerprint);
+      workspace.saveManifest(manifest);
+      logger.info(`[RENDER] Overlay split into ${blocks.length} block(s) over ${totalFrames} frames`);
+      const blockFiles = [];
+      for (let bi = 0; bi < manifest.overlayBlocks.length; bi++) {
+        throwIfAborted(signal);
+        const blk = manifest.overlayBlocks[bi];
+        const blockPath = workspace.overlayBlockPath(blk.blockIndex);
+        const frames = blk.endFrameExclusive - blk.startFrame;
+        const blockExpect = {
+          fingerprint: blk.fingerprint,
+          kind: "overlay-block",
+          width,
+          height,
+          fps,
+          frames,
+          durationSecs: frames / fps,
+          durationTolerance: 2 / fps + 0.05
+        };
+        const basePct = 0.905 + bi / manifest.overlayBlocks.length * 0.02;
+        const blockReuse = await workspace.tryReuse(blockPath, blockExpect, signal);
+        if (blockReuse.ok) {
+          reusedOverlayBlocks++;
+          blk.status = "completed";
+          blk.reused = true;
+          blockFiles.push(blockPath);
+          setPct(`Reusing overlay block ${bi + 1}/${manifest.overlayBlocks.length}`, basePct);
+          continue;
+        }
+        await throttle.beforeNextJob(signal);
+        const concurrency = throttle.currentRemotionConcurrency();
+        setPct(`Rendering overlay block ${bi + 1}/${manifest.overlayBlocks.length}`, basePct);
+        blk.status = "running";
+        blk.startedAt = (/* @__PURE__ */ new Date()).toISOString();
+        workspace.saveManifest(manifest);
+        const blockPartial = blockPath.replace(/\.mp4$/, ".partial.mp4");
+        safeUnlink(blockPartial);
+        const t0 = Date.now();
+        const { hardwareFallback } = await overlayRenderer({
+          captionPlan: captionPlanForOverlay,
+          proofVisuals,
+          visualGrammar,
+          videoDurationInSeconds: videoDurationSecs,
+          outputPath: blockPartial,
+          fps,
+          resolution,
+          frameRange: [blk.startFrame, blk.endFrameExclusive - 1],
+          concurrency,
+          offthreadVideoThreads: limits.offthreadVideoThreads,
+          mediaCacheSizeInBytes: limits.mediaCacheSizeInBytes,
+          offthreadVideoCacheSizeInBytes: limits.offthreadVideoCacheSizeInBytes,
+          hardwareAcceleration: hwMode,
+          signal,
+          onBundleProgress: (pct) => {
+            progress(`Bundling Remotion composition... ${Math.round(pct)}%`, basePct);
+          },
+          onRenderProgress: (pct) => {
+            progress(`Rendering overlay block ${bi + 1}/${manifest.overlayBlocks.length}... ${Math.round(pct * 100)}%`, basePct + pct * 0.02 / manifest.overlayBlocks.length);
+          }
+        });
+        if (hardwareFallback && !manifest.warnings.includes("Remotion hardware acceleration failed; overlay rendered in software.")) {
+          manifest.warnings.push("Remotion hardware acceleration failed; overlay rendered in software.");
+        }
+        try {
+          await workspace.commitPartial(blockPartial, blockPath, blockExpect, { encoder: `remotion:${hwMode}`, signal });
+        } catch (err) {
+          if (isRenderCancelledError(err)) throw err;
+          throw new Error(`Overlay block ${bi + 1} failed validation: ${String(err.message ?? err)}`);
+        }
+        blk.status = "completed";
+        blk.reused = false;
+        blk.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+        workspace.saveManifest(manifest);
+        workspace.logEvent({ event: "overlay-block-completed", block: blk.blockIndex, ms: Date.now() - t0, concurrency });
+        blockFiles.push(blockPath);
       }
-      const captionedProbe = await probeVideoInfo(captionedPath);
-      if (!captionedProbe || !captionedProbe.hasVideo || captionedProbe.duration <= 0) {
-        safeUnlink(captionedPath);
-        throw new Error("Caption overlay composited file has no valid video stream.");
+      const overlayFull = workspace.overlayFullPath;
+      const overlayFullExpect = {
+        fingerprint: fingerprintOf({ blocks: overlayBlockFps }),
+        kind: "overlay-full",
+        width,
+        height,
+        fps,
+        frames: totalFrames,
+        durationSecs: totalFrames / fps,
+        durationTolerance: 2 / fps + 0.05
+      };
+      const fullReuse = await workspace.tryReuse(overlayFull, overlayFullExpect, signal);
+      if (!fullReuse.ok) {
+        const fullPartial = overlayFull.replace(/\.mp4$/, ".partial.mp4");
+        safeUnlink(fullPartial);
+        if (blockFiles.length === 1) {
+          fs__namespace.copyFileSync(blockFiles[0], fullPartial, fs__namespace.constants.COPYFILE_FICLONE);
+        } else {
+          const listPath = path__namespace.join(tmpDir, "overlay-concat.txt");
+          fs__namespace.writeFileSync(listPath, blockFiles.map(concatListLine).join("\n"), "utf-8");
+          await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx);
+          safeUnlink(listPath);
+        }
+        await workspace.commitPartial(fullPartial, overlayFull, overlayFullExpect, { signal });
       }
-      logger.info(
-        `[RENDER] Caption overlay composited: path=${captionedPath} sizeBytes=${fs__namespace.statSync(captionedPath).size} duration=${captionedProbe.duration.toFixed(3)}s`
-      );
-      safeUnlink(workingOutputPath);
-      fs__namespace.renameSync(captionedPath, workingOutputPath);
-      safeUnlink(overlayPath);
-      logger.info("[RENDER] Caption overlay composited");
+      manifest.overlayFull = { status: "completed", fingerprint: overlayFullExpect.fingerprint, artifactPath: overlayFull };
+      throwIfAborted(signal);
+      manifest.status = "compositing";
+      manifest.progress.currentPhase = "compositing";
+      const compositeFingerprint = computeCompositeFingerprint({
+        audioFingerprint,
+        overlayBlockFingerprints: overlayBlockFps,
+        base: prepared.base
+      });
+      const compositePath = workspace.compositePath;
+      const compositeExpect = {
+        fingerprint: compositeFingerprint,
+        kind: "composite",
+        width,
+        height,
+        requireAudio: !!audioProbe?.hasAudio,
+        lenient: true
+      };
+      const compReuse = await workspace.tryReuse(compositePath, compositeExpect, signal);
+      if (compReuse.ok) {
+        reusedComposite = true;
+        setPct("Reusing composited video", 0.93);
+      } else {
+        setPct("Compositing final video", 0.93);
+        manifest.composite = { status: "running", fingerprint: compositeFingerprint, startedAt: (/* @__PURE__ */ new Date()).toISOString(), artifactPath: compositePath };
+        workspace.saveManifest(manifest);
+        const captionedPath = compositePath.replace(/\.mp4$/, ".partial.mp4");
+        safeUnlink(captionedPath);
+        logger.info(`[RENDER] Overlay merge: ${overlayFull} -> ${mixedVideo} (${params.captionPlan?.phrases?.length ?? 0} phrases, ${proofVisuals.length} proofs)`);
+        await encodeRun([
+          "-y",
+          "-i",
+          mixedVideo,
+          // [0] video có audio
+          "-i",
+          overlayFull,
+          // [1] caption MP4 green screen từ Remotion
+          "-filter_complex",
+          "[1:v]format=rgba,colorkey=0x00ff00:0.12:0.05[ov];[0:v][ov]overlay=0:0:shortest=1:eof_action=pass,format=yuv420p[outv]",
+          "-map",
+          "[outv]",
+          "-map",
+          "0:a?",
+          ...vcodec(ctx, 20),
+          "-c:a",
+          "copy",
+          captionedPath
+        ], ctx);
+        let captionedProbe;
+        try {
+          captionedProbe = await workspace.commitPartial(captionedPath, compositePath, compositeExpect, { encoder: encoder.key, signal });
+        } catch (err) {
+          if (isRenderCancelledError(err)) throw err;
+          throw new Error(`Caption overlay compositing failed to produce a valid file. (${String(err.message ?? err)})`);
+        }
+        logger.info(
+          `[RENDER] Caption overlay composited: path=${compositePath} sizeBytes=${fs__namespace.statSync(compositePath).size} duration=${captionedProbe.duration.toFixed(3)}s`
+        );
+        workspace.logEvent({ event: "composite-completed" });
+      }
+      manifest.composite = {
+        status: "completed",
+        fingerprint: compositeFingerprint,
+        artifactPath: compositePath,
+        reused: reusedComposite,
+        sizeBytes: fs__namespace.statSync(compositePath).size,
+        completedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      workspace.saveManifest(manifest);
+      finalWorkingPath = compositePath;
+    } else {
+      manifest.overlayBlocks = [];
+      manifest.composite = {
+        status: "completed",
+        fingerprint: computeCompositeFingerprint({ audioFingerprint, overlayBlockFingerprints: null, base: prepared.base }),
+        artifactPath: mixedVideo,
+        reused: reusedAudioMix,
+        completedAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      workspace.saveManifest(manifest);
     }
+    throwIfAborted(signal);
+    const outputDir = path__namespace.join(projectDir, "output");
+    fs__namespace.mkdirSync(outputDir, { recursive: true });
+    const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
+    publishPartial = path__namespace.join(outputDir, `${outputName}.partial.mp4`);
+    safeUnlink(publishPartial);
+    fs__namespace.copyFileSync(finalWorkingPath, publishPartial, fs__namespace.constants.COPYFILE_FICLONE);
+    manifest.status = "postflight";
+    manifest.progress.currentPhase = "postflight";
+    workspace.saveManifest(manifest);
     let qaReport;
     if (prodSettings.enabled && prodSettings.renderQaEnabled) {
-      progress("Running postflight QA inspection...", 0.95);
+      setPct("Running postflight QA inspection...", 0.95);
       qaReport = await runRenderPostflight({
         projectDir,
-        workingOutputPath,
+        workingOutputPath: publishPartial,
         expectedDuration: scenes.reduce((a, s) => a + s.duration, 0),
         totalScenes: scenes.length,
         hasVoiceover: hasAudio,
@@ -9190,62 +13403,282 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         throw new Error(`Render Postflight QA failed: ${msg}`);
       }
     }
-    progress("Finalizing output...", 0.96);
-    if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
+    throwIfAborted(signal);
+    setPct("Finalizing output...", 0.96);
+    if (!fs__namespace.existsSync(publishPartial) || fs__namespace.statSync(publishPartial).size === 0) {
       throw new Error("Final render working file is missing or empty.");
     }
-    const finalProbe = await probeVideoInfo(workingOutputPath);
+    const finalProbe = await probeMedia$1(publishPartial, { signal });
     if (!finalProbe || !finalProbe.hasVideo || finalProbe.duration <= 0) {
       throw new Error("Final output does not contain a valid video stream.");
     }
+    throwIfAborted(signal);
     safeUnlink(outputPath);
-    fs__namespace.renameSync(workingOutputPath, outputPath);
-    progress("Cleaning up...", 0.98);
-    for (const clip of sceneClips) {
-      safeUnlink(clip);
-    }
-    safeUnlink(rawVideo);
-    try {
-      fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
-      logger.info(`[RENDER] Removed temporary directory: ${tmpDir}`);
-    } catch (error) {
-      logger.warn(`[RENDER] Could not remove temporary directory ${tmpDir}: ${String(error)}`);
-    }
+    fs__namespace.renameSync(publishPartial, outputPath);
+    publishPartial = void 0;
+    setPct("Cleaning up...", 0.98);
     const stat = fs__namespace.statSync(outputPath);
     const durationSecs = finalProbe.duration || scenes.reduce((a, s) => a + s.duration, 0);
+    manifest.status = "completed";
+    manifest.progress.currentPhase = "completed";
+    manifest.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    manifest.finalOutput = {
+      status: "completed",
+      fingerprint: manifest.composite.fingerprint,
+      artifactPath: outputPath,
+      sizeBytes: stat.size,
+      durationSecs,
+      width: finalProbe.width,
+      height: finalProbe.height,
+      fps: finalProbe.fps,
+      completedAt: manifest.completedAt
+    };
+    workspace.saveManifest(manifest);
+    workspace.touch({ completedAt: manifest.completedAt, outputPath });
+    workspace.logEvent({ event: "render-completed", outputPath, reusedScenes, totalScenes });
+    if (activeRecord) {
+      activeRecord.status = "completed";
+      activeRecord.endedAt = manifest.completedAt;
+      writeActiveRender(projectDir, activeRecord);
+    }
+    try {
+      pruneRenderCache(projectDir, { keepWorkspaces: [workspace.name], maxBytes: prefs.maxCacheBytes });
+    } catch (err) {
+      logger.warn(`[RENDER] Cache prune skipped: ${String(err)}`);
+    }
+    const cache = {
+      renderFingerprint: prepared.renderFingerprint,
+      totalScenes,
+      reusedScenes,
+      renderedScenes: totalScenes - reusedScenes,
+      reusedAssembly,
+      reusedAudioMix,
+      totalOverlayBlocks: manifest.overlayBlocks.length,
+      reusedOverlayBlocks,
+      reusedComposite,
+      resourceProfile: limits.profile,
+      encoder: encoder.key,
+      warnings: manifest.warnings
+    };
     progress(`Done → ${outputPath}`, 1);
     logger.info("[RENDER] Complete", {
       outputPath,
       durationSecs: Math.round(durationSecs * 100) / 100,
       resolution: `${finalProbe.width}x${finalProbe.height}`,
-      fileSizeMB: (stat.size / 1024 / 1024).toFixed(2)
+      fileSizeMB: (stat.size / 1024 / 1024).toFixed(2),
+      reusedScenes,
+      totalScenes,
+      reusedOverlayBlocks
     });
     return {
       outputPath,
       durationSecs,
       fileSizeBytes: stat.size,
       preflightReport,
-      qaReport
+      qaReport,
+      cache
     };
   } catch (err) {
-    if (workingOutputPath) safeUnlink(workingOutputPath);
+    const cancelled = isRenderCancelledError(err) || !!signal?.aborted;
+    const reason = cancelled ? params.getCancelReason?.() ?? "user-cancelled" : "error";
+    if (workspace && manifest) {
+      try {
+        markInterruptedCheckpoints(manifest);
+        manifest.status = cancelled ? reason === "user-cancelled" ? "cancelled" : "interrupted" : "failed";
+        manifest.interruptionReason = reason;
+        manifest.interruptedAt = (/* @__PURE__ */ new Date()).toISOString();
+        if (!cancelled) manifest.warnings.push(`Render failed: ${String(err?.message ?? err).slice(0, 300)}`);
+        workspace.saveManifest(manifest);
+        workspace.logEvent({ event: cancelled ? "render-interrupted" : "render-failed", reason });
+      } catch {
+      }
+    }
+    if (activeRecord && workspace) {
+      try {
+        activeRecord.status = cancelled ? reason === "user-cancelled" ? "cancelled" : "interrupted" : "failed";
+        activeRecord.interruptionReason = reason;
+        activeRecord.endedAt = (/* @__PURE__ */ new Date()).toISOString();
+        activeRecord.lastError = cancelled ? void 0 : String(err?.message ?? err).slice(0, 500);
+        writeActiveRender(workspace.projectDir, activeRecord);
+      } catch {
+      }
+    }
+    if (cancelled && !(err instanceof RenderCancelledError)) {
+      throw new RenderCancelledError(reason === "app-closed" ? "Render interrupted: application closed" : "Render cancelled by user");
+    }
+    throw err;
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
+    throttle.stop();
+    if (publishPartial) safeUnlink(publishPartial);
     if (tmpDir && fs__namespace.existsSync(tmpDir)) {
       try {
         fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
       } catch {
       }
     }
-    throw err;
+  }
+}
+function markInterruptedCheckpoints(m) {
+  const reset = (c) => {
+    if (c.status === "running") c.status = "pending";
+  };
+  m.scenes.forEach(reset);
+  m.overlayBlocks.forEach(reset);
+  reset(m.assembly);
+  reset(m.audioMix);
+  reset(m.composite);
+  if (!m.finalOutput) m.finalOutput = emptyCheckpoint();
+}
+async function renderSceneClip(p) {
+  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p;
+  const scene = job.scene;
+  const i = p.sceneOrdinalIndex;
+  const mediaPath = job.mediaPath;
+  const scaleFilt = job.scaleFilt;
+  if (!mediaPath || !fs__namespace.existsSync(mediaPath)) {
+    logger.warn(`[RENDER] Missing media for scene ${scene.sceneIndex}: ${job.mediaName}, using black placeholder`);
+    await encodeRun([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
+      ...vcodec(ctx, 23),
+      "-t",
+      String(scene.duration),
+      "-pix_fmt",
+      "yuv420p",
+      outClip
+    ], ctx);
+    return;
+  }
+  const mediaKind = detectMediaKind(mediaPath, scene.mediaType);
+  const isImage = mediaKind === "image";
+  const declaredType = scene.mediaType;
+  const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
+  const extensionType = VIDEO_EXTENSIONS.has(cleanExt) ? "video" : IMAGE_EXTENSIONS.has(cleanExt) ? "image" : void 0;
+  if (declaredType && extensionType && declaredType !== extensionType) {
+    logger.warn(
+      `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${declaredType}, but file extension indicates ${extensionType}. Using ${extensionType}.`
+    );
+  }
+  if (scene.mediaType !== mediaKind) {
+    scene.mediaType = mediaKind;
+  }
+  logger.info(
+    `[RENDER] Scene ${scene.sceneIndex}: mediaKind=${mediaKind}, declaredType=${declaredType ?? "unknown"}, extension=${cleanExt}, path=${mediaPath}`
+  );
+  if (isImage && VIDEO_EXTENSIONS.has(cleanExt)) {
+    throw new Error(
+      `Media classification error: video file was about to be rendered as image: ${mediaPath}`
+    );
+  }
+  if (!isImage && IMAGE_EXTENSIONS.has(cleanExt)) {
+    throw new Error(
+      `Media classification error: image file was about to be rendered as video: ${mediaPath}`
+    );
+  }
+  const beats = job.beats;
+  const hasMultipleBeats = beats.length > 1;
+  const visualScene = visualPlanMap?.get(scene.sceneIndex);
+  const isAiStillImage = isImage && (visualScene?.strategy === "ai-still" || mediaPath.includes(path__namespace.join("assets", "generated", "health")) || mediaPath.includes("/assets/generated/health/") || mediaPath.includes(path__namespace.join("assets", "generated", "general")) || mediaPath.includes("/assets/generated/general/"));
+  if (isAiStillImage) {
+    const baseMotion = visualScene?.motion || visualScene?.motionPreset || "push-in-center";
+    const retentionHint = retentionPlanMap?.get(scene.sceneIndex) ?? retentionPlanMap?.get(i);
+    const motionParam = applyRetentionMotionHint(baseMotion, retentionHint, recentAiMotionPresets ?? []);
+    const presetName = typeof motionParam === "object" ? motionParam.preset : motionParam;
+    if (recentAiMotionPresets) {
+      recentAiMotionPresets.push(presetName);
+    }
+    const motionFilter = buildHealthMotionFilter(motionParam, width, height, scene.duration, fps);
+    logger.info(`[VisualMotion] Scene ${scene.sceneIndex}: applying cinematic motion spec '${presetName}'`);
+    await encodeRun([
+      "-y",
+      "-loop",
+      "1",
+      "-i",
+      mediaPath,
+      "-vf",
+      motionFilter,
+      ...vcodec(ctx, 20),
+      "-t",
+      String(scene.duration),
+      "-r",
+      String(fps),
+      "-pix_fmt",
+      "yuv420p",
+      outClip
+    ], ctx);
+  } else if (hasMultipleBeats && retentionSettings.enabled) {
+    await renderVisualBeatsToClip({
+      beats,
+      mediaPath,
+      isImage,
+      outClip,
+      width,
+      height,
+      fps,
+      scaleFilt,
+      tmpDir,
+      sceneIndex: i,
+      ctx
+    });
+  } else {
+    const singleBeat = beats[0];
+    let vfFilter = scaleFilt;
+    if (retentionSettings.semanticCropEnabled && singleBeat?.crop && singleBeat.crop.scale > 1.005) {
+      const zf = cropToZoomFilter(singleBeat.crop, width, height, scene.duration, fps);
+      if (zf) {
+        vfFilter = `${scaleFilt},${zf}`;
+        logger.info(`[RetentionEngine] scene ${i}: single-beat crop scale=${singleBeat.crop.scale.toFixed(2)}`);
+      }
+    }
+    if (isImage) {
+      await encodeRun([
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        mediaPath,
+        "-vf",
+        vfFilter,
+        ...vcodec(ctx, 20),
+        "-t",
+        String(scene.duration),
+        "-r",
+        String(fps),
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ], ctx);
+    } else {
+      const durationGuard = `tpad=stop_mode=clone:stop_duration=${scene.duration},trim=duration=${scene.duration},setpts=PTS-STARTPTS`;
+      const videoFilter = `${vfFilter},${durationGuard}`;
+      await encodeRun([
+        "-y",
+        "-i",
+        mediaPath,
+        "-vf",
+        videoFilter,
+        ...vcodec(ctx, 20),
+        "-t",
+        String(scene.duration),
+        "-r",
+        String(fps),
+        "-an",
+        "-pix_fmt",
+        "yuv420p",
+        outClip
+      ], ctx);
+    }
   }
 }
 function buildProofVisualList(scenes, retentionDecisions, captionPlan) {
   const result = [];
-  let sceneStartCursor = 0;
   const seenKeys = /* @__PURE__ */ new Set();
   for (let i = 0; i < scenes.length; i++) {
-    scenes[i];
     const decision = retentionDecisions.get(i);
-    sceneStartCursor += i === 0 ? 0 : scenes[i - 1].duration;
     if (!decision?.proofVisual) continue;
     const pv = decision.proofVisual;
     let cumStart = 0;
@@ -9321,3248 +13754,2729 @@ function resolveProofPosition(pv, captionState, sceneIndex) {
   const corners = ["bottom_right", "top_right", "bottom_right", "top_right"];
   return corners[sceneIndex % corners.length];
 }
-const BUILTIN_MASTER_PROMPT_TEXT = `# MASTER PROMPT — SCRIPT TO YOUTUBE THUMBNAIL
-
-Bạn là chuyên gia thiết kế thumbnail cho kênh YouTube thị trường Mỹ.
-
-Đọc toàn bộ script được cung cấp và tạo đúng {{VARIANT_COUNT}} phương án thumbnail khác nhau. Giá trị mặc định của {{VARIANT_COUNT}} là 5.
-
-Mục tiêu hình ảnh:
-
-- Ảnh chụp đời thực, photorealistic, giàu chi tiết và trông như một khoảnh khắc có thể xảy ra tại Mỹ.
-- Bối cảnh có thể là siêu thị dạng kho, kệ thực phẩm, quầy đồ hộp, cửa hàng tạp hóa, bãi đỗ xe hoặc kho dự trữ tại nhà, tùy nội dung script.
-- Thumbnail 16:9, thiết kế ở 3840 × 2160 px.
-- Hai dòng chữ cực lớn ở vùng 35–45% phía trên ảnh.
-- Dòng đầu màu vàng tươi.
-- Dòng thứ hai màu trắng.
-- Chữ in hoa, condensed sans-serif siêu đậm, viền đen dày và bóng tối nhẹ.
-- Phần dưới thể hiện rõ thực phẩm, vật dụng, con người hoặc tình huống trung tâm.
-- Thumbnail phải đọc được trên điện thoại.
-- Mỗi phương án phải tạo một curiosity gap nhưng không được bóp méo nội dung script.
-
-DỮ LIỆU ĐẦU VÀO
-
-FULL SCRIPT:
-
-{{SCRIPT}}
-
-VIDEO TITLE HIỆN CÓ:
-
-{{VIDEO_TITLE}}
-
-GLOBAL VISUAL CONTEXT:
-
-{{GLOBAL_VISUAL_CONTEXT}}
-
-OUTPUT LANGUAGE:
-
-{{OUTPUT_LANGUAGE}}
-
-CÁC CONCEPT ĐÃ DÙNG Ở CÁC ROUND TRƯỚC:
-
-{{PREVIOUS_CONCEPTS}}
-
-BƯỚC 1 — HIỂU SCRIPT
-
-Đọc toàn bộ script và xác định:
-
-1. Chủ đề chính video thực sự giải thích.
-2. Một chi tiết cụ thể và dễ thể hiện bằng hình ảnh.
-3. Điều người xem lo lắng hoặc muốn đạt được.
-4. Lời hứa thực tế video có thể đáp ứng.
-5. Các con số, địa điểm, thời hạn hoặc sản phẩm được script nhắc đến rõ ràng.
-6. Những tuyên bố không được phép suy diễn thêm.
-
-Không lấy riêng một câu giật gân rồi tạo thumbnail sai trọng tâm.
-
-Không tự bịa:
-
-- Tình trạng thiếu hàng.
-- Tăng giá.
-- Thiên tai.
-- Hạn chót.
-- Khủng hoảng.
-- Con số.
-- Dự báo.
-- Sự kiện chưa được script hỗ trợ.
-
-Nếu script chỉ nói về cách chuẩn bị nói chung, sử dụng hook về lợi ích hoặc sự tò mò, không tuyên bố một cuộc khủng hoảng sắp xảy ra.
-
-BƯỚC 2 — TẠO ĐÚNG 5 GÓC THUMBNAIL
-
-Tạo đúng 5 phương án khác nhau về ý tưởng hình ảnh, bố cục, chủ thể hoặc curiosity gap.
-
-Có thể sử dụng các hướng:
-
-A — Con người và tình huống:
-Người mua hàng, gia đình, giỏ hàng hoặc một hành động cụ thể. Khuôn mặt và hành động đủ lớn để nhìn rõ khi thu nhỏ.
-
-B — Sản phẩm và giải pháp:
-Kệ hàng, thực phẩm hoặc vật dụng thiết yếu được xếp rõ ràng. Có một nhóm sản phẩm chính nổi bật.
-
-C — Hậu quả hoặc sự thay đổi:
-Giá tại quầy, kệ hàng, before/after hoặc sự thay đổi đối với người xem, nhưng chỉ khi script hỗ trợ.
-
-D — Proof object:
-Một vật thể chứng minh trọng tâm video như receipt, price tag, shelf label, grocery total, pantry inventory hoặc sản phẩm cụ thể được script nhắc đến.
-
-E — Curiosity or contrast:
-Một sự đối lập rõ ràng, một tình huống chưa giải thích hết hoặc một chi tiết khiến người xem muốn biết nguyên nhân.
-
-Nếu một hướng không phù hợp, thay bằng một hướng khác phù hợp hơn.
-
-Năm phương án không được chỉ thay đổi vài chữ trên cùng một bức ảnh.
-
-BƯỚC 3 — QUY TẮC TEXT OVERLAY
-
-Mỗi thumbnail có đúng hai dòng chữ.
-
-- Dòng 1 màu vàng tươi.
-- Dòng 2 màu trắng.
-- Ưu tiên tổng cộng 4–7 từ.
-- Tối đa 9 từ nếu thật cần thiết.
-- Chữ phải hiểu được trong chưa đến một giây.
-- Chỉ thể hiện một thông điệp chính.
-- Không thêm logo, badge, mũi tên hoặc dòng phụ không cần thiết.
-- Không dùng ngày tháng hoặc hạn chót nếu script không xác nhận.
-- Không dùng tuyên bố tuyệt đối như NEVER EXPIRE, GUARANTEED hoặc WILL BE DEVASTATING nếu script không hỗ trợ.
-- Text thumbnail và title phải bổ sung cho nhau.
-- Không lặp lại nguyên văn toàn bộ thumbnail text trong title.
-- Kiểm tra chính tả tiếng Anh Mỹ.
-- Tất cả text xuất hiện trên thumbnail phải là tiếng Anh Mỹ.
-
-BƯỚC 4 — IMAGE PROMPT
-
-Mỗi option phải có một IMAGE PROMPT đầy đủ bằng tiếng Anh và sẵn sàng gửi trực tiếp sang Google Flow.
-
-Mỗi image prompt phải tự đầy đủ, không viết “same as above” và không tham chiếu option khác.
-
-Image prompt phải mô tả:
-
-1. YouTube thumbnail 16:9, 3840 × 2160.
-2. Địa điểm cụ thể tại Mỹ phù hợp với script.
-3. Chủ thể chính, vị trí, kích thước, hành động và biểu cảm.
-4. Bố cục với vùng chữ phía trên.
-5. Không để chữ che mặt, tay hoặc proof object.
-6. Tiền cảnh rõ, hậu cảnh có ngữ cảnh nhưng không rối.
-7. Photorealistic documentary look.
-8. Tương phản cao nhưng da người tự nhiên.
-9. Hai dòng text chính xác đã chọn.
-10. Dòng đầu màu vàng và dòng thứ hai màu trắng.
-11. Font condensed sans-serif siêu đậm, chữ in hoa, viền đen dày.
-12. Safe margin.
-13. Không đặt thông tin quan trọng ở góc dưới bên phải.
-14. Giải phẫu chính xác.
-15. Không có mặt hoặc bàn tay bị méo.
-16. Không lặp người.
-17. Không có bao bì biến dạng quá mức.
-18. Không logo hoặc watermark ngoài nội dung được yêu cầu.
-
-Nếu script nói về người hoặc cộng đồng có thật, không trình bày cảnh dàn dựng như bằng chứng chụp tại một sự kiện có thật.
-
-BƯỚC 5 — TITLE
-
-Với mỗi option, tạo hai title tiếng Anh Mỹ:
-
-- titleClear: nói rõ video mang lại thông tin gì.
-- titleCuriosity: tạo lý do bấm xem nhưng vẫn đúng nội dung.
-
-Không tự tạo con số chỉ để tăng click.
-
-BƯỚC 6 — ROUND MỚI
-
-Nếu PREVIOUS_CONCEPTS không trống:
-
-- Không lặp lại concept cũ.
-- Không chỉ đổi góc camera hoặc vài từ.
-- Phải tạo 5 ý tưởng hình ảnh mới thực sự khác biệt.
-- Vẫn giữ đúng nội dung script và visual identity của niche.
-
-OUTPUT
-
-Chỉ trả về một JSON object hợp lệ.
-
-Không markdown.
-Không code fence.
-Không giải thích bên ngoài JSON.
-Không trailing comma.
-
-Schema bắt buộc:
-
-{
-  "scriptInsight": {
-    "mainTopic": "string",
-    "groundedHook": "string",
-    "strongestVisualDetail": "string",
-    "viewerConcernOrGoal": "string",
-    "unsupportedClaimsToAvoid": ["string"]
-  },
-  "options": [
-    {
-      "id": "A",
-      "conceptName": "string",
-      "yellowText": "string",
-      "whiteText": "string",
-      "visualConcept": "string",
-      "imagePrompt": "complete English prompt",
-      "titleClear": "string",
-      "titleCuriosity": "string",
-      "whyItWorks": "string"
-    }
-  ],
-  "recommendedOptionId": "A",
-  "recommendationReason": "string",
-  "postGenerationCheck": "string"
+class RenderBusyError extends Error {
+  constructor(message = "Another render is already active for this project.") {
+    super(message);
+    this.name = "RenderBusyError";
+  }
 }
-
-Yêu cầu bắt buộc:
-
-- options phải có đúng 5 phần tử.
-- ID lần lượt là A, B, C, D, E.
-- Mỗi imagePrompt phải đầy đủ.
-- Không để placeholder.
-- Không viết same as above.
-- Chưa tạo ảnh trong bước lập kế hoạch này.`;
-const BUILTIN_TEMPLATE = {
-  id: "builtin-us-grocery-preparedness",
-  name: "US Grocery & Preparedness — Script Grounded",
-  description: "Script-grounded 5-variant YouTube thumbnail generator tailored for US grocery and preparedness topics with bold 2-line overlay text.",
-  category: "US Grocery",
-  promptText: BUILTIN_MASTER_PROMPT_TEXT,
-  isBuiltIn: true,
-  isDefault: true,
-  createdAt: "2026-01-01T00:00:00.000Z",
-  updatedAt: "2026-01-01T00:00:00.000Z"
-};
-class ThumbnailTemplateStore {
-  customPath;
-  queue = Promise.resolve();
-  constructor(customPath) {
-    this.customPath = customPath;
+function norm(projectDir) {
+  return path__namespace.normalize(path__namespace.resolve(projectDir));
+}
+class RenderJobCoordinator {
+  jobs = /* @__PURE__ */ new Map();
+  isActive(projectDir) {
+    return this.jobs.has(norm(projectDir));
   }
-  getFilePath() {
-    if (this.customPath) {
-      return this.customPath;
-    }
-    const dir = electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd();
-    return path__namespace.join(dir, "thumbnail-prompt-library.json");
+  hasAnyActive() {
+    return this.jobs.size > 0;
   }
-  getBackupPath() {
-    return `${this.getFilePath()}.backup.json`;
+  getActiveInfo(projectDir) {
+    const job = this.jobs.get(norm(projectDir));
+    if (!job) return null;
+    return { requestKey: job.requestKey, source: job.source, startedAt: job.startedAt, lastProgress: job.lastProgress };
   }
-  runInLock(task) {
-    const res = this.queue.then(task, task);
-    this.queue = res.catch(() => {
-    });
-    return res;
+  getCancelReason(projectDir) {
+    return this.jobs.get(norm(projectDir))?.cancelReason;
   }
-  async getAll() {
-    return this.runInLock(async () => this.loadInternal());
-  }
-  async getById(id) {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      return list.find((t) => t.id === id) || null;
-    });
-  }
-  async getDefault() {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const def = list.find((t) => t.isDefault);
-      if (def) return def;
-      const builtin = list.find((t) => t.isBuiltIn);
-      if (builtin) return builtin;
-      return list[0] || BUILTIN_TEMPLATE;
-    });
-  }
-  async create(data) {
-    this.validateTemplateData(data.name, data.promptText);
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const id = `tpl-${uuid.v4()}`;
-      const newTemplate = {
-        id,
-        name: data.name.trim(),
-        description: data.description?.trim() || void 0,
-        category: data.category?.trim() || "Custom",
-        promptText: data.promptText.trim(),
-        isBuiltIn: false,
-        isDefault: Boolean(data.isDefault),
-        createdAt: now,
-        updatedAt: now
-      };
-      if (newTemplate.isDefault) {
-        list.forEach((t) => {
-          t.isDefault = false;
-        });
-      }
-      list.push(newTemplate);
-      await this.saveInternal(list);
-      return newTemplate;
-    });
-  }
-  async update(id, updates) {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const index = list.findIndex((t) => t.id === id);
-      if (index === -1) {
-        throw new Error(`Template not found: ${id}`);
-      }
-      const current = list[index];
-      const nextName = updates.name !== void 0 ? updates.name : current.name;
-      const nextPrompt = updates.promptText !== void 0 ? updates.promptText : current.promptText;
-      this.validateTemplateData(nextName, nextPrompt);
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      if (updates.isDefault) {
-        list.forEach((t) => {
-          t.isDefault = false;
-        });
-      }
-      const updated = {
-        ...current,
-        name: nextName.trim(),
-        description: updates.description !== void 0 ? updates.description.trim() || void 0 : current.description,
-        category: updates.category !== void 0 ? updates.category.trim() : current.category,
-        promptText: nextPrompt.trim(),
-        isDefault: updates.isDefault !== void 0 ? updates.isDefault : current.isDefault,
-        updatedAt: now
-      };
-      list[index] = updated;
-      await this.saveInternal(list);
-      return updated;
-    });
-  }
-  async duplicate(id, newName) {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const source = list.find((t) => t.id === id);
-      if (!source) {
-        throw new Error(`Template not found: ${id}`);
-      }
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      const copyName = newName?.trim() || `${source.name} (Copy)`;
-      const newTemplate = {
-        ...source,
-        id: `tpl-${uuid.v4()}`,
-        name: copyName,
-        isBuiltIn: false,
-        isDefault: false,
-        createdAt: now,
-        updatedAt: now
-      };
-      list.push(newTemplate);
-      await this.saveInternal(list);
-      return newTemplate;
-    });
-  }
-  async delete(id) {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const target = list.find((t) => t.id === id);
-      if (!target) {
-        return false;
-      }
-      if (target.isBuiltIn) {
-        throw new Error("Cannot delete a built-in template");
-      }
-      const filtered = list.filter((t) => t.id !== id);
-      if (target.isDefault && filtered.length > 0) {
-        const builtin = filtered.find((t) => t.isBuiltIn) || filtered[0];
-        builtin.isDefault = true;
-      }
-      await this.saveInternal(filtered);
-      return true;
-    });
-  }
-  async setDefault(id) {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const target = list.find((t) => t.id === id);
-      if (!target) {
-        throw new Error(`Template not found: ${id}`);
-      }
-      list.forEach((t) => {
-        t.isDefault = t.id === id;
-      });
-      await this.saveInternal(list);
-      return target;
-    });
-  }
-  async exportToJson(ids) {
-    return this.runInLock(async () => {
-      const list = await this.loadInternal();
-      const toExport = ids && ids.length > 0 ? list.filter((t) => ids.includes(t.id)) : list;
-      return JSON.stringify(toExport, null, 2);
-    });
-  }
-  async importFromJson(jsonString) {
-    let parsed;
-    try {
-      parsed = JSON.parse(jsonString);
-    } catch (err) {
-      throw new Error(`Invalid JSON format: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    let rawTemplates;
-    if (Array.isArray(parsed)) {
-      rawTemplates = parsed;
-    } else if (parsed && typeof parsed === "object" && Array.isArray(parsed.templates)) {
-      rawTemplates = parsed.templates;
-    } else {
-      throw new Error('Import data must be a JSON array of templates or an object with a "templates" array');
-    }
-    if (rawTemplates.length === 0) {
-      throw new Error("No templates found in import data");
-    }
-    return this.runInLock(async () => {
-      const currentList = await this.loadInternal();
-      const existingIds = new Set(currentList.map((t) => t.id));
-      const importedTemplates = [];
-      const now = (/* @__PURE__ */ new Date()).toISOString();
-      for (let i = 0; i < rawTemplates.length; i++) {
-        const item = rawTemplates[i];
-        if (!item || typeof item !== "object") {
-          throw new Error(`Template at index ${i} is not a valid object`);
+  /**
+   * Run (or attach to) the render job for a project.
+   *
+   * @param starter receives an AbortSignal and an emit function for progress.
+   * @param externalSignal optional upstream signal (e.g. pipeline cancel) linked to the job.
+   */
+  run(params) {
+    const key2 = norm(params.projectDir);
+    const existing = this.jobs.get(key2);
+    if (existing) {
+      if (existing.requestKey === params.requestKey) {
+        if (params.listener) {
+          existing.listeners.add(params.listener);
+          if (existing.lastProgress) params.listener(existing.lastProgress);
         }
-        const record = item;
-        const name = typeof record.name === "string" ? record.name.trim() : "";
-        const promptText = typeof record.promptText === "string" ? record.promptText.trim() : "";
-        const category = typeof record.category === "string" ? record.category.trim() : "Custom";
-        const description = typeof record.description === "string" ? record.description.trim() : void 0;
-        if (!name) {
-          throw new Error(`Template at index ${i} has empty name`);
-        }
-        if (!promptText) {
-          throw new Error(`Template "${name}" has empty promptText`);
-        }
-        if (!promptText.includes("{{SCRIPT}}")) {
-          throw new Error(`Template "${name}" is missing required variable {{SCRIPT}}`);
-        }
-        let id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : `tpl-${uuid.v4()}`;
-        if (existingIds.has(id)) {
-          id = `tpl-${uuid.v4()}`;
-        }
-        existingIds.add(id);
-        const template = {
-          id,
-          name,
-          description,
-          category,
-          promptText,
-          isBuiltIn: false,
-          isDefault: false,
-          createdAt: typeof record.createdAt === "string" ? record.createdAt : now,
-          updatedAt: now
-        };
-        currentList.push(template);
-        importedTemplates.push(template);
+        logger.info(`[RenderCoordinator] Attached ${params.source} listener to running render for ${key2}`);
+        if (params.externalSignal) this.linkSignal(existing, params.externalSignal);
+        return { promise: existing.promise, attached: true };
       }
-      await this.saveInternal(currentList);
-      return {
-        importedCount: importedTemplates.length,
-        importedTemplates
-      };
-    });
-  }
-  validateTemplateData(name, promptText) {
-    if (!name || !name.trim()) {
-      throw new Error("Template name cannot be empty");
+      throw new RenderBusyError(
+        "Another render with different settings is already running for this project. Wait for it to finish or cancel it first."
+      );
     }
-    if (!promptText || !promptText.trim()) {
-      throw new Error("Prompt text cannot be empty");
-    }
-    if (!promptText.includes("{{SCRIPT}}")) {
-      throw new Error("Prompt text must contain the required variable {{SCRIPT}}");
-    }
-  }
-  async loadInternal() {
-    const filePath = this.getFilePath();
-    const backupPath = this.getBackupPath();
-    let raw = "";
-    let loadedFromBackup = false;
-    if (fs__namespace.existsSync(filePath)) {
-      try {
-        raw = fs__namespace.readFileSync(filePath, "utf-8");
-      } catch (err) {
-        logger.warn(`[ThumbnailStore] Failed to read primary library file: ${err}`);
-      }
-    }
-    if (!raw && fs__namespace.existsSync(backupPath)) {
-      try {
-        raw = fs__namespace.readFileSync(backupPath, "utf-8");
-        loadedFromBackup = true;
-        logger.info("[ThumbnailStore] Recovered template library from backup");
-      } catch (err) {
-        logger.warn(`[ThumbnailStore] Failed to read backup file: ${err}`);
-      }
-    }
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw);
-        let templates = [];
-        if (Array.isArray(parsed)) {
-          templates = parsed;
-        } else if (parsed && Array.isArray(parsed.templates)) {
-          templates = parsed.templates;
-        }
-        const hasBuiltin = templates.some((t) => t.isBuiltIn && t.id === BUILTIN_TEMPLATE.id);
-        if (!hasBuiltin) {
-          templates.unshift({ ...BUILTIN_TEMPLATE });
-        }
-        const hasDefault = templates.some((t) => t.isDefault);
-        if (!hasDefault && templates.length > 0) {
-          const builtin = templates.find((t) => t.isBuiltIn) || templates[0];
-          builtin.isDefault = true;
-        }
-        if (loadedFromBackup) {
-          await this.saveInternal(templates);
-        }
-        return templates;
-      } catch (err) {
-        logger.error(`[ThumbnailStore] Corrupted library file: ${err}. Attempting recovery...`);
-        if (!loadedFromBackup && fs__namespace.existsSync(backupPath)) {
-          try {
-            const bRaw = fs__namespace.readFileSync(backupPath, "utf-8");
-            const bParsed = JSON.parse(bRaw);
-            const bTemplates = Array.isArray(bParsed) ? bParsed : bParsed.templates || [];
-            if (bTemplates.length > 0) {
-              if (!bTemplates.some((t) => t.isBuiltIn && t.id === BUILTIN_TEMPLATE.id)) {
-                bTemplates.unshift({ ...BUILTIN_TEMPLATE });
-              }
-              await this.saveInternal(bTemplates);
-              return bTemplates;
-            }
-          } catch {
-          }
-        }
-      }
-    }
-    const initialList = [{ ...BUILTIN_TEMPLATE }];
-    await this.saveInternal(initialList);
-    return initialList;
-  }
-  async saveInternal(templates) {
-    const filePath = this.getFilePath();
-    const backupPath = this.getBackupPath();
-    const dir = path__namespace.dirname(filePath);
-    if (!fs__namespace.existsSync(dir)) {
-      fs__namespace.mkdirSync(dir, { recursive: true });
-    }
-    const payload = {
-      schemaVersion: 1,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      templates
+    const abortController = new AbortController();
+    const listeners = /* @__PURE__ */ new Set();
+    if (params.listener) listeners.add(params.listener);
+    const job = {
+      projectDir: key2,
+      requestKey: params.requestKey,
+      source: params.source,
+      abortController,
+      listeners,
+      startedAt: Date.now(),
+      promise: Promise.resolve()
     };
-    const serialized = JSON.stringify(payload, null, 2);
-    const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
-    try {
-      fs__namespace.renameSync(tmpPath, filePath);
+    const emit = (p) => {
+      job.lastProgress = p;
+      for (const l of job.listeners) {
+        try {
+          l(p);
+        } catch {
+        }
+      }
+    };
+    if (params.externalSignal) this.linkSignal(job, params.externalSignal);
+    this.jobs.set(key2, job);
+    job.promise = (async () => {
       try {
-        fs__namespace.copyFileSync(filePath, backupPath);
+        return await params.starter(abortController.signal, emit);
+      } finally {
+        if (this.jobs.get(key2) === job) this.jobs.delete(key2);
+      }
+    })();
+    return { promise: job.promise, attached: false };
+  }
+  /** Detach a listener (e.g. renderer window closed) without cancelling the job. */
+  detach(projectDir, listener) {
+    this.jobs.get(norm(projectDir))?.listeners.delete(listener);
+  }
+  cancel(projectDir, reason = "user-cancelled") {
+    const job = this.jobs.get(norm(projectDir));
+    if (!job) return false;
+    job.cancelReason = reason;
+    job.abortController.abort();
+    logger.info(`[RenderCoordinator] Render for ${job.projectDir} cancelled (${reason})`);
+    return true;
+  }
+  /** Abort every job (app quit). Resolves once all job promises settle or timeout. */
+  async abortAll(reason, timeoutMs = 4e3) {
+    const all = Array.from(this.jobs.values());
+    for (const job of all) {
+      job.cancelReason = reason;
+      job.abortController.abort();
+    }
+    if (all.length === 0) return;
+    await Promise.race([
+      Promise.allSettled(all.map((j) => j.promise)),
+      new Promise((r) => setTimeout(r, timeoutMs))
+    ]);
+  }
+  linkSignal(job, signal) {
+    const onAbort = () => {
+      job.cancelReason = job.cancelReason ?? "user-cancelled";
+      job.abortController.abort();
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  }
+}
+const renderJobCoordinator = new RenderJobCoordinator();
+function loadRenderCaptionPlan(projectDir) {
+  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!fs__namespace.existsSync(captionPlanPath)) return void 0;
+  try {
+    const loaded = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+    if (loaded.enabled && (loaded.phrases?.length ?? 0) > 0) return loaded;
+  } catch (e) {
+    logger.warn(`[RenderService] Could not read caption-plan.json: ${String(e)}`);
+  }
+  return void 0;
+}
+function startCoordinatedRender(params) {
+  const { onProgress, externalSignal, jobSource, ...renderParams } = params;
+  const requestKey = computeRenderRequestKey(renderParams);
+  return renderJobCoordinator.run({
+    projectDir: params.projectDir,
+    requestKey,
+    source: jobSource ?? params.source ?? "manual",
+    listener: onProgress ? (p) => onProgress({ stage: p.stage, progress: p.progress, sceneIndex: p.sceneIndex, totalScenes: p.totalScenes }) : void 0,
+    externalSignal,
+    starter: (signal, emit) => renderVideo({
+      ...renderParams,
+      signal,
+      getCancelReason: () => renderJobCoordinator.getCancelReason(params.projectDir),
+      onProgress: (p) => emit({ stage: p.stage, progress: p.progress, sceneIndex: p.sceneIndex, totalScenes: p.totalScenes })
+    })
+  });
+}
+const PHASE_WEIGHTS = { scenes: 0.55, assembly: 0.1, audio: 0.05, overlay: 0.25, composite: 0.05 };
+function emptyInfo(extra = {}) {
+  return {
+    manifestFound: false,
+    resumable: false,
+    fingerprintMatches: false,
+    completedScenes: 0,
+    totalScenes: 0,
+    completedOverlayBlocks: 0,
+    totalOverlayBlocks: 0,
+    invalidArtifacts: [],
+    status: "none",
+    ...extra
+  };
+}
+function artifactLooksValid(artifactPath, fingerprint) {
+  if (!artifactPath || !fingerprint) return false;
+  try {
+    const st = fs__namespace.statSync(artifactPath);
+    if (!st.isFile() || st.size <= 0) return false;
+    const meta = readArtifactMeta(artifactPath);
+    return !!meta && meta.fingerprint === fingerprint && (!meta.sizeBytes || meta.sizeBytes === st.size);
+  } catch {
+    return false;
+  }
+}
+function checkpointValid(cp2) {
+  return !!cp2 && cp2.status === "completed" && artifactLooksValid(cp2.artifactPath, cp2.fingerprint);
+}
+function latestWorkspace(projectDir) {
+  const index = readCacheIndex(projectDir);
+  const entries = Object.entries(index.workspaces).sort((a, b) => (b[1].lastUsedAt ?? "").localeCompare(a[1].lastUsedAt ?? ""));
+  return entries[0]?.[0] ?? null;
+}
+function paramsFromActive(active) {
+  if (active?.params?.voiceoverPath !== void 0) return active.params;
+  return null;
+}
+function inspectRenderRecovery(projectDir, opts = {}) {
+  try {
+    const root = getRenderCacheRoot(projectDir);
+    if (!fs__namespace.existsSync(root)) return emptyInfo();
+    const isActiveHere = renderJobCoordinator.isActive(projectDir);
+    const active = reconcileActiveRender(projectDir, isActiveHere) ?? readActiveRender(projectDir);
+    const workspaceName = active?.workspace ?? latestWorkspace(projectDir);
+    const cacheSizeBytes = getRenderCacheSizeBytes(projectDir);
+    if (!workspaceName) return emptyInfo({ cacheSizeBytes });
+    const manifest = readManifest(path__namespace.join(root, workspaceName, "manifest.json"));
+    if (!manifest) return emptyInfo({ cacheSizeBytes });
+    const resumeParams = opts.params ?? paramsFromActive(active) ?? opts.fallbackParams;
+    const invalidArtifacts = [];
+    let fingerprintMatches = false;
+    let currentSceneFps = null;
+    let currentAssemblyFp = null;
+    if (resumeParams) {
+      try {
+        const prepared = prepareRenderPlan({
+          projectDir,
+          voiceoverPath: resumeParams.voiceoverPath,
+          outputName: resumeParams.outputName,
+          resolution: resumeParams.resolution,
+          fps: resumeParams.fps,
+          captionPlan: loadRenderCaptionPlan(projectDir),
+          transitionSettings: resumeParams.transitionSettings,
+          encoderKey: encoderKeyFor(manifest.settings.encoderMode, resumeParams.resolution, resumeParams.fps)
+        });
+        fingerprintMatches = prepared.renderFingerprint === manifest.renderFingerprint;
+        currentSceneFps = prepared.sceneJobs.map((j) => j.fingerprint);
+        currentAssemblyFp = prepared.assemblyFingerprint;
+      } catch (err) {
+        logger.warn(`[RenderRecovery] Could not compute current render fingerprint: ${String(err)}`);
+      }
+    }
+    let completedScenes = 0;
+    let totalScenes = manifest.scenes.length;
+    if (currentSceneFps && !fingerprintMatches) {
+      totalScenes = currentSceneFps.length;
+      const index = readCacheIndex(projectDir);
+      const byFp = new Map(manifest.scenes.map((s) => [s.fingerprint, s]));
+      for (const fp of currentSceneFps) {
+        const local = byFp.get(fp);
+        if (local && checkpointValid(local)) {
+          completedScenes++;
+          continue;
+        }
+        const entry = index.entries[fp];
+        if (entry && artifactLooksValid(path__namespace.join(root, entry.path), fp)) completedScenes++;
+      }
+    } else {
+      for (const s of manifest.scenes) {
+        if (s.status !== "completed") continue;
+        if (checkpointValid(s)) completedScenes++;
+        else invalidArtifacts.push(s.artifactPath ?? `scene-${s.ordinal}`);
+      }
+    }
+    const assemblyStillValid = fingerprintMatches || !!currentAssemblyFp && currentAssemblyFp === manifest.assembly.fingerprint;
+    const statusOf = (cp2, stillValid) => {
+      if (!cp2 || cp2.status === "pending" || cp2.status === "running") return "pending";
+      if (cp2.status !== "completed") return cp2.status;
+      if (!stillValid) return "invalid";
+      if (!checkpointValid(cp2)) {
+        if (cp2.artifactPath) invalidArtifacts.push(cp2.artifactPath);
+        return "invalid";
+      }
+      return "completed";
+    };
+    const assemblyStatus = statusOf(manifest.assembly, assemblyStillValid);
+    const audioMixStatus = statusOf(manifest.audioMix, fingerprintMatches);
+    const compositeStatus = manifest.composite.artifactPath && manifest.composite.artifactPath === manifest.audioMix.artifactPath ? audioMixStatus : statusOf(manifest.composite, fingerprintMatches);
+    let completedOverlayBlocks = 0;
+    const totalOverlayBlocks = manifest.overlayBlocks.length;
+    if (fingerprintMatches) {
+      for (const b of manifest.overlayBlocks) {
+        if (b.status !== "completed") continue;
+        if (checkpointValid(b)) completedOverlayBlocks++;
+        else invalidArtifacts.push(b.artifactPath ?? `overlay-block-${b.blockIndex}`);
+      }
+    }
+    const finalDone = manifest.status === "completed" && !!manifest.finalOutput?.artifactPath && fs__namespace.existsSync(manifest.finalOutput.artifactPath);
+    const sceneRatio = totalScenes > 0 ? completedScenes / totalScenes : 0;
+    const overlayRatio = totalOverlayBlocks > 0 ? completedOverlayBlocks / totalOverlayBlocks : compositeStatus === "completed" ? 1 : 0;
+    const saved = PHASE_WEIGHTS.scenes * sceneRatio + PHASE_WEIGHTS.assembly * (assemblyStatus === "completed" ? 1 : 0) + PHASE_WEIGHTS.audio * (audioMixStatus === "completed" ? 1 : 0) + PHASE_WEIGHTS.overlay * overlayRatio + PHASE_WEIGHTS.composite * (compositeStatus === "completed" ? 1 : 0);
+    const estimatedWorkSavedPct = Math.round(Math.min(1, saved) * 100);
+    const lastValidArtifact = compositeStatus === "completed" ? manifest.composite.artifactPath : audioMixStatus === "completed" ? manifest.audioMix.artifactPath : assemblyStatus === "completed" ? manifest.assembly.artifactPath : [...manifest.scenes].reverse().find((s) => checkpointValid(s))?.artifactPath;
+    const hasCachedWork = completedScenes > 0 || assemblyStatus === "completed";
+    const isRunning = isActiveHere || active?.status === "running";
+    let status = "none";
+    if (isRunning) status = "resuming";
+    else if (finalDone && fingerprintMatches) status = "complete";
+    else if (hasCachedWork) status = fingerprintMatches || !resumeParams ? "available" : "partially-invalidated";
+    const resumable = !isRunning && !(finalDone && fingerprintMatches) && hasCachedWork && !!resumeParams;
+    const prefs = loadRenderPreferences();
+    const canAutoResume = resumable && !!active && active.status === "interrupted" && active.interruptionReason !== "user-cancelled" && active.source === "pipeline" && active.autoResumeAfterCrash !== false && prefs.autoResumeAfterCrash && (active.autoResumeCount ?? 0) < 1;
+    let message;
+    if (resumable && totalScenes > 0) {
+      message = completedScenes >= totalScenes ? `Render interrupted — ${completedScenes}/${totalScenes} scenes cached
+Resume from ${manifest.progress.currentPhase || "the next checkpoint"}` : `Render interrupted — ${completedScenes}/${totalScenes} scenes cached
+Resume from cached scene ${completedScenes + 1}`;
+    }
+    return {
+      manifestFound: true,
+      resumable,
+      fingerprintMatches,
+      currentPhase: manifest.progress.currentPhase || manifest.status,
+      completedScenes,
+      totalScenes,
+      completedOverlayBlocks,
+      totalOverlayBlocks,
+      lastValidArtifact,
+      invalidArtifacts,
+      status,
+      assemblyStatus,
+      audioMixStatus,
+      compositeStatus,
+      interruptionReason: active?.interruptionReason ?? manifest.interruptionReason,
+      source: active?.source,
+      canAutoResume,
+      estimatedWorkSavedPct,
+      cacheSizeBytes,
+      message,
+      resumeParams
+    };
+  } catch (err) {
+    logger.warn(`[RenderRecovery] Inspection failed for ${projectDir}: ${String(err)}`);
+    return emptyInfo();
+  }
+}
+function isTranscriptionValid(projectDir, voiceoverPath) {
+  const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
+  const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
+  if (!fs__namespace.existsSync(transcriptPath)) {
+    return false;
+  }
+  try {
+    if (voiceoverPath && fs__namespace.existsSync(voiceoverPath) && fs__namespace.existsSync(cacheMetaPath)) {
+      const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
+      const stat = fs__namespace.statSync(voiceoverPath);
+      const expectedHash = `${voiceoverPath}:${stat.size}:${stat.mtimeMs}`;
+      if (meta.hash && meta.hash !== expectedHash) return false;
+    }
+    const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+    return !!(transcript && transcript.segments && transcript.segments.length > 0);
+  } catch {
+    return false;
+  }
+}
+function isPlanningValid(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) return false;
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    if (!plan || !Array.isArray(plan.chapters) || plan.chapters.length === 0) {
+      return false;
+    }
+    const sceneCount = plan.chapters.reduce(
+      (acc, ch) => {
+        const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+        return acc + seqs.reduce((sAcc, seq) => sAcc + (seq.scenes?.length ?? 0), 0);
+      },
+      0
+    );
+    return sceneCount > 0;
+  } catch {
+    return false;
+  }
+}
+function isCaptionsValid(projectDir) {
+  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!fs__namespace.existsSync(captionPlanPath)) return false;
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+    return !!(plan && typeof plan.enabled === "boolean");
+  } catch {
+    return false;
+  }
+}
+function isGlobalContextValid(projectDir, scriptHash2) {
+  const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+  if (!fs__namespace.existsSync(contextPath)) return false;
+  try {
+    const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    if (!ctx || !ctx.primarySubject) return false;
+    if (scriptHash2 && ctx._scriptHash && ctx._scriptHash !== scriptHash2) ;
+    return true;
+  } catch {
+    return false;
+  }
+}
+function checkStockCompletion(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    return {
+      totalScenes: 0,
+      assignedScenes: 0,
+      downloadedScenes: 0,
+      missingScenes: 0,
+      lowConfidenceScenes: 0,
+      missingSceneIndices: []
+    };
+  }
+  let totalScenes = 0;
+  const sceneIndices = [];
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    const chapters = plan.chapters ?? [];
+    for (const ch of chapters) {
+      const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+      for (const seq of seqs) {
+        for (const sc of seq.scenes ?? []) {
+          totalScenes++;
+          sceneIndices.push(sc.sceneIndex);
+        }
+      }
+    }
+  } catch {
+  }
+  const assignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+  let assignmentList = [];
+  if (fs__namespace.existsSync(assignmentsPath)) {
+    try {
+      const parsed = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      if (Array.isArray(parsed)) {
+        assignmentList = parsed;
+      } else if (parsed && typeof parsed === "object") {
+        if (Array.isArray(parsed.assignments)) {
+          assignmentList = parsed.assignments;
+        } else if (parsed.assignments && typeof parsed.assignments === "object") {
+          assignmentList = Object.values(parsed.assignments);
+        }
+      }
+    } catch {
+    }
+  }
+  const assignmentMap = /* @__PURE__ */ new Map();
+  for (const a of assignmentList) {
+    if (a && typeof a.sceneIndex === "number") {
+      assignmentMap.set(a.sceneIndex, a);
+    }
+  }
+  let assignedScenes = 0;
+  let downloadedScenes = 0;
+  let lowConfidenceScenes = 0;
+  const missingSceneIndices = [];
+  for (const idx of sceneIndices) {
+    const assign = assignmentMap.get(idx);
+    if (!assign || assign.status !== "assigned") {
+      missingSceneIndices.push(idx);
+      continue;
+    }
+    assignedScenes++;
+    let mediaExists = false;
+    const candidates = [];
+    if (assign.asset?.localPath) {
+      candidates.push(assign.asset.localPath);
+      if (!path__namespace.isAbsolute(assign.asset.localPath)) {
+        candidates.push(path__namespace.join(projectDir, assign.asset.localPath));
+      }
+    }
+    if (assign.asset?.filename) {
+      candidates.push(path__namespace.join(projectDir, "assets", "stock", assign.asset.filename));
+    }
+    const anyAsset = assign.asset;
+    if (anyAsset?.mediaFile) {
+      candidates.push(path__namespace.join(projectDir, "assets", "stock", anyAsset.mediaFile));
+    }
+    if (anyAsset?.localAsset) {
+      candidates.push(path__namespace.join(projectDir, "assets", "stock", anyAsset.localAsset));
+    }
+    for (const candidatePath of candidates) {
+      try {
+        if (fs__namespace.existsSync(candidatePath) && fs__namespace.statSync(candidatePath).size > 0) {
+          mediaExists = true;
+          break;
+        }
       } catch {
       }
-    } finally {
-      if (fs__namespace.existsSync(tmpPath)) {
+    }
+    if (mediaExists) {
+      downloadedScenes++;
+    } else {
+      missingSceneIndices.push(idx);
+    }
+    if (assign.score !== void 0 && assign.score < 50) {
+      lowConfidenceScenes++;
+    }
+  }
+  return {
+    totalScenes,
+    assignedScenes,
+    downloadedScenes,
+    missingScenes: missingSceneIndices.length,
+    lowConfidenceScenes,
+    missingSceneIndices
+  };
+}
+function checkVisualCompletion(projectDir) {
+  return checkStockCompletion(projectDir);
+}
+function isAudioValid(projectDir, requireMusic, contentType) {
+  const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+  if (!fs__namespace.existsSync(audioPlanPath)) return false;
+  try {
+    const plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+    if (!plan || !Array.isArray(plan.sections)) return false;
+    if (requireMusic) {
+      const hasDownloadedMusic = plan.sections.some(
+        (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+      );
+      if (!hasDownloadedMusic) return false;
+    }
+    if (contentType === "health") {
+      const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
+      if (fs__namespace.existsSync(healthPlanPath)) {
         try {
-          fs__namespace.unlinkSync(tmpPath);
+          const healthPlan = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+          const hasSfxCues = (healthPlan.scenes || []).some((s) => s.sfxCue);
+          if (hasSfxCues) {
+            if (!plan.healthSfx?.enabled) return false;
+            const expectedHash = computeHealthMotionHash(healthPlan);
+            if (plan.healthSfx.planHash !== expectedHash) return false;
+          }
         } catch {
         }
       }
     }
+    return true;
+  } catch {
+    return false;
   }
 }
-const thumbnailTemplateStore = new ThumbnailTemplateStore();
-function computeSha256(content) {
-  return crypto__namespace.createHash("sha256").update(content.trim(), "utf-8").digest("hex");
-}
-function getProjectThumbnailSettingsPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "thumbnail-settings.json");
-}
-async function loadProjectThumbnailSettings(projectDir) {
-  const filePath = getProjectThumbnailSettingsPath(projectDir);
-  if (fs__namespace.existsSync(filePath)) {
-    try {
-      const raw = fs__namespace.readFileSync(filePath, "utf-8");
-      const parsed = JSON.parse(raw);
-      return {
-        enabled: parsed.enabled !== void 0 ? parsed.enabled : true,
-        autoGenerateAfterRender: parsed.autoGenerateAfterRender !== void 0 ? parsed.autoGenerateAfterRender : true,
-        selectedTemplateId: parsed.selectedTemplateId,
-        templateSnapshot: parsed.templateSnapshot,
-        templateSnapshotHash: parsed.templateSnapshotHash,
-        existingVideoTitle: parsed.existingVideoTitle || "",
-        variantCount: 5,
-        outputLanguage: "en-US",
-        provider: "google-flow",
-        imageModel: parsed.imageModel || "GEM_PIX_2",
-        outputQuality: "4k"
-      };
-    } catch (err) {
-      logger.warn(`[ThumbnailSettings] Failed to parse ${filePath}: ${err}. Falling back to defaults.`);
-    }
-  }
-  const defTpl = await thumbnailTemplateStore.getDefault();
-  const settings = {
-    enabled: true,
-    autoGenerateAfterRender: true,
-    selectedTemplateId: defTpl.id,
-    templateSnapshot: defTpl.promptText,
-    templateSnapshotHash: computeSha256(defTpl.promptText),
-    existingVideoTitle: "",
-    variantCount: 5,
-    outputLanguage: "en-US",
-    provider: "google-flow",
-    imageModel: "GEM_PIX_2",
-    outputQuality: "4k"
-  };
-  await saveProjectThumbnailSettings(projectDir, settings);
-  return settings;
-}
-async function saveProjectThumbnailSettings(projectDir, settings) {
-  const filePath = getProjectThumbnailSettingsPath(projectDir);
-  const dir = path__namespace.dirname(filePath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  if (settings.templateSnapshot && !settings.templateSnapshotHash) {
-    settings.templateSnapshotHash = computeSha256(settings.templateSnapshot);
-  }
-  const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
-  fs__namespace.writeFileSync(tmpPath, JSON.stringify(settings, null, 2), "utf-8");
+function isPreflightValid(projectDir) {
+  const preflightPath = path__namespace.join(projectDir, "analysis", "render-preflight.json");
+  if (!fs__namespace.existsSync(preflightPath)) return false;
   try {
-    fs__namespace.renameSync(tmpPath, filePath);
-  } finally {
-    if (fs__namespace.existsSync(tmpPath)) {
-      try {
-        fs__namespace.unlinkSync(tmpPath);
-      } catch {
+    const report = JSON.parse(fs__namespace.readFileSync(preflightPath, "utf-8"));
+    return report && report.status !== "failed";
+  } catch {
+    return false;
+  }
+}
+function reconcileProjectArtifacts(projectDir, options) {
+  const voPath = options?.voiceoverPath || "";
+  const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs__namespace.existsSync(path__namespace.join(projectDir, "analysis", "transcript.json"));
+  const planningValid = isPlanningValid(projectDir);
+  const captionsValid = isCaptionsValid(projectDir);
+  const globalContextValid = isGlobalContextValid(projectDir);
+  const stockCompletion = checkStockCompletion(projectDir);
+  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic);
+  const preflightValid = isPreflightValid(projectDir);
+  const outputDir = path__namespace.join(projectDir, "output");
+  let renderValid = false;
+  if (fs__namespace.existsSync(outputDir)) {
+    try {
+      const files = fs__namespace.readdirSync(outputDir).filter(
+        (f) => f.endsWith(".mp4") && !f.startsWith("_") && !f.includes(".partial") && !f.includes(".working")
+      );
+      if (files.length > 0) {
+        const stat = fs__namespace.statSync(path__namespace.join(outputDir, files[0]));
+        if (stat.size > 1024) renderValid = true;
       }
+    } catch {
     }
   }
-}
-function getThumbnailPlanPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "thumbnail-plan.json");
-}
-function cleanJsonFence(raw) {
-  if (!raw) return "";
-  return raw.trim().replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```\s*$/i, "").trim();
-}
-function validateThumbnailPlanSchema(obj) {
-  if (!obj || typeof obj !== "object") {
-    return { valid: false, error: "Output must be a JSON object" };
-  }
-  const p = obj;
-  if (!p.scriptInsight || typeof p.scriptInsight !== "object") {
-    return { valid: false, error: 'Missing "scriptInsight" object in response' };
-  }
-  const insight = p.scriptInsight;
-  if (typeof insight.mainTopic !== "string" || !insight.mainTopic.trim()) {
-    return { valid: false, error: "scriptInsight.mainTopic is missing or empty" };
-  }
-  if (!Array.isArray(p.options)) {
-    return { valid: false, error: '"options" must be an array' };
-  }
-  if (p.options.length !== 5) {
-    return { valid: false, error: `Expected exactly 5 thumbnail options, got ${p.options.length}` };
-  }
-  const requiredIds = ["A", "B", "C", "D", "E"];
-  const validatedOptions = [];
-  for (let i = 0; i < 5; i++) {
-    const opt = p.options[i];
-    const expectedId = requiredIds[i];
-    if (!opt || typeof opt !== "object") {
-      return { valid: false, error: `Option at index ${i} is not a valid object` };
+  const qaPath = path__namespace.join(projectDir, "analysis", "render-qa.json");
+  const postflightValid = renderValid && fs__namespace.existsSync(qaPath);
+  let renderRecovery;
+  if (!renderValid) {
+    try {
+      renderRecovery = inspectRenderRecovery(projectDir, {
+        fallbackParams: options?.voiceoverPath ? {
+          voiceoverPath: options.voiceoverPath,
+          outputName: options.outputName || "final_output",
+          resolution: options.resolution ?? { width: 1920, height: 1080 },
+          fps: options.fps ?? 30,
+          transitionSettings: options.transitionSettings
+        } : void 0
+      });
+    } catch {
+      renderRecovery = void 0;
     }
-    if (String(opt.id || "").toUpperCase() !== expectedId) {
-      return { valid: false, error: `Option at index ${i} must have id "${expectedId}", got "${opt.id}"` };
-    }
-    const conceptName = typeof opt.conceptName === "string" ? opt.conceptName.trim() : "";
-    const yellowText = typeof opt.yellowText === "string" ? opt.yellowText.trim() : "";
-    const whiteText = typeof opt.whiteText === "string" ? opt.whiteText.trim() : "";
-    const visualConcept = typeof opt.visualConcept === "string" ? opt.visualConcept.trim() : "";
-    const imagePrompt = typeof opt.imagePrompt === "string" ? opt.imagePrompt.trim() : "";
-    const titleClear = typeof opt.titleClear === "string" ? opt.titleClear.trim() : "";
-    const titleCuriosity = typeof opt.titleCuriosity === "string" ? opt.titleCuriosity.trim() : "";
-    const whyItWorks = typeof opt.whyItWorks === "string" ? opt.whyItWorks.trim() : "";
-    if (!conceptName) return { valid: false, error: `Option ${expectedId}: conceptName cannot be empty` };
-    if (!yellowText) return { valid: false, error: `Option ${expectedId}: yellowText cannot be empty` };
-    if (!whiteText) return { valid: false, error: `Option ${expectedId}: whiteText cannot be empty` };
-    if (!imagePrompt) return { valid: false, error: `Option ${expectedId}: imagePrompt cannot be empty` };
-    if (imagePrompt.toLowerCase().includes("same as above")) {
-      return { valid: false, error: `Option ${expectedId}: imagePrompt cannot reference previous option or use "same as above"` };
-    }
-    validatedOptions.push({
-      id: expectedId,
-      conceptName,
-      yellowText,
-      whiteText,
-      visualConcept,
-      imagePrompt,
-      titleClear,
-      titleCuriosity,
-      whyItWorks
-    });
   }
-  const scriptInsight = {
-    mainTopic: String(insight.mainTopic || "").trim(),
-    groundedHook: String(insight.groundedHook || "").trim(),
-    strongestVisualDetail: String(insight.strongestVisualDetail || "").trim(),
-    viewerConcernOrGoal: String(insight.viewerConcernOrGoal || "").trim(),
-    unsupportedClaimsToAvoid: Array.isArray(insight.unsupportedClaimsToAvoid) ? insight.unsupportedClaimsToAvoid.map(String) : []
+  return {
+    transcribingValid,
+    planningValid,
+    captionsValid,
+    globalContextValid,
+    stockCompletion,
+    audioValid,
+    preflightValid,
+    renderValid,
+    postflightValid,
+    renderRecovery
   };
-  const plan = {
-    scriptInsight,
-    options: validatedOptions,
-    recommendedOptionId: String(p.recommendedOptionId || "A").toUpperCase(),
-    recommendationReason: String(p.recommendationReason || ""),
-    postGenerationCheck: String(p.postGenerationCheck || "")
-  };
-  return { valid: true, plan };
 }
-function substituteTemplateVariables(templateText, vars) {
-  let prompt = templateText;
-  prompt = prompt.replace(/\{\{SCRIPT\}\}/g, vars.script || "");
-  prompt = prompt.replace(/\{\{VIDEO_TITLE\}\}/g, vars.videoTitle || "Untitled Documentary");
-  prompt = prompt.replace(/\{\{GLOBAL_VISUAL_CONTEXT\}\}/g, vars.globalVisualContext || "None specified");
-  prompt = prompt.replace(/\{\{VARIANT_COUNT\}\}/g, String(vars.variantCount));
-  prompt = prompt.replace(/\{\{PREVIOUS_CONCEPTS\}\}/g, vars.previousConcepts || "None");
-  prompt = prompt.replace(/\{\{OUTPUT_LANGUAGE\}\}/g, vars.outputLanguage || "en-US");
-  if (!templateText.includes("{{VARIANT_COUNT}}") && !prompt.includes("exactly 5")) {
-    prompt += "\n\nIMPORTANT SYSTEM REQUIREMENT: You MUST generate exactly 5 distinct options with IDs A, B, C, D, and E.";
+function getUvPath() {
+  if (process.env.UV_PATH && fs__namespace.existsSync(process.env.UV_PATH)) {
+    return process.env.UV_PATH;
   }
-  return prompt;
+  try {
+    const cmd = process.platform === "win32" ? "where uv" : "which uv";
+    const out = cp.execSync(cmd, { encoding: "utf8", env: process.env }).trim().split(/\r?\n/)[0].trim();
+    if (out && fs__namespace.existsSync(out)) {
+      return out;
+    }
+  } catch {
+  }
+  const homedir = os__namespace.homedir();
+  const candidates = process.platform === "win32" ? [
+    path.join(homedir, ".local", "bin", "uv.exe"),
+    path.join(homedir, ".cargo", "bin", "uv.exe"),
+    "C:\\Users\\ADMIN\\.local\\bin\\uv.exe"
+  ] : [
+    path.join(homedir, ".local", "bin", "uv"),
+    path.join(homedir, ".cargo", "bin", "uv"),
+    "/opt/homebrew/bin/uv",
+    "/usr/local/bin/uv",
+    "/usr/bin/uv"
+  ];
+  for (const candidate of candidates) {
+    if (fs__namespace.existsSync(candidate)) return candidate;
+  }
+  return process.platform === "win32" ? candidates[0] : "uv";
 }
-class ThumbnailPlanner {
-  async plan(params) {
-    const { projectDir } = params;
-    const script = this.readScript(projectDir);
-    if (!script || !script.trim()) {
-      throw new Error(`Cannot plan thumbnails: script file is missing or empty in project "${projectDir}"`);
+function getScriptPath() {
+  if (!electron.app.isPackaged) {
+    return path.join(process.cwd(), "scripts", "transcribe.py");
+  }
+  return path.join(process.resourcesPath, "scripts", "transcribe.py");
+}
+function getModelsDir() {
+  const dir = path.join(electron.app.getPath("userData"), "whisper-models");
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+async function transcribeAudio(audioPath, modelName = "base", onProgress) {
+  const scriptPath = getScriptPath();
+  const modelsDir = getModelsDir();
+  const uvPath = getUvPath();
+  if (!fs__namespace.existsSync(scriptPath)) {
+    throw new Error(`Transcription script not found: ${scriptPath}`);
+  }
+  const uvExists = fs__namespace.existsSync(uvPath) || (() => {
+    try {
+      cp.execSync(`${uvPath} --version`, { stdio: "ignore" });
+      return true;
+    } catch {
+      return false;
     }
-    const settings = await loadProjectThumbnailSettings(projectDir);
-    const globalContext = this.readGlobalContext(projectDir);
-    let templatePrompt = params.templateSnapshot || settings.templateSnapshot;
-    if (!templatePrompt) {
-      if (settings.selectedTemplateId) {
-        const tpl = await thumbnailTemplateStore.getById(settings.selectedTemplateId);
-        if (tpl) templatePrompt = tpl.promptText;
-      }
-      if (!templatePrompt) {
-        const defTpl = await thumbnailTemplateStore.getDefault();
-        templatePrompt = defTpl.promptText;
-      }
-    }
-    const prompt = substituteTemplateVariables(templatePrompt, {
-      script,
-      videoTitle: settings.existingVideoTitle,
-      globalVisualContext: globalContext,
-      variantCount: 5,
-      previousConcepts: params.previousConcepts,
-      outputLanguage: settings.outputLanguage || "en-US"
+  })();
+  if (!uvExists) {
+    throw new Error(
+      `uv not found at "${uvPath}". Please install uv (https://docs.astral.sh/uv/) or run "brew install uv" on macOS.`
+    );
+  }
+  logger.info("Starting transcription via uv + faster-whisper", {
+    audio: audioPath,
+    model: modelName,
+    script: scriptPath,
+    uv: uvPath
+  });
+  onProgress?.("Starting uv + faster-whisper...", 0.02);
+  return new Promise((resolve, reject2) => {
+    const args = [
+      "run",
+      scriptPath,
+      audioPath,
+      "--model",
+      modelName,
+      "--cache-dir",
+      modelsDir
+    ];
+    logger.info(`Spawning: ${uvPath} ${args.join(" ")}`);
+    const proc = cp.spawn(uvPath, args, {
+      env: { ...process.env },
+      windowsHide: true
     });
-    const config = loadConfig();
-    const apiKey = normalizeApiKey(params.apiKeyOverride || config.geminiApiKey || process.env.GEMINI_API_KEY);
-    if (!apiKey) {
-      throw new Error("THUMBNAIL_PLAN_INVALID: Gemini API key is missing. Please set your Gemini API key in Settings.");
-    }
-    const ai = new genai.GoogleGenAI({ apiKey });
-    const candidateModels = getModelRoute("planning", params.preferredModel || config.preferredModel);
-    let rawOutput = "";
-    let usedModel = "";
-    let lastError = "";
-    for (const modelId of candidateModels) {
-      const normalized = normalizePreferredTextModel(modelId);
-      try {
-        logger.info(`[ThumbnailPlanner] Requesting 5 thumbnail concepts from ${normalized}...`);
-        const response = await ai.models.generateContent({
-          model: normalized,
-          contents: [{ role: "user", parts: [{ text: prompt }] }],
-          config: {
-            responseMimeType: "application/json",
-            temperature: 0.3,
-            maxOutputTokens: 8192
+    let resultData = null;
+    let stderr = "";
+    let stdoutBuffer = "";
+    let lastScriptError = "";
+    proc.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString();
+      const lines = stdoutBuffer.split("\n");
+      stdoutBuffer = lines.pop() ?? "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const msg = JSON.parse(trimmed);
+          if (msg.type === "progress") {
+            onProgress?.(msg.message, msg.progress);
+            logger.info(`[WHISPER] ${msg.message}`);
+          } else if (msg.type === "result") {
+            resultData = msg;
+          } else if (msg.type === "error") {
+            logger.error(`[WHISPER] Script error: ${msg.message}`);
+            lastScriptError = String(msg.message ?? "");
           }
-        });
-        const text = response.text || "";
-        if (text.trim()) {
-          rawOutput = text;
-          usedModel = normalized;
-          recordModelSuccess(normalized);
-          break;
-        }
-      } catch (err) {
-        const classified = classifyGeminiErrorKind(err);
-        recordModelFailure(normalized, classified.kind);
-        lastError = classified.message;
-        logger.warn(`[ThumbnailPlanner] Model ${normalized} failed: ${classified.message}`);
-        if (classified.kind === "RATE_LIMIT") {
-          recordModelRateLimit(normalized);
-        } else if (classified.kind === "SERVICE_UNAVAILABLE") {
-          recordModelUnavailable(normalized);
+        } catch {
+          logger.debug(`[WHISPER stdout] ${trimmed.slice(0, 120)}`);
         }
       }
-    }
-    if (!rawOutput) {
-      throw new Error(`THUMBNAIL_PLAN_INVALID: All AI models failed to generate thumbnail plan. Last error: ${lastError}`);
-    }
-    let parsed;
-    try {
-      parsed = JSON.parse(cleanJsonFence(rawOutput));
-    } catch (parseErr) {
-      logger.warn(`[ThumbnailPlanner] Initial JSON parse failed: ${parseErr}. Attempting repair with ${usedModel}...`);
-      rawOutput = await this.repairJson(ai, usedModel, rawOutput, String(parseErr));
-      try {
-        parsed = JSON.parse(cleanJsonFence(rawOutput));
-      } catch (secondErr) {
-        throw new Error(`THUMBNAIL_PLAN_INVALID: Model returned malformed JSON that could not be parsed: ${secondErr}`);
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+      const lines = chunk.toString().split("\n");
+      for (const line of lines) {
+        if (line.includes("Transcribing") || line.includes("Detected") || line.includes("%")) {
+          onProgress?.(line.trim(), 0.5);
+        }
       }
-    }
-    let validation = validateThumbnailPlanSchema(parsed);
-    if (!validation.valid) {
-      logger.warn(`[ThumbnailPlanner] Schema validation failed: ${validation.error}. Attempting repair with ${usedModel}...`);
-      rawOutput = await this.repairJson(ai, usedModel, rawOutput, validation.error || "Invalid schema");
-      try {
-        parsed = JSON.parse(cleanJsonFence(rawOutput));
-        validation = validateThumbnailPlanSchema(parsed);
-      } catch (secondErr) {
-        throw new Error(`THUMBNAIL_PLAN_INVALID: Repaired JSON failed to parse: ${secondErr}`);
+    });
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        logger.error(`Transcription process exited ${code}`, { stderr: stderr.slice(0, 500) });
+        const detail = stderr.trim() ? stderr.slice(0, 300) : lastScriptError.slice(0, 300);
+        reject2(new Error(`Transcription failed (exit ${code}): ${detail}`));
+        return;
       }
-    }
-    if (!validation.valid || !validation.plan) {
-      throw new Error(`THUMBNAIL_PLAN_INVALID: ${validation.error || "Failed schema validation"}`);
-    }
-    const finalPlan = {
-      ...validation.plan,
-      generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      modelUsed: usedModel,
-      generationRound: params.generationRound || 1
-    };
-    const outPath = getThumbnailPlanPath(projectDir);
-    fs__namespace.mkdirSync(path__namespace.dirname(outPath), { recursive: true });
-    fs__namespace.writeFileSync(outPath, JSON.stringify(finalPlan, null, 2), "utf-8");
-    logger.info(`[ThumbnailPlanner] Successfully created and saved thumbnail plan to ${outPath}`);
-    return finalPlan;
+      if (!resultData) {
+        reject2(new Error("Transcription produced no result"));
+        return;
+      }
+      logger.info("Transcription complete", {
+        segments: resultData.segments.length,
+        words: resultData.wordCount,
+        duration: resultData.duration
+      });
+      resolve(resultData);
+    });
+    proc.on("error", (err) => {
+      logger.error(`Failed to spawn transcription process: ${err.message}`);
+      reject2(new Error(`Failed to start transcription: ${err.message}`));
+    });
+  });
+}
+const FILLER_PHRASES = [
+  /\bnot\s+specified\b/gi,
+  /\bnot\s+available\b/gi,
+  /\bunknown\b/gi,
+  /\bn\/?a\b/gi,
+  /\bnone\b/gi,
+  /\bnull\b/gi,
+  /\bundefined\b/gi,
+  /\bstock\s+footage\s+of\b/gi,
+  /\bfootage\s+of\b/gi,
+  /\bpicture\s+of\b/gi,
+  /\bimage\s+of\b/gi,
+  /\bphoto\s+of\b/gi,
+  /\bvideo\s+of\b/gi,
+  /\bclip\s+of\b/gi,
+  /\bscene\s+showing\b/gi,
+  /\bshow\s+a\b/gi,
+  /\bpicture\b/gi,
+  /\bphoto\b/gi,
+  /\bfootage\b/gi
+];
+const CHARACTER_NAME_REGEX = /\b(man|woman|person|boy|girl|guy|worker|farmer|shopper|customer|doctor|lawyer|teacher|driver|passenger|elder|child)\s+(?:named|called)\s+[A-ZÀ-Ỹa-zà-ỹ0-9_-]+/gi;
+const PUNCTUATION_REGEX = /[.,;:!?"'()[\]{}<>\\/|_~`#@*+=]/g;
+function sanitizeStockQuery(query, fallback = "") {
+  if (!query || typeof query !== "string") {
+    return fallback.trim();
   }
-  async repairJson(ai, model, badJson, errorMsg) {
-    const repairPrompt = `The previous JSON response for YouTube thumbnail plan was invalid.
-Error reported: ${errorMsg}
+  let cleaned = query.trim();
+  cleaned = cleaned.replace(CHARACTER_NAME_REGEX, "$1");
+  for (const pattern of FILLER_PHRASES) {
+    cleaned = cleaned.replace(pattern, " ");
+  }
+  cleaned = cleaned.replace(PUNCTUATION_REGEX, " ");
+  const words = cleaned.split(/\s+/).map((w) => w.trim()).filter((w) => w.length > 0);
+  const dedupedWords = [];
+  const seenLower = /* @__PURE__ */ new Set();
+  for (const word of words) {
+    const lower = word.toLowerCase();
+    if (lower.length === 1 && lower !== "a") continue;
+    if (!seenLower.has(lower)) {
+      seenLower.add(lower);
+      dedupedWords.push(word);
+    }
+  }
+  let result = dedupedWords.join(" ").trim();
+  if (result.length > 100) {
+    result = result.slice(0, 100).trim();
+    const lastSpace = result.lastIndexOf(" ");
+    if (lastSpace > 20) {
+      result = result.slice(0, lastSpace).trim();
+    }
+  }
+  if (!result || result.length < 2) {
+    if (fallback && fallback.trim().length > 0) {
+      return sanitizeStockQuery(fallback);
+    }
+    return "documentary scene";
+  }
+  return result;
+}
+function normalizeStockQueryKey(query) {
+  return (query || "").toLowerCase().trim().replace(/[^\w\sà-ỹ]/g, " ").replace(/\s+/g, " ").trim();
+}
+function dedupeStockQueries(queries, fallback) {
+  const result = [];
+  const seenKeys = /* @__PURE__ */ new Set();
+  for (const raw of queries) {
+    const sanitized = sanitizeStockQuery(raw, fallback);
+    const key2 = normalizeStockQueryKey(sanitized);
+    if (key2 && !seenKeys.has(key2)) {
+      seenKeys.add(key2);
+      result.push(sanitized);
+    }
+  }
+  return result;
+}
+const DEFAULT_CONFIG = {
+  maxMonotoneEnergySeconds: 150,
+  // 2.5 minutes — documentary standard
+  maxMonotoneShotSeconds: 90,
+  // 1.5 minutes — for shot variation
+  requireShotTypeVariety: true
+};
+function inferEnergyLevel(scene) {
+  const text = `${scene.narrativeText ?? ""} ${scene.visualIntent ?? ""}`.toLowerCase();
+  const highCues = [
+    "conflict",
+    "battle",
+    "crisis",
+    "explosion",
+    "urgent",
+    "reveal",
+    "shocking",
+    "protest",
+    "riot",
+    "disaster",
+    "fire",
+    "attack",
+    "death",
+    "murder",
+    "crash",
+    "breakthrough",
+    "victory",
+    "defeat",
+    "climax",
+    "confrontation"
+  ];
+  if (highCues.some((c) => text.includes(c))) return "high";
+  const lowCues = [
+    "peaceful",
+    "quiet",
+    "meditation",
+    "reflection",
+    "landscape",
+    "sunrise",
+    "slow",
+    "history",
+    "archive",
+    "document",
+    "explain",
+    "background",
+    "context",
+    "meanwhile",
+    "tradition",
+    "ceremony",
+    "ritual",
+    "daily life",
+    "routine"
+  ];
+  if (lowCues.some((c) => text.includes(c))) return "low";
+  return "medium";
+}
+function inferShotType(scene) {
+  const text = `${scene.visualIntent ?? ""} ${(scene.searchQueries ?? []).join(" ")}`.toLowerCase();
+  if (text.includes("close") || text.includes("portrait") || text.includes("face") || text.includes("detail") || text.includes("hand") || text.includes("eye")) {
+    return "close-up";
+  }
+  if (text.includes("aerial") || text.includes("wide") || text.includes("landscape") || text.includes("establishing") || text.includes("panorama") || text.includes("horizon")) {
+    return "wide";
+  }
+  if (text.includes("abstract") || text.includes("concept") || text.includes("metaphor") || text.includes("symbol") || text.includes("silhouette") || text.includes("blur")) {
+    return "abstract";
+  }
+  return "medium";
+}
+function nextShotType(current) {
+  const cycle = ["wide", "medium", "close-up", "abstract"];
+  const idx = cycle.indexOf(current);
+  return cycle[(idx + 1) % cycle.length];
+}
+function analyzePacing(scenes, config = {}) {
+  const cfg = { ...DEFAULT_CONFIG, ...config };
+  const issues = [];
+  for (const scene of scenes) {
+    if (!scene.energyLevel) {
+      scene.energyLevel = inferEnergyLevel(scene);
+    }
+    if (!scene.shotType) {
+      scene.shotType = inferShotType(scene);
+    }
+  }
+  logger.info(`[PacingGuard] Analyzing ${scenes.length} scenes for monotone stretches...`);
+  let energyRunSeconds = 0;
+  let currentEnergy = scenes[0]?.energyLevel ?? "medium";
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const sceneEnergy = scene.energyLevel;
+    if (sceneEnergy === currentEnergy) {
+      energyRunSeconds += scene.duration;
+      if (energyRunSeconds > cfg.maxMonotoneEnergySeconds) {
+        const suggestion = sceneEnergy === "low" ? "insert_broll" : "insert_text_overlay";
+        issues.push({
+          sceneId: String(scene.sceneIndex),
+          accumulatedMonotoneSeconds: Math.round(energyRunSeconds),
+          suggestion,
+          affectedField: "energyLevel"
+        });
+        logger.info(
+          `[PacingGuard] Monotone energy "${sceneEnergy}" for ${Math.round(energyRunSeconds)}s at scene ${scene.sceneIndex} → ${suggestion}`
+        );
+        scene.isPatternInterrupt = true;
+        energyRunSeconds = scene.duration;
+      }
+    } else {
+      currentEnergy = sceneEnergy;
+      energyRunSeconds = scene.duration;
+    }
+  }
+  if (cfg.requireShotTypeVariety) {
+    let shotRunSeconds = 0;
+    let currentShot = scenes[0]?.shotType ?? "medium";
+    for (let i = 0; i < scenes.length; i++) {
+      const scene = scenes[i];
+      const sceneShot = scene.shotType;
+      if (sceneShot === currentShot) {
+        shotRunSeconds += scene.duration;
+        if (shotRunSeconds > cfg.maxMonotoneShotSeconds) {
+          const suggestedNext = nextShotType(currentShot);
+          issues.push({
+            sceneId: String(scene.sceneIndex),
+            accumulatedMonotoneSeconds: Math.round(shotRunSeconds),
+            suggestion: "vary_shot_type",
+            affectedField: "shotType"
+          });
+          logger.info(
+            `[PacingGuard] Monotone shot "${currentShot}" for ${Math.round(shotRunSeconds)}s at scene ${scene.sceneIndex} → suggest "${suggestedNext}" next`
+          );
+          if (i + 1 < scenes.length) {
+            const nextScene = scenes[i + 1];
+            if (!nextScene.isPatternInterrupt) {
+              nextScene.shotType = suggestedNext;
+              nextScene.isPatternInterrupt = true;
+            }
+          }
+          shotRunSeconds = scene.duration;
+        }
+      } else {
+        currentShot = sceneShot;
+        shotRunSeconds = scene.duration;
+      }
+    }
+  }
+  const breakCount = scenes.filter((s) => s.isPatternInterrupt).length;
+  logger.info(
+    `[PacingGuard] Analysis complete: ${issues.length} issues found, ${breakCount} scenes annotated as pattern-interrupt candidates.`
+  );
+  return issues;
+}
+function flattenPlanScenes(plan) {
+  return plan.chapters.flatMap((ch) => {
+    const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+    return seqs.flatMap((seq) => seq.scenes ?? []);
+  });
+}
+const PACING_PROFILES = {
+  fast: {
+    hook: { min: 2, targetMin: 2.5, preferred: 3.2, targetMax: 4, hardMax: 6 },
+    normal: { min: 3, targetMin: 4, preferred: 5, targetMax: 6, hardMax: 8 }
+  },
+  balanced: {
+    hook: { min: 2.5, targetMin: 3, preferred: 4, targetMax: 5, hardMax: 6 },
+    normal: { min: 3, targetMin: 5.5, preferred: 6.8, targetMax: 8, hardMax: 10 }
+  },
+  cinematic: {
+    hook: { min: 3, targetMin: 4, preferred: 5, targetMax: 6, hardMax: 8 },
+    normal: { min: 4, targetMin: 7, preferred: 8.5, targetMax: 10, hardMax: 12 }
+  },
+  slow: {
+    hook: { min: 4, targetMin: 5, preferred: 6, targetMax: 7, hardMax: 9 },
+    normal: { min: 5, targetMin: 8, preferred: 10, targetMax: 12, hardMax: 14 }
+  }
+};
+const STRONG_PUNCTUATION = /[.?!;]$/;
+function preprocessSegments(segments, profile) {
+  const normalized = [];
+  for (const seg of segments) {
+    const isHook = seg.start < 30;
+    const limits = isHook ? profile.hook : profile.normal;
+    if (seg.duration <= limits.hardMax) {
+      normalized.push({
+        id: seg.id,
+        subId: seg.id,
+        text: seg.text.trim(),
+        start: seg.start,
+        end: seg.end,
+        duration: seg.duration,
+        isSplit: false
+      });
+      continue;
+    }
+    logger.warn(
+      `[PLAN][Segmentation] Segment ${seg.id} duration (${seg.duration.toFixed(1)}s) exceeds hardMax (${limits.hardMax}s). Splitting into sub-parts...`
+    );
+    const rawWords = seg.text.trim().split(/\s+/).filter(Boolean);
+    if (rawWords.length <= 1) {
+      normalized.push({
+        id: seg.id,
+        subId: seg.id,
+        text: seg.text.trim(),
+        start: seg.start,
+        end: seg.end,
+        duration: seg.duration,
+        isSplit: false
+      });
+      continue;
+    }
+    const numParts = Math.max(2, Math.ceil(seg.duration / limits.preferred));
+    const wordsPerPart = Math.ceil(rawWords.length / numParts);
+    let prevEnd = seg.start;
+    for (let p = 0; p < numParts; p++) {
+      const startWordIdx = p * wordsPerPart;
+      const endWordIdx = Math.min((p + 1) * wordsPerPart, rawWords.length);
+      const partWords = rawWords.slice(startWordIdx, endWordIdx);
+      if (partWords.length === 0) continue;
+      const isLastPart = p === numParts - 1 || endWordIdx >= rawWords.length;
+      const partStart = prevEnd;
+      let partEnd;
+      if (isLastPart) {
+        partEnd = seg.end;
+      } else if (seg.words && seg.words.length === rawWords.length) {
+        const lastWordInPart = seg.words[endWordIdx - 1];
+        const nextWord = seg.words[endWordIdx];
+        partEnd = nextWord ? nextWord.start : lastWordInPart?.end ?? seg.end;
+        partEnd = Number(partEnd.toFixed(2));
+      } else {
+        partEnd = Number((seg.start + endWordIdx / rawWords.length * (seg.end - seg.start)).toFixed(2));
+      }
+      const partDuration = Number((partEnd - partStart).toFixed(2));
+      prevEnd = partEnd;
+      normalized.push({
+        id: seg.id,
+        subId: `${seg.id}#${p + 1}`,
+        text: partWords.join(" "),
+        start: partStart,
+        end: partEnd,
+        duration: partDuration,
+        isSplit: true
+      });
+      if (isLastPart) break;
+    }
+  }
+  return normalized;
+}
+function buildSceneSkeleton(transcript, pacing = "balanced") {
+  const profile = PACING_PROFILES[pacing] ?? PACING_PROFILES.balanced;
+  const normalizedSegments = preprocessSegments(transcript.segments, profile);
+  const skeletons = [];
+  let i = 0;
+  while (i < normalizedSegments.length) {
+    const firstSeg = normalizedSegments[i];
+    const candidateSegments = [firstSeg];
+    i++;
+    while (i < normalizedSegments.length) {
+      const nextSeg = normalizedSegments[i];
+      const isHook = firstSeg.start < 30;
+      const currentLimits = isHook ? profile.hook : profile.normal;
+      const currentDuration = candidateSegments[candidateSegments.length - 1].end - firstSeg.start;
+      const potentialDuration = nextSeg.end - firstSeg.start;
+      if (currentDuration < currentLimits.min) {
+        candidateSegments.push(nextSeg);
+        i++;
+        continue;
+      }
+      if (potentialDuration > currentLimits.hardMax) {
+        break;
+      }
+      const lastText = candidateSegments[candidateSegments.length - 1].text.trim();
+      if (currentDuration >= currentLimits.targetMin && STRONG_PUNCTUATION.test(lastText)) {
+        break;
+      }
+      if (currentDuration >= currentLimits.preferred) {
+        break;
+      }
+      if (potentialDuration > currentLimits.targetMax && currentDuration >= currentLimits.targetMin) {
+        break;
+      }
+      candidateSegments.push(nextSeg);
+      i++;
+    }
+    const sceneStartTime = candidateSegments[0].start;
+    const sceneEndTime = candidateSegments[candidateSegments.length - 1].end;
+    const narrativeText = candidateSegments.map((s) => s.text).join(" ");
+    const transcriptSegmentIds = Array.from(new Set(candidateSegments.map((s) => s.id)));
+    skeletons.push({
+      sceneIndex: skeletons.length + 1,
+      startTime: sceneStartTime,
+      endTime: sceneEndTime,
+      duration: Number((sceneEndTime - sceneStartTime).toFixed(2)),
+      narrativeText,
+      transcriptSegmentIds
+    });
+  }
+  if (skeletons.length > 1) {
+    const lastScene = skeletons[skeletons.length - 1];
+    const prevScene = skeletons[skeletons.length - 2];
+    const isHook = lastScene.startTime < 30;
+    const minDur = isHook ? profile.hook.min : profile.normal.min;
+    const hardMax = isHook ? profile.hook.hardMax : profile.normal.hardMax;
+    if (lastScene.duration < minDur) {
+      if (prevScene.duration + lastScene.duration <= hardMax) {
+        prevScene.endTime = lastScene.endTime;
+        prevScene.duration = Number((prevScene.endTime - prevScene.startTime).toFixed(2));
+        prevScene.narrativeText = `${prevScene.narrativeText} ${lastScene.narrativeText}`;
+        prevScene.transcriptSegmentIds = Array.from(
+          /* @__PURE__ */ new Set([...prevScene.transcriptSegmentIds, ...lastScene.transcriptSegmentIds])
+        );
+        skeletons.pop();
+      } else {
+        logger.warn(
+          `[PLAN][Segmentation] Final scene duration (${lastScene.duration.toFixed(1)}s) is below minimum (${minDur}s) but cannot merge into previous scene without exceeding hardMax (${hardMax}s). Keeping final scene.`
+        );
+      }
+    }
+  }
+  for (let s = 0; s < skeletons.length; s++) {
+    skeletons[s].sceneIndex = s + 1;
+    if (s === 0 && skeletons[s].startTime <= 0.15) {
+      skeletons[s].startTime = 0;
+    }
+    if (s > 0) {
+      const prev = skeletons[s - 1];
+      const cur = skeletons[s];
+      const isPrevHook = prev.startTime < 30;
+      const prevHardMax = isPrevHook ? profile.hook.hardMax : profile.normal.hardMax;
+      if (cur.startTime > prev.endTime) {
+        const gap = cur.startTime - prev.endTime;
+        if (prev.duration + gap <= prevHardMax) {
+          prev.endTime = cur.startTime;
+        } else {
+          cur.startTime = prev.endTime;
+        }
+      } else if (cur.startTime < prev.endTime) {
+        prev.endTime = cur.startTime;
+      }
+      prev.duration = Number((prev.endTime - prev.startTime).toFixed(2));
+      cur.duration = Number((cur.endTime - cur.startTime).toFixed(2));
+    }
+  }
+  const last = skeletons[skeletons.length - 1];
+  if (last) {
+    if (transcript.duration > last.endTime && transcript.duration - last.endTime <= 2) {
+      last.endTime = Number(transcript.duration.toFixed(2));
+    }
+    last.duration = Number((last.endTime - last.startTime).toFixed(2));
+  }
+  const totalDuration = transcript.duration;
+  const avgDuration = totalDuration / skeletons.length;
+  const minDuration = Math.min(...skeletons.map((s) => s.duration));
+  const maxDuration = Math.max(...skeletons.map((s) => s.duration));
+  logger.info(`[PLAN][Segmentation] transcriptSegments=${transcript.segments.length}`);
+  logger.info(`[PLAN][Segmentation] generatedScenes=${skeletons.length}`);
+  logger.info(`[PLAN][Segmentation] duration=${totalDuration.toFixed(1)}s`);
+  logger.info(`[PLAN][Segmentation] averageSceneDuration=${avgDuration.toFixed(2)}s`);
+  logger.info(`[PLAN][Segmentation] minSceneDuration=${minDuration.toFixed(2)}s`);
+  logger.info(`[PLAN][Segmentation] maxSceneDuration=${maxDuration.toFixed(2)}s`);
+  return skeletons;
+}
+function validateScenePlanCoverage(transcript, scenes) {
+  const errors = [];
+  const warnings = [];
+  if (!scenes || scenes.length === 0) {
+    errors.push("Scene plan is empty (0 scenes).");
+    return {
+      valid: false,
+      totalScenes: 0,
+      totalSegments: transcript.segments.length,
+      coveredSegmentsCount: 0,
+      missingSegmentIds: transcript.segments.map((s) => s.id),
+      duplicateSegmentIds: [],
+      errors,
+      warnings
+    };
+  }
+  const sceneIndices = scenes.map((s) => s.sceneIndex);
+  const uniqueIndices = new Set(sceneIndices);
+  if (uniqueIndices.size !== sceneIndices.length) {
+    errors.push(`Duplicate sceneIndex detected: ${sceneIndices.length} scenes but only ${uniqueIndices.size} unique indices.`);
+  }
+  const TIMELINE_TOLERANCE = 0.15;
+  const expectedStart = transcript.segments[0]?.start ?? 0;
+  if (scenes[0].startTime > expectedStart + TIMELINE_TOLERANCE) {
+    errors.push(
+      `First scene startTime (${scenes[0].startTime}s) does not match transcript start (${expectedStart}s).`
+    );
+  }
+  const expectedEnd = transcript.duration;
+  if (Math.abs(scenes[scenes.length - 1].endTime - expectedEnd) > 0.25) {
+    warnings.push(
+      `Last scene endTime (${scenes[scenes.length - 1].endTime}s) differs from transcript duration (${expectedEnd}s) by more than 0.25s.`
+    );
+  }
+  for (let i = 0; i < scenes.length; i++) {
+    const sc = scenes[i];
+    const expectedDur = Number((sc.endTime - sc.startTime).toFixed(2));
+    if (Math.abs(sc.duration - expectedDur) > 0.05) {
+      errors.push(
+        `Scene ${sc.sceneIndex}: duration (${sc.duration}) does not match endTime - startTime (${expectedDur}).`
+      );
+    }
+    if (!sc.narrativeText || sc.narrativeText.trim().length === 0) {
+      errors.push(`Scene ${sc.sceneIndex}: narrativeText is empty.`);
+    }
+    if (!sc.visualIntent || sc.visualIntent.trim().length === 0) {
+      warnings.push(`Scene ${sc.sceneIndex}: visualIntent is empty.`);
+    }
+    if (!sc.searchQueries || sc.searchQueries.filter((q) => q.trim().length >= 2).length < 3) {
+      warnings.push(`Scene ${sc.sceneIndex}: searchQueries has fewer than 3 valid queries.`);
+    }
+    if (i < scenes.length - 1) {
+      const nextSc = scenes[i + 1];
+      if (nextSc.startTime < sc.startTime) {
+        errors.push(
+          `Timeline reversal: Scene ${nextSc.sceneIndex} starts at ${nextSc.startTime}s before Scene ${sc.sceneIndex} at ${sc.startTime}s.`
+        );
+      }
+      const gap = nextSc.startTime - sc.endTime;
+      if (gap > TIMELINE_TOLERANCE) {
+        errors.push(
+          `Significant timeline gap (${gap.toFixed(2)}s) between Scene ${sc.sceneIndex} (end ${sc.endTime}s) and Scene ${nextSc.sceneIndex} (start ${nextSc.startTime}s).`
+        );
+      }
+      const overlap = sc.endTime - nextSc.startTime;
+      if (overlap > TIMELINE_TOLERANCE) {
+        errors.push(
+          `Significant timeline overlap (${overlap.toFixed(2)}s) between Scene ${sc.sceneIndex} (end ${sc.endTime}s) and Scene ${nextSc.sceneIndex} (start ${nextSc.startTime}s).`
+        );
+      }
+    }
+  }
+  const allTranscriptSegmentIds = new Set(transcript.segments.map((s) => s.id));
+  const sceneSegmentIdUsage = /* @__PURE__ */ new Map();
+  for (const sc of scenes) {
+    for (const segId of sc.transcriptSegmentIds || []) {
+      sceneSegmentIdUsage.set(segId, (sceneSegmentIdUsage.get(segId) ?? 0) + 1);
+    }
+  }
+  const missingSegmentIds = [];
+  for (const id of allTranscriptSegmentIds) {
+    if (!sceneSegmentIdUsage.has(id)) {
+      missingSegmentIds.push(id);
+    }
+  }
+  const duplicateSegmentIds = [];
+  for (const [id, count] of sceneSegmentIdUsage.entries()) {
+    if (count > 1) {
+      const originalSeg = transcript.segments.find((s) => s.id === id);
+      if (originalSeg && originalSeg.duration <= 10) {
+        duplicateSegmentIds.push(id);
+      }
+    }
+  }
+  if (missingSegmentIds.length > 0) {
+    errors.push(
+      `Missing transcript segments (${missingSegmentIds.length}/${transcript.segments.length}): ${missingSegmentIds.slice(0, 10).join(", ")}${missingSegmentIds.length > 10 ? "..." : ""}`
+    );
+  }
+  if (duplicateSegmentIds.length > 0) {
+    errors.push(
+      `Unexpected duplicate transcript segments: ${duplicateSegmentIds.slice(0, 10).join(", ")}${duplicateSegmentIds.length > 10 ? "..." : ""}`
+    );
+  }
+  const coveredSegmentsCount = allTranscriptSegmentIds.size - missingSegmentIds.length;
+  const valid = errors.length === 0;
+  logger.info(
+    `[PLAN][Coverage] valid=${valid} coveredSegments=${coveredSegmentsCount}/${allTranscriptSegmentIds.size} totalScenes=${scenes.length} errors=${errors.length} warnings=${warnings.length}`
+  );
+  return {
+    valid,
+    totalScenes: scenes.length,
+    totalSegments: allTranscriptSegmentIds.size,
+    coveredSegmentsCount,
+    missingSegmentIds,
+    duplicateSegmentIds,
+    errors,
+    warnings
+  };
+}
+function getContextPath(projectDir) {
+  return path.join(projectDir, "analysis", "global-script-context.json");
+}
+function scriptHash(text) {
+  return crypto.createHash("md5").update(text).digest("hex").slice(0, 16);
+}
+const SYSTEM_PROMPT$1 = `You are the Context-Aware Visual Research Engine for a long-form documentary.
+Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
+Rules:
+- Identify primary subject, central thesis, geography, time period, communities from the script.
+- List exactTopicAnchors (proper nouns) that MUST appear in exact-match queries.
+- List contextualAnchors (broader descriptors) for when exact results are unavailable.
+- List forbiddenSubstitutions (visually similar but factually wrong subjects).
+- List negativeKeywords (terms that would return wrong stock).
+- Map the storyArc per chapter.
+- Do NOT invent facts not in the script.
+- Return ONLY valid JSON. No markdown. No explanation.`;
+function buildGeminiPrompt$1(fullScriptText, projectId, language) {
+  return `FULL SCRIPT (analyze completely before responding):
+---
+${fullScriptText.slice(0, 4e4)}
+---
+PROJECT ID: ${projectId}
+LANGUAGE: ${language}
 
-Raw output:
-${badJson.slice(0, 4e3)}
-
-Please output the corrected, valid JSON matching the exact schema with 5 options (A, B, C, D, E).
-Return ONLY the raw JSON object. No markdown code fence. No commentary.`;
+Return ONLY valid JSON matching this schema:
+{
+  "projectId": "${projectId}",
+  "language": "${language}",
+  "version": 1,
+  "primarySubject": "the single most important subject",
+  "secondarySubjects": ["string"],
+  "globalSynopsis": "2-3 sentence summary",
+  "centralThesis": "the main argument",
+  "documentaryAngle": "journalistic angle",
+  "targetAudience": "audience description",
+  "geography": { "primaryCountry": null, "primaryRegion": null, "secondaryLocations": [] },
+  "timeContext": { "primaryPeriod": "contemporary", "historicalPeriods": [] },
+  "communities": [{ "name": "name", "role": "protagonist", "visualDescription": "desc", "mustNotConfuseWith": [] }],
+  "recurringPeople": [{ "id": "p1", "role": "narrator", "ageRange": null, "gender": null, "appearance": null, "clothing": null }],
+  "visualWorld": { "environment": [], "architecture": [], "clothing": [], "occupations": [], "machinery": [], "recurringObjects": [], "colorMood": "natural", "documentaryStyle": "observational" },
+  "exactTopicAnchors": [],
+  "contextualAnchors": [],
+  "forbiddenSubstitutions": [],
+  "negativeKeywords": [],
+  "recurringVisualMotifs": [],
+  "storyArc": [{ "chapterId": "CH1", "title": "title", "purpose": "purpose", "startText": "first words", "endText": "last words" }]
+}`;
+}
+async function analyzeGlobalContext(params) {
+  const { projectDir, apiKey, forceRegenerate = false } = params;
+  const progress = params.onProgress ?? (() => {
+  });
+  const modelId = params.model ?? "gemini-3.5-flash";
+  const fullText = params.scriptText ?? params.transcript?.fullText ?? params.transcript?.segments.map((s) => s.text).join(" ") ?? "";
+  if (!fullText.trim()) throw new Error("No script or transcript text for global context analysis.");
+  let projectId = "unknown";
+  const language = params.transcript?.language ?? "en";
+  try {
+    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
+    const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+    projectId = st?.id ?? st?.name ?? "unknown";
+  } catch {
+  }
+  const contextPath = getContextPath(projectDir);
+  const hash = scriptHash(fullText);
+  if (!forceRegenerate && fs__namespace.existsSync(contextPath)) {
     try {
-      const resp = await ai.models.generateContent({
+      const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+      if (cached._scriptHash === hash) {
+        logger.info("[GlobalContext] Cache hit");
+        progress("Using cached global script context...", 1);
+        return cached;
+      }
+    } catch {
+    }
+  }
+  let rawJson = "";
+  let aiError = null;
+  let successfulModel = "";
+  const cleanKey = normalizeApiKey(apiKey);
+  if (cleanKey.length > 0) {
+    progress("Analyzing full script for global context...", 0.05);
+    try {
+      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+      const prompt = buildGeminiPrompt$1(fullText, projectId, language);
+      const rawModel = params.model;
+      if (rawModel && DEPRECATED_TEXT_MODELS.has(rawModel)) {
+        logger.warn(`[GeminiModel] Saved model ${rawModel} is unavailable for this account.`);
+        logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(rawModel)}.`);
+      }
+      const fallbackModels = getAvailableModelsForTask("global_context", rawModel);
+      for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+        const currentModel = fallbackModels[mIdx];
+        let retryCount = 0;
+        const maxRetries = 1;
+        while (retryCount <= maxRetries) {
+          try {
+            progress(
+              retryCount === 0 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
+              0.05 + mIdx * 0.15 + retryCount * 0.05
+            );
+            const response = await ai.models.generateContent({
+              model: currentModel,
+              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
+              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+            });
+            rawJson = response.text ?? "";
+            if (rawJson) {
+              successfulModel = currentModel;
+              recordModelSuccess(currentModel);
+              break;
+            }
+          } catch (err) {
+            const { kind, message } = classifyGeminiErrorKind(err);
+            recordModelFailure(currentModel, kind);
+            aiError = message;
+            if (kind === "MODEL_NOT_FOUND") {
+              const nextModel = fallbackModels[mIdx + 1];
+              logger.warn(`[GeminiModel] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`);
+              break;
+            }
+            if (kind === "AUTH_ERROR") {
+              logger.error(`[GlobalContext] Gemini authentication error. Check API key.`);
+              mIdx = fallbackModels.length;
+              break;
+            }
+            if (kind === "BAD_REQUEST") {
+              logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`);
+              break;
+            }
+            if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
+              const nextModel = fallbackModels[mIdx + 1];
+              logger.warn(`[GlobalContext] Gemini ${currentModel} encountered ${kind}. Circuit breaker tripped. Switching immediately to ${nextModel ?? "fallback"}...`);
+              break;
+            }
+            retryCount++;
+            if (retryCount <= maxRetries) {
+              const wait = Math.pow(2, retryCount);
+              progress(`Gemini overloaded, retrying in ${wait}s...`, 0.2);
+              await new Promise((r) => setTimeout(r, wait * 1e3 + Math.floor(Math.random() * 500)));
+              continue;
+            } else {
+              logger.warn(`[GlobalContext] Gemini ${currentModel} exhausted retries, switching model...`);
+              break;
+            }
+          }
+        }
+        if (rawJson) break;
+      }
+    } catch (outerErr) {
+      aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
+      logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
+    }
+  } else {
+    logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
+  }
+  let ctx;
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      ctx = JSON.parse(clean);
+      ctx.modelUsed = successfulModel || modelId;
+    } catch {
+      logger.warn("[GlobalContext] JSON parse failed, using fallback context");
+      ctx = buildFallbackContext(projectId, language, fullText);
+      ctx.modelUsed = "algorithmic (JSON parse fallback)";
+    }
+  } else {
+    logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
+    progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.7);
+    ctx = buildFallbackContext(projectId, language, fullText);
+    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
+  }
+  ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ctx.version = 1;
+  ctx._scriptHash = hash;
+  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
+  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
+  progress(`Global context ready - "${ctx.primarySubject}"`, 1);
+  return ctx;
+}
+function buildFallbackContext(projectId, language, text) {
+  const STOP_WORDS2 = /* @__PURE__ */ new Set([
+    "about",
+    "above",
+    "after",
+    "again",
+    "against",
+    "all",
+    "another",
+    "any",
+    "are",
+    "aren't",
+    "because",
+    "been",
+    "before",
+    "being",
+    "below",
+    "between",
+    "both",
+    "but",
+    "can",
+    "cannot",
+    "could",
+    "couldn't",
+    "did",
+    "didn't",
+    "does",
+    "doesn't",
+    "doing",
+    "don't",
+    "down",
+    "during",
+    "each",
+    "few",
+    "for",
+    "from",
+    "further",
+    "had",
+    "hadn't",
+    "has",
+    "hasn't",
+    "have",
+    "haven't",
+    "having",
+    "here",
+    "here's",
+    "hers",
+    "herself",
+    "himself",
+    "how",
+    "how's",
+    "into",
+    "it's",
+    "its",
+    "itself",
+    "let's",
+    "more",
+    "most",
+    "mustn't",
+    "myself",
+    "never",
+    "only",
+    "other",
+    "ought",
+    "our",
+    "ours",
+    "ourselves",
+    "out",
+    "over",
+    "own",
+    "same",
+    "shan't",
+    "should",
+    "shouldn't",
+    "some",
+    "such",
+    "than",
+    "that",
+    "that's",
+    "the",
+    "their",
+    "theirs",
+    "them",
+    "themselves",
+    "then",
+    "there",
+    "there's",
+    "these",
+    "they",
+    "they'd",
+    "they'll",
+    "they're",
+    "they've",
+    "this",
+    "those",
+    "through",
+    "until",
+    "very",
+    "was",
+    "wasn't",
+    "we'd",
+    "we'll",
+    "we're",
+    "we've",
+    "were",
+    "weren't",
+    "what",
+    "what's",
+    "when",
+    "when's",
+    "where",
+    "where's",
+    "which",
+    "while",
+    "who",
+    "who's",
+    "whom",
+    "why",
+    "why's",
+    "with",
+    "won't",
+    "would",
+    "wouldn't",
+    "you",
+    "you'd",
+    "you'll",
+    "you're",
+    "you've",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "video",
+    "channel",
+    "going",
+    "first",
+    "today",
+    "finally",
+    "place",
+    "entire",
+    "exact",
+    "thing",
+    "things",
+    "really",
+    "almost",
+    "turns",
+    "right",
+    "breakdown",
+    // Vietnamese common stop words
+    "những",
+    "chúng",
+    "trong",
+    "người",
+    "không",
+    "được",
+    "nhiều",
+    "chính",
+    "thực",
+    "thấy",
+    "video",
+    "kênh",
+    "hoặc",
+    "cũng",
+    "này",
+    "đang",
+    "phải",
+    "theo",
+    "cùng",
+    "nhau"
+  ]);
+  const properMatches = text.match(/\b[A-Z][a-z]{2,}\b/g) ?? [];
+  const properFreq = {};
+  for (const p of properMatches) {
+    const lower = p.toLowerCase();
+    if (!STOP_WORDS2.has(lower) && lower.length > 3) {
+      properFreq[p] = (properFreq[p] ?? 0) + 1;
+    }
+  }
+  const topProper = Object.entries(properFreq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const words = text.split(/\s+/);
+  const freq = {};
+  for (const w of words) {
+    const clean = w.toLowerCase().replace(/[^a-z0-9à-ỹ]/g, "");
+    if (clean.length > 3 && !STOP_WORDS2.has(clean)) {
+      freq[clean] = (freq[clean] ?? 0) + 1;
+    }
+  }
+  const topWords = Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([w]) => w);
+  const primarySubject = topProper[0] || topWords[0] || "Documentary Subject";
+  const exactTopicAnchors = topProper.length > 0 ? topProper.slice(0, 5) : topWords.slice(0, 5);
+  const contextualAnchors = topWords.filter((w) => !exactTopicAnchors.map((x) => x.toLowerCase()).includes(w)).slice(0, 8);
+  const sentences = text.replace(/\n+/g, " ").split(/(?<=[.?!])\s+/).filter(Boolean);
+  const centralThesis = sentences.slice(0, 2).join(" ") || text.slice(0, 250);
+  const globalSynopsis = sentences.slice(0, 4).join(" ") || text.slice(0, 350);
+  return {
+    projectId,
+    language,
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    modelUsed: "algorithmic-fallback",
+    primarySubject,
+    secondarySubjects: topWords.slice(1, 5),
+    globalSynopsis,
+    centralThesis,
+    documentaryAngle: "observational documentary",
+    targetAudience: "general audience",
+    geography: {
+      primaryCountry: "",
+      secondaryLocations: []
+    },
+    timeContext: {
+      primaryPeriod: "contemporary",
+      historicalPeriods: []
+    },
+    communities: [],
+    recurringPeople: [],
+    visualWorld: {
+      environment: [],
+      architecture: [],
+      clothing: [],
+      occupations: [],
+      machinery: [],
+      recurringObjects: [],
+      colorMood: "natural cinematics",
+      documentaryStyle: "observational"
+    },
+    exactTopicAnchors,
+    contextualAnchors,
+    forbiddenSubstitutions: [],
+    negativeKeywords: ["cartoon", "cgi", "animation", "vlog", "generic"],
+    recurringVisualMotifs: [],
+    storyArc: []
+  };
+}
+function loadGlobalContext(projectDir) {
+  const p = getContextPath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+function saveGlobalContext(projectDir, ctx) {
+  const p = getContextPath(projectDir);
+  fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
+}
+function extractVisualQueries(text) {
+  const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
+  const words = clean.split(/\s+/).filter((w) => w.length > 2);
+  const queries = [];
+  if (words.length >= 3) {
+    queries.push(words.slice(0, 4).join(" "));
+    const mid = Math.floor(words.length / 2);
+    queries.push(words.slice(mid, mid + 3).join(" "));
+    queries.push(words.slice(-3).join(" "));
+  } else {
+    queries.push(clean || "documentary cinematic shot");
+  }
+  return queries.filter((q) => q.length >= 3).slice(0, 3);
+}
+function inferEnergyLevelFromText(text) {
+  const lower = text.toLowerCase();
+  const highCues = ["conflict", "battle", "crisis", "explosion", "urgent", "reveal", "shocking", "protest", "disaster", "death"];
+  if (highCues.some((c) => lower.includes(c))) return "high";
+  const lowCues = ["peaceful", "quiet", "meditation", "reflection", "landscape", "slow", "history", "archive"];
+  if (lowCues.some((c) => lower.includes(c))) return "low";
+  return "medium";
+}
+function inferShotTypeFromText(text) {
+  const lower = text.toLowerCase();
+  if (lower.includes("close") || lower.includes("face") || lower.includes("detail") || lower.includes("hand")) return "close-up";
+  if (lower.includes("aerial") || lower.includes("wide") || lower.includes("landscape") || lower.includes("panorama")) return "wide";
+  if (lower.includes("abstract") || lower.includes("symbol") || lower.includes("silhouette")) return "abstract";
+  return "medium";
+}
+function buildAlgorithmicOutline(skeletons, totalDuration) {
+  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)));
+  const scenesPerChapter = Math.ceil(skeletons.length / numChapters);
+  const chapters = [];
+  for (let chIdx = 0; chIdx < numChapters; chIdx++) {
+    const chStartIdx = chIdx * scenesPerChapter;
+    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length);
+    const chScenes = skeletons.slice(chStartIdx, chEndIdx);
+    if (chScenes.length === 0) continue;
+    const startSceneIndex = chScenes[0].sceneIndex;
+    const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex;
+    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)));
+    const scenesPerSeq = Math.ceil(chScenes.length / numSequences);
+    const sequences = [];
+    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
+      const seqStartIdx = seqIdx * scenesPerSeq;
+      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length);
+      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx);
+      if (seqScenes.length === 0) continue;
+      sequences.push({
+        sequenceIndex: seqIdx + 1,
+        title: `Sequence ${seqIdx + 1}`,
+        startSceneIndex: seqScenes[0].sceneIndex,
+        endSceneIndex: seqScenes[seqScenes.length - 1].sceneIndex
+      });
+    }
+    chapters.push({
+      chapterIndex: chIdx + 1,
+      title: chIdx === 0 ? "Chapter 1: Introduction & Premise" : chIdx === numChapters - 1 ? `Chapter ${chIdx + 1}: Conclusion & Legacy` : `Chapter ${chIdx + 1}: Narrative Progression`,
+      purpose: "Documentary narrative arc",
+      startSceneIndex,
+      endSceneIndex,
+      sequences
+    });
+  }
+  return chapters;
+}
+async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, onProgress) {
+  const firstIndex = skeletons[0].sceneIndex;
+  const lastIndex = skeletons[skeletons.length - 1].sceneIndex;
+  const step = Math.max(1, Math.floor(skeletons.length / 10));
+  const sampleScenes = skeletons.filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0).map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`).join("\n");
+  const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
+Video Duration: ${totalDuration.toFixed(0)}s
+Total Scenes: ${skeletons.length} (Scene ${firstIndex} to Scene ${lastIndex})
+
+${globalContextSummary ? `## GLOBAL CONTEXT
+${globalContextSummary}
+` : ""}
+## SAMPLE SCENE TIMELINE
+${sampleScenes}
+
+## YOUR TASK
+Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
+Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
+Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
+
+Return ONLY valid JSON matching this schema:
+{
+  "chapters": [
+    {
+      "chapterIndex": 1,
+      "title": "Meaningful Chapter Title",
+      "purpose": "Narrative purpose",
+      "startSceneIndex": 1,
+      "endSceneIndex": 25,
+      "sequences": [
+        {
+          "sequenceIndex": 1,
+          "title": "Sequence title",
+          "startSceneIndex": 1,
+          "endSceneIndex": 12
+        }
+      ]
+    }
+  ]
+}`;
+  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
+    const model = modelChain[attempt];
+    try {
+      onProgress?.(`Generating story arc outline (${model})...`, 0.2);
+      const res = await ai.models.generateContent({
         model,
-        contents: [{ role: "user", parts: [{ text: repairPrompt }] }],
+        contents: prompt,
         config: {
           responseMimeType: "application/json",
-          temperature: 0.1,
+          temperature: 0.2,
+          maxOutputTokens: 4096
+        }
+      });
+      const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const data = JSON.parse(clean);
+      if (data.chapters && data.chapters.length >= 2) {
+        const covered = /* @__PURE__ */ new Set();
+        let valid = true;
+        for (const ch of data.chapters) {
+          if (!ch.sequences || ch.sequences.length === 0) {
+            valid = false;
+            break;
+          }
+          for (const seq of ch.sequences) {
+            if (seq.startSceneIndex > seq.endSceneIndex) {
+              valid = false;
+              break;
+            }
+            for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+              if (covered.has(idx)) {
+                valid = false;
+                break;
+              }
+              covered.add(idx);
+            }
+          }
+        }
+        if (valid && covered.size === skeletons.length && !skeletons.some((s) => !covered.has(s.sceneIndex))) {
+          recordModelSuccess(model);
+          logger.info(`[PLAN] Gemini chapter outline successfully generated: ${data.chapters.length} chapters`);
+          return data.chapters;
+        }
+      }
+    } catch (err) {
+      const { kind } = classifyGeminiErrorKind(err);
+      recordModelFailure(model, kind);
+      if (kind === "MODEL_NOT_FOUND") {
+        const nextModel = modelChain[attempt + 1];
+        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic outline fallback"}.`);
+      } else {
+        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
+      }
+    }
+  }
+  logger.info("[PLAN] Using algorithmic chapter outline fallback");
+  return buildAlgorithmicOutline(skeletons, totalDuration);
+}
+function buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles) {
+  const hasLocalMedia = mediaFiles.length > 0;
+  const mediaList = hasLocalMedia ? [
+    ...mediaFiles.filter((m) => m.type === "video").map((v) => `  VIDEO: ${v.filename}`),
+    ...mediaFiles.filter((m) => m.type === "image").map((i) => `  IMAGE: ${i.filename}`)
+  ].join("\n") : "";
+  const mediaSection = hasLocalMedia ? `## AVAILABLE LOCAL MEDIA FILES (Match exact filename to localAsset if appropriate, otherwise null):
+${mediaList}
+` : `## MEDIA MODE: STOCK SEARCH ONLY
+No local media files. Set localAsset to null for all scenes. Default mediaType to "video".
+`;
+  const scenesJson = JSON.stringify(
+    batchScenes.map((s) => ({
+      sceneIndex: s.sceneIndex,
+      startTime: s.startTime,
+      endTime: s.endTime,
+      duration: s.duration,
+      narrativeText: s.narrativeText,
+      transcriptSegmentIds: s.transcriptSegmentIds
+    })),
+    null,
+    2
+  );
+  return `You are enriching a PRE-DETERMINED documentary scene timeline.
+
+CRITICAL RULES:
+- Do not add scenes.
+- Do not remove scenes.
+- Do not merge scenes.
+- Do not split scenes.
+- Do not renumber scenes.
+- Return exactly one result for every provided sceneIndex.
+- Keep results in the same order.
+- Only provide visual metadata.
+- Each visualIntent must describe one visible concept (3-10 words).
+- Search queries must remain visually searchable (3-5 queries per scene, each query 2-6 words).
+- Do not use abstract narration sentences as stock queries.
+  BAD:  "family has to borrow money to cover funeral expenses"
+  GOOD: ["worried family bills", "financial stress loan", "credit card bills debt"]
+- Maintain global documentary context across all batches.
+- Avoid repeating the same stock concept for consecutive scenes.
+- Prefer real-life documentary footage.
+- Use transitionIn="cut" for most scenes. Use dissolve/fade sparingly.
+- Vary shotType ("wide", "medium", "close-up", "abstract") across consecutive scenes.
+- Hook scenes should use visually strong and specific footage.
+- mediaType must be "video" or "image" (default "video").
+
+${globalContextSummary ? `## GLOBAL DOCUMENTARY CONTEXT
+${globalContextSummary}
+` : ""}
+${mediaSection}
+## SCENES TO ENRICH (${batchScenes.length} scenes)
+${scenesJson}
+
+Return ONLY valid JSON array matching this exact schema:
+[
+  {
+    "sceneIndex": 1,
+    "visualIntent": "3-10 words visual description",
+    "visualNote": "Director suggestion for visual tone and camera angle",
+    "searchQueries": ["short query 1", "short query 2", "short query 3"],
+    "mediaType": "video",
+    "transitionIn": "cut",
+    "energyLevel": "medium",
+    "shotType": "medium",
+    "localAsset": null
+  }
+]`;
+}
+async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, onProgress) {
+  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
+  const enrichedMap = /* @__PURE__ */ new Map();
+  let activeModelIndex = 0;
+  let lastError = "";
+  let successModel = modelChain[0];
+  let usedFallback = false;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const currentModel = modelChain[activeModelIndex];
+    try {
+      onProgress?.(
+        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
+        0.25 + batchIndex / totalBatches * 0.55
+      );
+      const res = await ai.models.generateContent({
+        model: currentModel,
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.3,
           maxOutputTokens: 8192
         }
       });
-      return resp.text || badJson;
-    } catch {
-      return badJson;
-    }
-  }
-  readScript(projectDir) {
-    const candidates = [
-      path__namespace.join(projectDir, "script.txt"),
-      path__namespace.join(projectDir, "inputs", "script.txt"),
-      path__namespace.join(projectDir, "project-state.json"),
-      path__namespace.join(projectDir, "project.json")
-    ];
-    for (const c of candidates) {
-      if (fs__namespace.existsSync(c)) {
-        if (c.endsWith(".json")) {
-          try {
-            const raw = fs__namespace.readFileSync(c, "utf-8");
-            const st = JSON.parse(raw);
-            const p = st?.inputs?.scriptPath;
-            if (p && fs__namespace.existsSync(p)) {
-              return fs__namespace.readFileSync(p, "utf-8");
-            }
-          } catch {
-          }
-        } else {
-          return fs__namespace.readFileSync(c, "utf-8");
-        }
-      }
-    }
-    return "";
-  }
-  readGlobalContext(projectDir) {
-    const candidates = [
-      path__namespace.join(projectDir, "analysis", "global-script-context.json"),
-      path__namespace.join(projectDir, "analysis", "global-visual-context.json")
-    ];
-    for (const c of candidates) {
-      if (fs__namespace.existsSync(c)) {
-        try {
-          return fs__namespace.readFileSync(c, "utf-8");
-        } catch {
-        }
-      }
-    }
-    return "";
-  }
-}
-const thumbnailPlanner = new ThumbnailPlanner();
-const DEFAULT_FLOWKIT_BRIDGE_URL = "http://127.0.0.1:8100";
-class GoogleFlowClient {
-  bridgeUrl;
-  constructor(bridgeUrl) {
-    this.bridgeUrl = (bridgeUrl || DEFAULT_FLOWKIT_BRIDGE_URL).replace(/\/+$/, "");
-  }
-  setBridgeUrl(url2) {
-    this.bridgeUrl = (url2 || DEFAULT_FLOWKIT_BRIDGE_URL).replace(/\/+$/, "");
-  }
-  getBridgeUrl() {
-    return this.bridgeUrl;
-  }
-  async checkHealth() {
-    const health = {
-      reachable: false,
-      providerAvailable: false,
-      extensionConnected: false,
-      signedIn: false,
-      supportsImageGeneration: false,
-      requestedExportQuality: "4k",
-      message: "Checking connection..."
-    };
-    try {
-      const healthResp = await this.fetchWithTimeout(`${this.bridgeUrl}/health`, { method: "GET" }, 3e3);
-      if (!healthResp.ok) {
-        health.message = `FlowKit bridge responded with status ${healthResp.status}`;
-        return health;
-      }
-      health.reachable = true;
-      const healthData = await healthResp.json();
-      health.extensionConnected = Boolean(healthData.extension_connected);
-      try {
-        const flowStatusResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: "GET" }, 3e3);
-        if (flowStatusResp.ok) {
-          const flowData = await flowStatusResp.json();
-          if (flowData.connected) {
-            health.extensionConnected = true;
-          }
-          health.details = {
-            version: healthData.version,
-            flowProjectId: flowData.flow_project_id || flowData.session_project?.project_id,
-            generationThrottle: flowData.generation_throttle
-          };
-        }
-      } catch (err) {
-        logger.debug(`[GoogleFlowClient] /api/flow/status check notice: ${err}`);
-      }
-      try {
-        const provResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/providers/status`, { method: "GET" }, 3e3);
-        if (provResp.ok) {
-          const body = await provResp.json();
-          const provsArray = Array.isArray(body) ? body : Array.isArray(body.providers) ? body.providers : [];
-          const flowProv = provsArray.find((p) => p.name === "flow");
-          if (flowProv) {
-            health.providerAvailable = Boolean(flowProv.available);
-            health.supportsImageGeneration = Boolean(flowProv.capabilities?.generate_image);
+      const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const items = JSON.parse(clean);
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (typeof item.sceneIndex === "number") {
+            enrichedMap.set(item.sceneIndex, item);
           }
         }
-      } catch (err) {
-        logger.debug(`[GoogleFlowClient] /api/providers/status check notice: ${err}`);
+        recordModelSuccess(currentModel);
+        successModel = currentModel;
+        break;
       }
-      if (health.extensionConnected) {
-        try {
-          const credResp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/credits`, { method: "GET" }, 4e3);
-          if (credResp.ok) {
-            health.signedIn = true;
-            health.supportsImageGeneration = true;
-          } else if (credResp.status === 503) {
-            health.extensionConnected = false;
-            health.message = "Google Flow Chrome extension is disconnected.";
-          } else if (credResp.status === 502) {
-            health.signedIn = false;
-            health.message = "Google Flow account not signed in. Open Google Flow in Chrome and log in.";
-          }
-        } catch {
-          health.signedIn = health.extensionConnected;
-        }
-      }
-      if (!health.extensionConnected) {
-        health.message = "Chrome extension disconnected. Open Google Flow in Chrome, reconnect the extension, then retry.";
-      } else if (!health.signedIn) {
-        health.message = "Google Flow is not signed in. Please log into Google Flow in Chrome.";
-      } else {
-        health.message = "FlowKit bridge and Google Flow are connected and ready for 4K thumbnail generation.";
-      }
-      return health;
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      health.reachable = false;
-      health.message = `FlowKit bridge unreachable at ${this.bridgeUrl} (${msg}). Ensure FlowKit is running.`;
-      return health;
-    }
-  }
-  async generateImage(request) {
-    const url2 = `${this.bridgeUrl}/api/flow/generate-image`;
-    const payload = {
-      prompt: request.prompt,
-      project_id: request.projectId || "",
-      image_model: request.imageModel || "GEM_PIX_2",
-      aspect_ratio: request.aspectRatio || "16:9",
-      count: 1,
-      reference_media_ids: []
-    };
-    logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`);
-    const callerHeader = request.caller ? `long-form-video-factory/${request.caller}` : "long-form-video-factory/thumbnail-studio";
-    let resp;
-    try {
-      resp = await this.fetchWithTimeout(
-        url2,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-flowkit-caller": callerHeader
-          },
-          body: JSON.stringify(payload)
-        },
-        12e4
-      );
-    } catch (err) {
-      throw err;
-    }
-    if (resp.ok) {
-      const data = await resp.json();
-      const firstMedia = data.media?.[0];
-      const mediaId = firstMedia?.image?.generatedImage?.mediaId || firstMedia?.name;
-      const fifeUrl = firstMedia?.image?.generatedImage?.fifeUrl;
-      if (!mediaId) {
-        throw new Error("FLOW_GENERATION_FAILED: FlowKit returned response without mediaId.");
-      }
-      logger.info(`[GoogleFlowClient] Candidate ${request.optionId} generated media: ${mediaId}`);
-      return {
-        mediaId,
-        projectId: data.project_id || request.projectId || "",
-        fifeUrl,
-        raw: data
-      };
-    }
-    const status = resp.status;
-    let errorBody = {};
-    try {
-      errorBody = await resp.json();
-    } catch {
-    }
-    const errMsg = errorBody.error || errorBody.detail || (typeof errorBody === "string" ? errorBody : "") || `HTTP ${status}`;
-    if (status === 503 || String(errMsg).toLowerCase().includes("extension not connected")) {
-      throw new Error(`FLOW_EXTENSION_DISCONNECTED: Chrome extension is disconnected. Open Google Flow in Chrome and reconnect.`);
-    }
-    if (status === 400 || status === 422) {
-      throw new Error(`FLOW_GENERATION_FAILED: Invalid argument: ${errMsg}`);
-    }
-    if (status === 429 || String(errMsg).toLowerCase().includes("rate limit") || String(errMsg).toLowerCase().includes("cooldown")) {
-      throw new Error(`FLOW_RATE_LIMITED: Google Flow rate limit reached. (${errMsg})`);
-    }
-    if (String(errMsg).toLowerCase().includes("recaptcha")) {
-      throw new Error(`FLOW_RECAPTCHA_FAILED: Google Flow reCAPTCHA verification failed. (${errMsg})`);
-    }
-    throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`);
-  }
-  async getFlowThrottle() {
-    try {
-      const resp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: "GET" }, 3e3);
-      if (resp.ok) {
-        const data = await resp.json();
-        const throttle = data?.generation_throttle;
-        const maxConc = typeof throttle?.max_concurrent === "number" ? throttle.max_concurrent : 1;
-        const minInt = typeof throttle?.min_interval_s === "number" ? throttle.min_interval_s : 3;
-        const cooldown = Boolean(throttle?.cooldown_active);
-        const cooldownRem = typeof throttle?.cooldown_remaining_s === "number" ? throttle.cooldown_remaining_s : 0;
-        return {
-          maxConcurrent: maxConc,
-          minIntervalS: minInt,
-          cooldownActive: cooldown,
-          cooldownRemainingS: cooldownRem
-        };
-      }
-    } catch {
-    }
-    return {
-      maxConcurrent: 1,
-      minIntervalS: 3,
-      cooldownActive: false,
-      cooldownRemainingS: 0
-    };
-  }
-  async exportImage(request) {
-    const destDir = path__namespace.dirname(request.destinationPath);
-    if (!fs__namespace.existsSync(destDir)) {
-      fs__namespace.mkdirSync(destDir, { recursive: true });
-    }
-    const pref = request.preferredQuality || (request.quality === "2k" ? "2k" : "4k");
-    if (pref === "2k") {
-      const result2k = await this.tryExportAtQuality(request.mediaId, request.projectId, "2k", request.destinationPath);
-      if (result2k.success && result2k.buffer) {
-        fs__namespace.writeFileSync(request.destinationPath, result2k.buffer);
-        const dims = probeImageDimensions(result2k.buffer);
-        const stats = fs__namespace.statSync(request.destinationPath);
-        return {
-          filePath: request.destinationPath,
-          fileSize: stats.size,
-          width: dims?.width || 2560,
-          height: dims?.height || 1440,
-          actualQuality: "2k-fallback"
-        };
-      }
-      if (request.fallbackToOriginalUrl) {
-        logger.warn(`[GoogleFlowClient] Direct 2K export failed (${result2k.error}). Falling back to original image download from fifeUrl...`);
-        try {
-          const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: "GET" }, 3e4);
-          if (origResp.ok) {
-            const arrayBuf = await origResp.arrayBuffer();
-            const buf = Buffer.from(arrayBuf);
-            fs__namespace.writeFileSync(request.destinationPath, buf);
-            const dims = probeImageDimensions(buf);
-            const stats = fs__namespace.statSync(request.destinationPath);
-            return {
-              filePath: request.destinationPath,
-              fileSize: stats.size,
-              width: dims?.width || 1376,
-              height: dims?.height || 768,
-              actualQuality: "original-fallback",
-              is4kPlanGated: true
-            };
-          }
-        } catch (fifeErr) {
-          logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`);
-        }
-      }
-      throw new Error(`FLOW_EXPORT_FAILED: Failed to export 2K image for media ${request.mediaId}: ${result2k.error || "Unknown error"}`);
-    }
-    let result = await this.tryExportAtQuality(request.mediaId, request.projectId, "4k", request.destinationPath);
-    if (result.success && result.buffer) {
-      fs__namespace.writeFileSync(request.destinationPath, result.buffer);
-      const dims = probeImageDimensions(result.buffer);
-      const stats = fs__namespace.statSync(request.destinationPath);
-      return {
-        filePath: request.destinationPath,
-        fileSize: stats.size,
-        width: dims?.width || 3840,
-        height: dims?.height || 2160,
-        actualQuality: "native-4k"
-      };
-    }
-    const is4kGated = result.statusCode === 400 || result.statusCode === 403 || result.statusCode === 502 || String(result.error).toLowerCase().includes("tier") || String(result.error).toLowerCase().includes("plan") || String(result.error).toLowerCase().includes("not supported") || String(result.error).toLowerCase().includes("upscale");
-    logger.warn(`[GoogleFlowClient] 4K export failed (${result.error}). Attempting 2K fallback...`);
-    result = await this.tryExportAtQuality(request.mediaId, request.projectId, "2k", request.destinationPath);
-    if (result.success && result.buffer) {
-      fs__namespace.writeFileSync(request.destinationPath, result.buffer);
-      const dims = probeImageDimensions(result.buffer);
-      const stats = fs__namespace.statSync(request.destinationPath);
-      return {
-        filePath: request.destinationPath,
-        fileSize: stats.size,
-        width: dims?.width || 2560,
-        height: dims?.height || 1440,
-        actualQuality: "2k-fallback",
-        is4kPlanGated: is4kGated
-      };
-    }
-    if (request.fallbackToOriginalUrl) {
-      logger.warn(`[GoogleFlowClient] 2K export failed. Falling back to original image download from fifeUrl...`);
-      try {
-        const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: "GET" }, 3e4);
-        if (origResp.ok) {
-          const arrayBuf = await origResp.arrayBuffer();
-          const buf = Buffer.from(arrayBuf);
-          fs__namespace.writeFileSync(request.destinationPath, buf);
-          const dims = probeImageDimensions(buf);
-          const stats = fs__namespace.statSync(request.destinationPath);
-          return {
-            filePath: request.destinationPath,
-            fileSize: stats.size,
-            width: dims?.width || 1376,
-            height: dims?.height || 768,
-            actualQuality: "original-fallback",
-            is4kPlanGated: true
-          };
-        }
-      } catch (fifeErr) {
-        logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`);
-      }
-    }
-    throw new Error(`FLOW_EXPORT_FAILED: Failed to export image for media ${request.mediaId}: ${result.error || "Unknown export error"}`);
-  }
-  async tryExportAtQuality(mediaId, projectId, quality, _destPath) {
-    const url2 = `${this.bridgeUrl}/api/flow/export-image`;
-    const payload = {
-      media_id: mediaId,
-      project_id: projectId || "",
-      quality: quality.toLowerCase()
-    };
-    try {
-      const resp = await this.fetchWithTimeout(
-        url2,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-flowkit-caller": "long-form-video-factory/thumbnail-studio"
-          },
-          body: JSON.stringify(payload)
-        },
-        9e4
-      );
-      if (resp.ok) {
-        const arrayBuf = await resp.arrayBuffer();
-        const buf = Buffer.from(arrayBuf);
-        if (buf.length > 0) {
-          return { success: true, buffer: buf, statusCode: resp.status };
-        }
-        return { success: false, statusCode: resp.status, error: "Empty binary response returned" };
-      }
-      let errorMsg = `HTTP ${resp.status}`;
-      try {
-        const errJson = await resp.json();
-        errorMsg = String(errJson.error || errJson.detail || errorMsg);
-      } catch {
-      }
-      return { success: false, statusCode: resp.status, error: String(errorMsg) };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : String(err) };
-    }
-  }
-  async fetchWithTimeout(url2, init, timeoutMs = 15e3) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      const resp = await fetch(url2, {
-        ...init,
-        signal: controller.signal
-      });
-      return resp;
-    } catch (err) {
-      if (err.name === "AbortError") {
-        throw new Error(`Request timed out after ${timeoutMs}ms: ${url2}`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-}
-const googleFlowClient = new GoogleFlowClient();
-class GoogleFlowProvider {
-  name = "google-flow";
-  client;
-  constructor(client) {
-    this.client = client || googleFlowClient;
-  }
-  async healthCheck(bridgeUrl) {
-    if (bridgeUrl) {
-      this.client.setBridgeUrl(bridgeUrl);
-    }
-    return this.client.checkHealth();
-  }
-  async generateImage(request) {
-    return this.client.generateImage(request);
-  }
-  async exportImage(request) {
-    return this.client.exportImage(request);
-  }
-}
-const googleFlowProvider = new GoogleFlowProvider();
-const DEFAULT_SETTINGS = {
-  mode: "external",
-  bridgeUrl: "http://127.0.0.1:8100",
-  autoStartBridge: false,
-  autoOpenGoogleFlow: false
-};
-const HEALTH_POLL_INTERVAL_MS = 2e3;
-const HEALTH_START_TIMEOUT_MS = 3e4;
-const GOOGLE_FLOW_URL = "https://flow.google.com/";
-const CONFIG_FILENAME = "flowkit-runtime-settings.json";
-class FlowKitRuntimeManager {
-  settings = { ...DEFAULT_SETTINGS };
-  managedProcess = null;
-  isStarting = false;
-  /** Guard: only open Google Flow browser tab once per app session */
-  hasOpenedGoogleFlowThisSession = false;
-  /** Reference to GoogleFlowClient for URL sync — set by initialize() */
-  googleFlowClientRef = null;
-  // ─── Initialization ───────────────────────────────────────────────────────
-  /**
-   * Must be called once during app startup BEFORE any IPC handlers fire.
-   * Loads persisted settings and optionally links the GoogleFlowClient for URL sync.
-   */
-  initialize(googleFlowClient2) {
-    if (googleFlowClient2) {
-      this.googleFlowClientRef = googleFlowClient2;
-    }
-    this.loadPersistedSettings();
-    logger.info(`[FlowKitRuntime] Initialized. mode=${this.settings.mode} url=${this.settings.bridgeUrl}`);
-  }
-  // ─── Persistence ──────────────────────────────────────────────────────────
-  getConfigPath() {
-    try {
-      return path__namespace.join(electron.app.getPath("userData"), CONFIG_FILENAME);
-    } catch {
-      return path__namespace.join(process.cwd(), CONFIG_FILENAME);
-    }
-  }
-  loadPersistedSettings() {
-    const configPath = this.getConfigPath();
-    try {
-      if (!fs__namespace.existsSync(configPath)) {
-        logger.info("[FlowKitRuntime] No persisted settings found. Using defaults.");
-        return;
-      }
-      const raw = fs__namespace.readFileSync(configPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      this.applySettings(parsed);
-      logger.info(`[FlowKitRuntime] Loaded persisted settings from ${configPath}`);
-    } catch (err) {
-      logger.warn(`[FlowKitRuntime] Failed to load persisted settings (using defaults): ${err}`);
-    }
-  }
-  savePersistedSettings() {
-    const configPath = this.getConfigPath();
-    const tmpPath = `${configPath}.tmp`;
-    try {
-      const data = JSON.stringify(this.settings, null, 2);
-      fs__namespace.writeFileSync(tmpPath, data, "utf-8");
-      fs__namespace.renameSync(tmpPath, configPath);
-      logger.info(`[FlowKitRuntime] Settings persisted to ${configPath}`);
-    } catch (err) {
-      logger.error(`[FlowKitRuntime] Failed to persist settings: ${err}`);
-      try {
-        fs__namespace.unlinkSync(tmpPath);
-      } catch {
-      }
-    }
-  }
-  // ─── Settings ─────────────────────────────────────────────────────────────
-  getSettings() {
-    return { ...this.settings };
-  }
-  applySettings(settings) {
-    const newUrl = this.normalizeBridgeUrl(settings.bridgeUrl || this.settings.bridgeUrl);
-    this.settings = {
-      ...this.settings,
-      ...settings,
-      // Normalize and sanitize
-      bridgeUrl: newUrl,
-      flowProjectId: (settings.flowProjectId ?? this.settings.flowProjectId ?? "").trim() || void 0,
-      flowKitPath: settings.flowKitPath ?? this.settings.flowKitPath,
-      pythonPath: settings.pythonPath ?? this.settings.pythonPath
-    };
-    if (this.googleFlowClientRef) {
-      this.googleFlowClientRef.setBridgeUrl(newUrl);
-    }
-    logger.info(`[FlowKitRuntime] Settings applied: mode=${this.settings.mode} url=${this.settings.bridgeUrl}`);
-  }
-  /** Save settings and apply them atomically */
-  saveSettings(settings) {
-    this.applySettings(settings);
-    this.savePersistedSettings();
-  }
-  normalizeBridgeUrl(url2) {
-    const raw = (url2 || DEFAULT_SETTINGS.bridgeUrl).replace(/\/+$/, "");
-    if (!raw.startsWith("http://") && !raw.startsWith("https://")) {
-      return DEFAULT_SETTINGS.bridgeUrl;
-    }
-    return raw;
-  }
-  // ─── Status ───────────────────────────────────────────────────────────────
-  getStatus() {
-    return {
-      mode: this.settings.mode,
-      bridgeRunning: this.managedProcess !== null && !this.managedProcess.killed,
-      bridgeUrl: this.settings.bridgeUrl,
-      managedPid: this.managedProcess?.pid ?? void 0,
-      flowProjectId: this.settings.flowProjectId
-    };
-  }
-  // ─── Start Bridge (Managed Mode only) ─────────────────────────────────────
-  async startBridge() {
-    if (this.settings.mode !== "managed") {
-      return { success: false, error: "Bridge is in External mode. Start FlowKit manually.", errorCode: "FLOWKIT_NOT_CONFIGURED" };
-    }
-    if (this.managedProcess && !this.managedProcess.killed) {
-      logger.info("[FlowKitRuntime] Bridge already running.");
-      return { success: true };
-    }
-    if (this.isStarting) {
-      return { success: false, error: "Bridge is already starting." };
-    }
-    const flowKitPath = this.settings.flowKitPath || "";
-    if (!flowKitPath || !fs__namespace.existsSync(flowKitPath)) {
-      return { success: false, error: `FlowKit path not found: "${flowKitPath}"`, errorCode: "FLOWKIT_PATH_INVALID" };
-    }
-    const agentMain = path__namespace.join(flowKitPath, "agent", "main.py");
-    if (!fs__namespace.existsSync(agentMain)) {
-      return {
-        success: false,
-        error: `agent/main.py not found in "${flowKitPath}". Is this the correct FlowKit folder?`,
-        errorCode: "FLOWKIT_PATH_INVALID"
-      };
-    }
-    const pythonExe = await this.resolvePython(flowKitPath);
-    if (!pythonExe) {
-      return {
-        success: false,
-        error: "Python 3.10+ not found. Configure the Python path in settings or install Python.",
-        errorCode: "FLOWKIT_PYTHON_NOT_FOUND"
-      };
-    }
-    const bridgePort = this.parseBridgePort();
-    const flowProjectId = this.settings.flowProjectId || "";
-    await this.freePort(bridgePort);
-    this.isStarting = true;
-    this.broadcastLog(`[FlowKitRuntime] Starting FlowKit bridge...
-Python: ${pythonExe}
-Cwd: ${flowKitPath}
-Port: ${bridgePort}`);
-    try {
-      const env = {
-        ...Object.fromEntries(
-          Object.entries(process.env).filter(([, v]) => v !== void 0)
-        ),
-        API_HOST: "127.0.0.1",
-        API_PORT: String(bridgePort),
-        MEDIA_PROVIDER: "flow",
-        ...flowProjectId ? { FLOW_PROJECT_ID: flowProjectId } : {}
-      };
-      const child = cp__namespace.spawn(pythonExe, ["-m", "agent.main"], {
-        cwd: flowKitPath,
-        env,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
-      this.managedProcess = child;
-      child.stdout?.on("data", (data) => {
-        const text = data.toString("utf-8").trimEnd();
-        this.broadcastLog(`[FlowKit] ${text}`);
-      });
-      child.stderr?.on("data", (data) => {
-        const text = data.toString("utf-8").trimEnd();
-        this.broadcastLog(`[FlowKit:err] ${text}`);
-      });
-      child.on("exit", (code, signal) => {
-        const wasManaged = this.managedProcess === child;
-        if (wasManaged) {
-          this.managedProcess = null;
-        }
-        const msg = `[FlowKitRuntime] Bridge process exited (code=${code ?? signal})`;
-        logger.warn(msg);
-        this.broadcastLog(msg);
-        this.broadcastStatus();
-      });
-      const ready = await this.pollHealth(HEALTH_START_TIMEOUT_MS);
-      if (!ready) {
-        if (this.managedProcess === child && !child.killed) {
-          child.kill("SIGTERM");
-          this.managedProcess = null;
-        }
-        return { success: false, error: `Bridge did not become healthy within ${HEALTH_START_TIMEOUT_MS / 1e3}s.`, errorCode: "FLOWKIT_HEALTH_TIMEOUT" };
-      }
-      this.broadcastLog("[FlowKitRuntime] Bridge is healthy and ready.");
-      this.broadcastStatus();
-      return { success: true };
-    } catch (err) {
-      this.managedProcess = null;
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[FlowKitRuntime] Failed to start bridge: ${msg}`);
-      return { success: false, error: msg, errorCode: "FLOWKIT_START_FAILED" };
-    } finally {
-      this.isStarting = false;
-    }
-  }
-  // ─── Stop Bridge (Managed Mode only) ──────────────────────────────────────
-  stopBridge() {
-    if (!this.managedProcess || this.managedProcess.killed) {
-      return;
-    }
-    logger.info("[FlowKitRuntime] Stopping managed FlowKit bridge...");
-    this.managedProcess.kill("SIGTERM");
-    setTimeout(() => {
-      if (this.managedProcess && !this.managedProcess.killed) {
-        this.managedProcess.kill("SIGKILL");
-      }
-    }, 5e3);
-    this.managedProcess = null;
-    this.broadcastStatus();
-  }
-  /**
-   * Kill any process occupying `port` on localhost so the bridge can bind.
-   * Only acts on the external/zombie case — if we own `managedProcess` on that
-   * port, `stopBridge()` should have been called first.
-   *
-   * macOS/Linux only. No-op on Windows (port conflicts will surface naturally).
-   */
-  async freePort(port) {
-    if (process.platform === "win32") return;
-    return new Promise((resolve) => {
-      const lsof = cp__namespace.spawn("lsof", ["-ti", `:${port}`]);
-      let pids = "";
-      lsof.stdout?.on("data", (d) => {
-        pids += d.toString();
-      });
-      lsof.on("close", () => {
-        const pidList = pids.trim().split("\n").filter(Boolean);
-        if (pidList.length === 0) return resolve();
-        for (const pid of pidList) {
-          try {
-            process.kill(parseInt(pid, 10), "SIGKILL");
-          } catch {
-          }
-        }
-        logger.info(`[FlowKitRuntime] Freed port ${port}: killed PIDs [${pidList.join(", ")}]`);
-        setTimeout(resolve, 500);
-      });
-      lsof.on("error", () => resolve());
-    });
-  }
-  handleAppQuit() {
-    if (this.settings.mode === "managed") {
-      this.stopBridge();
-    }
-  }
-  /**
-   * Open Google Flow in the default browser.
-   * Only opens once per app session regardless of how many times called.
-   */
-  openGoogleFlow(force = false) {
-    if (!force && this.hasOpenedGoogleFlowThisSession) {
-      logger.info("[FlowKitRuntime] Google Flow already opened this session. Skipping.");
-      return;
-    }
-    this.hasOpenedGoogleFlowThisSession = true;
-    electron.shell.openExternal(GOOGLE_FLOW_URL).catch((err) => {
-      logger.warn(`[FlowKitRuntime] Failed to open Google Flow: ${err}`);
-    });
-    logger.info(`[FlowKitRuntime] Opened Google Flow in browser: ${GOOGLE_FLOW_URL}`);
-  }
-  /**
-   * Auto-start FlowKit in the background (non-blocking).
-   * Called from app startup if mode=managed and autoStartBridge=true.
-   */
-  autoStartIfConfigured() {
-    if (this.settings.mode !== "managed" || !this.settings.autoStartBridge) {
-      return;
-    }
-    logger.info("[FlowKitRuntime] Auto-start configured. Starting FlowKit bridge in background...");
-    this.startBridge().then((result) => {
-      if (result.success) {
-        logger.info("[FlowKitRuntime] Auto-start: bridge is healthy.");
-        if (this.settings.autoOpenGoogleFlow) {
-          this.openGoogleFlow();
-        }
-      } else {
-        logger.warn(`[FlowKitRuntime] Auto-start failed: ${result.error}`);
-      }
-    }).catch((err) => {
-      logger.error(`[FlowKitRuntime] Auto-start error: ${err}`);
-    });
-  }
-  // ─── Readiness Preflight ──────────────────────────────────────────────────
-  /**
-   * Run the full readiness preflight check.
-   * MUST be called before any thumbnail generation.
-   * If not ready, returns blockingCode and message.
-   */
-  async ensureFlowReady(bridgeUrl) {
-    const url2 = this.normalizeBridgeUrl(bridgeUrl || this.settings.bridgeUrl);
-    const result = {
-      ready: false,
-      bridgeReachable: false,
-      extensionConnected: false,
-      flowConnected: false,
-      flowProjectIdPresent: Boolean(this.settings.flowProjectId),
-      imageGenerationReady: false,
-      export4kStatus: "unknown",
-      message: "Checking FlowKit connection..."
-    };
-    let healthData = null;
-    try {
-      const resp = await this.fetchWithTimeout(`${url2}/health`, 5e3);
-      if (resp.ok) {
-        result.bridgeReachable = true;
-        healthData = await resp.json();
-        result.extensionConnected = Boolean(healthData?.extension_connected);
-      } else {
-        result.blockingCode = "FLOWKIT_BRIDGE_OFFLINE";
-        result.message = `FlowKit bridge at ${url2} returned HTTP ${resp.status}.`;
-        return result;
-      }
-    } catch (err) {
-      const errCode = this.extractNodeErrorCode(err);
-      result.bridgeReachable = false;
-      result.extensionConnected = false;
-      result.blockingCode = "FLOWKIT_BRIDGE_OFFLINE";
-      result.message = this.buildBridgeOfflineMessage(url2, errCode);
-      result.diagnostics = { errorCode: errCode, bridgeUrl: url2 };
-      return result;
-    }
-    if (!result.extensionConnected) {
-      result.blockingCode = "FLOW_EXTENSION_DISCONNECTED";
-      result.message = "FlowKit bridge is online, but the Chrome extension is not connected. Open Google Flow in Chrome and reload the extension.";
-      return result;
-    }
-    try {
-      const flowResp = await this.fetchWithTimeout(`${url2}/api/flow/status`, 1e4);
-      if (flowResp.ok) {
-        const flowData = await flowResp.json();
-        result.flowConnected = Boolean(flowData.connected);
-        const bridgeProjectId = flowData.flow_project_id || flowData.session_project?.project_id;
-        if (!this.settings.flowProjectId && bridgeProjectId) {
-          result.flowProjectIdPresent = true;
-        }
-      }
-    } catch {
-    }
-    try {
-      const provResp = await this.fetchWithTimeout(`${url2}/api/providers/status`, 5e3);
-      if (provResp.ok) {
-        const body = await provResp.json();
-        const provsArray = Array.isArray(body) ? body : Array.isArray(body?.providers) ? body.providers : [];
-        const flowProv = provsArray.find((p) => p.name === "flow");
-        if (flowProv?.available && flowProv.capabilities?.generate_image) {
-          result.imageGenerationReady = true;
-        }
-      }
-    } catch {
-    }
-    if (!this.settings.flowProjectId && !result.flowProjectIdPresent) {
-      result.blockingCode = "FLOW_PROJECT_ID_MISSING";
-      result.message = "Flow Project ID is not configured. Open Google Flow, create or open a project, copy the UUID from the URL, and paste it in Settings → Thumbnail Studio.";
-      return result;
-    }
-    result.ready = result.bridgeReachable && result.extensionConnected && result.imageGenerationReady;
-    if (result.ready) {
-      result.message = "Google Flow is connected and ready for thumbnail generation.";
-    } else if (!result.imageGenerationReady) {
-      result.blockingCode = "FLOW_IMAGE_GENERATION_UNAVAILABLE";
-      result.message = "FlowKit is connected but the image generation provider is unavailable. Check that Google Flow is open in Chrome.";
-    }
-    return result;
-  }
-  /**
-   * Lightweight bridge liveness check (no extension/project checks).
-   * Use between candidates in a running batch.
-   */
-  async isBridgeStillReachable(bridgeUrl) {
-    const url2 = this.normalizeBridgeUrl(bridgeUrl || this.settings.bridgeUrl);
-    try {
-      const resp = await this.fetchWithTimeout(`${url2}/health`, 5e3);
-      return resp.ok;
-    } catch {
-      return false;
-    }
-  }
-  // ─── Python resolution ─────────────────────────────────────────────────────
-  async resolvePython(flowKitPath) {
-    const candidates = [];
-    if (this.settings.pythonPath) {
-      candidates.push(this.settings.pythonPath);
-    }
-    candidates.push(
-      path__namespace.join(flowKitPath, ".venv", "Scripts", "python.exe"),
-      path__namespace.join(flowKitPath, "venv", "Scripts", "python.exe"),
-      path__namespace.join(flowKitPath, ".venv", "bin", "python"),
-      path__namespace.join(flowKitPath, "venv", "bin", "python")
-    );
-    candidates.push("py", "python", "python3");
-    for (const py of candidates) {
-      const version = await this.checkPythonVersion(py);
-      if (version) {
-        logger.info(`[FlowKitRuntime] Found Python: ${py} (${version})`);
-        return py;
-      }
-    }
-    return null;
-  }
-  async checkPythonVersion(pythonExe) {
-    return new Promise((resolve) => {
-      try {
-        const child = cp__namespace.spawn(pythonExe, ["--version"], { stdio: ["ignore", "pipe", "pipe"] });
-        let out = "";
-        child.stdout?.on("data", (d) => {
-          out += d.toString();
-        });
-        child.stderr?.on("data", (d) => {
-          out += d.toString();
-        });
-        child.on("close", (code) => {
-          if (code !== 0) return resolve(null);
-          const match = out.match(/Python (\d+)\.(\d+)/);
-          if (!match) return resolve(null);
-          const major = parseInt(match[1], 10);
-          const minor = parseInt(match[2], 10);
-          if (major >= 3 && minor >= 10) {
-            resolve(out.trim());
-          } else {
-            resolve(null);
-          }
-        });
-        child.on("error", () => resolve(null));
-      } catch {
-        resolve(null);
-      }
-    });
-  }
-  // ─── Helpers ──────────────────────────────────────────────────────────────
-  async pollHealth(timeoutMs) {
-    const start = Date.now();
-    const url2 = this.settings.bridgeUrl;
-    while (Date.now() - start < timeoutMs) {
-      try {
-        const resp = await this.fetchWithTimeout(`${url2}/health`, 3e3);
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data.status === "ok" || resp.ok) return true;
-        }
-      } catch {
-      }
-      await new Promise((r) => setTimeout(r, HEALTH_POLL_INTERVAL_MS));
-    }
-    return false;
-  }
-  parseBridgePort() {
-    try {
-      const url2 = new URL(this.settings.bridgeUrl);
-      return parseInt(url2.port || "8100", 10);
-    } catch {
-      return 8100;
-    }
-  }
-  extractNodeErrorCode(err) {
-    if (err && typeof err === "object") {
-      const cause = err.cause;
-      if (cause?.code) return cause.code;
-      const code = err.code;
-      if (code) return code;
-    }
-    return "UNKNOWN";
-  }
-  buildBridgeOfflineMessage(url2, code) {
-    if (code === "ECONNREFUSED") {
-      return `FlowKit bridge is not running at ${url2}. Start FlowKit with: python -m agent.main`;
-    }
-    if (code === "ETIMEDOUT" || code === "ECONNABORTED") {
-      return `FlowKit bridge at ${url2} timed out. The process may be starting or hung.`;
-    }
-    if (code === "ENOTFOUND") {
-      return `Cannot resolve host for FlowKit at ${url2}. Check the bridge URL in settings.`;
-    }
-    return `Cannot connect to FlowKit at ${url2} (${code}). Ensure FlowKit is running.`;
-  }
-  async fetchWithTimeout(url2, timeoutMs) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-      return await fetch(url2, { signal: controller.signal });
-    } catch (err) {
-      if (err.name === "AbortError") {
-        throw new Error(`Request timed out after ${timeoutMs}ms: ${url2}`);
-      }
-      throw err;
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-  broadcastLog(message) {
-    try {
-      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
-        for (const win of electron.BrowserWindow.getAllWindows()) {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC_CHANNELS.FLOWKIT_RUNTIME_LOG, { message, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-          }
-        }
-      }
-    } catch {
-    }
-    logger.info(message);
-  }
-  broadcastStatus() {
-    const status = this.getStatus();
-    try {
-      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
-        for (const win of electron.BrowserWindow.getAllWindows()) {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC_CHANNELS.FLOWKIT_RUNTIME_STATUS, status);
-          }
-        }
-      }
-    } catch {
-    }
-  }
-}
-const flowkitRuntimeManager = new FlowKitRuntimeManager();
-const APP_INSTANCE_ID$2 = uuid.v4();
-function getThumbnailJobStatePath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "thumbnail-job-state.json");
-}
-function getThumbnailJobStateBackupPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "thumbnail-job-state.backup.json");
-}
-function computeThumbnailJobKey(params) {
-  const payload = [
-    params.renderOutputPath,
-    String(params.renderFileSize),
-    String(params.renderMtimeMs),
-    params.scriptHash,
-    params.templateSnapshotHash,
-    String(params.generationRound)
-  ].join("::");
-  return crypto__namespace.createHash("sha256").update(payload, "utf-8").digest("hex");
-}
-function createCandidatesFromPlan(plan, round = 1) {
-  return plan.options.map((opt) => ({
-    id: `cand-${uuid.v4()}`,
-    optionId: opt.id,
-    round,
-    revision: 1,
-    conceptName: opt.conceptName,
-    yellowText: opt.yellowText,
-    whiteText: opt.whiteText,
-    imagePrompt: opt.imagePrompt,
-    titleClear: opt.titleClear,
-    titleCuriosity: opt.titleCuriosity,
-    status: "pending",
-    attempts: 0
-  }));
-}
-function createInitialThumbnailJobState(params) {
-  const round = params.generationRound || 1;
-  const jobKey = computeThumbnailJobKey({
-    renderOutputPath: params.renderOutputPath,
-    renderFileSize: params.renderFileSize || 0,
-    renderMtimeMs: params.renderMtimeMs || 0,
-    scriptHash: params.scriptHash,
-    templateSnapshotHash: params.templateSnapshotHash,
-    generationRound: round
-  });
-  const candidates = params.plan ? createCandidatesFromPlan(params.plan, round) : [];
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const jobId = `job-${uuid.v4()}`;
-  return {
-    schemaVersion: 1,
-    version: 1,
-    jobId,
-    jobKey,
-    projectDir: params.projectDir,
-    renderOutputPath: params.renderOutputPath,
-    status: params.plan ? "generating" : "planning",
-    generationRound: round,
-    scriptHash: params.scriptHash,
-    templateSnapshotHash: params.templateSnapshotHash,
-    flowProjectId: params.flowProjectId,
-    candidates,
-    createdAt: now,
-    updatedAt: now,
-    warnings: [],
-    errors: [],
-    lease: {
-      jobId,
-      appInstanceId: APP_INSTANCE_ID$2,
-      pid: process.pid,
-      acquiredAt: now,
-      heartbeatAt: now
-    }
-  };
-}
-function isThumbnailLeaseStale(lease, thresholdMs = 3e4) {
-  if (!lease) return false;
-  if (lease.appInstanceId !== APP_INSTANCE_ID$2) {
-    const age = Date.now() - new Date(lease.heartbeatAt).getTime();
-    if (age > thresholdMs) {
-      return true;
-    }
-    try {
-      process.kill(lease.pid, 0);
-      return false;
-    } catch {
-      return true;
-    }
-  }
-  return false;
-}
-function saveThumbnailJobStateAtomic(projectDir, state2) {
-  const filePath = getThumbnailJobStatePath(projectDir);
-  const backupPath = getThumbnailJobStateBackupPath(projectDir);
-  const dir = path__namespace.dirname(filePath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  state2.version = (state2.version || 0) + 1;
-  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  if (state2.lease) {
-    state2.lease.heartbeatAt = state2.updatedAt;
-  }
-  const serialized = JSON.stringify(state2, null, 2);
-  const tmpPath = `${filePath}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
-  fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
-  try {
-    fs__namespace.renameSync(tmpPath, filePath);
-    try {
-      fs__namespace.copyFileSync(filePath, backupPath);
-    } catch {
-    }
-  } finally {
-    if (fs__namespace.existsSync(tmpPath)) {
-      try {
-        fs__namespace.unlinkSync(tmpPath);
-      } catch {
-      }
-    }
-  }
-}
-function loadThumbnailJobState(projectDir) {
-  const filePath = getThumbnailJobStatePath(projectDir);
-  const backupPath = getThumbnailJobStateBackupPath(projectDir);
-  if (fs__namespace.existsSync(filePath)) {
-    try {
-      const raw = fs__namespace.readFileSync(filePath, "utf-8");
-      return JSON.parse(raw);
-    } catch (err) {
-      logger.warn(`[ThumbnailState] Primary state corrupted at ${filePath}: ${err}. Attempting recovery from backup...`);
-    }
-  }
-  if (fs__namespace.existsSync(backupPath)) {
-    try {
-      const raw = fs__namespace.readFileSync(backupPath, "utf-8");
-      const recovered = JSON.parse(raw);
-      logger.info(`[ThumbnailState] Successfully recovered thumbnail state from backup for ${projectDir}`);
-      saveThumbnailJobStateAtomic(projectDir, recovered);
-      return recovered;
-    } catch (err) {
-      logger.error(`[ThumbnailState] Backup state also corrupted at ${backupPath}: ${err}`);
-    }
-  }
-  return null;
-}
-function getRoundDirectory(projectDir, round) {
-  const roundStr = `round-${String(round).padStart(3, "0")}`;
-  return path__namespace.join(projectDir, "output", "thumbnails", roundStr);
-}
-function getCandidateImagePath(projectDir, round, optionId, revision = 1) {
-  const roundDir = getRoundDirectory(projectDir, round);
-  const revSuffix = revision > 1 ? `-rev${revision}` : "";
-  return path__namespace.join(roundDir, `thumbnail-${optionId}-master${revSuffix}.png`);
-}
-function getSelectedDirectory(projectDir) {
-  return path__namespace.join(projectDir, "output", "thumbnails", "selected");
-}
-function reconcileThumbnailArtifacts(projectDir, state2) {
-  let changed = false;
-  getRoundDirectory(projectDir, state2.generationRound);
-  for (const cand of state2.candidates) {
-    if (cand.round !== state2.generationRound) continue;
-    const expectedPath = cand.exportedImagePath || getCandidateImagePath(projectDir, cand.round, cand.optionId, cand.revision);
-    if (fs__namespace.existsSync(expectedPath)) {
-      const stat = fs__namespace.statSync(expectedPath);
-      if (stat.size > 0) {
-        const dims = probeImageFile(expectedPath);
-        if (dims && cand.status !== "completed") {
-          cand.status = "completed";
-          cand.exportedImagePath = expectedPath;
-          cand.actualWidth = dims.width;
-          cand.actualHeight = dims.height;
-          cand.exportQuality = cand.exportQuality || (dims.width >= 3840 ? "native-4k" : "2k-fallback");
-          changed = true;
-          logger.info(`[ThumbnailArtifacts] Reconciled candidate ${cand.optionId} to completed from disk artifact (${expectedPath})`);
-        }
-      }
-    }
-  }
-  const allCompleted = state2.candidates.length === 5 && state2.candidates.every((c) => c.status === "completed");
-  if (allCompleted && state2.status !== "completed") {
-    state2.status = "completed";
-    state2.completedAt = state2.completedAt || (/* @__PURE__ */ new Date()).toISOString();
-    changed = true;
-  }
-  return changed;
-}
-function saveThumbnailManifest(projectDir, state2) {
-  const roundDir = getRoundDirectory(projectDir, state2.generationRound);
-  if (!fs__namespace.existsSync(roundDir)) {
-    fs__namespace.mkdirSync(roundDir, { recursive: true });
-  }
-  const manifestPath = path__namespace.join(roundDir, "manifest.json");
-  const manifest = {
-    projectId: path__namespace.basename(projectDir),
-    renderOutput: state2.renderOutputPath,
-    scriptHash: state2.scriptHash,
-    templateSnapshotHash: state2.templateSnapshotHash,
-    generationRound: state2.generationRound,
-    flowModel: "GEM_PIX_2",
-    flowProjectId: state2.flowProjectId,
-    candidates: state2.candidates.map((c) => ({
-      id: c.id,
-      optionId: c.optionId,
-      conceptName: c.conceptName,
-      yellowText: c.yellowText,
-      whiteText: c.whiteText,
-      titleClear: c.titleClear,
-      titleCuriosity: c.titleCuriosity,
-      imagePrompt: c.imagePrompt,
-      mediaId: c.mediaId,
-      actualDimensions: c.actualWidth && c.actualHeight ? { width: c.actualWidth, height: c.actualHeight } : void 0,
-      actualExportQuality: c.exportQuality,
-      filePath: c.exportedImagePath,
-      status: c.status,
-      error: c.error
-    })),
-    selectedCandidateId: state2.selectedCandidateId,
-    createdAt: state2.createdAt,
-    completedAt: state2.completedAt,
-    errors: state2.errors
-  };
-  fs__namespace.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), "utf-8");
-  logger.info(`[ThumbnailArtifacts] Saved manifest.json for round ${state2.generationRound} to ${manifestPath}`);
-}
-function selectThumbnailCandidate(projectDir, state2, candidateId) {
-  const candidate = state2.candidates.find((c) => c.id === candidateId);
-  if (!candidate) {
-    return { success: false, error: `Candidate not found: ${candidateId}` };
-  }
-  if (candidate.status !== "completed" || !candidate.exportedImagePath || !fs__namespace.existsSync(candidate.exportedImagePath)) {
-    return { success: false, error: `Candidate ${candidate.optionId} is not completed or missing image file` };
-  }
-  const selectedDir = getSelectedDirectory(projectDir);
-  if (!fs__namespace.existsSync(selectedDir)) {
-    fs__namespace.mkdirSync(selectedDir, { recursive: true });
-  }
-  const ext = path__namespace.extname(candidate.exportedImagePath) || ".png";
-  const destImagePath = path__namespace.join(selectedDir, `selected-thumbnail${ext}`);
-  const destMetaPath = path__namespace.join(selectedDir, "selected-thumbnail.json");
-  fs__namespace.copyFileSync(candidate.exportedImagePath, destImagePath);
-  const meta = {
-    selectedCandidateId: candidate.id,
-    optionId: candidate.optionId,
-    conceptName: candidate.conceptName,
-    yellowText: candidate.yellowText,
-    whiteText: candidate.whiteText,
-    titleClear: candidate.titleClear,
-    titleCuriosity: candidate.titleCuriosity,
-    imagePrompt: candidate.imagePrompt,
-    mediaId: candidate.mediaId,
-    actualDimensions: { width: candidate.actualWidth, height: candidate.actualHeight },
-    exportQuality: candidate.exportQuality,
-    sourceFilePath: candidate.exportedImagePath,
-    selectedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  fs__namespace.writeFileSync(destMetaPath, JSON.stringify(meta, null, 2), "utf-8");
-  state2.selectedCandidateId = candidate.id;
-  saveThumbnailJobStateAtomic(projectDir, state2);
-  saveThumbnailManifest(projectDir, state2);
-  logger.info(`[ThumbnailArtifacts] Selected candidate ${candidate.optionId} copied to ${destImagePath}`);
-  return { success: true, selectedPath: destImagePath };
-}
-class ThumbnailFlowError extends Error {
-  code;
-  retryable;
-  scope;
-  constructor(code, message, retryable, scope) {
-    super(message);
-    this.name = "ThumbnailFlowError";
-    this.code = code;
-    this.retryable = retryable;
-    this.scope = scope;
-  }
-}
-class ThumbnailCancelledError extends Error {
-  constructor() {
-    super("THUMBNAIL_JOB_CANCELLED: Generation was cancelled.");
-    this.name = "ThumbnailCancelledError";
-  }
-}
-function abortableDelay(ms, signal) {
-  return new Promise((resolve, reject2) => {
-    if (signal.aborted) {
-      reject2(new ThumbnailCancelledError());
-      return;
-    }
-    const timer = setTimeout(() => {
-      signal.removeEventListener("abort", onAbort);
-      resolve();
-    }, ms);
-    const onAbort = () => {
-      clearTimeout(timer);
-      reject2(new ThumbnailCancelledError());
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-function classifyGenerationError(err, bridgeUrl) {
-  const rawMsg = err instanceof Error ? err.message : String(err);
-  const cause = err instanceof Error ? err.cause : void 0;
-  const causeCode = cause?.code || "";
-  if (rawMsg.startsWith("FLOWKIT_BRIDGE_OFFLINE") || causeCode === "ECONNREFUSED" || rawMsg.includes("ECONNREFUSED")) {
-    return new ThumbnailFlowError(
-      "FLOWKIT_BRIDGE_OFFLINE",
-      `FlowKit is not running at ${bridgeUrl}. Start FlowKit with: python -m agent.main`,
-      false,
-      "connector"
-    );
-  }
-  if (rawMsg.includes("fetch failed") || rawMsg.includes("Failed to fetch") || rawMsg.includes("ENOTFOUND")) {
-    return new ThumbnailFlowError(
-      "FLOWKIT_BRIDGE_OFFLINE",
-      `FlowKit bridge is not running at ${bridgeUrl}. Start FlowKit with: python -m agent.main`,
-      false,
-      "connector"
-    );
-  }
-  if (rawMsg.startsWith("FLOWKIT_TIMEOUT") || rawMsg.includes("ETIMEDOUT") || rawMsg.includes("timed out")) {
-    return new ThumbnailFlowError(
-      "FLOWKIT_TIMEOUT",
-      "FlowKit bridge request timed out. The bridge may be overloaded or unresponsive.",
-      true,
-      "candidate"
-    );
-  }
-  if (rawMsg.startsWith("FLOW_EXTENSION_DISCONNECTED") || rawMsg.includes("FLOW_EXTENSION_DISCONNECTED")) {
-    return new ThumbnailFlowError(
-      "FLOW_EXTENSION_DISCONNECTED",
-      "Chrome extension is disconnected. Open Google Flow in Chrome and reconnect the extension.",
-      false,
-      "connector"
-    );
-  }
-  if (rawMsg.startsWith("FLOW_RATE_LIMITED")) {
-    return new ThumbnailFlowError(
-      "FLOW_RATE_LIMITED",
-      rawMsg.replace("FLOW_RATE_LIMITED:", "").trim() || "Google Flow rate limit reached.",
-      true,
-      "candidate"
-    );
-  }
-  if (rawMsg.startsWith("FLOW_RECAPTCHA_FAILED")) {
-    return new ThumbnailFlowError(
-      "FLOW_RECAPTCHA_FAILED",
-      rawMsg.replace("FLOW_RECAPTCHA_FAILED:", "").trim() || "reCAPTCHA verification failed.",
-      true,
-      "candidate"
-    );
-  }
-  if (rawMsg.startsWith("FLOW_GENERATION_FAILED") || rawMsg.startsWith("FLOW_EXPORT_FAILED")) {
-    const [code, ...rest] = rawMsg.split(":");
-    return new ThumbnailFlowError(code, rest.join(":").trim() || rawMsg, false, "candidate");
-  }
-  if (rawMsg.includes("THUMBNAIL_JOB_CANCELLED") || err instanceof ThumbnailCancelledError) {
-    return new ThumbnailFlowError("THUMBNAIL_JOB_CANCELLED", "Generation was cancelled.", false, "job");
-  }
-  return new ThumbnailFlowError("FLOW_GENERATION_FAILED", rawMsg, false, "candidate");
-}
-function addUniqueDiagnostic(arr, message) {
-  const key = message.substring(0, 60);
-  const exists = arr.some((e) => e.substring(0, 60) === key);
-  if (!exists) {
-    arr.push(message);
-    return true;
-  }
-  return false;
-}
-function reconcileCandidatesForResume(state2, projectDir, hasActiveRun) {
-  let changed = false;
-  for (const c of state2.candidates) {
-    if (c.status === "generating" || c.status === "exporting") {
-      if (!hasActiveRun) {
-        c.status = "pending";
-        c.error = void 0;
-        changed = true;
-      }
-    } else if (c.status === "completed") {
-      const filePath = c.exportedImagePath || getCandidateImagePath(projectDir, c.round, c.optionId, c.revision);
-      if (!fs__namespace.existsSync(filePath) || fs__namespace.statSync(filePath).size === 0) {
-        c.status = "pending";
-        c.error = void 0;
-        changed = true;
-      }
-    }
-  }
-  return changed;
-}
-function deriveJobStatus(state2, hasActiveRun) {
-  const candidates = state2.candidates;
-  const completedCount = candidates.filter((c) => c.status === "completed").length;
-  const failedCount = candidates.filter((c) => c.status === "failed").length;
-  const runningCount = candidates.filter((c) => c.status === "generating" || c.status === "exporting").length;
-  const pendingCount = candidates.filter((c) => c.status === "pending").length;
-  const total = candidates.length;
-  if (state2.status === "cancelled") return "cancelled";
-  if (completedCount === total && total > 0) return "completed";
-  if (runningCount > 0 || pendingCount > 0 && hasActiveRun) return "generating";
-  if (completedCount > 0 && (failedCount > 0 || pendingCount > 0)) return "partial";
-  if (pendingCount > 0 && !hasActiveRun) return "interrupted";
-  if (failedCount > 0) {
-    const allConnectorFailed = candidates.filter((c) => c.status === "failed").every((c) => c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED")));
-    return allConnectorFailed ? "needs-attention" : "failed";
-  }
-  return state2.status;
-}
-class ThumbnailOrchestrator {
-  /** Single-flight map: projectDir → active run. Only ONE run per project allowed. */
-  activeJobs = /* @__PURE__ */ new Map();
-  provider;
-  defaultCooldownMs = 8e3;
-  runtimeManager;
-  constructor(provider, runtimeManager) {
-    this.provider = provider || googleFlowProvider;
-    this.runtimeManager = runtimeManager || flowkitRuntimeManager;
-  }
-  setRuntimeManager(rm) {
-    this.runtimeManager = rm;
-  }
-  setCooldownMs(ms) {
-    this.defaultCooldownMs = ms;
-  }
-  // ─── getJobState ─────────────────────────────────────────────────────────
-  async getJobState(projectDir) {
-    const state2 = loadThumbnailJobState(projectDir);
-    if (!state2) return null;
-    const hasActiveRun = this.activeJobs.has(projectDir);
-    const changed1 = reconcileThumbnailArtifacts(projectDir, state2);
-    const changed2 = reconcileCandidatesForResume(state2, projectDir, hasActiveRun);
-    let changed3 = false;
-    if (state2.status === "generating" && !hasActiveRun) {
-      const derived = deriveJobStatus(state2, false);
-      if (derived !== state2.status) {
-        logger.info(`[ThumbnailOrchestrator] Reconciled stuck job for ${projectDir}: ${state2.status}→${derived}`);
-        state2.status = derived;
-        changed3 = true;
-      }
-    }
-    if (changed1 || changed2 || changed3) {
-      saveThumbnailJobStateAtomic(projectDir, state2);
-    }
-    return state2;
-  }
-  // ─── startJob ────────────────────────────────────────────────────────────
-  async startJob(params) {
-    const { projectDir } = params;
-    const existing = this.activeJobs.get(projectDir);
-    if (existing) {
-      logger.info(`[ThumbnailOrchestrator] Job already actively running for ${projectDir} (jobId=${existing.jobId}). Returning existing.`);
-      return existing.promise;
-    }
-    const settings = await loadProjectThumbnailSettings(projectDir);
-    const script = this.resolveScriptText(projectDir, params.scriptPath);
-    const scriptHash2 = computeSha256(script || "no-script");
-    const templateSnapshot = params.templateSnapshot || settings.templateSnapshot || "";
-    const templateSnapshotHash = computeSha256(templateSnapshot);
-    const renderOutputPath = params.renderOutputPath || this.resolveRenderOutputPath(projectDir);
-    let renderFileSize = 0;
-    let renderMtimeMs = 0;
-    if (renderOutputPath && fs__namespace.existsSync(renderOutputPath)) {
-      const st = fs__namespace.statSync(renderOutputPath);
-      renderFileSize = st.size;
-      renderMtimeMs = st.mtimeMs;
-    }
-    const round = params.generationRound || 1;
-    const existingState = loadThumbnailJobState(projectDir);
-    if (existingState && !params.forceRestart) {
-      if (existingState.status === "completed" && existingState.generationRound === round) {
-        logger.info(`[ThumbnailOrchestrator] Completed job found for round ${round}. Skipping.`);
-        return existingState;
-      }
-      if (existingState.status === "generating" && isThumbnailLeaseStale(existingState.lease)) {
-        logger.info(`[ThumbnailOrchestrator] Stale lease detected. Reconciling to interrupted state.`);
-        existingState.status = "interrupted";
-        for (const c of existingState.candidates) {
-          if (c.status === "generating" || c.status === "exporting") {
-            c.status = "pending";
-            c.error = void 0;
-          }
-        }
-        if (existingState.lease) delete existingState.lease;
-        saveThumbnailJobStateAtomic(projectDir, existingState);
-        return existingState;
-      }
-    }
-    const readiness = await this.runtimeManager.ensureFlowReady();
-    if (!readiness.ready) {
-      logger.warn(`[ThumbnailOrchestrator] startJob preflight failed: ${readiness.blockingCode} — ${readiness.message}`);
-      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash: scriptHash2, templateSnapshotHash, round, params, settings, templateSnapshot });
-    }
-    const abortController = new AbortController();
-    const jobIdPlaceholder = `job-${Date.now()}`;
-    const executionPromise = (async () => {
-      try {
-        let state2;
-        if (existingState && existingState.candidates.length === 5 && existingState.generationRound === round && !params.forceRestart) {
-          state2 = existingState;
-          reconcileCandidatesForResume(state2, projectDir, true);
-          state2.status = "generating";
-          state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-          saveThumbnailJobStateAtomic(projectDir, state2);
+      lastError = msg;
+      const { kind } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      if (kind === "MODEL_NOT_FOUND") {
+        const nextModel = modelChain[activeModelIndex + 1];
+        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic fallback"}.`);
+        if (activeModelIndex + 1 < modelChain.length) {
+          activeModelIndex++;
+          continue;
         } else {
-          this.broadcastProgress({
-            projectDir,
-            jobId: jobIdPlaceholder,
-            status: "planning",
-            stage: "planning",
-            completedCount: 0,
-            totalCount: 5,
-            progress: 0.1,
-            message: "Generating 5 distinct thumbnail concepts from script..."
-          });
-          const plan = await thumbnailPlanner.plan({
-            projectDir,
-            templateId: params.templateId || settings.selectedTemplateId,
-            templateSnapshot,
-            preferredModel: params.preferredModel,
-            generationRound: round
-          });
-          state2 = createInitialThumbnailJobState({
-            projectDir,
-            renderOutputPath,
-            renderFileSize,
-            renderMtimeMs,
-            scriptHash: scriptHash2,
-            templateSnapshotHash,
-            generationRound: round,
-            plan
-          });
-          saveThumbnailJobStateAtomic(projectDir, state2);
-        }
-        reconcileThumbnailArtifacts(projectDir, state2);
-        saveThumbnailJobStateAtomic(projectDir, state2);
-        const cooldown = params.cooldownMs ?? this.defaultCooldownMs;
-        await this.runConcurrentCandidates(state2, abortController.signal, cooldown);
-        return this.finalizeJob(state2, projectDir);
-      } finally {
-        this.activeJobs.delete(projectDir);
-      }
-    })();
-    this.activeJobs.set(projectDir, { abortController, promise: executionPromise, jobId: jobIdPlaceholder });
-    return executionPromise;
-  }
-  // ─── resumeJob ───────────────────────────────────────────────────────────
-  async resumeJob(projectDir) {
-    const existing = this.activeJobs.get(projectDir);
-    if (existing) {
-      logger.info(`[ThumbnailOrchestrator] Resume requested but job already running (jobId=${existing.jobId}). Returning existing.`);
-      return existing.promise;
-    }
-    const state2 = loadThumbnailJobState(projectDir);
-    if (!state2) {
-      throw new Error(`No thumbnail job state found to resume for ${projectDir}`);
-    }
-    reconcileThumbnailArtifacts(projectDir, state2);
-    reconcileCandidatesForResume(state2, projectDir, false);
-    const incomplete = state2.candidates.filter((c) => c.status !== "completed");
-    if (incomplete.length === 0) {
-      state2.status = "completed";
-      state2.completedAt = state2.completedAt || (/* @__PURE__ */ new Date()).toISOString();
-      saveThumbnailJobStateAtomic(projectDir, state2);
-      return state2;
-    }
-    const readiness = await this.runtimeManager.ensureFlowReady();
-    if (!readiness.ready) {
-      logger.warn(`[ThumbnailOrchestrator] Resume preflight failed: ${readiness.blockingCode}`);
-      for (const c of state2.candidates) {
-        if (c.status === "generating" || c.status === "exporting") {
-          c.status = "pending";
-          c.error = void 0;
+          break;
         }
       }
-      state2.status = "needs-attention";
-      state2.errors = state2.errors || [];
-      addUniqueDiagnostic(state2.errors, `[${readiness.blockingCode}] ${readiness.message}`);
-      saveThumbnailJobStateAtomic(projectDir, state2);
-      this.broadcastProgress({
-        projectDir,
-        jobId: state2.jobId,
-        status: "needs-attention",
-        stage: "idle",
-        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
-        totalCount: 5,
-        progress: 0,
-        message: readiness.message,
-        jobState: state2
-      });
-      return state2;
-    }
-    for (const c of incomplete) {
-      if (c.status === "failed") {
-        const isConnectorError = c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED"));
-        if (isConnectorError || !c.error) {
-          c.status = "pending";
-          c.error = void 0;
-        }
-      }
-    }
-    state2.status = "generating";
-    state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    const abortController = new AbortController();
-    const executionPromise = (async () => {
-      try {
-        await this.runConcurrentCandidates(state2, abortController.signal, this.defaultCooldownMs);
-        return this.finalizeJob(state2, projectDir);
-      } finally {
-        this.activeJobs.delete(projectDir);
-      }
-    })();
-    this.activeJobs.set(projectDir, { abortController, promise: executionPromise, jobId: state2.jobId });
-    return executionPromise;
-  }
-  // ─── cancelJob ───────────────────────────────────────────────────────────
-  async cancelJob(projectDir) {
-    const active = this.activeJobs.get(projectDir);
-    if (active) {
-      active.abortController.abort();
-    }
-    const state2 = loadThumbnailJobState(projectDir);
-    if (state2 && (state2.status === "generating" || state2.status === "planning")) {
-      state2.status = "cancelled";
-      for (const c of state2.candidates) {
-        if (c.status === "generating" || c.status === "exporting") {
-          c.status = "pending";
-        }
-      }
-      saveThumbnailJobStateAtomic(projectDir, state2);
-      this.broadcastProgress({
-        projectDir,
-        jobId: state2.jobId,
-        status: "cancelled",
-        stage: "idle",
-        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
-        totalCount: 5,
-        progress: 0,
-        message: "Thumbnail generation cancelled by user.",
-        jobState: state2
-      });
-      return true;
-    }
-    return false;
-  }
-  // ─── generateMore ─────────────────────────────────────────────────────────
-  async generateMore(projectDir, templateId, templateSnapshot) {
-    if (this.activeJobs.has(projectDir)) {
-      const state2 = loadThumbnailJobState(projectDir);
-      if (state2) return state2;
-      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Generation already in progress.");
-    }
-    const existing = loadThumbnailJobState(projectDir);
-    const nextRound = (existing?.generationRound || 1) + 1;
-    const previousConceptsList = [];
-    if (existing?.candidates) {
-      for (const c of existing.candidates) {
-        previousConceptsList.push(`- [${c.optionId}] ${c.conceptName}: "${c.yellowText} / ${c.whiteText}"`);
-      }
-    }
-    logger.info(`[ThumbnailOrchestrator] Generating 5 More thumbnails for round ${nextRound}...`);
-    return this.startJob({
-      projectDir,
-      templateId,
-      templateSnapshot,
-      generationRound: nextRound,
-      forceRestart: true
-    });
-  }
-  // ─── retryCandidate ───────────────────────────────────────────────────────
-  async retryCandidate(projectDir, candidateId) {
-    if (this.activeJobs.has(projectDir)) {
-      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Cannot retry individual candidate while batch is running.");
-    }
-    const state2 = loadThumbnailJobState(projectDir);
-    if (!state2) throw new Error("No thumbnail job found");
-    const candidate = state2.candidates.find((c) => c.id === candidateId);
-    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
-    const readiness = await this.runtimeManager.ensureFlowReady();
-    if (!readiness.ready) {
-      throw new ThumbnailFlowError(
-        readiness.blockingCode || "FLOWKIT_BRIDGE_OFFLINE",
-        readiness.message || "FlowKit is not ready.",
-        false,
-        "connector"
-      );
-    }
-    logger.info(`[ThumbnailOrchestrator] Retrying candidate ${candidate.optionId}...`);
-    candidate.status = "generating";
-    candidate.attempts = (candidate.attempts || 0) + 1;
-    candidate.error = void 0;
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    const abortController = new AbortController();
-    try {
-      await this.processSingleCandidate(state2, candidate, abortController.signal);
-    } catch (err) {
-      const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
-      candidate.status = "failed";
-      candidate.error = `${structured.code}: ${structured.message}`;
-    }
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    saveThumbnailManifest(projectDir, state2);
-    return candidate;
-  }
-  // ─── regenerateCandidate ─────────────────────────────────────────────────
-  async regenerateCandidate(projectDir, candidateId, customPrompt) {
-    if (this.activeJobs.has(projectDir)) {
-      throw new Error("THUMBNAIL_JOB_ALREADY_RUNNING: Cannot regenerate individual candidate while batch is running.");
-    }
-    const state2 = loadThumbnailJobState(projectDir);
-    if (!state2) throw new Error("No thumbnail job found");
-    const candidate = state2.candidates.find((c) => c.id === candidateId);
-    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
-    const readiness = await this.runtimeManager.ensureFlowReady();
-    if (!readiness.ready) {
-      throw new ThumbnailFlowError(
-        readiness.blockingCode || "FLOWKIT_BRIDGE_OFFLINE",
-        readiness.message || "FlowKit is not ready.",
-        false,
-        "connector"
-      );
-    }
-    candidate.revision = (candidate.revision || 1) + 1;
-    if (customPrompt) {
-      candidate.imagePrompt = customPrompt.trim();
-    }
-    candidate.status = "generating";
-    candidate.error = void 0;
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    const abortController = new AbortController();
-    try {
-      await this.processSingleCandidate(state2, candidate, abortController.signal);
-    } catch (err) {
-      const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
-      candidate.status = "failed";
-      candidate.error = `${structured.code}: ${structured.message}`;
-    }
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    saveThumbnailManifest(projectDir, state2);
-    return candidate;
-  }
-  // ─── exportCandidate4k ────────────────────────────────────────────────────
-  async exportCandidate4k(projectDir, candidateId) {
-    const state2 = loadThumbnailJobState(projectDir);
-    if (!state2) throw new Error("No thumbnail job found");
-    const candidate = state2.candidates.find((c) => c.id === candidateId);
-    if (!candidate) throw new Error(`Candidate not found: ${candidateId}`);
-    if (!candidate.mediaId) {
-      throw new Error(`Candidate ${candidate.optionId} does not have a mediaId yet. Generate it first.`);
-    }
-    candidate.status = "exporting";
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    const destPath = getCandidateImagePath(projectDir, candidate.round, candidate.optionId, candidate.revision);
-    const exportRes = await this.provider.exportImage({
-      mediaId: candidate.mediaId,
-      projectId: state2.flowProjectId,
-      quality: "4k",
-      fallbackToOriginalUrl: candidate.originalImagePath,
-      destinationPath: destPath
-    });
-    candidate.status = "completed";
-    candidate.exportedImagePath = exportRes.filePath;
-    candidate.actualWidth = exportRes.width;
-    candidate.actualHeight = exportRes.height;
-    candidate.exportQuality = exportRes.actualQuality;
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    saveThumbnailManifest(projectDir, state2);
-    return candidate;
-  }
-  // ─── selectCandidate ─────────────────────────────────────────────────────
-  selectCandidate(projectDir, candidateId) {
-    const state2 = loadThumbnailJobState(projectDir);
-    if (!state2) throw new Error("No thumbnail job found");
-    return selectThumbnailCandidate(projectDir, state2, candidateId);
-  }
-  // ─── handleAppQuit ────────────────────────────────────────────────────────
-  handleAppQuit() {
-    logger.info("[ThumbnailOrchestrator] App quitting. Marking running thumbnail jobs as interrupted...");
-    for (const [projectDir, active] of this.activeJobs.entries()) {
-      active.abortController.abort();
-      const state2 = loadThumbnailJobState(projectDir);
-      if (state2 && (state2.status === "generating" || state2.status === "planning")) {
-        state2.status = "interrupted";
-        for (const c of state2.candidates) {
-          if (c.status === "generating" || c.status === "exporting") {
-            c.status = "pending";
-          }
-        }
-        if (state2.lease) delete state2.lease;
-        saveThumbnailJobStateAtomic(projectDir, state2);
-      }
-    }
-    this.activeJobs.clear();
-  }
-  // ─── Private: runSequentialCandidates ─────────────────────────────────────
-  /**
-   * Run candidates strictly sequentially, one at a time.
-   * Uses ONE retry loop here in the orchestrator. GoogleFlowClient does NOT retry.
-   * @deprecated Kept as fallback. Active path uses runConcurrentCandidates.
-   */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  async runSequentialCandidates(state2, signal, cooldownMs) {
-    const candidates = state2.candidates;
-    const MAX_CANDIDATE_ATTEMPTS = 4;
-    for (let i = 0; i < candidates.length; i++) {
-      if (signal.aborted) {
-        logger.info("[ThumbnailOrchestrator] Abort signal received. Stopping candidate loop.");
-        state2.status = "cancelled";
-        saveThumbnailJobStateAtomic(state2.projectDir, state2);
-        return;
-      }
-      const candidate = candidates[i];
-      if (candidate.status === "completed") {
-        logger.info(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} already completed, skipping.`);
+      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`);
+      const isOverloaded = kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE" || msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
+      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
+        activeModelIndex++;
+        await new Promise((r) => setTimeout(r, 1500));
         continue;
       }
-      if (!await this.runtimeManager.isBridgeStillReachable()) {
-        logger.warn(`[ThumbnailOrchestrator] Bridge went offline before candidate ${candidate.optionId}. Pausing batch.`);
-        this.pauseBatchForBridgeOffline(state2, i, candidates);
-        return;
-      }
-      this.broadcastProgress({
-        projectDir: state2.projectDir,
-        jobId: state2.jobId,
-        status: "generating",
-        stage: "generating",
-        currentOptionId: candidate.optionId,
-        completedCount: candidates.filter((c) => c.status === "completed").length,
-        totalCount: 5,
-        progress: (candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
-        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
-        candidate,
-        jobState: state2
-      });
-      let succeeded = false;
-      let lastError = null;
-      const attemptsAtStart = candidate.attempts || 0;
-      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
-        if (signal.aborted) {
-          state2.status = "cancelled";
-          saveThumbnailJobStateAtomic(state2.projectDir, state2);
-          return;
-        }
-        logger.info(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} (runId=${state2.jobId})`);
-        try {
-          await this.processSingleCandidate(state2, candidate, signal);
-          succeeded = true;
-          break;
-        } catch (err) {
-          if (err instanceof ThumbnailCancelledError) {
-            state2.status = "cancelled";
-            saveThumbnailJobStateAtomic(state2.projectDir, state2);
-            return;
-          }
-          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
-          lastError = structured;
-          logger.error(
-            `[ThumbnailOrchestrator] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
-          );
-          if (structured.scope === "connector") {
-            logger.warn(`[ThumbnailOrchestrator] Connector error on candidate ${candidate.optionId}. Aborting batch.`);
-            candidate.status = "pending";
-            candidate.error = void 0;
-            candidate.attempts = attemptsAtStart;
-            this.pauseBatchForBridgeOffline(state2, i, candidates, structured);
-            return;
-          }
-          if (!structured.retryable) {
-            break;
-          }
-          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
-            const backoffMs = Math.min(3e3 * attempt, 15e3);
-            logger.warn(`[ThumbnailOrchestrator] Retryable error. Waiting ${backoffMs}ms before attempt ${attempt + 1}...`);
-            try {
-              await abortableDelay(backoffMs, signal);
-            } catch {
-              state2.status = "cancelled";
-              saveThumbnailJobStateAtomic(state2.projectDir, state2);
-              return;
-            }
-          }
-        }
-      }
-      if (!succeeded && lastError) {
-        candidate.status = "failed";
-        candidate.error = `${lastError.code}: ${lastError.message}`;
-        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
-        logger.error(`[ThumbnailOrchestrator] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
-      }
-      saveThumbnailJobStateAtomic(state2.projectDir, state2);
-      saveThumbnailManifest(state2.projectDir, state2);
-      const updatedCompleted = candidates.filter((c) => c.status === "completed").length;
-      this.broadcastProgress({
-        projectDir: state2.projectDir,
-        jobId: state2.jobId,
-        status: "generating",
-        stage: candidate.status === "completed" ? "exporting" : "generating",
-        currentOptionId: candidate.optionId,
-        completedCount: updatedCompleted,
-        totalCount: 5,
-        progress: updatedCompleted / 5,
-        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
-        candidate,
-        jobState: state2
-      });
-      if (i < candidates.length - 1 && !signal.aborted) {
-        logger.info(`[ThumbnailOrchestrator] Cooldown ${cooldownMs}ms before next candidate...`);
-        try {
-          await abortableDelay(cooldownMs, signal);
-        } catch {
-          state2.status = "cancelled";
-          saveThumbnailJobStateAtomic(state2.projectDir, state2);
-          return;
-        }
+      if (attempt < 4) {
+        await new Promise((r) => setTimeout(r, 2e3));
       }
     }
   }
-  // ─── Private: runConcurrentCandidates ─────────────────────────────────────
-  /**
-   * Run all pending candidates in parallel (Promise.allSettled).
-   * Each candidate gets its own retry loop (MAX_CANDIDATE_ATTEMPTS).
-   * Progress is broadcast immediately when each candidate completes.
-   * Connector errors (bridge offline) abort ALL siblings via AbortController.
-   */
-  async runConcurrentCandidates(state2, signal, _cooldownMs) {
-    const candidates = state2.candidates.filter((c) => c.status !== "completed");
-    if (candidates.length === 0) return;
-    const MAX_CANDIDATE_ATTEMPTS = 4;
-    const innerAbort = new AbortController();
-    signal.addEventListener("abort", () => innerAbort.abort(), { once: true });
-    const runOne = async (candidate) => {
-      if (signal.aborted || innerAbort.signal.aborted) {
-        state2.status = "cancelled";
-        return;
-      }
-      const attemptsAtStart = candidate.attempts || 0;
-      let succeeded = false;
-      let lastError = null;
-      if (!await this.runtimeManager.isBridgeStillReachable()) {
-        logger.warn(`[ThumbnailOrchestrator] Bridge offline before concurrent candidate ${candidate.optionId}.`);
-        innerAbort.abort();
-        this.pauseBatchForBridgeOffline(state2, 0, state2.candidates);
-        return;
-      }
-      this.broadcastProgress({
-        projectDir: state2.projectDir,
-        jobId: state2.jobId,
-        status: "generating",
-        stage: "generating",
-        currentOptionId: candidate.optionId,
-        completedCount: state2.candidates.filter((c) => c.status === "completed").length,
-        totalCount: 5,
-        progress: (state2.candidates.filter((c) => c.status === "completed").length + 0.1) / 5,
-        message: `Generating image for Option ${candidate.optionId}: "${candidate.conceptName}"...`,
-        candidate,
-        jobState: state2
-      });
-      for (let attempt = 1; attempt <= MAX_CANDIDATE_ATTEMPTS; attempt++) {
-        if (signal.aborted || innerAbort.signal.aborted) {
-          state2.status = "cancelled";
-          saveThumbnailJobStateAtomic(state2.projectDir, state2);
-          return;
-        }
-        logger.info(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS}`);
-        try {
-          await this.processSingleCandidate(state2, candidate, innerAbort.signal);
-          succeeded = true;
-          break;
-        } catch (err) {
-          if (err instanceof ThumbnailCancelledError) {
-            state2.status = "cancelled";
-            saveThumbnailJobStateAtomic(state2.projectDir, state2);
-            return;
-          }
-          const structured = classifyGenerationError(err, this.runtimeManager.getSettings().bridgeUrl);
-          lastError = structured;
-          logger.error(
-            `[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} attempt ${attempt}/${MAX_CANDIDATE_ATTEMPTS} failed: [${structured.code}] ${structured.message}`
-          );
-          if (structured.scope === "connector") {
-            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Connector error on ${candidate.optionId}. Aborting all concurrent candidates.`);
-            candidate.status = "pending";
-            candidate.error = void 0;
-            candidate.attempts = attemptsAtStart;
-            innerAbort.abort();
-            this.pauseBatchForBridgeOffline(state2, 0, state2.candidates, structured);
-            return;
-          }
-          if (!structured.retryable) break;
-          if (attempt < MAX_CANDIDATE_ATTEMPTS) {
-            const backoffMs = Math.min(3e3 * attempt, 15e3);
-            logger.warn(`[ThumbnailOrchestrator] [Concurrent] Retryable error on ${candidate.optionId}. Waiting ${backoffMs}ms...`);
-            try {
-              await abortableDelay(backoffMs, innerAbort.signal);
-            } catch {
-              state2.status = "cancelled";
-              saveThumbnailJobStateAtomic(state2.projectDir, state2);
-              return;
-            }
-          }
-        }
-      }
-      if (!succeeded && lastError) {
-        candidate.status = "failed";
-        candidate.error = `${lastError.code}: ${lastError.message}`;
-        addUniqueDiagnostic(state2.errors, `Option ${candidate.optionId}: ${lastError.code}: ${lastError.message}`);
-        logger.error(`[ThumbnailOrchestrator] [Concurrent] Candidate ${candidate.optionId} exhausted all ${MAX_CANDIDATE_ATTEMPTS} attempts.`);
-      }
-      saveThumbnailJobStateAtomic(state2.projectDir, state2);
-      saveThumbnailManifest(state2.projectDir, state2);
-      const updatedCompleted = state2.candidates.filter((c) => c.status === "completed").length;
-      this.broadcastProgress({
-        projectDir: state2.projectDir,
-        jobId: state2.jobId,
-        status: "generating",
-        stage: candidate.status === "completed" ? "exporting" : "generating",
-        currentOptionId: candidate.optionId,
-        completedCount: updatedCompleted,
-        totalCount: 5,
-        progress: updatedCompleted / 5,
-        message: candidate.status === "completed" ? `Option ${candidate.optionId} ready (${candidate.exportQuality || "4K"})` : `Option ${candidate.optionId} failed. Proceeding with remaining options...`,
-        candidate,
-        jobState: state2
-      });
-    };
-    await Promise.allSettled(candidates.map((c) => runOne(c)));
-  }
-  // ─── Private: processSingleCandidate ──────────────────────────────────────
-  /**
-   * Process a single candidate: generate + export.
-   * DOES NOT retry. Orchestrator owns retry policy.
-   * Accepts AbortSignal to stop immediately.
-   */
-  async processSingleCandidate(state2, candidate, signal) {
-    if (signal?.aborted) throw new ThumbnailCancelledError();
-    candidate.status = "generating";
-    candidate.attempts = (candidate.attempts || 0) + 1;
-    saveThumbnailJobStateAtomic(state2.projectDir, state2);
-    const genRes = await this.provider.generateImage({
-      prompt: candidate.imagePrompt,
-      projectId: state2.flowProjectId,
-      candidateId: candidate.id,
-      optionId: candidate.optionId
-    });
-    if (signal?.aborted) throw new ThumbnailCancelledError();
-    candidate.mediaId = genRes.mediaId;
-    candidate.originalImagePath = genRes.fifeUrl;
-    if (genRes.projectId && !state2.flowProjectId) {
-      state2.flowProjectId = genRes.projectId;
-    }
-    candidate.status = "exporting";
-    saveThumbnailJobStateAtomic(state2.projectDir, state2);
-    if (signal?.aborted) throw new ThumbnailCancelledError();
-    const destPath = getCandidateImagePath(state2.projectDir, candidate.round, candidate.optionId, candidate.revision);
-    const exportRes = await this.provider.exportImage({
-      mediaId: genRes.mediaId,
-      projectId: state2.flowProjectId,
-      quality: "4k",
-      fallbackToOriginalUrl: genRes.fifeUrl,
-      destinationPath: destPath
-    });
-    if (!fs__namespace.existsSync(exportRes.filePath) || fs__namespace.statSync(exportRes.filePath).size === 0) {
-      throw new Error(`Downloaded image file is missing or 0 bytes: ${exportRes.filePath}`);
-    }
-    candidate.status = "completed";
-    candidate.exportedImagePath = exportRes.filePath;
-    candidate.actualWidth = exportRes.width;
-    candidate.actualHeight = exportRes.height;
-    candidate.exportQuality = exportRes.actualQuality;
-    candidate.error = void 0;
-  }
-  // ─── Private: pauseBatchForBridgeOffline ─────────────────────────────────
-  pauseBatchForBridgeOffline(state2, fromIndex, candidates, error) {
-    for (let j = fromIndex; j < candidates.length; j++) {
-      if (candidates[j].status !== "completed") {
-        candidates[j].status = "pending";
-        candidates[j].error = void 0;
-      }
-    }
-    state2.status = "needs-attention";
-    state2.errors = state2.errors || [];
-    const errMsg = error ? `${error.code}: ${error.message}` : "FLOWKIT_BRIDGE_OFFLINE: Bridge went offline during generation.";
-    addUniqueDiagnostic(state2.errors, errMsg);
-    saveThumbnailJobStateAtomic(state2.projectDir, state2);
-    saveThumbnailManifest(state2.projectDir, state2);
-    this.broadcastProgress({
-      projectDir: state2.projectDir,
-      jobId: state2.jobId,
-      status: "needs-attention",
-      stage: "idle",
-      completedCount: candidates.filter((c) => c.status === "completed").length,
-      totalCount: 5,
-      progress: candidates.filter((c) => c.status === "completed").length / 5,
-      message: error?.message || "FlowKit connection lost. Fix the connection and click Resume.",
-      jobState: state2
-    });
-  }
-  // ─── Private: finalizeJob ─────────────────────────────────────────────────
-  finalizeJob(state2, projectDir) {
-    reconcileThumbnailArtifacts(projectDir, state2);
-    saveThumbnailManifest(projectDir, state2);
-    const completedCount = state2.candidates.filter((c) => c.status === "completed").length;
-    const failedCount = state2.candidates.filter((c) => c.status === "failed").length;
-    const pendingCount = state2.candidates.filter((c) => c.status === "pending").length;
-    const allConnectorFailed = failedCount > 0 && state2.candidates.filter((c) => c.status === "failed").every((c) => c.error && (c.error.includes("FLOWKIT_BRIDGE_OFFLINE") || c.error.includes("ECONNREFUSED") || c.error.includes("fetch failed") || c.error.includes("FLOW_EXTENSION_DISCONNECTED")));
-    if (state2.status !== "cancelled" && state2.status !== "needs-attention") {
-      state2.status = completedCount === 5 ? "completed" : completedCount > 0 ? "partial" : pendingCount > 0 ? "needs-attention" : allConnectorFailed ? "needs-attention" : "failed";
-    }
-    if (completedCount === 5) {
-      state2.completedAt = (/* @__PURE__ */ new Date()).toISOString();
-    }
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    this.broadcastProgress({
-      projectDir,
-      jobId: state2.jobId,
-      status: state2.status,
-      stage: completedCount === 5 ? "completed" : state2.status === "needs-attention" ? "idle" : "failed",
-      completedCount,
-      totalCount: 5,
-      progress: completedCount / 5,
-      message: completedCount === 5 ? "All 5 thumbnails generated and exported successfully." : state2.status === "needs-attention" ? "FlowKit connection failed. Fix the connection and click Resume." : `${completedCount}/5 thumbnails generated. Some candidates require attention.`,
-      jobState: state2
-    });
-    return state2;
-  }
-  // ─── Private: markNeedsAttention ─────────────────────────────────────────
-  async markNeedsAttention(projectDir, readiness, ctx) {
-    let state2;
-    const loadedState = loadThumbnailJobState(projectDir);
-    if (loadedState && loadedState.candidates.length === 5) {
-      state2 = loadedState;
-      for (const c of state2.candidates) {
-        if (c.status === "generating" || c.status === "exporting") {
-          c.status = "pending";
-          c.error = void 0;
-        }
-      }
-    } else {
-      const plan = await thumbnailPlanner.plan({
-        projectDir,
-        templateId: ctx.params.templateId || ctx.settings.selectedTemplateId,
-        templateSnapshot: ctx.templateSnapshot,
-        preferredModel: ctx.params.preferredModel,
-        generationRound: ctx.round
-      }).catch(() => void 0);
-      state2 = createInitialThumbnailJobState({
-        projectDir,
-        renderOutputPath: ctx.renderOutputPath,
-        renderFileSize: ctx.renderFileSize,
-        renderMtimeMs: ctx.renderMtimeMs,
-        scriptHash: ctx.scriptHash,
-        templateSnapshotHash: ctx.templateSnapshotHash,
-        generationRound: ctx.round,
-        plan
+  let fallbackCount = 0;
+  for (const skel of batchScenes) {
+    if (!enrichedMap.has(skel.sceneIndex)) {
+      fallbackCount++;
+      usedFallback = true;
+      const queries = extractVisualQueries(skel.narrativeText);
+      enrichedMap.set(skel.sceneIndex, {
+        sceneIndex: skel.sceneIndex,
+        visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+        visualNote: `Visual shot: ${queries[0]}`,
+        searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
+        mediaType: "video",
+        transitionIn: "cut",
+        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+        shotType: inferShotTypeFromText(skel.narrativeText)
       });
     }
-    state2.status = "needs-attention";
-    state2.errors = state2.errors || [];
-    addUniqueDiagnostic(state2.errors, `[${readiness.blockingCode}] ${readiness.message}`);
-    saveThumbnailJobStateAtomic(projectDir, state2);
-    this.broadcastProgress({
-      projectDir,
-      jobId: state2.jobId,
-      status: "needs-attention",
-      stage: "idle",
-      completedCount: state2.candidates.filter((c) => c.status === "completed").length,
-      totalCount: 5,
-      progress: 0,
-      message: readiness.message,
-      jobState: state2
-    });
-    return state2;
   }
-  // ─── Private: resolve helpers ─────────────────────────────────────────────
-  resolveScriptText(projectDir, customPath) {
-    if (customPath && fs__namespace.existsSync(customPath)) {
-      try {
-        return fs__namespace.readFileSync(customPath, "utf-8");
-      } catch {
+  if (fallbackCount > 0) {
+    logger.warn(
+      `[PLAN] Batch ${batchIndex + 1}: ${fallbackCount}/${batchScenes.length} scenes used algorithmic fallback (${lastError || "missing AI data"})`
+    );
+  }
+  return { enrichedMap, modelUsed: successModel, usedFallback };
+}
+function applyLocalMediaMatching(scene, localAssetSuggestion, mediaFiles) {
+  if (localAssetSuggestion && mediaFiles.length > 0) {
+    const cleanSuggestion = localAssetSuggestion.trim().toLowerCase();
+    const matched = mediaFiles.find(
+      (m) => m.filename.toLowerCase() === cleanSuggestion || m.filename.toLowerCase().includes(cleanSuggestion)
+    );
+    if (matched) {
+      scene.localAsset = matched.filename;
+      scene.mediaFile = matched.filename;
+      scene.localPath = matched.filePath;
+      const ext = path.extname(matched.filename).toLowerCase();
+      if ([".mp4", ".mov", ".webm", ".mkv", ".avi"].includes(ext)) {
+        scene.mediaType = "video";
+      } else if ([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".gif"].includes(ext)) {
+        scene.mediaType = "image";
+      }
+      return;
+    }
+  }
+  scene.mediaFile = "";
+  scene.mediaType = "video";
+  scene.localAsset = void 0;
+}
+function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
+  const skeletons = buildSceneSkeleton(transcript, pacing);
+  const outline = buildAlgorithmicOutline(skeletons, transcript.duration);
+  const skeletonMap = /* @__PURE__ */ new Map();
+  for (const skel of skeletons) {
+    skeletonMap.set(skel.sceneIndex, skel);
+  }
+  const chapters = outline.map((ch) => ({
+    chapterIndex: ch.chapterIndex,
+    title: ch.title,
+    startTime: 0,
+    endTime: 0,
+    sequences: ch.sequences.map((seq) => {
+      const scenes = [];
+      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+        const skel = skeletonMap.get(idx);
+        if (!skel) continue;
+        const queries = extractVisualQueries(skel.narrativeText);
+        scenes.push({
+          sceneIndex: skel.sceneIndex,
+          mediaFile: "",
+          mediaType: "video",
+          startTime: skel.startTime,
+          endTime: skel.endTime,
+          duration: skel.duration,
+          narrativeText: skel.narrativeText,
+          transcriptSegmentIds: [...skel.transcriptSegmentIds],
+          transitionIn: "cut",
+          visualNote: `Visual shot: ${queries[0]}`,
+          visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+          searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
+          energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+          shotType: inferShotTypeFromText(skel.narrativeText)
+        });
+      }
+      const seqStart = scenes[0]?.startTime ?? 0;
+      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0;
+      return {
+        sequenceIndex: seq.sequenceIndex,
+        title: seq.title,
+        startTime: seqStart,
+        endTime: seqEnd,
+        scenes
+      };
+    })
+  }));
+  for (const ch of chapters) {
+    const allSeqScenes = ch.sequences.flatMap((s) => s.scenes);
+    ch.startTime = allSeqScenes[0]?.startTime ?? 0;
+    ch.endTime = allSeqScenes[allSeqScenes.length - 1]?.endTime ?? 0;
+  }
+  let globalSceneIndex = 1;
+  for (const ch of chapters) {
+    for (const seq of ch.sequences) {
+      seq.scenes.sort((a, b) => a.startTime - b.startTime);
+      for (const sc of seq.scenes) {
+        sc.sceneIndex = globalSceneIndex++;
       }
     }
-    const candidates = [
-      path__namespace.join(projectDir, "script.txt"),
-      path__namespace.join(projectDir, "inputs", "script.txt"),
-      path__namespace.join(projectDir, "project-state.json"),
-      path__namespace.join(projectDir, "project.json")
-    ];
-    for (const c of candidates) {
-      if (fs__namespace.existsSync(c)) {
-        if (c.endsWith(".json")) {
-          try {
-            const raw = fs__namespace.readFileSync(c, "utf-8");
-            const st = JSON.parse(raw);
-            if (st?.inputs?.scriptPath && fs__namespace.existsSync(st.inputs.scriptPath)) {
-              return fs__namespace.readFileSync(st.inputs.scriptPath, "utf-8");
-            }
-          } catch {
-          }
-        } else {
-          return fs__namespace.readFileSync(c, "utf-8");
-        }
-      }
-    }
-    return "";
   }
-  resolveRenderOutputPath(projectDir) {
-    const candidates = [
-      path__namespace.join(projectDir, "output", "final_video.mp4"),
-      path__namespace.join(projectDir, "output", "video.mp4"),
-      path__namespace.join(projectDir, "output", "render.mp4")
-    ];
-    for (const c of candidates) {
-      if (fs__namespace.existsSync(c)) return c;
-    }
-    return candidates[0];
+  const allScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
+  let pacingIssues = [];
+  try {
+    const flatScenes = flattenPlanScenes({ chapters });
+    pacingIssues = analyzePacing(flatScenes);
+  } catch (err) {
+    logger.warn(`[PLAN] Algorithmic plan pacing guard warning: ${err}`);
   }
-  broadcastProgress(payload) {
+  const initialFlags = pacingIssues.map((issue) => ({
+    sceneId: issue.sceneId,
+    severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
+    issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
+    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type for visual variety`
+  }));
+  return {
+    projectName,
+    totalDuration: transcript.duration,
+    totalScenes: allScenes.length,
+    language: transcript.language,
+    chapters,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    modelUsed: "rule-based-segmenter",
+    openLoops: [],
+    motifRegistry: [],
+    retentionFlags: initialFlags
+  };
+}
+async function buildEditPlan(params) {
+  const { projectDir, apiKey, onProgress } = params;
+  const modelId = params.model ?? "gemini-3.8-flash";
+  const progress = (msg, pct) => {
+    logger.info(`[PLAN] ${msg}`);
+    onProgress?.(msg, pct);
+  };
+  progress("Loading transcript...", 0.05);
+  const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
+  if (!fs__namespace.existsSync(transcriptPath)) {
+    throw new Error("No transcript found. Run transcription first.");
+  }
+  const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+  progress("Loading media library...", 0.07);
+  const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
+  let mediaFiles = [];
+  if (fs__namespace.existsSync(mediaIndexPath)) {
     try {
-      if (typeof electron.BrowserWindow !== "undefined" && electron.BrowserWindow?.getAllWindows) {
-        const windows = electron.BrowserWindow.getAllWindows();
-        for (const win of windows) {
-          if (!win.isDestroyed()) {
-            win.webContents.send(IPC_CHANNELS.THUMBNAIL_PROGRESS, payload);
-          }
-        }
-      }
+      const rawItems = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
+      mediaFiles = rawItems.map((item) => ({
+        filePath: item.path ?? "",
+        filename: item.filename,
+        type: item.type === "video" ? "video" : "image",
+        durationSecs: item.durationSecs,
+        fps: item.fps,
+        width: item.width,
+        height: item.height
+      }));
     } catch {
     }
   }
-}
-const thumbnailOrchestrator = new ThumbnailOrchestrator();
-class ThumbnailAutoTrigger {
-  triggeredKeys = /* @__PURE__ */ new Set();
-  /**
-   * Safe, non-blocking auto-trigger entry point.
-   * NEVER throws an error to the caller, never interferes with video pipeline status.
-   */
-  async startIfEligible(params) {
-    try {
-      const { projectDir } = params;
-      if (!projectDir || !fs__namespace.existsSync(projectDir)) {
-        logger.info("[ThumbnailAutoTrigger] Project directory does not exist. Skipping.");
-        return false;
+  let scriptText = null;
+  let projectName = "Unnamed";
+  let projectPacing = "balanced";
+  try {
+    const stateFile = fs__namespace.existsSync(path.join(projectDir, "project-state.json")) ? path.join(projectDir, "project-state.json") : path.join(projectDir, "project.json");
+    if (fs__namespace.existsSync(stateFile)) {
+      const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+      projectName = st?.name ?? "Unnamed";
+      if (st?.settings?.pacing && ["slow", "balanced", "fast", "cinematic"].includes(st.settings.pacing)) {
+        projectPacing = st.settings.pacing;
       }
-      const settings = await loadProjectThumbnailSettings(projectDir);
-      if (!settings.enabled || !settings.autoGenerateAfterRender) {
-        logger.info(`[ThumbnailAutoTrigger] Thumbnail automation disabled for ${projectDir}. Skipping.`);
-        return false;
+      const scriptPathFromState = st?.inputs?.scriptPath;
+      const resolvedScriptPath = params.scriptPath ?? scriptPathFromState;
+      if (resolvedScriptPath && fs__namespace.existsSync(resolvedScriptPath)) {
+        scriptText = fs__namespace.readFileSync(resolvedScriptPath, "utf-8");
       }
-      const renderPath = params.renderOutputPath || this.findRenderOutput(projectDir);
-      if (!renderPath || !fs__namespace.existsSync(renderPath)) {
-        logger.warn(`[ThumbnailAutoTrigger] Render output file not found at "${renderPath}". Skipping thumbnail generation.`);
-        return false;
+    }
+  } catch (err) {
+    logger.warn(`Could not load script text or project settings: ${err}`);
+  }
+  progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.1);
+  const skeletons = buildSceneSkeleton(transcript, projectPacing);
+  progress(
+    `Created ${skeletons.length} scene skeletons (avg ${(transcript.duration / skeletons.length).toFixed(1)}s/scene)...`,
+    0.14
+  );
+  const cleanApiKey = normalizeApiKey(apiKey);
+  if (!cleanApiKey) {
+    logger.warn("[PLAN] No API key provided, creating algorithmic edit plan");
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing);
+    const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
+    fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
+    progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
+    return fallbackPlan;
+  }
+  let globalContextSummary = "";
+  try {
+    progress("Preparing global documentary context...", 0.16);
+    const ctx = await analyzeGlobalContext({
+      projectDir,
+      apiKey: cleanApiKey,
+      model: modelId,
+      scriptText,
+      transcript,
+      onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
+    });
+    globalContextSummary = [
+      `Primary Subject: ${ctx.primarySubject}`,
+      `Central Thesis: ${ctx.centralThesis}`,
+      ctx.geography?.primaryCountry ? `Geography: ${ctx.geography.primaryCountry} (${ctx.geography.primaryRegion ?? ""})` : "",
+      ctx.timeContext?.primaryPeriod ? `Period: ${ctx.timeContext.primaryPeriod}` : "",
+      ctx.exactTopicAnchors?.length ? `Topic Anchors: ${ctx.exactTopicAnchors.join(", ")}` : "",
+      ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(", ")}` : "",
+      ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ""
+    ].filter(Boolean).join("\n");
+  } catch (err) {
+    logger.warn(`[PLAN] Global context extraction failed: ${err}`);
+  }
+  const ai = new genai.GoogleGenAI({
+    apiKey: cleanApiKey,
+    httpOptions: { apiVersion: "v1beta" }
+  });
+  if (modelId && DEPRECATED_TEXT_MODELS.has(modelId)) {
+    logger.warn(`[GeminiModel] Saved model ${modelId} is unavailable for this account.`);
+    logger.info(`[GeminiModel] Falling back to ${normalizePreferredTextModel(modelId)}.`);
+  }
+  const fallbackModelChain = getAvailableModelsForTask("planning", modelId);
+  progress("Creating chapter and sequence outline...", 0.2);
+  const outline = await generateChapterOutlineWithGemini(
+    ai,
+    fallbackModelChain,
+    skeletons,
+    globalContextSummary,
+    transcript.duration,
+    (m, p) => progress(m, p)
+  );
+  const BATCH_SIZE = 20;
+  const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE);
+  const allEnrichedMap = /* @__PURE__ */ new Map();
+  let hadAnyBatchFallback = false;
+  let primaryModelUsed = fallbackModelChain[0];
+  for (let b = 0; b < totalBatches; b++) {
+    const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+    const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
+      ai,
+      fallbackModelChain,
+      batchScenes,
+      globalContextSummary,
+      mediaFiles,
+      b,
+      totalBatches,
+      progress
+    );
+    for (const [idx, data] of enrichedMap.entries()) {
+      allEnrichedMap.set(idx, data);
+    }
+    if (usedFallback) hadAnyBatchFallback = true;
+    if (b === 0) primaryModelUsed = modelUsed;
+  }
+  progress("Assembling master edit plan...", 0.85);
+  const skeletonMap = /* @__PURE__ */ new Map();
+  for (const skel of skeletons) {
+    skeletonMap.set(skel.sceneIndex, skel);
+  }
+  const chapters = outline.map((ch) => ({
+    chapterIndex: ch.chapterIndex,
+    title: ch.title,
+    startTime: 0,
+    endTime: 0,
+    sequences: ch.sequences.map((seq) => {
+      const scenes = [];
+      for (let idx = seq.startSceneIndex; idx <= seq.endSceneIndex; idx++) {
+        const skel = skeletonMap.get(idx);
+        if (!skel) continue;
+        const aiData = allEnrichedMap.get(skel.sceneIndex);
+        const rawQueries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
+        const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)));
+        const sc = {
+          sceneIndex: skel.sceneIndex,
+          // will be globally normalized below
+          mediaFile: "",
+          mediaType: aiData?.mediaType === "image" ? "image" : "video",
+          startTime: skel.startTime,
+          endTime: skel.endTime,
+          duration: skel.duration,
+          narrativeText: skel.narrativeText,
+          transcriptSegmentIds: [...skel.transcriptSegmentIds],
+          transitionIn: aiData?.transitionIn ?? "cut",
+          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
+          visualIntent: aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll",
+          searchQueries: queries,
+          energyLevel: aiData?.energyLevel ?? inferEnergyLevelFromText(skel.narrativeText),
+          shotType: aiData?.shotType ?? inferShotTypeFromText(skel.narrativeText)
+        };
+        applyLocalMediaMatching(sc, aiData?.localAsset, mediaFiles);
+        scenes.push(sc);
       }
-      const st = fs__namespace.statSync(renderPath);
-      const renderFileSize = st.size;
-      const renderMtimeMs = st.mtimeMs;
-      const script = this.readScriptText(projectDir, params.scriptPath);
-      const scriptHash2 = computeSha256(script || "no-script");
-      const templateSnapshotHash = settings.templateSnapshotHash || computeSha256(settings.templateSnapshot || "");
-      const round = 1;
-      const jobKey = computeThumbnailJobKey({
-        renderOutputPath: renderPath,
-        renderFileSize,
-        renderMtimeMs,
-        scriptHash: scriptHash2,
-        templateSnapshotHash,
-        generationRound: round
-      });
-      if (this.triggeredKeys.has(jobKey)) {
-        logger.info(`[ThumbnailAutoTrigger] Job key ${jobKey} already triggered in-memory. Skipping duplicate trigger.`);
-        return false;
+      const seqStart = scenes[0]?.startTime ?? 0;
+      const seqEnd = scenes[scenes.length - 1]?.endTime ?? 0;
+      return {
+        sequenceIndex: seq.sequenceIndex,
+        title: seq.title,
+        startTime: seqStart,
+        endTime: seqEnd,
+        scenes
+      };
+    })
+  }));
+  for (const ch of chapters) {
+    const chScenes = ch.sequences.flatMap((s) => s.scenes);
+    ch.startTime = chScenes[0]?.startTime ?? 0;
+    ch.endTime = chScenes[chScenes.length - 1]?.endTime ?? 0;
+  }
+  let globalSceneIndex = 1;
+  for (const ch of chapters) {
+    for (const seq of ch.sequences) {
+      seq.scenes.sort((a, b) => a.startTime - b.startTime);
+      for (const sc of seq.scenes) {
+        sc.sceneIndex = globalSceneIndex++;
       }
-      const existingState = loadThumbnailJobState(projectDir);
-      if (existingState && existingState.jobKey === jobKey) {
-        if (existingState.status === "completed" || existingState.status === "generating") {
-          logger.info(`[ThumbnailAutoTrigger] Job with key ${jobKey} is already ${existingState.status}. Skipping duplicate.`);
-          return false;
-        }
-      }
-      if (!settings.selectedTemplateId || !settings.templateSnapshot) {
-        logger.warn(`[ThumbnailAutoTrigger] Automation enabled but no template selected for ${projectDir}. Setting status to needs-attention.`);
-        const attentionState = existingState || createInitialThumbnailJobState({
-          projectDir,
-          renderOutputPath: renderPath,
-          renderFileSize,
-          renderMtimeMs,
-          scriptHash: scriptHash2,
-          templateSnapshotHash,
-          generationRound: round
-        });
-        attentionState.status = "needs-attention";
-        attentionState.warnings.push("No master prompt template selected. Please choose a template in Thumbnail Studio.");
-        saveThumbnailJobStateAtomic(projectDir, attentionState);
-        return false;
-      }
-      this.triggeredKeys.add(jobKey);
-      logger.info(`[ThumbnailAutoTrigger] Video completed. Spawning companion thumbnail generation for ${projectDir}...`);
-      void (async () => {
-        try {
-          await thumbnailOrchestrator.startJob({
-            projectDir,
-            renderOutputPath: renderPath,
-            scriptPath: params.scriptPath,
-            templateId: settings.selectedTemplateId,
-            templateSnapshot: settings.templateSnapshot,
-            generationRound: round
-          });
-        } catch (jobErr) {
-          logger.error(`[ThumbnailAutoTrigger] Companion thumbnail run failed: ${jobErr}`);
-          const state2 = loadThumbnailJobState(projectDir);
-          if (state2 && state2.status !== "completed") {
-            state2.status = "failed";
-            state2.errors.push(jobErr instanceof Error ? jobErr.message : String(jobErr));
-            saveThumbnailJobStateAtomic(projectDir, state2);
-          }
-        }
-      })();
-      return true;
-    } catch (outerErr) {
-      logger.error(`[ThumbnailAutoTrigger] Unexpected error in startIfEligible: ${outerErr}`);
-      return false;
     }
   }
-  findRenderOutput(projectDir) {
-    const candidates = [
-      path__namespace.join(projectDir, "output", "final_video.mp4"),
-      path__namespace.join(projectDir, "output", "video.mp4"),
-      path__namespace.join(projectDir, "output", "render.mp4")
-    ];
-    for (const c of candidates) {
-      if (fs__namespace.existsSync(c)) return c;
+  const allFinalScenes = chapters.flatMap((c) => c.sequences.flatMap((s) => s.scenes));
+  const sceneIds = allFinalScenes.map((s) => s.sceneIndex);
+  if (new Set(sceneIds).size !== sceneIds.length) {
+    throw new Error("Duplicate global sceneIndex detected after assembly");
+  }
+  progress("Validating transcript coverage...", 0.88);
+  const coverageResult = validateScenePlanCoverage(transcript, allFinalScenes);
+  if (!coverageResult.valid) {
+    logger.error("[PLAN] Transcript coverage validation encountered issues:", { errors: coverageResult.errors });
+    if (coverageResult.missingSegmentIds.length > 0) {
+      throw new Error(`Transcript coverage validation failed: missing segments [${coverageResult.missingSegmentIds.join(", ")}]`);
     }
+  }
+  progress("Running Pacing Guard analysis...", 0.9);
+  let pacingIssues = [];
+  try {
+    const flatScenes = flattenPlanScenes({ chapters });
+    pacingIssues = analyzePacing(flatScenes);
+    logger.info(`[PLAN] Pacing Guard: ${pacingIssues.length} issues found, scenes annotated in-place`);
+  } catch (pgErr) {
+    logger.warn(`[PLAN] Pacing Guard error (non-fatal): ${pgErr instanceof Error ? pgErr.message : String(pgErr)}`);
+  }
+  const initialFlags = pacingIssues.map((issue) => ({
+    sceneId: issue.sceneId,
+    severity: issue.accumulatedMonotoneSeconds > 240 ? "high" : issue.accumulatedMonotoneSeconds > 150 ? "medium" : "low",
+    issue: `${issue.suggestion === "vary_shot_type" ? "Monotone shot type" : "Monotone energy level"} for ${Math.round(issue.accumulatedMonotoneSeconds)}s (pacing-guard)`,
+    suggestion: issue.suggestion === "insert_broll" ? "Insert a B-roll cutaway or add a stock clip with high motion/contrast" : issue.suggestion === "insert_text_overlay" ? "Add a text overlay (keyword callout) at this scene to break visual monotony" : `Change shot type to "${allFinalScenes[Number(issue.sceneId) - 1]?.shotType ?? "wide"}" for visual variety`
+  }));
+  const finalModelUsed = hadAnyBatchFallback ? `${primaryModelUsed} + partial-fallback` : primaryModelUsed;
+  const plan = {
+    projectName,
+    totalDuration: transcript.duration,
+    totalScenes: allFinalScenes.length,
+    language: transcript.language,
+    chapters,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    modelUsed: finalModelUsed,
+    openLoops: [],
+    motifRegistry: [],
+    retentionFlags: initialFlags
+  };
+  progress("Saving master edit plan...", 0.95);
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  logger.info("Edit plan saved", {
+    chapters: plan.chapters.length,
+    scenes: plan.totalScenes,
+    pacingIssues: pacingIssues.length,
+    model: finalModelUsed
+  });
+  progress(
+    `Done — ${plan.chapters.length} chapters, ${plan.totalScenes} scenes (${(plan.totalDuration / plan.totalScenes).toFixed(1)}s/scene), ${initialFlags.length} pacing flags`,
+    1
+  );
+  return plan;
+}
+const SHOCK_STAT_REGEX = /\d+%|\$\d[\d,.]*|\d+[\d,.]* (năm|ngày|giờ|tháng|người|triệu|tỷ|billion|million|thousand|dollars|years|days)/i;
+const HOOK_WINDOW_SECONDS = 30;
+const SENTENCE_END_REGEX = /[.!?]$/;
+const PHRASE_BREAK_REGEX = /[,;:]$/;
+const MIN_PAUSE_FOR_SPLIT = 0.5;
+const MAX_WORDS_PER_PHRASE = 5;
+const DEFAULT_WORDS_PER_PHRASE = 3;
+function groupWordsIntoPhrases(words, sceneId, emphasisType) {
+  const phrases = [];
+  if (words.length === 0) return phrases;
+  let phraseIndex = 0;
+  let currentChunk = [];
+  const commitChunk = () => {
+    if (currentChunk.length === 0) return;
+    const text = currentChunk.map((w) => w.word).join(" ").trim();
+    if (!text) {
+      currentChunk = [];
+      return;
+    }
+    const highlightWords = [];
+    for (const w of currentChunk) {
+      if (SHOCK_STAT_REGEX.test(w.word)) highlightWords.push(w.word);
+    }
+    const fontPreset = emphasisType === "punchline" ? "serif_italic" : "sans_bold_caps";
+    const baseColor = fontPreset === "serif_italic" ? "yellow_pale" : "white";
+    const boxHighlight = emphasisType === "shock_stat" && highlightWords.length > 0;
+    const skew = emphasisType === "list_transition";
+    const presetType = emphasisType === "hook" || emphasisType === "punchline" ? "big_statement" : emphasisType === "list_transition" ? "news_chyron" : emphasisType === "shock_stat" ? "data_note" : "big_statement";
+    phrases.push({
+      id: `cap_${sceneId}_${String(phraseIndex).padStart(3, "0")}`,
+      sceneId,
+      text,
+      startTime: currentChunk[0].start,
+      endTime: currentChunk[currentChunk.length - 1].end,
+      emphasisType,
+      highlightWords,
+      presetType,
+      style: { fontPreset, boxHighlight, skew, baseColor }
+    });
+    phraseIndex++;
+    currentChunk = [];
+  };
+  for (let i = 0; i < words.length; i++) {
+    const word = words[i];
+    const nextWord = words[i + 1];
+    currentChunk.push(word);
+    const hasSentenceEnd = SENTENCE_END_REGEX.test(word.word);
+    const hasPhraseBreak = PHRASE_BREAK_REGEX.test(word.word);
+    const pauseToNext = nextWord ? nextWord.start - word.end : 999;
+    const atMaxWords = currentChunk.length >= MAX_WORDS_PER_PHRASE;
+    const atDefaultWords = currentChunk.length >= DEFAULT_WORDS_PER_PHRASE;
+    const isLast = !nextWord;
+    if (isLast || hasSentenceEnd || pauseToNext >= MIN_PAUSE_FOR_SPLIT || hasPhraseBreak && currentChunk.length >= 2 || atMaxWords || atDefaultWords && pauseToNext >= 0.25) {
+      commitChunk();
+    }
+  }
+  commitChunk();
+  return phrases;
+}
+function buildFallbackCaptionPlan(transcript, scenes) {
+  logger.warn("[CaptionPlanner] Using algorithmic fallback -- basic captions generated, please review manually");
+  const activeRanges = [];
+  const phrases = [];
+  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, transcript.duration);
+  activeRanges.push({ startTime: 0, endTime: hookEnd, reason: "hook" });
+  const seenChapters = /* @__PURE__ */ new Set();
+  for (const scene of scenes) {
+    if (!seenChapters.has(scene.chapterId)) {
+      seenChapters.add(scene.chapterId);
+      if (scene.startTime > hookEnd + 2) {
+        activeRanges.push({
+          startTime: scene.startTime,
+          endTime: Math.min(scene.startTime + 8, scene.endTime),
+          reason: "list_transition",
+          chapterId: scene.chapterId
+        });
+      }
+    }
+  }
+  const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
+  for (const range of activeRanges) {
+    const sceneInRange = scenes.find(
+      (s) => s.startTime <= range.endTime && s.endTime >= range.startTime
+    ) ?? scenes[0];
+    const wordsInRange = allWords.filter(
+      (w) => w.start >= range.startTime && w.end <= range.endTime
+    );
+    const rangeIdStr = `${range.reason}_${Math.round(range.startTime)}`;
+    const scenePhrases = groupWordsIntoPhrases(
+      wordsInRange,
+      sceneInRange?.sceneId ?? "scene_unknown",
+      range.reason
+    );
+    for (const p of scenePhrases) {
+      p.id = `cap_${rangeIdStr}_${p.id.split("_").pop()}`;
+      phrases.push(p);
+    }
+  }
+  return {
+    enabled: true,
+    activeRanges,
+    phrases,
+    generatedByFallback: true,
+    generationSource: "fallback",
+    generationReason: "No Gemini API key or all Gemini models unavailable",
+    hookWindowSeconds: HOOK_WINDOW_SECONDS,
+    sourceDuration: transcript.duration,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function buildGeminiPrompt(scenes, allWords) {
+  const scenePayload = scenes.map((scene) => ({
+    sceneId: scene.sceneId,
+    chapterId: scene.chapterId,
+    narrativeText: scene.narrativeText,
+    visualIntent: scene.visualIntent ?? "",
+    startTime: scene.startTime,
+    endTime: scene.endTime,
+    words: allWords.filter((w) => w.start >= scene.startTime && w.end <= scene.endTime + 0.5)
+  }));
+  return `Bạn là chuyên gia dựng "dynamic kinetic captions" cho video documentary/listicle theo phong cách giữ chân người xem cao (giống các kênh YouTube top-tier dạng "X Foods/Things Disappearing...").
+
+Nhiệm vụ: Với danh sách scene dưới đây (kèm narrativeText và khung thời gian), xác định:
+
+BƯỚC A — Chọn khoảng thời gian BẬT caption (activeRanges), CHỈ theo 4 loại lý do sau, không bật tùy tiện:
+1. "hook": 15-30 giây đầu tiên của toàn video (bất kể nội dung gì).
+2. "list_transition": ngay tại câu chuyển sang một mục/số thứ tự mới trong danh sách.
+3. "shock_stat": câu chứa số liệu, phần trăm, so sánh gây sốc, hoặc dữ kiện cốt lõi.
+4. "punchline": câu đúc kết, cảnh báo, hoặc câu thúc giục hành động.
+
+TUYỆT ĐỐI KHÔNG bật caption cho các đoạn giải thích sâu, phân tích nguyên nhân, mô tả lịch sử/bối cảnh dài dòng.
+
+BƯỚC B — Chia narrativeText thành cụm từ 2-4 chữ, đồng bộ với word timestamps đã cung cấp. Không tự bịa timestamp.
+
+BƯỚC C — Gán style cho mỗi phrase:
+- emphasisType: kế thừa từ activeRange chứa nó
+- highlightWords: từ khóa quan trọng nhất (số liệu, danh từ riêng, động từ mạnh) — tối đa 1-2 từ
+- fontPreset: "sans_bold_caps" mặc định; "serif_italic" nếu đoạn có giọng chậm/tâm sự
+- boxHighlight: true CHỈ khi emphasisType là "shock_stat" hoặc mang tính cảnh báo rõ rệt
+- skew: true CHỈ khi emphasisType là "list_transition"
+- baseColor: "white" mặc định, "yellow_pale" khi fontPreset là "serif_italic"
+
+Dữ liệu đầu vào:
+${JSON.stringify(scenePayload, null, 2)}
+
+BƯỚC D — Với mỗi phrase, chọn presetType theo quy tắc:
+- "hook" hoặc "punchline" → presetType = "big_statement" (chiếm trọn màn hình, tạo sức nặng tối đa)
+- "list_transition" → presetType = "news_chyron" (cảm giác như 1 bản tin/headline mở màn cho mục mới), chia text thành 2 chyronSegments: segment đầu là mệnh đề chính (nền đỏ #E8352B, chữ trắng, font sans_bold_caps), segment sau là phần bổ nghĩa (nền trắng ngà #F5F0E6, chữ đen, font serif)
+- "shock_stat" → MẶC ĐỊNH presetType = "data_note" (note nhỏ góc màn hình, không che B-roll đang phát) TRỪ KHI số liệu đó là luận điểm trung tâm của cả video thì mới dùng "big_statement". Với data_note, điền field "dataNote.label" là bản rút gọn số liệu dưới 8 từ.
+
+QUY TẮC RIÊNG CHO 30 GIÂY ĐẦU (hook window, 0-30s):
+Trong khoảng này, coi MỌI cụm từ được nói ra đều đáng hiện caption (không chỉ áp dụng 4 trigger như phần còn lại video) để tối đa hoá pattern interrupt. Luân phiên presetType giữa "big_statement" và "news_chyron" theo nhịp câu (không dùng "data_note" trong hook window — hook cần chiếm trọn màn hình, không phải note nhỏ). Ngoài hook window, áp dụng đúng 4 trigger đã nêu và cho phép nhiều khoảng trống hoàn toàn tắt caption.
+
+Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
+{
+  "enabled": true,
+  "activeRanges": [
+    { "startTime": 0, "endTime": 28.5, "reason": "hook" }
+  ],
+  "phrases": [
+    {
+      "id": "cap_001",
+      "sceneId": "...",
+      "text": "RIGHT NOW",
+      "startTime": 0.0,
+      "endTime": 0.6,
+      "emphasisType": "hook",
+      "highlightWords": ["NOW"],
+      "presetType": "big_statement",
+      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": false, "skew": false, "baseColor": "white" }
+    },
+    {
+      "id": "cap_002",
+      "sceneId": "...",
+      "text": "40% tăng mỗi năm",
+      "startTime": 45.0,
+      "endTime": 47.5,
+      "emphasisType": "shock_stat",
+      "highlightWords": ["40%"],
+      "presetType": "data_note",
+      "dataNote": { "label": "Tăng 40% từ 2023", "position": "bottom_right" },
+      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": true, "skew": false, "baseColor": "white" }
+    }
+  ]
+}`;
+}
+async function generateCaptionPlan(params) {
+  const { projectDir, apiKey, forceRegenerate = false } = params;
+  const progress = params.onProgress ?? (() => {
+  });
+  const modelId = params.model ?? "gemini-3.5-flash";
+  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!forceRegenerate && fs__namespace.existsSync(captionPlanPath)) {
+    logger.info("[CaptionPlanner] Using cached caption-plan.json");
+    return JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+  }
+  progress("Loading transcript...", 0.05);
+  const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
+  if (!fs__namespace.existsSync(transcriptPath)) {
+    throw new Error("Missing transcript.json -- please run Transcription step first");
+  }
+  const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+  progress("Loading edit plan...", 0.1);
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (!fs__namespace.existsSync(planPath)) {
+    throw new Error("Missing master-edit-plan.json -- please run Planning step first");
+  }
+  const editPlan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const scenes = [];
+  for (const chapter of editPlan.chapters ?? []) {
+    const chapterId = chapter.id ?? chapter.chapterId ?? `ch_${scenes.length}`;
+    const sequences = chapter.sequences ?? chapter.chapters_seq ?? [];
+    for (const seq of sequences) {
+      for (const scene of seq.scenes ?? []) {
+        scenes.push({
+          sceneId: scene.id ?? scene.sceneId ?? `scene_${scenes.length}`,
+          chapterId,
+          narrativeText: scene.narrativeText ?? scene.narration ?? "",
+          visualIntent: scene.visualIntent ?? "",
+          startTime: scene.startTime ?? 0,
+          endTime: scene.endTime ?? (scene.startTime ?? 0) + (scene.duration ?? 5),
+          isPatternInterrupt: scene.isPatternInterrupt ?? false
+        });
+      }
+    }
+  }
+  logger.info(`[CaptionPlanner] ${scenes.length} scenes, ${transcript.segments.length} segments`);
+  const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
+  const fallbackModels = getAvailableModelsForTask("caption_planning", modelId);
+  let plan = null;
+  for (let attempt = 0; attempt < fallbackModels.length; attempt++) {
+    const currentModel = fallbackModels[attempt];
+    try {
+      progress(
+        attempt === 0 ? `Sending caption planning request to Gemini (${currentModel})...` : `Retrying with ${currentModel}...`,
+        0.2 + attempt * 0.1
+      );
+      const ai = new genai.GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } });
+      const prompt = buildGeminiPrompt(scenes, allWords);
+      const response = await ai.models.generateContent({
+        model: currentModel,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: { responseMimeType: "application/json", temperature: 0.1, maxOutputTokens: 8192 }
+      });
+      const rawJson = response.text ?? "";
+      const parsed = JSON.parse(rawJson);
+      parsed.generatedByFallback = false;
+      parsed.generationSource = "gemini";
+      parsed.generationModel = currentModel;
+      parsed.hookWindowSeconds = HOOK_WINDOW_SECONDS;
+      parsed.sourceDuration = transcript.duration;
+      parsed.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
+        throw new Error("Response JSON missing phrases or activeRanges");
+      }
+      progress("Validating Gemini caption plan...", 0.6 + attempt * 0.05);
+      sanitizePlan$1(parsed, transcript.duration);
+      plan = parsed;
+      recordModelSuccess(currentModel);
+      logger.info(`[CaptionPlanner] Gemini succeeded with ${currentModel}, ${plan.phrases.length} phrases`);
+      break;
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      if (kind === "MODEL_NOT_FOUND") {
+        const nextModel = fallbackModels[attempt + 1];
+        logger.warn(`[CaptionPlanner] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`);
+      } else if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
+        const nextModel = fallbackModels[attempt + 1];
+        logger.warn(`[CaptionPlanner] ${currentModel} failed (${kind}): ${message.slice(0, 100)}. Switching immediately to ${nextModel ?? "fallback"}...`);
+      } else {
+        logger.warn(`[CaptionPlanner] ${currentModel} failed: ${message.slice(0, 100)}`);
+      }
+    }
+  }
+  if (!plan) {
+    progress("Gemini AI unavailable -- using algorithmic fallback...", 0.7);
+    plan = buildFallbackCaptionPlan(transcript, scenes);
+  }
+  progress("Saving caption-plan.json...", 0.9);
+  fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
+  const tmpPath = captionPlanPath + ".tmp";
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(plan, null, 2), "utf-8");
+  fs__namespace.renameSync(tmpPath, captionPlanPath);
+  logger.info(`[CaptionPlanner] Saved ${plan.phrases.length} phrases to caption-plan.json`);
+  progress("Complete!", 1);
+  return plan;
+}
+function sanitizePlan$1(plan, sourceDuration) {
+  const dur = sourceDuration;
+  const seenIds = /* @__PURE__ */ new Set();
+  let autoIdx = 0;
+  for (const p of plan.phrases) {
+    p.startTime = Math.max(0, Math.min(p.startTime, dur));
+    p.endTime = Math.max(p.startTime + 0.1, Math.min(p.endTime, dur));
+    if (!p.id || seenIds.has(p.id)) {
+      p.id = `cap_${String(++autoIdx).padStart(4, "0")}`;
+      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed -> ${p.id}`);
+    }
+    seenIds.add(p.id);
+  }
+  const validRanges = plan.activeRanges.filter((r) => {
+    const valid = r.endTime > r.startTime && r.startTime >= 0 && r.endTime <= dur + 1;
+    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime} -> ${r.endTime}`);
+    return valid;
+  });
+  plan.activeRanges = validRanges;
+  for (const r of plan.activeRanges) {
+    r.startTime = Math.max(0, r.startTime);
+    r.endTime = Math.min(r.endTime, dur);
+  }
+  plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
+  plan.phrases.sort((a, b) => a.startTime - b.startTime);
+  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, dur);
+  const hookRange = plan.activeRanges.find((r) => r.reason === "hook");
+  if (!hookRange) {
+    logger.warn("[CaptionPlanner] Gemini missing hook range -- adding default 0 -> " + hookEnd);
+    plan.activeRanges.unshift({ startTime: 0, endTime: hookEnd, reason: "hook" });
+    plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
+  } else if (hookRange.endTime < hookEnd - 0.5) {
+    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s -- extending to ${hookEnd}s`);
+    hookRange.endTime = hookEnd;
+  }
+}
+function loadCaptionPlan(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  if (!fs__namespace.existsSync(planPath)) return null;
+  try {
+    return JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  } catch {
     return null;
   }
-  readScriptText(projectDir, customPath) {
-    if (customPath && fs__namespace.existsSync(customPath)) {
-      try {
-        return fs__namespace.readFileSync(customPath, "utf-8");
-      } catch {
-      }
-    }
-    const candidates = [
-      path__namespace.join(projectDir, "script.txt"),
-      path__namespace.join(projectDir, "inputs", "script.txt"),
-      path__namespace.join(projectDir, "project-state.json"),
-      path__namespace.join(projectDir, "project.json")
-    ];
-    for (const c of candidates) {
-      if (fs__namespace.existsSync(c)) {
-        if (c.endsWith(".json")) {
-          try {
-            const raw = fs__namespace.readFileSync(c, "utf-8");
-            const st = JSON.parse(raw);
-            if (st?.inputs?.scriptPath && fs__namespace.existsSync(st.inputs.scriptPath)) {
-              return fs__namespace.readFileSync(st.inputs.scriptPath, "utf-8");
-            }
-          } catch {
-          }
-        } else {
-          return fs__namespace.readFileSync(c, "utf-8");
-        }
-      }
-    }
-    return "";
-  }
 }
-const thumbnailAutoTrigger = new ThumbnailAutoTrigger();
-function registerRenderHandlers(ipcMain) {
-  ipcMain.handle(
-    IPC_CHANNELS.RENDER_START,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const sendProgress = (p) => {
-        win?.webContents.send(IPC_CHANNELS.RENDER_PROGRESS, p);
-      };
-      try {
-        let captionPlan = void 0;
-        const captionPlanPath = path__namespace.join(params.projectDir, "analysis", "caption-plan.json");
-        if (fs__namespace.existsSync(captionPlanPath)) {
-          try {
-            const loaded = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
-            if (loaded.enabled && loaded.phrases?.length > 0) {
-              captionPlan = loaded;
-              logger.info(`[RenderIPC] Caption plan loaded: ${loaded.phrases.length} phrases, enabled=${loaded.enabled}`);
-            } else {
-              logger.info(`[RenderIPC] Caption plan exists but disabled or empty (enabled=${loaded.enabled}, phrases=${loaded.phrases?.length ?? 0})`);
-            }
-          } catch (e) {
-            logger.warn(`[RenderIPC] Could not read caption-plan.json: ${String(e)}`);
-          }
-        } else {
-          logger.info("[RenderIPC] No caption-plan.json -- skipping caption burn");
-        }
-        const result = await renderVideo({
-          ...params,
-          captionPlan,
-          // truyền vào renderer — undefined = bỏ qua burn step
-          onProgress: sendProgress
-        });
-        if (result && result.outputPath && fs__namespace.existsSync(result.outputPath)) {
-          void thumbnailAutoTrigger.startIfEligible({
-            projectDir: params.projectDir,
-            renderOutputPath: result.outputPath
-          });
-        }
-        return { success: true, result };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Render failed: ${msg}`);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.RENDER_PREFLIGHT_RUN,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      win?.webContents.send(IPC_CHANNELS.RENDER_QA_PROGRESS, {
-        stage: "preflight",
-        progress: 0.2,
-        message: "Running preflight checks..."
-      });
-      let captionPlan = void 0;
-      const captionPlanPath = path__namespace.join(params.projectDir, "analysis", "caption-plan.json");
-      if (fs__namespace.existsSync(captionPlanPath)) {
-        try {
-          captionPlan = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
-        } catch {
-        }
-      }
-      let voiceoverPath;
-      try {
-        const stateFile = fs__namespace.existsSync(path__namespace.join(params.projectDir, "project-state.json")) ? path__namespace.join(params.projectDir, "project-state.json") : path__namespace.join(params.projectDir, "project.json");
-        if (fs__namespace.existsSync(stateFile)) {
-          const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-          voiceoverPath = st?.inputs?.voiceoverPath;
-        }
-      } catch {
-      }
-      const report = await runRenderPreflight({
-        projectDir: params.projectDir,
-        voiceoverPath,
-        captionPlan
-      });
-      win?.webContents.send(IPC_CHANNELS.RENDER_QA_PROGRESS, {
-        stage: "preflight",
-        progress: 1,
-        message: `Preflight completed: ${report.status}`
-      });
-      return report;
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.RENDER_QA_GET,
-    (_event, params) => {
-      const qaPath = path__namespace.join(params.projectDir, "analysis", "render-qa.json");
-      const preflightPath = path__namespace.join(params.projectDir, "analysis", "render-preflight.json");
-      if (fs__namespace.existsSync(qaPath)) {
-        return readJsonSafe$1(qaPath, null);
-      }
-      if (fs__namespace.existsSync(preflightPath)) {
-        return readJsonSafe$1(preflightPath, null);
-      }
-      return null;
-    }
-  );
+function saveCaptionPlan(projectDir, plan) {
+  const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
+  fs__namespace.mkdirSync(path__namespace.dirname(planPath), { recursive: true });
+  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  logger.info(`[CaptionPlanner] Saved caption-plan.json manually (${plan.phrases.length} phrases)`);
 }
 const PEXELS_BASE = "https://api.pexels.com";
 async function pexelsFetch(url2, apiKey, attempt = 0) {
@@ -12810,23 +16724,23 @@ function buildPixabayCacheKey(params) {
   const normQ = normalizeStockQueryKey(params.query);
   return `${params.mediaType}:${params.orientation}:${params.perPage}:${normQ}`;
 }
-function getCachedPixabayResults(key) {
+function getCachedPixabayResults(key2) {
   const store = loadPixabayCache();
-  const entry = store[key];
+  const entry = store[key2];
   if (!entry) return null;
   const now = (/* @__PURE__ */ new Date()).toISOString();
   if (entry.expiresAt && entry.expiresAt < now) {
-    delete store[key];
+    delete store[key2];
     savePixabayCache(store);
     return null;
   }
   return entry.results;
 }
-function setCachedPixabayResults(key, results) {
+function setCachedPixabayResults(key2, results) {
   const store = loadPixabayCache();
   const now = Date.now();
   const ttl = results.length > 0 ? CACHE_TTL_MS$1 : EMPTY_CACHE_TTL_MS;
-  store[key] = {
+  store[key2] = {
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + ttl).toISOString(),
     results
@@ -12834,13 +16748,13 @@ function setCachedPixabayResults(key, results) {
   savePixabayCache(store);
 }
 function executeWithInFlightDedup(arg1, arg2, arg3, arg4, arg5) {
-  let key;
+  let key2;
   let fetcher;
   if (typeof arg2 === "function") {
-    key = arg1;
+    key2 = arg1;
     fetcher = arg2;
   } else {
-    key = buildPixabayCacheKey({
+    key2 = buildPixabayCacheKey({
       mediaType: arg1,
       query: arg2,
       orientation: arg3,
@@ -12848,7 +16762,7 @@ function executeWithInFlightDedup(arg1, arg2, arg3, arg4, arg5) {
     });
     fetcher = arg5;
   }
-  const existing = inFlightRequests.get(key);
+  const existing = inFlightRequests.get(key2);
   if (existing) {
     return existing;
   }
@@ -12856,10 +16770,10 @@ function executeWithInFlightDedup(arg1, arg2, arg3, arg4, arg5) {
     try {
       return await fetcher();
     } finally {
-      inFlightRequests.delete(key);
+      inFlightRequests.delete(key2);
     }
   })();
-  inFlightRequests.set(key, promise);
+  inFlightRequests.set(key2, promise);
   return promise;
 }
 const PIXABAY_BASE = "https://pixabay.com/api";
@@ -13022,80 +16936,24 @@ class QueryCache {
     }
   }
   get(query) {
-    const key = QueryCache.normalize(query);
-    const entry = this.data[key];
+    const key2 = QueryCache.normalize(query);
+    const entry = this.data[key2];
     if (!entry) return null;
     if (Date.now() - entry.cachedAt > CACHE_TTL_MS) {
-      delete this.data[key];
+      delete this.data[key2];
       this.dirty = true;
       return null;
     }
     return entry.results;
   }
   set(query, results) {
-    const key = QueryCache.normalize(query);
-    this.data[key] = { results, cachedAt: Date.now() };
+    const key2 = QueryCache.normalize(query);
+    this.data[key2] = { results, cachedAt: Date.now() };
     this.dirty = true;
   }
   size() {
     return Object.keys(this.data).length;
   }
-}
-function tokenize$3(text) {
-  return new Set(
-    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2)
-  );
-}
-function jaccardSimilarity(a, b) {
-  if (a.size === 0 && b.size === 0) return 0;
-  let intersection = 0;
-  a.forEach((token) => {
-    if (b.has(token)) intersection++;
-  });
-  const union = a.size + b.size - intersection;
-  return union === 0 ? 0 : intersection / union;
-}
-function semanticScore(candidate, ctx) {
-  const intentTokens = tokenize$3(ctx.visualIntent);
-  const narrationTokens = tokenize$3(ctx.narrationText);
-  const refTokens = /* @__PURE__ */ new Set([...intentTokens, ...narrationTokens]);
-  const titleTokens = tokenize$3(candidate.title);
-  const tagTokens = new Set(candidate.tags.flatMap((t) => t.toLowerCase().split(/\s+/)));
-  const candidateTokens2 = /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
-  return Math.min(1, jaccardSimilarity(refTokens, candidateTokens2) * 5);
-}
-function technicalScore$1(candidate) {
-  const minDim = Math.min(candidate.width, candidate.height);
-  if (minDim >= 2160) return 1;
-  if (minDim >= 1080) return 0.9;
-  if (minDim >= 720) return 0.6;
-  return 0.3;
-}
-function compositionScore$1(candidate, preferredAr) {
-  const [pw, ph] = preferredAr.split(":").map(Number);
-  const preferred = pw / ph;
-  const actual = candidate.width / candidate.height;
-  if (!preferred || !actual) return 0.5;
-  const diff = Math.abs(preferred - actual) / preferred;
-  return Math.max(0, 1 - diff * 2);
-}
-function durationScore$1(candidate, sceneDuration) {
-  if (candidate.mediaType === "photo") return 0.8;
-  const clipDur = candidate.durationSecs ?? 0;
-  if (clipDur <= 0) return 0.4;
-  if (clipDur >= sceneDuration) return 1;
-  return Math.max(0.2, clipDur / sceneDuration);
-}
-function scoreCandidate(candidate, ctx) {
-  const sem = semanticScore(candidate, ctx) * 0.5;
-  const tech = technicalScore$1(candidate) * 0.2;
-  const comp = compositionScore$1(candidate, ctx.preferredAspectRatio) * 0.15;
-  const dur = durationScore$1(candidate, ctx.sceneDurationSecs) * 0.15;
-  const reuse = ctx.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
-  return Math.max(0, sem + tech + comp + dur - reuse);
-}
-function rankCandidates(candidates, ctx) {
-  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx) })).sort((a, b) => b.score - a.score);
 }
 const ASSETS_MANIFEST = "stock-assets.json";
 function loadAssetsManifest(stockDir) {
@@ -13190,6 +17048,701 @@ async function downloadAsset(candidate, sceneIndex, searchQuery, stockDir, exist
   };
   logger.info(`[Downloader] Downloaded ${filename} (${Math.round((fileSizeBytes ?? 0) / 1024)} KB)`);
   return asset;
+}
+const STOCK_QUERY_BATCH_SIZE = 12;
+function getQueryCachePath(projectDir) {
+  return path.join(projectDir, "assets", "stock", ".context-query-cache.json");
+}
+function loadQueryCache(projectDir) {
+  const p = getQueryCachePath(projectDir);
+  if (!fs__namespace.existsSync(p)) return {};
+  try {
+    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+  } catch {
+    return {};
+  }
+}
+function saveQueryCacheEntries(projectDir, newEntries) {
+  const p = getQueryCachePath(projectDir);
+  const dir = path.join(projectDir, "assets", "stock");
+  fs__namespace.mkdirSync(dir, { recursive: true });
+  const cache = loadQueryCache(projectDir);
+  for (const [k, v] of Object.entries(newEntries)) {
+    cache[k] = v;
+  }
+  const tmpPath = `${p}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(cache, null, 2), "utf-8");
+  try {
+    fs__namespace.renameSync(tmpPath, p);
+  } catch {
+    try {
+      fs__namespace.copyFileSync(tmpPath, p);
+      fs__namespace.unlinkSync(tmpPath);
+    } catch {
+      fs__namespace.writeFileSync(p, JSON.stringify(cache, null, 2), "utf-8");
+    }
+  }
+}
+function makeCacheKey(globalContext, sceneId, narration) {
+  const narrationHash = crypto.createHash("md5").update(narration).digest("hex").slice(0, 8);
+  return `v${globalContext.version}_${sceneId}_${narrationHash}`;
+}
+const SYSTEM_PROMPT = `You are the Context-Aware Visual Research Engine for a documentary video editor.
+
+You must NEVER interpret a scene in isolation.
+Every scene belongs to a complete documentary with a defined primary subject, central thesis, geography, historical period, community, visual identity and story arc.
+
+Analyze each scene using four levels:
+1. Complete script context (GlobalScriptContext).
+2. Current chapter context.
+3. Exact current narration.
+4. Previous and next scene context.
+
+Produce stock-media search queries in four tiers:
+- Tier A (exactQueries): subject name + action + geography. These MUST contain the primary community/subject proper noun.
+- Tier B (subjectQueries): subject name only, broader action or location.
+- Tier C (contextualQueries): no exact proper noun, uses environment/setting descriptors.
+- Tier D (fallbackQueries): purely illustrative, concept-level only. Use ONLY as last resort.
+
+Rules:
+- NEVER start with Tier D.
+- Every Tier A and B query must contain at least one exact topic anchor from GlobalScriptContext.
+- negativeTerms must include all negativeKeywords from GlobalScriptContext plus any scene-specific ones.
+- Return ONLY valid JSON. No markdown. No explanation.`;
+function buildScenePrompt(packet, globalCtx) {
+  return `GLOBAL SCRIPT CONTEXT:
+Primary Subject: ${globalCtx.primarySubject}
+Central Thesis: ${globalCtx.centralThesis}
+Geography: ${[globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(", ")}
+Time Period: ${globalCtx.timeContext.primaryPeriod}
+Exact Topic Anchors: ${globalCtx.exactTopicAnchors.join(", ")}
+Contextual Anchors: ${globalCtx.contextualAnchors.join(", ")}
+Forbidden Substitutions: ${globalCtx.forbiddenSubstitutions.join("; ")}
+Negative Keywords: ${globalCtx.negativeKeywords.join(", ")}
+Visual World: ${[...globalCtx.visualWorld.environment, ...globalCtx.visualWorld.occupations].join(", ")}
+
+CHAPTER CONTEXT:
+Title: ${packet.chapterContext.chapterTitle}
+Purpose: ${packet.chapterContext.chapterPurpose}
+
+PREVIOUS SCENE: ${packet.neighboringContext.previousScene || "none"}
+CURRENT NARRATION: "${packet.localContext.narration}"
+NEXT SCENE: ${packet.neighboringContext.nextScene || "none"}
+
+CURRENT SCENE PURPOSE: ${packet.localContext.scenePurpose}
+VISIBLE SUBJECT: ${packet.localContext.visibleSubject}
+VISIBLE ACTION: ${packet.localContext.visibleAction}
+PREFERRED LOCATION: ${packet.localContext.preferredLocation}
+PREFERRED TIME PERIOD: ${packet.localContext.preferredTimePeriod}
+
+Generate a context-aware StockSearchPlan. Return ONLY this JSON:
+{
+  "visualIntent": "short visual concept (5-12 words)",
+  "exactQueries": ["Tier A query 1", "Tier A query 2", "Tier A query 3"],
+  "subjectQueries": ["Tier B query 1", "Tier B query 2"],
+  "contextualQueries": ["Tier C query 1", "Tier C query 2"],
+  "fallbackQueries": ["Tier D query 1", "Tier D query 2"],
+  "requiredTerms": ["term that must appear in Tier A"],
+  "preferredTerms": ["preferred search term"],
+  "negativeTerms": ["term to exclude"],
+  "targetMediaType": "video",
+  "desiredShotTypes": ["wide shot", "medium shot"],
+  "desiredOrientation": "landscape"
+}`;
+}
+function buildBatchPrompt(scenes, globalCtx) {
+  const globalContextData = {
+    primarySubject: globalCtx.primarySubject,
+    centralThesis: globalCtx.centralThesis,
+    geography: [
+      globalCtx.geography.primaryCountry,
+      globalCtx.geography.primaryRegion,
+      ...globalCtx.geography.secondaryLocations
+    ].filter(Boolean),
+    timePeriod: [globalCtx.timeContext.primaryPeriod, ...globalCtx.timeContext.historicalPeriods].filter(Boolean),
+    exactTopicAnchors: globalCtx.exactTopicAnchors,
+    negativeKeywords: globalCtx.negativeKeywords
+  };
+  const scenesData = scenes.map((s) => ({
+    sceneId: s.sceneId,
+    chapterTitle: s.packet.chapterContext.chapterTitle,
+    chapterPurpose: s.packet.chapterContext.chapterPurpose,
+    previousScene: s.packet.neighboringContext.previousScene || "none",
+    narration: s.packet.localContext.narration,
+    nextScene: s.packet.neighboringContext.nextScene || "none",
+    scenePurpose: s.packet.localContext.scenePurpose,
+    visibleSubject: s.packet.localContext.visibleSubject,
+    visibleAction: s.packet.localContext.visibleAction
+  }));
+  return `GLOBAL SCRIPT CONTEXT:
+${JSON.stringify(globalContextData, null, 2)}
+
+REQUESTED SCENES (${scenes.length} scenes):
+${JSON.stringify(scenesData, null, 2)}
+
+Generate a context-aware StockSearchPlan for EACH requested scene.
+Every scene in the response MUST map accurately to its requested sceneId.
+Return ONLY valid JSON matching this exact structure:
+{
+  "scenes": [
+    {
+      "sceneId": "exact sceneId matching requested scene",
+      "visualIntent": "short visual concept (5-12 words)",
+      "exactQueries": ["Tier A query 1", "Tier A query 2"],
+      "subjectQueries": ["Tier B query 1", "Tier B query 2"],
+      "contextualQueries": ["Tier C query 1", "Tier C query 2"],
+      "fallbackQueries": ["Tier D query 1", "Tier D query 2"],
+      "requiredTerms": ["term that must appear in Tier A"],
+      "preferredTerms": ["preferred search term"],
+      "negativeTerms": ["term to exclude"],
+      "targetMediaType": "video",
+      "desiredShotTypes": ["medium shot", "close-up"],
+      "desiredOrientation": "landscape"
+    }
+  ]
+}`;
+}
+function buildFallbackPlan(packet, globalCtx) {
+  const anchor = globalCtx.exactTopicAnchors[0] ?? globalCtx.primarySubject;
+  const env = globalCtx.visualWorld.environment[0] ?? "rural";
+  const action = packet.localContext.visibleAction || "community life";
+  const locRaw = globalCtx.geography.primaryRegion ?? globalCtx.geography.primaryCountry ?? "";
+  const location = locRaw.toLowerCase().includes("not specified") ? "" : locRaw;
+  const plan = {
+    visualIntent: sanitizeStockQuery(`${anchor} ${action}`),
+    exactQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${anchor} ${action} ${location}`.trim()),
+      sanitizeStockQuery(`${anchor} ${action}`.trim()),
+      sanitizeStockQuery(`${anchor} community ${env}`.trim())
+    ]),
+    subjectQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${anchor} ${env}`),
+      sanitizeStockQuery(`${anchor} community`)
+    ]),
+    contextualQueries: dedupeStockQueries([
+      sanitizeStockQuery(`${env} community ${action}`),
+      sanitizeStockQuery(`rural ${action}`),
+      sanitizeStockQuery(packet.chapterContext.chapterTitle.toLowerCase())
+    ]),
+    fallbackQueries: dedupeStockQueries([
+      sanitizeStockQuery(action),
+      sanitizeStockQuery(env + " landscape")
+    ]),
+    requiredTerms: [anchor],
+    preferredTerms: globalCtx.contextualAnchors.slice(0, 3),
+    negativeTerms: globalCtx.negativeKeywords,
+    targetMediaType: "video",
+    desiredShotTypes: ["wide shot", "medium shot"],
+    desiredOrientation: "landscape"
+  };
+  return plan;
+}
+function sanitizePlan(plan) {
+  const fallback = sanitizeStockQuery(plan.visualIntent || "documentary footage");
+  return {
+    ...plan,
+    visualIntent: sanitizeStockQuery(plan.visualIntent, fallback),
+    exactQueries: dedupeStockQueries((plan.exactQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    subjectQueries: dedupeStockQueries((plan.subjectQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    contextualQueries: dedupeStockQueries((plan.contextualQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
+    fallbackQueries: dedupeStockQueries((plan.fallbackQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5)
+  };
+}
+function isValidScenePlan(obj, expectedSceneId) {
+  if (!obj || typeof obj !== "object") return false;
+  const p = obj;
+  if (expectedSceneId && p.sceneId !== expectedSceneId) return false;
+  if (typeof p.visualIntent !== "string" || !p.visualIntent.trim()) return false;
+  if (p.visualIntent.toLowerCase().includes("not specified")) return false;
+  const allQueries = [
+    ...Array.isArray(p.exactQueries) ? p.exactQueries : [],
+    ...Array.isArray(p.subjectQueries) ? p.subjectQueries : [],
+    ...Array.isArray(p.contextualQueries) ? p.contextualQueries : [],
+    ...Array.isArray(p.fallbackQueries) ? p.fallbackQueries : []
+  ].filter((q) => typeof q === "string" && q.trim().length > 0 && !q.toLowerCase().includes("not specified"));
+  return allQueries.length > 0;
+}
+async function generateContextAwareSearchPlan(params) {
+  const { projectDir, apiKey, packet, globalContext, sceneId, useCache = true } = params;
+  const rawModel = params.model;
+  const cacheKey = makeCacheKey(globalContext, sceneId, packet.localContext.narration);
+  const cache = useCache ? loadQueryCache(projectDir) : {};
+  if (useCache && cache[cacheKey] && cache[cacheKey].contextVersion === globalContext.version) {
+    logger.info(`[QueryGen] Cache hit for scene ${sceneId}`);
+    return sanitizePlan(cache[cacheKey].plan);
+  }
+  const candidateModels = getAvailableModelsForTask("stock_query", rawModel);
+  const cleanKey = normalizeApiKey(apiKey);
+  let rawJson = "";
+  let modelUsed = "";
+  if (cleanKey.length > 0 && candidateModels.length > 0) {
+    const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+    const prompt = buildScenePrompt(packet, globalContext);
+    for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+      const currentModel = candidateModels[mIdx];
+      try {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+          config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 2048 }
+        });
+        rawJson = response.text ?? "";
+        if (rawJson) {
+          modelUsed = currentModel;
+          recordModelSuccess(currentModel);
+          logger.info(`[QueryGen] Scene ${sceneId} generated successfully with ${currentModel}.`);
+          break;
+        }
+      } catch (err) {
+        const { kind, message } = classifyGeminiErrorKind(err);
+        recordModelFailure(currentModel, kind);
+        if (kind === "MODEL_NOT_FOUND") {
+          logger.warn(`[QueryGen] Model ${currentModel} not found for this account. Switching model immediately.`);
+        } else if (kind === "RATE_LIMIT") {
+          logger.warn(`[QueryGen] Model ${currentModel} rate-limited. Circuit breaker tripped. Switching immediately.`);
+        } else if (kind === "SERVICE_UNAVAILABLE") {
+          logger.warn(`[QueryGen] Model ${currentModel} service unavailable. Switching immediately.`);
+        } else if (kind === "AUTH_ERROR") {
+          logger.error(`[QueryGen] Gemini authentication error. Check API key.`);
+          break;
+        } else {
+          logger.warn(`[QueryGen] Model ${currentModel} failed (${kind}): ${message.slice(0, 100)}`);
+        }
+      }
+    }
+  }
+  let plan;
+  let generationMode = "single_ai";
+  if (rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const parsed = JSON.parse(clean);
+      if (!isValidScenePlan(parsed)) throw new Error("Parsed search plan failed validation");
+      plan = parsed;
+    } catch {
+      logger.warn(`[QueryGen] Scene ${sceneId} JSON parse failed, using rule-based fallback`);
+      plan = buildFallbackPlan(packet, globalContext);
+      generationMode = "rule_fallback";
+    }
+  } else {
+    logger.warn(`[QueryGen] Scene ${sceneId} AI failed or models blocked, using rule-based fallback`);
+    plan = buildFallbackPlan(packet, globalContext);
+    generationMode = "rule_fallback";
+  }
+  plan = sanitizePlan(plan);
+  if (useCache) {
+    saveQueryCacheEntries(projectDir, {
+      [cacheKey]: {
+        plan,
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        contextVersion: globalContext.version,
+        modelUsed: modelUsed || void 0,
+        generationMode
+      }
+    });
+  }
+  return plan;
+}
+async function processBatchChunk(params) {
+  const { projectDir, apiKey, model, batch, globalContext, batchIndex, totalBatches, onProgress } = params;
+  const results = /* @__PURE__ */ new Map();
+  const candidateModels = getAvailableModelsForTask("stock_query", model);
+  const cleanKey = normalizeApiKey(apiKey);
+  let batchSuccess = false;
+  let rawJson = "";
+  let successfulModel = "";
+  if (cleanKey.length > 0 && candidateModels.length > 0) {
+    const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+    const prompt = buildBatchPrompt(batch, globalContext);
+    for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
+      const currentModel = candidateModels[mIdx];
+      const modelNotice = `Using ${currentModel} for batch ${batchIndex + 1}/${totalBatches} (${batch.length} scenes)...`;
+      logger.info(`[QueryGen] ${modelNotice}`);
+      onProgress?.(modelNotice, batchIndex / totalBatches, {
+        phase: "query_generation",
+        currentBatch: batchIndex + 1,
+        totalBatches,
+        processedScenes: batchIndex * STOCK_QUERY_BATCH_SIZE,
+        totalScenes: totalBatches * STOCK_QUERY_BATCH_SIZE,
+        cachedScenes: 0,
+        modelUsed: currentModel
+      });
+      try {
+        const response = await ai.models.generateContent({
+          model: currentModel,
+          contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+          config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 8192 }
+        });
+        rawJson = response.text ?? "";
+        if (rawJson) {
+          successfulModel = currentModel;
+          recordModelSuccess(currentModel);
+          batchSuccess = true;
+          logger.info(`[QueryGen] Batch ${batchIndex + 1}/${totalBatches} generated successfully with ${currentModel}.`);
+          break;
+        }
+      } catch (err) {
+        const { kind, message } = classifyGeminiErrorKind(err);
+        recordModelFailure(currentModel, kind);
+        const nextModel = candidateModels[mIdx + 1];
+        if (kind === "RATE_LIMIT") {
+          const switchMsg = nextModel ? `${currentModel} temporarily rate-limited. Switching to ${nextModel}...` : `${currentModel} rate-limited. No other AI models available, using rule-based fallback...`;
+          logger.warn(`[QueryGen] ${switchMsg}`);
+          onProgress?.(switchMsg, batchIndex / totalBatches);
+        } else if (kind === "SERVICE_UNAVAILABLE") {
+          const switchMsg = nextModel ? `${currentModel} high demand/unavailable. Switching to ${nextModel}...` : `${currentModel} unavailable. Using rule-based fallback...`;
+          logger.warn(`[QueryGen] ${switchMsg}`);
+          onProgress?.(switchMsg, batchIndex / totalBatches);
+        } else if (kind === "MODEL_NOT_FOUND") {
+          logger.warn(`[QueryGen] Model ${currentModel} not found for this account.`);
+        } else if (kind === "AUTH_ERROR") {
+          logger.error(`[QueryGen] Gemini authentication error. Check API key.`);
+          break;
+        } else {
+          logger.warn(`[QueryGen] Batch call with ${currentModel} error (${kind}): ${message.slice(0, 100)}`);
+        }
+      }
+    }
+  }
+  if (batchSuccess && rawJson) {
+    try {
+      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
+      const parsed = JSON.parse(clean);
+      if (Array.isArray(parsed.scenes)) {
+        const returnedMap = /* @__PURE__ */ new Map();
+        const seenIds = /* @__PURE__ */ new Set();
+        for (const item of parsed.scenes) {
+          const sId = typeof item.sceneId === "string" ? item.sceneId.trim() : "";
+          if (sId && !seenIds.has(sId)) {
+            seenIds.add(sId);
+            returnedMap.set(sId, item);
+          }
+        }
+        for (const item of batch) {
+          const found = returnedMap.get(item.sceneId);
+          if (found && isValidScenePlan(found, item.sceneId)) {
+            const sanitized = sanitizePlan(found);
+            results.set(item.sceneId, { plan: sanitized, modelUsed: successfulModel, mode: "batch_ai" });
+          } else {
+            logger.warn(`[QueryGen] Missing or invalid response for scene ${item.sceneId}, falling back to rule-based plan`);
+            const fb = sanitizePlan(buildFallbackPlan(item.packet, globalContext));
+            results.set(item.sceneId, { plan: fb, mode: "rule_fallback" });
+          }
+        }
+        return results;
+      }
+    } catch {
+      logger.warn(`[QueryGen] Batch ${batchIndex + 1} JSON parse failed. Attempting batch split fallback.`);
+    }
+  }
+  if (batch.length >= 4) {
+    const mid = Math.floor(batch.length / 2);
+    const firstHalf = batch.slice(0, mid);
+    const secondHalf = batch.slice(mid);
+    logger.info(`[QueryGen] Splitting batch of ${batch.length} into two sub-batches (${firstHalf.length} and ${secondHalf.length})...`);
+    const half1Res = await processBatchChunk({
+      ...params,
+      batch: firstHalf
+    });
+    const half2Res = await processBatchChunk({
+      ...params,
+      batch: secondHalf
+    });
+    for (const [k, v] of half1Res.entries()) results.set(k, v);
+    for (const [k, v] of half2Res.entries()) results.set(k, v);
+    return results;
+  }
+  logger.warn(`[QueryGen] All AI models failed for batch ${batchIndex + 1}, using rule-based fallback for ${batch.length} scenes.`);
+  for (const item of batch) {
+    const fb = sanitizePlan(buildFallbackPlan(item.packet, globalContext));
+    results.set(item.sceneId, { plan: fb, mode: "rule_fallback" });
+  }
+  return results;
+}
+async function batchGenerateSearchPlans(params) {
+  const { projectDir, apiKey, model, scenes, globalContext, useCache = true, onProgress } = params;
+  const plans = /* @__PURE__ */ new Map();
+  if (scenes.length === 0) {
+    return plans;
+  }
+  const existingCache = useCache ? loadQueryCache(projectDir) : {};
+  const uncachedScenes = [];
+  let cachedCount = 0;
+  for (const s of scenes) {
+    const cacheKey = makeCacheKey(globalContext, s.sceneId, s.packet.localContext.narration);
+    const entry = existingCache[cacheKey];
+    if (useCache && entry && entry.contextVersion === globalContext.version) {
+      plans.set(s.sceneId, sanitizePlan(entry.plan));
+      cachedCount++;
+    } else {
+      uncachedScenes.push({
+        sceneId: s.sceneId,
+        packet: s.packet,
+        cacheKey
+      });
+    }
+  }
+  if (cachedCount > 0) {
+    logger.info(`[QueryGen] ${cachedCount} cached scenes found out of ${scenes.length}.`);
+  }
+  if (uncachedScenes.length === 0) {
+    onProgress?.(`All ${cachedCount} scenes loaded from cache.`, 1, {
+      phase: "query_generation",
+      currentBatch: 0,
+      totalBatches: 0,
+      processedScenes: scenes.length,
+      totalScenes: scenes.length,
+      cachedScenes: cachedCount
+    });
+    return plans;
+  }
+  const batches = [];
+  for (let i = 0; i < uncachedScenes.length; i += STOCK_QUERY_BATCH_SIZE) {
+    batches.push(uncachedScenes.slice(i, i + STOCK_QUERY_BATCH_SIZE));
+  }
+  const totalBatches = batches.length;
+  logger.info(`[QueryGen] Generating stock queries: ${uncachedScenes.length} uncached scenes partitioned into ${totalBatches} batches (batch size ${STOCK_QUERY_BATCH_SIZE}).`);
+  onProgress?.(`Preparing stock queries... ${cachedCount} cached scenes found. Generating ${totalBatches} batches...`, 0.02, {
+    phase: "query_generation",
+    currentBatch: 0,
+    totalBatches,
+    processedScenes: cachedCount,
+    totalScenes: scenes.length,
+    cachedScenes: cachedCount
+  });
+  let processedScenesCount = cachedCount;
+  for (let bIdx = 0; bIdx < batches.length; bIdx++) {
+    const currentBatch = batches[bIdx];
+    const batchProgressPct = bIdx / totalBatches * 0.95;
+    onProgress?.(
+      `Generating stock queries: batch ${bIdx + 1}/${totalBatches} (${currentBatch.length} scenes)...`,
+      batchProgressPct,
+      {
+        phase: "query_generation",
+        currentBatch: bIdx + 1,
+        totalBatches,
+        processedScenes: processedScenesCount,
+        totalScenes: scenes.length,
+        cachedScenes: cachedCount
+      }
+    );
+    const batchResults = await processBatchChunk({
+      projectDir,
+      apiKey,
+      model,
+      batch: currentBatch,
+      globalContext,
+      batchIndex: bIdx,
+      totalBatches,
+      onProgress
+    });
+    const cacheEntriesToSave = {};
+    for (const item of currentBatch) {
+      const res = batchResults.get(item.sceneId);
+      if (res) {
+        plans.set(item.sceneId, res.plan);
+        cacheEntriesToSave[item.cacheKey] = {
+          plan: res.plan,
+          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          contextVersion: globalContext.version,
+          modelUsed: res.modelUsed,
+          generationMode: res.mode
+        };
+      } else {
+        const fb = sanitizePlan(buildFallbackPlan(item.packet, globalContext));
+        plans.set(item.sceneId, fb);
+        cacheEntriesToSave[item.cacheKey] = {
+          plan: fb,
+          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+          contextVersion: globalContext.version,
+          generationMode: "rule_fallback"
+        };
+      }
+      processedScenesCount++;
+    }
+    if (useCache && Object.keys(cacheEntriesToSave).length > 0) {
+      saveQueryCacheEntries(projectDir, cacheEntriesToSave);
+    }
+    onProgress?.(
+      `Stock query batch ${bIdx + 1}/${totalBatches} completed.`,
+      (bIdx + 1) / totalBatches * 0.95,
+      {
+        phase: "query_generation",
+        currentBatch: bIdx + 1,
+        totalBatches,
+        processedScenes: processedScenesCount,
+        totalScenes: scenes.length,
+        cachedScenes: cachedCount
+      }
+    );
+  }
+  onProgress?.(`All ${scenes.length} stock query plans ready.`, 1, {
+    phase: "query_generation",
+    currentBatch: totalBatches,
+    totalBatches,
+    processedScenes: scenes.length,
+    totalScenes: scenes.length,
+    cachedScenes: cachedCount
+  });
+  return plans;
+}
+function tokenize$3(text) {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2)
+  );
+}
+function overlapScore(ref, candidate) {
+  if (ref.size === 0) return 0;
+  let hits = 0;
+  ref.forEach((t) => {
+    if (candidate.has(t)) hits++;
+  });
+  return Math.min(1, hits / Math.max(1, Math.min(ref.size, 5)));
+}
+function candidateTokens(c) {
+  const titleTokens = tokenize$3(c.title);
+  const tagTokens = new Set(c.tags.flatMap((t) => t.toLowerCase().split(/\s+/).filter((x) => x.length > 2)));
+  return /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
+}
+function localRelevanceScore(c, ctx) {
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx.visualIntent), ...tokenize$3(ctx.narration)]);
+  return overlapScore(refTokens, candidateTokens(c));
+}
+function globalSubjectScore(c, ctx) {
+  const anchors = new Set([
+    ...ctx.globalContext.exactTopicAnchors,
+    ...ctx.globalContext.contextualAnchors
+  ].flatMap((a) => a.toLowerCase().split(/\s+/)));
+  return overlapScore(anchors, candidateTokens(c));
+}
+function geographyScore(c, ctx) {
+  const geos = [
+    ctx.globalContext.geography.primaryCountry,
+    ctx.globalContext.geography.primaryRegion,
+    ...ctx.globalContext.geography.secondaryLocations
+  ].filter(Boolean);
+  if (geos.length === 0) return 0.5;
+  const geoTokens = new Set(geos.flatMap((g) => g.toLowerCase().split(/\s+/)));
+  return overlapScore(geoTokens, candidateTokens(c));
+}
+function timePeriodScore(c, ctx) {
+  const period = (ctx.preferredTimePeriod ?? ctx.globalContext.timeContext.primaryPeriod).toLowerCase();
+  const tokens = candidateTokens(c);
+  const historicTerms = /* @__PURE__ */ new Set(["historical", "vintage", "antique", "old", "century", "archival"]);
+  const isModerrn = period === "contemporary" || period === "modern";
+  if (isModerrn && tokens.has("contemporary")) return 1;
+  if (!isModerrn && [...historicTerms].some((t) => tokens.has(t))) return 1;
+  if (isModerrn && [...historicTerms].some((t) => tokens.has(t))) return 0.2;
+  return 0.5;
+}
+function chapterPurposeScore(c, ctx) {
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx.chapterTitle), ...tokenize$3(ctx.chapterPurpose)]);
+  return overlapScore(refTokens, candidateTokens(c));
+}
+function technicalScore$1(c) {
+  const minDim = Math.min(c.width, c.height);
+  if (minDim >= 2160) return 1;
+  if (minDim >= 1080) return 0.9;
+  if (minDim >= 720) return 0.6;
+  return 0.3;
+}
+function compositionScore$1(c, preferredAr) {
+  const [pw, ph] = preferredAr.split(":").map(Number);
+  const preferred = pw / ph;
+  const actual = c.width / c.height;
+  if (!preferred || !actual) return 0.5;
+  const diff = Math.abs(preferred - actual) / preferred;
+  return Math.max(0, 1 - diff * 2);
+}
+function durationScore$1(c, sceneDuration) {
+  if (c.mediaType === "photo") return 0.8;
+  const clipDur = c.durationSecs ?? 0;
+  if (clipDur <= 0) return 0.4;
+  if (clipDur >= sceneDuration) return 1;
+  return Math.max(0.2, clipDur / sceneDuration);
+}
+function applyPenalties(c, ctx) {
+  const reasons = [];
+  let total = 0;
+  const tokens = candidateTokens(c);
+  for (const community of ctx.globalContext.communities) {
+    for (const wrong of community.mustNotConfuseWith) {
+      const wrongTokens = tokenize$3(wrong);
+      if ([...wrongTokens].some((t) => tokens.has(t))) {
+        total += 60;
+        reasons.push(`Wrong community: contains "${wrong}" (should be "${community.name}")`);
+      }
+    }
+  }
+  for (const forbidden of ctx.globalContext.forbiddenSubstitutions) {
+    const fTokens = tokenize$3(forbidden);
+    if ([...fTokens].filter((t) => t.length > 3).some((t) => tokens.has(t))) {
+      total += 50;
+      reasons.push(`Forbidden substitution: ${forbidden}`);
+    }
+  }
+  for (const neg of ctx.globalContext.negativeKeywords) {
+    const negTokens = tokenize$3(neg);
+    if ([...negTokens].some((t) => tokens.has(t))) {
+      total += 30;
+      reasons.push(`Negative keyword: ${neg}`);
+    }
+  }
+  if (ctx.usedAssetIds.has(c.assetId)) {
+    total += 20;
+    reasons.push("Asset already used");
+  }
+  return { total, reasons };
+}
+function getMatchLabel(score, penalties) {
+  const adjusted = score - penalties;
+  if (adjusted >= 80) return "STRONG_MATCH";
+  if (adjusted >= 65) return "ACCEPTABLE";
+  if (adjusted >= 50) return "ILLUSTRATIVE";
+  return "REJECTED";
+}
+function getVisualTruthLabel(c, ctx, localScore, globalScore) {
+  const tokens = candidateTokens(c);
+  const hasExactAnchor = ctx.globalContext.exactTopicAnchors.some(
+    (a) => a.toLowerCase().split(/\s+/).every((t) => tokens.has(t))
+  );
+  if (hasExactAnchor && localScore >= 0.5) return "EXACT_SUBJECT";
+  if (globalScore >= 0.3 && localScore >= 0.3) return "CONTEXTUAL_MATCH";
+  const isHistorical = ctx.globalContext.timeContext.historicalPeriods.length > 0 && (tokens.has("historical") || tokens.has("vintage") || tokens.has("archival"));
+  if (isHistorical) return "HISTORICAL";
+  return "ILLUSTRATIVE";
+}
+function scoreContextCandidate(candidate, ctx) {
+  const local = localRelevanceScore(candidate, ctx) * 30;
+  const global = globalSubjectScore(candidate, ctx) * 25;
+  const geo = geographyScore(candidate, ctx) * 15;
+  const time = timePeriodScore(candidate, ctx) * 10;
+  const chapter = chapterPurposeScore(candidate, ctx) * 10;
+  const tech = (technicalScore$1(candidate) * 0.6 + compositionScore$1(candidate, ctx.preferredAspectRatio) * 0.4) * 5;
+  const dur = durationScore$1(candidate, ctx.sceneDurationSecs);
+  const sequenceContinuity = dur * 5;
+  const rawScore = local + global + geo + time + chapter + tech + sequenceContinuity;
+  const { total: penalties, reasons: penaltyReasons } = applyPenalties(candidate, ctx);
+  const totalScore = Math.max(0, rawScore - penalties);
+  const matchLabel = getMatchLabel(rawScore, penalties);
+  const visualTruthLabel = getVisualTruthLabel(candidate, ctx, local / 30, global / 25);
+  return {
+    localRelevance: Math.round(local),
+    globalSubjectRelevance: Math.round(global),
+    geographyMatch: Math.round(geo),
+    timePeriodMatch: Math.round(time),
+    chapterPurposeMatch: Math.round(chapter),
+    technicalQuality: Math.round(tech),
+    sequenceContinuity: Math.round(sequenceContinuity),
+    totalScore: Math.round(totalScore),
+    penalties: -Math.round(penalties),
+    penaltyReasons,
+    matchLabel,
+    visualTruthLabel
+  };
+}
+function rankContextCandidates(candidates, ctx) {
+  return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
 }
 function normalizeUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") return "";
@@ -13609,1062 +18162,6 @@ function loadStockCandidates(projectDir) {
 function saveStockCandidates(projectDir, data) {
   const filePath = getCandidatesStorePath(projectDir);
   return atomicWriteJson(filePath, data);
-}
-async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
-  const allCandidates = [];
-  const seenIds = /* @__PURE__ */ new Set();
-  const addCandidates = (results) => {
-    for (const r of results) {
-      if (!seenIds.has(r.assetId)) {
-        seenIds.add(r.assetId);
-        allCandidates.push(r);
-      }
-    }
-  };
-  const cleanQueries = dedupeStockQueries(queries.map((q) => sanitizeStockQuery(q)));
-  if (pexelsApiKey) {
-    for (const query of cleanQueries) {
-      const cached = cache.get(`pexels_v:${query}`);
-      if (cached) {
-        addCandidates(cached);
-      } else {
-        const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation);
-        cache.set(`pexels_v:${query}`, res);
-        addCandidates(res);
-      }
-      if (allCandidates.length >= 10) break;
-    }
-  }
-  if (allCandidates.length >= 3) {
-    logger.info(`[StockEngine] Pexels returned enough candidates (${allCandidates.length}). Pixabay skipped to preserve API quota.`);
-    return allCandidates;
-  }
-  if (pixabayApiKey) {
-    if (isPixabayPaused()) {
-      const waitSec = getPixabayPauseRemainingSecs();
-      logger.info(`[Pixabay] Rate limit paused (${waitSec}s remaining). Skipping Pixabay for this scene.`);
-    } else {
-      const pxOrientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
-      const pixabayQueries = cleanQueries.slice(0, 2);
-      for (const query of pixabayQueries) {
-        if (isPixabayPaused()) break;
-        const cached = cache.get(`pixabay_v:${query}`);
-        if (cached) {
-          addCandidates(cached);
-        } else {
-          try {
-            const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation);
-            cache.set(`pixabay_v:${query}`, res);
-            addCandidates(res);
-          } catch (pxErr) {
-            logger.warn(`[Pixabay] Video search failed for query "${query}": ${pxErr}`);
-          }
-        }
-        if (allCandidates.length >= 10) break;
-      }
-    }
-  }
-  if (allCandidates.length < 3) {
-    for (const query of cleanQueries.slice(0, 2)) {
-      if (pexelsApiKey) {
-        const cached = cache.get(`pexels_p:${query}`);
-        if (cached) {
-          addCandidates(cached);
-        } else {
-          const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation);
-          cache.set(`pexels_p:${query}`, res);
-          addCandidates(res);
-        }
-      }
-      if (pixabayApiKey && !isPixabayPaused() && allCandidates.length < 2) {
-        const cached = cache.get(`pixabay_p:${query}`);
-        if (cached) {
-          addCandidates(cached);
-        } else {
-          try {
-            const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
-            const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation);
-            cache.set(`pixabay_p:${query}`, res);
-            addCandidates(res);
-          } catch (pxErr) {
-            logger.warn(`[Pixabay] Photo search failed for query "${query}": ${pxErr}`);
-          }
-        }
-      }
-    }
-  }
-  return allCandidates;
-}
-function toOrientation$1(ar) {
-  if (ar === "9:16") return "portrait";
-  if (ar === "1:1") return "square";
-  return "landscape";
-}
-async function runStockEngine(params, onProgress = () => {
-}) {
-  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9", targetSceneIndices } = params;
-  setPixabayProjectDir(projectDir);
-  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-  if (!fs__namespace.existsSync(planPath)) {
-    return {
-      success: false,
-      totalScenes: 0,
-      assignedScenes: 0,
-      failedScenes: 0,
-      assignments: [],
-      error: "No edit plan found. Run AI Planning first."
-    };
-  }
-  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-  const stockDir = path.join(projectDir, "assets", "stock");
-  fs__namespace.mkdirSync(stockDir, { recursive: true });
-  const prodSettings = loadProductionSettings(projectDir);
-  const stockCandidatesStore = loadStockCandidates(projectDir);
-  const cache = new QueryCache(stockDir);
-  let manifest = loadAssetsManifest(stockDir);
-  const usedAssetIds = new Set(manifest.map((a) => a.assetId));
-  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe$1(reviewPath, []) : [];
-  const existingMap = /* @__PURE__ */ new Map();
-  for (const a of existingAssignments) {
-    existingMap.set(a.sceneIndex, a);
-  }
-  const flattenedEntries = flattenEditPlanScenes(plan);
-  const scenesToProcess = flattenedEntries.filter(({ scene }) => {
-    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
-      return false;
-    }
-    const existing = existingMap.get(scene.sceneIndex);
-    if (scene.locked || existing?.locked) return false;
-    if (existing?.manualOverride) return false;
-    if (existing?.approvalStatus === "approved") return false;
-    if (!targetSceneIndices && existing?.asset?.provider === "google-flow" && existing?.status === "assigned" && existing?.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
-      return false;
-    }
-    return true;
-  });
-  if (targetSceneIndices) {
-    const expectedTargetCount = targetSceneIndices.length;
-    const actualEligibleTargetCount = scenesToProcess.length;
-    const totalProjectScenes = flattenedEntries.length;
-    logger.info(
-      `[VisualMix] Stock ownership: expected=${expectedTargetCount} actualEligible=${actualEligibleTargetCount} totalProjectScenes=${totalProjectScenes}`
-    );
-    if (expectedTargetCount < totalProjectScenes && actualEligibleTargetCount > expectedTargetCount) {
-      throw new Error(
-        `VISUAL_MIX_STOCK_SCOPE_VIOLATION: Expected at most ${expectedTargetCount} scenes but stock engine targeted ${actualEligibleTargetCount} scenes out of ${totalProjectScenes}.`
-      );
-    }
-  }
-  const assignments = [];
-  let assignedCount = 0;
-  let failedCount = 0;
-  const orientation = toOrientation$1(preferredAspectRatio);
-  for (const entry of flattenedEntries) {
-    const existing = existingMap.get(entry.sceneIndex);
-    const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved";
-    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex);
-    if ((isLocked || isExcluded) && existing) {
-      assignments.push(existing);
-      if (existing.status === "assigned") assignedCount++;
-    }
-  }
-  onProgress(`Starting stock search for ${scenesToProcess.length} scenes...`, 0.01);
-  for (let i = 0; i < scenesToProcess.length; i++) {
-    const entry = scenesToProcess[i];
-    const { scene, sceneId, chapterTitle, chapterPurpose } = entry;
-    const pct = 0.05 + i / scenesToProcess.length * 0.85;
-    const queries = scene.searchQueries?.length ? scene.searchQueries : [scene.visualIntent ?? scene.narrativeText ?? "nature background"].slice(0, 4);
-    const visualIntent = scene.visualIntent ?? queries[0] ?? "";
-    const narrationText = scene.narrativeText ?? "";
-    const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
-    onProgress(
-      `[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - "${queries[0]}"`,
-      pct
-    );
-    const assignment = {
-      sceneId,
-      sceneIndex: scene.sceneIndex,
-      narrationText,
-      startTime: scene.startTime,
-      endTime: scene.endTime,
-      visualIntent,
-      searchQueries: queries,
-      usedQuery: queries[0],
-      asset: null,
-      score: 0,
-      locked: false,
-      manualOverride: false,
-      status: "searching"
-    };
-    try {
-      const candidates = await searchForScene(
-        queries,
-        pexelsApiKey,
-        pixabayApiKey,
-        orientation,
-        cache
-      );
-      if (candidates.length === 0) {
-        assignment.status = "failed";
-        assignment.errorMessage = "No candidates found from any provider";
-        failedCount++;
-      } else {
-        const assignmentHistory = assignments.map((a) => ({
-          sceneIndex: a.sceneIndex,
-          provider: a.asset?.provider,
-          assetId: a.asset?.assetId,
-          creator: a.asset?.creator,
-          title: a.asset?.searchQuery,
-          downloadUrl: a.asset?.downloadUrl,
-          thumbnailUrl: a.asset?.thumbnailUrl,
-          isLocked: a.locked
-        }));
-        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
-          const scoringCtx = {
-            narration: narrationText,
-            visualIntent,
-            chapterTitle,
-            chapterPurpose,
-            sceneDurationSecs: sceneDuration,
-            preferredAspectRatio,
-            assignmentHistory,
-            isLocked: scene.locked
-          };
-          const topCandidates = rankCandidatesForScene(
-            sceneId,
-            scene.sceneIndex,
-            candidates,
-            scoringCtx,
-            prodSettings.candidatesPerScene || 3
-          );
-          stockCandidatesStore[sceneId] = topCandidates;
-          const winner = topCandidates.find((c) => c.selected) || topCandidates[0];
-          const usedQuery = queries[0];
-          const downloadedAsset = await downloadAsset(
-            winner.result,
-            scene.sceneIndex,
-            usedQuery,
-            stockDir,
-            manifest
-          );
-          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
-          manifest.push(downloadedAsset);
-          usedAssetIds.add(downloadedAsset.assetId);
-          scene.localPath = downloadedAsset.localPath;
-          scene.mediaFile = path.basename(downloadedAsset.localPath);
-          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
-          assignment.asset = downloadedAsset;
-          assignment.score = winner.score.totalScore;
-          assignment.usedQuery = usedQuery;
-          assignment.status = "assigned";
-          assignment.candidates = topCandidates;
-          assignment.selectedCandidateId = winner.candidateId;
-          assignment.approvalStatus = "auto_selected";
-          assignment.scoreBreakdown = winner.score;
-          assignedCount++;
-        } else {
-          const ranked = rankCandidates(candidates, {
-            visualIntent,
-            narrationText,
-            sceneDurationSecs: sceneDuration,
-            preferredAspectRatio,
-            usedAssetIds
-          });
-          const winner = ranked[0];
-          const usedQuery = queries.find(
-            (q) => winner.searchQuery !== void 0 ? winner.searchQuery === q : true
-          ) ?? queries[0];
-          const downloadedAsset = await downloadAsset(
-            winner,
-            scene.sceneIndex,
-            usedQuery,
-            stockDir,
-            manifest
-          );
-          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
-          manifest.push(downloadedAsset);
-          usedAssetIds.add(downloadedAsset.assetId);
-          scene.localPath = downloadedAsset.localPath;
-          scene.mediaFile = path.basename(downloadedAsset.localPath);
-          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
-          assignment.asset = downloadedAsset;
-          assignment.score = winner.score;
-          assignment.usedQuery = usedQuery;
-          assignment.status = "assigned";
-          assignedCount++;
-        }
-      }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[StockEngine] Scene ${scene.sceneIndex} failed: ${msg}`);
-      assignment.status = "failed";
-      assignment.errorMessage = msg;
-      failedCount++;
-    }
-    assignments.push(assignment);
-    cache.save();
-    saveAssetsManifest(stockDir, manifest);
-  }
-  assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
-  atomicWriteJson(planPath, plan);
-  if (params.assignmentSink) {
-    const owned = targetSceneIndices ? assignments.filter((a) => targetSceneIndices.includes(a.sceneIndex)) : assignments;
-    await params.assignmentSink(owned);
-  } else {
-    atomicWriteJson(reviewPath, assignments);
-  }
-  if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
-    saveStockCandidates(projectDir, stockCandidatesStore);
-  }
-  onProgress(
-    `Done - ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`,
-    1
-  );
-  return {
-    success: true,
-    totalScenes: flattenedEntries.length,
-    assignedScenes: assignedCount,
-    failedScenes: failedCount,
-    assignments
-  };
-}
-async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9") {
-  const stockDir = path.join(projectDir, "assets", "stock");
-  const cache = new QueryCache(stockDir);
-  const manifest = loadAssetsManifest(stockDir);
-  const orientation = toOrientation$1(preferredAspectRatio);
-  const sanitizedQuery = sanitizeStockQuery(newQuery);
-  const candidates = await searchForScene(
-    [sanitizedQuery],
-    pexelsApiKey,
-    pixabayApiKey,
-    orientation,
-    cache
-  );
-  if (candidates.length === 0) throw new Error(`No results for query "${sanitizedQuery}"`);
-  const usedIds = new Set(manifest.map((a) => a.assetId));
-  const ranked = rankCandidates(candidates, {
-    visualIntent: newQuery,
-    narrationText: newQuery,
-    sceneDurationSecs: 10,
-    preferredAspectRatio,
-    usedAssetIds: usedIds
-  });
-  const winner = ranked[0];
-  const asset = await downloadAsset(winner, sceneIndex, newQuery, stockDir, manifest);
-  const updatedManifest = manifest.filter((a) => a.assetId !== asset.assetId);
-  updatedManifest.push(asset);
-  saveAssetsManifest(stockDir, updatedManifest);
-  cache.save();
-  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-  if (fs__namespace.existsSync(planPath)) {
-    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    const flat = flattenEditPlanScenes(plan);
-    const sceneEntry = flat.find((s) => s.sceneIndex === sceneIndex);
-    if (sceneEntry) {
-      sceneEntry.scene.localPath = asset.localPath;
-      sceneEntry.scene.mediaFile = path.basename(asset.localPath);
-      sceneEntry.scene.mediaType = asset.mediaType === "photo" ? "image" : "video";
-      atomicWriteJson(planPath, plan);
-    }
-  }
-  return asset;
-}
-const STOCK_QUERY_BATCH_SIZE = 12;
-function getQueryCachePath(projectDir) {
-  return path.join(projectDir, "assets", "stock", ".context-query-cache.json");
-}
-function loadQueryCache(projectDir) {
-  const p = getQueryCachePath(projectDir);
-  if (!fs__namespace.existsSync(p)) return {};
-  try {
-    return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
-  } catch {
-    return {};
-  }
-}
-function saveQueryCacheEntries(projectDir, newEntries) {
-  const p = getQueryCachePath(projectDir);
-  const dir = path.join(projectDir, "assets", "stock");
-  fs__namespace.mkdirSync(dir, { recursive: true });
-  const cache = loadQueryCache(projectDir);
-  for (const [k, v] of Object.entries(newEntries)) {
-    cache[k] = v;
-  }
-  const tmpPath = `${p}.${Date.now()}.${Math.random().toString(36).slice(2, 6)}.tmp`;
-  fs__namespace.writeFileSync(tmpPath, JSON.stringify(cache, null, 2), "utf-8");
-  try {
-    fs__namespace.renameSync(tmpPath, p);
-  } catch {
-    try {
-      fs__namespace.copyFileSync(tmpPath, p);
-      fs__namespace.unlinkSync(tmpPath);
-    } catch {
-      fs__namespace.writeFileSync(p, JSON.stringify(cache, null, 2), "utf-8");
-    }
-  }
-}
-function makeCacheKey(globalContext, sceneId, narration) {
-  const narrationHash = crypto.createHash("md5").update(narration).digest("hex").slice(0, 8);
-  return `v${globalContext.version}_${sceneId}_${narrationHash}`;
-}
-const SYSTEM_PROMPT = `You are the Context-Aware Visual Research Engine for a documentary video editor.
-
-You must NEVER interpret a scene in isolation.
-Every scene belongs to a complete documentary with a defined primary subject, central thesis, geography, historical period, community, visual identity and story arc.
-
-Analyze each scene using four levels:
-1. Complete script context (GlobalScriptContext).
-2. Current chapter context.
-3. Exact current narration.
-4. Previous and next scene context.
-
-Produce stock-media search queries in four tiers:
-- Tier A (exactQueries): subject name + action + geography. These MUST contain the primary community/subject proper noun.
-- Tier B (subjectQueries): subject name only, broader action or location.
-- Tier C (contextualQueries): no exact proper noun, uses environment/setting descriptors.
-- Tier D (fallbackQueries): purely illustrative, concept-level only. Use ONLY as last resort.
-
-Rules:
-- NEVER start with Tier D.
-- Every Tier A and B query must contain at least one exact topic anchor from GlobalScriptContext.
-- negativeTerms must include all negativeKeywords from GlobalScriptContext plus any scene-specific ones.
-- Return ONLY valid JSON. No markdown. No explanation.`;
-function buildScenePrompt(packet, globalCtx) {
-  return `GLOBAL SCRIPT CONTEXT:
-Primary Subject: ${globalCtx.primarySubject}
-Central Thesis: ${globalCtx.centralThesis}
-Geography: ${[globalCtx.geography.primaryCountry, globalCtx.geography.primaryRegion, ...globalCtx.geography.secondaryLocations].filter(Boolean).join(", ")}
-Time Period: ${globalCtx.timeContext.primaryPeriod}
-Exact Topic Anchors: ${globalCtx.exactTopicAnchors.join(", ")}
-Contextual Anchors: ${globalCtx.contextualAnchors.join(", ")}
-Forbidden Substitutions: ${globalCtx.forbiddenSubstitutions.join("; ")}
-Negative Keywords: ${globalCtx.negativeKeywords.join(", ")}
-Visual World: ${[...globalCtx.visualWorld.environment, ...globalCtx.visualWorld.occupations].join(", ")}
-
-CHAPTER CONTEXT:
-Title: ${packet.chapterContext.chapterTitle}
-Purpose: ${packet.chapterContext.chapterPurpose}
-
-PREVIOUS SCENE: ${packet.neighboringContext.previousScene || "none"}
-CURRENT NARRATION: "${packet.localContext.narration}"
-NEXT SCENE: ${packet.neighboringContext.nextScene || "none"}
-
-CURRENT SCENE PURPOSE: ${packet.localContext.scenePurpose}
-VISIBLE SUBJECT: ${packet.localContext.visibleSubject}
-VISIBLE ACTION: ${packet.localContext.visibleAction}
-PREFERRED LOCATION: ${packet.localContext.preferredLocation}
-PREFERRED TIME PERIOD: ${packet.localContext.preferredTimePeriod}
-
-Generate a context-aware StockSearchPlan. Return ONLY this JSON:
-{
-  "visualIntent": "short visual concept (5-12 words)",
-  "exactQueries": ["Tier A query 1", "Tier A query 2", "Tier A query 3"],
-  "subjectQueries": ["Tier B query 1", "Tier B query 2"],
-  "contextualQueries": ["Tier C query 1", "Tier C query 2"],
-  "fallbackQueries": ["Tier D query 1", "Tier D query 2"],
-  "requiredTerms": ["term that must appear in Tier A"],
-  "preferredTerms": ["preferred search term"],
-  "negativeTerms": ["term to exclude"],
-  "targetMediaType": "video",
-  "desiredShotTypes": ["wide shot", "medium shot"],
-  "desiredOrientation": "landscape"
-}`;
-}
-function buildBatchPrompt(scenes, globalCtx) {
-  const globalContextData = {
-    primarySubject: globalCtx.primarySubject,
-    centralThesis: globalCtx.centralThesis,
-    geography: [
-      globalCtx.geography.primaryCountry,
-      globalCtx.geography.primaryRegion,
-      ...globalCtx.geography.secondaryLocations
-    ].filter(Boolean),
-    timePeriod: [globalCtx.timeContext.primaryPeriod, ...globalCtx.timeContext.historicalPeriods].filter(Boolean),
-    exactTopicAnchors: globalCtx.exactTopicAnchors,
-    negativeKeywords: globalCtx.negativeKeywords
-  };
-  const scenesData = scenes.map((s) => ({
-    sceneId: s.sceneId,
-    chapterTitle: s.packet.chapterContext.chapterTitle,
-    chapterPurpose: s.packet.chapterContext.chapterPurpose,
-    previousScene: s.packet.neighboringContext.previousScene || "none",
-    narration: s.packet.localContext.narration,
-    nextScene: s.packet.neighboringContext.nextScene || "none",
-    scenePurpose: s.packet.localContext.scenePurpose,
-    visibleSubject: s.packet.localContext.visibleSubject,
-    visibleAction: s.packet.localContext.visibleAction
-  }));
-  return `GLOBAL SCRIPT CONTEXT:
-${JSON.stringify(globalContextData, null, 2)}
-
-REQUESTED SCENES (${scenes.length} scenes):
-${JSON.stringify(scenesData, null, 2)}
-
-Generate a context-aware StockSearchPlan for EACH requested scene.
-Every scene in the response MUST map accurately to its requested sceneId.
-Return ONLY valid JSON matching this exact structure:
-{
-  "scenes": [
-    {
-      "sceneId": "exact sceneId matching requested scene",
-      "visualIntent": "short visual concept (5-12 words)",
-      "exactQueries": ["Tier A query 1", "Tier A query 2"],
-      "subjectQueries": ["Tier B query 1", "Tier B query 2"],
-      "contextualQueries": ["Tier C query 1", "Tier C query 2"],
-      "fallbackQueries": ["Tier D query 1", "Tier D query 2"],
-      "requiredTerms": ["term that must appear in Tier A"],
-      "preferredTerms": ["preferred search term"],
-      "negativeTerms": ["term to exclude"],
-      "targetMediaType": "video",
-      "desiredShotTypes": ["medium shot", "close-up"],
-      "desiredOrientation": "landscape"
-    }
-  ]
-}`;
-}
-function buildFallbackPlan(packet, globalCtx) {
-  const anchor = globalCtx.exactTopicAnchors[0] ?? globalCtx.primarySubject;
-  const env = globalCtx.visualWorld.environment[0] ?? "rural";
-  const action = packet.localContext.visibleAction || "community life";
-  const locRaw = globalCtx.geography.primaryRegion ?? globalCtx.geography.primaryCountry ?? "";
-  const location = locRaw.toLowerCase().includes("not specified") ? "" : locRaw;
-  const plan = {
-    visualIntent: sanitizeStockQuery(`${anchor} ${action}`),
-    exactQueries: dedupeStockQueries([
-      sanitizeStockQuery(`${anchor} ${action} ${location}`.trim()),
-      sanitizeStockQuery(`${anchor} ${action}`.trim()),
-      sanitizeStockQuery(`${anchor} community ${env}`.trim())
-    ]),
-    subjectQueries: dedupeStockQueries([
-      sanitizeStockQuery(`${anchor} ${env}`),
-      sanitizeStockQuery(`${anchor} community`)
-    ]),
-    contextualQueries: dedupeStockQueries([
-      sanitizeStockQuery(`${env} community ${action}`),
-      sanitizeStockQuery(`rural ${action}`),
-      sanitizeStockQuery(packet.chapterContext.chapterTitle.toLowerCase())
-    ]),
-    fallbackQueries: dedupeStockQueries([
-      sanitizeStockQuery(action),
-      sanitizeStockQuery(env + " landscape")
-    ]),
-    requiredTerms: [anchor],
-    preferredTerms: globalCtx.contextualAnchors.slice(0, 3),
-    negativeTerms: globalCtx.negativeKeywords,
-    targetMediaType: "video",
-    desiredShotTypes: ["wide shot", "medium shot"],
-    desiredOrientation: "landscape"
-  };
-  return plan;
-}
-function sanitizePlan$1(plan) {
-  const fallback = sanitizeStockQuery(plan.visualIntent || "documentary footage");
-  return {
-    ...plan,
-    visualIntent: sanitizeStockQuery(plan.visualIntent, fallback),
-    exactQueries: dedupeStockQueries((plan.exactQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
-    subjectQueries: dedupeStockQueries((plan.subjectQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
-    contextualQueries: dedupeStockQueries((plan.contextualQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5),
-    fallbackQueries: dedupeStockQueries((plan.fallbackQueries || []).map((q) => sanitizeStockQuery(q, fallback))).slice(0, 5)
-  };
-}
-function isValidScenePlan(obj, expectedSceneId) {
-  if (!obj || typeof obj !== "object") return false;
-  const p = obj;
-  if (expectedSceneId && p.sceneId !== expectedSceneId) return false;
-  if (typeof p.visualIntent !== "string" || !p.visualIntent.trim()) return false;
-  if (p.visualIntent.toLowerCase().includes("not specified")) return false;
-  const allQueries = [
-    ...Array.isArray(p.exactQueries) ? p.exactQueries : [],
-    ...Array.isArray(p.subjectQueries) ? p.subjectQueries : [],
-    ...Array.isArray(p.contextualQueries) ? p.contextualQueries : [],
-    ...Array.isArray(p.fallbackQueries) ? p.fallbackQueries : []
-  ].filter((q) => typeof q === "string" && q.trim().length > 0 && !q.toLowerCase().includes("not specified"));
-  return allQueries.length > 0;
-}
-async function generateContextAwareSearchPlan(params) {
-  const { projectDir, apiKey, packet, globalContext, sceneId, useCache = true } = params;
-  const rawModel = params.model;
-  const cacheKey = makeCacheKey(globalContext, sceneId, packet.localContext.narration);
-  const cache = useCache ? loadQueryCache(projectDir) : {};
-  if (useCache && cache[cacheKey] && cache[cacheKey].contextVersion === globalContext.version) {
-    logger.info(`[QueryGen] Cache hit for scene ${sceneId}`);
-    return sanitizePlan$1(cache[cacheKey].plan);
-  }
-  const candidateModels = getAvailableModelsForTask("stock_query", rawModel);
-  const cleanKey = normalizeApiKey(apiKey);
-  let rawJson = "";
-  let modelUsed = "";
-  if (cleanKey.length > 0 && candidateModels.length > 0) {
-    const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
-    const prompt = buildScenePrompt(packet, globalContext);
-    for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
-      const currentModel = candidateModels[mIdx];
-      try {
-        const response = await ai.models.generateContent({
-          model: currentModel,
-          contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-          config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 2048 }
-        });
-        rawJson = response.text ?? "";
-        if (rawJson) {
-          modelUsed = currentModel;
-          recordModelSuccess(currentModel);
-          logger.info(`[QueryGen] Scene ${sceneId} generated successfully with ${currentModel}.`);
-          break;
-        }
-      } catch (err) {
-        const { kind, message } = classifyGeminiErrorKind(err);
-        recordModelFailure(currentModel, kind);
-        if (kind === "MODEL_NOT_FOUND") {
-          logger.warn(`[QueryGen] Model ${currentModel} not found for this account. Switching model immediately.`);
-        } else if (kind === "RATE_LIMIT") {
-          logger.warn(`[QueryGen] Model ${currentModel} rate-limited. Circuit breaker tripped. Switching immediately.`);
-        } else if (kind === "SERVICE_UNAVAILABLE") {
-          logger.warn(`[QueryGen] Model ${currentModel} service unavailable. Switching immediately.`);
-        } else if (kind === "AUTH_ERROR") {
-          logger.error(`[QueryGen] Gemini authentication error. Check API key.`);
-          break;
-        } else {
-          logger.warn(`[QueryGen] Model ${currentModel} failed (${kind}): ${message.slice(0, 100)}`);
-        }
-      }
-    }
-  }
-  let plan;
-  let generationMode = "single_ai";
-  if (rawJson) {
-    try {
-      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      const parsed = JSON.parse(clean);
-      if (!isValidScenePlan(parsed)) throw new Error("Parsed search plan failed validation");
-      plan = parsed;
-    } catch {
-      logger.warn(`[QueryGen] Scene ${sceneId} JSON parse failed, using rule-based fallback`);
-      plan = buildFallbackPlan(packet, globalContext);
-      generationMode = "rule_fallback";
-    }
-  } else {
-    logger.warn(`[QueryGen] Scene ${sceneId} AI failed or models blocked, using rule-based fallback`);
-    plan = buildFallbackPlan(packet, globalContext);
-    generationMode = "rule_fallback";
-  }
-  plan = sanitizePlan$1(plan);
-  if (useCache) {
-    saveQueryCacheEntries(projectDir, {
-      [cacheKey]: {
-        plan,
-        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        contextVersion: globalContext.version,
-        modelUsed: modelUsed || void 0,
-        generationMode
-      }
-    });
-  }
-  return plan;
-}
-async function processBatchChunk(params) {
-  const { projectDir, apiKey, model, batch, globalContext, batchIndex, totalBatches, onProgress } = params;
-  const results = /* @__PURE__ */ new Map();
-  const candidateModels = getAvailableModelsForTask("stock_query", model);
-  const cleanKey = normalizeApiKey(apiKey);
-  let batchSuccess = false;
-  let rawJson = "";
-  let successfulModel = "";
-  if (cleanKey.length > 0 && candidateModels.length > 0) {
-    const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
-    const prompt = buildBatchPrompt(batch, globalContext);
-    for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
-      const currentModel = candidateModels[mIdx];
-      const modelNotice = `Using ${currentModel} for batch ${batchIndex + 1}/${totalBatches} (${batch.length} scenes)...`;
-      logger.info(`[QueryGen] ${modelNotice}`);
-      onProgress?.(modelNotice, batchIndex / totalBatches, {
-        phase: "query_generation",
-        currentBatch: batchIndex + 1,
-        totalBatches,
-        processedScenes: batchIndex * STOCK_QUERY_BATCH_SIZE,
-        totalScenes: totalBatches * STOCK_QUERY_BATCH_SIZE,
-        cachedScenes: 0,
-        modelUsed: currentModel
-      });
-      try {
-        const response = await ai.models.generateContent({
-          model: currentModel,
-          contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-          config: { responseMimeType: "application/json", temperature: 0.25, maxOutputTokens: 8192 }
-        });
-        rawJson = response.text ?? "";
-        if (rawJson) {
-          successfulModel = currentModel;
-          recordModelSuccess(currentModel);
-          batchSuccess = true;
-          logger.info(`[QueryGen] Batch ${batchIndex + 1}/${totalBatches} generated successfully with ${currentModel}.`);
-          break;
-        }
-      } catch (err) {
-        const { kind, message } = classifyGeminiErrorKind(err);
-        recordModelFailure(currentModel, kind);
-        const nextModel = candidateModels[mIdx + 1];
-        if (kind === "RATE_LIMIT") {
-          const switchMsg = nextModel ? `${currentModel} temporarily rate-limited. Switching to ${nextModel}...` : `${currentModel} rate-limited. No other AI models available, using rule-based fallback...`;
-          logger.warn(`[QueryGen] ${switchMsg}`);
-          onProgress?.(switchMsg, batchIndex / totalBatches);
-        } else if (kind === "SERVICE_UNAVAILABLE") {
-          const switchMsg = nextModel ? `${currentModel} high demand/unavailable. Switching to ${nextModel}...` : `${currentModel} unavailable. Using rule-based fallback...`;
-          logger.warn(`[QueryGen] ${switchMsg}`);
-          onProgress?.(switchMsg, batchIndex / totalBatches);
-        } else if (kind === "MODEL_NOT_FOUND") {
-          logger.warn(`[QueryGen] Model ${currentModel} not found for this account.`);
-        } else if (kind === "AUTH_ERROR") {
-          logger.error(`[QueryGen] Gemini authentication error. Check API key.`);
-          break;
-        } else {
-          logger.warn(`[QueryGen] Batch call with ${currentModel} error (${kind}): ${message.slice(0, 100)}`);
-        }
-      }
-    }
-  }
-  if (batchSuccess && rawJson) {
-    try {
-      const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      const parsed = JSON.parse(clean);
-      if (Array.isArray(parsed.scenes)) {
-        const returnedMap = /* @__PURE__ */ new Map();
-        const seenIds = /* @__PURE__ */ new Set();
-        for (const item of parsed.scenes) {
-          const sId = typeof item.sceneId === "string" ? item.sceneId.trim() : "";
-          if (sId && !seenIds.has(sId)) {
-            seenIds.add(sId);
-            returnedMap.set(sId, item);
-          }
-        }
-        for (const item of batch) {
-          const found = returnedMap.get(item.sceneId);
-          if (found && isValidScenePlan(found, item.sceneId)) {
-            const sanitized = sanitizePlan$1(found);
-            results.set(item.sceneId, { plan: sanitized, modelUsed: successfulModel, mode: "batch_ai" });
-          } else {
-            logger.warn(`[QueryGen] Missing or invalid response for scene ${item.sceneId}, falling back to rule-based plan`);
-            const fb = sanitizePlan$1(buildFallbackPlan(item.packet, globalContext));
-            results.set(item.sceneId, { plan: fb, mode: "rule_fallback" });
-          }
-        }
-        return results;
-      }
-    } catch {
-      logger.warn(`[QueryGen] Batch ${batchIndex + 1} JSON parse failed. Attempting batch split fallback.`);
-    }
-  }
-  if (batch.length >= 4) {
-    const mid = Math.floor(batch.length / 2);
-    const firstHalf = batch.slice(0, mid);
-    const secondHalf = batch.slice(mid);
-    logger.info(`[QueryGen] Splitting batch of ${batch.length} into two sub-batches (${firstHalf.length} and ${secondHalf.length})...`);
-    const half1Res = await processBatchChunk({
-      ...params,
-      batch: firstHalf
-    });
-    const half2Res = await processBatchChunk({
-      ...params,
-      batch: secondHalf
-    });
-    for (const [k, v] of half1Res.entries()) results.set(k, v);
-    for (const [k, v] of half2Res.entries()) results.set(k, v);
-    return results;
-  }
-  logger.warn(`[QueryGen] All AI models failed for batch ${batchIndex + 1}, using rule-based fallback for ${batch.length} scenes.`);
-  for (const item of batch) {
-    const fb = sanitizePlan$1(buildFallbackPlan(item.packet, globalContext));
-    results.set(item.sceneId, { plan: fb, mode: "rule_fallback" });
-  }
-  return results;
-}
-async function batchGenerateSearchPlans(params) {
-  const { projectDir, apiKey, model, scenes, globalContext, useCache = true, onProgress } = params;
-  const plans = /* @__PURE__ */ new Map();
-  if (scenes.length === 0) {
-    return plans;
-  }
-  const existingCache = useCache ? loadQueryCache(projectDir) : {};
-  const uncachedScenes = [];
-  let cachedCount = 0;
-  for (const s of scenes) {
-    const cacheKey = makeCacheKey(globalContext, s.sceneId, s.packet.localContext.narration);
-    const entry = existingCache[cacheKey];
-    if (useCache && entry && entry.contextVersion === globalContext.version) {
-      plans.set(s.sceneId, sanitizePlan$1(entry.plan));
-      cachedCount++;
-    } else {
-      uncachedScenes.push({
-        sceneId: s.sceneId,
-        packet: s.packet,
-        cacheKey
-      });
-    }
-  }
-  if (cachedCount > 0) {
-    logger.info(`[QueryGen] ${cachedCount} cached scenes found out of ${scenes.length}.`);
-  }
-  if (uncachedScenes.length === 0) {
-    onProgress?.(`All ${cachedCount} scenes loaded from cache.`, 1, {
-      phase: "query_generation",
-      currentBatch: 0,
-      totalBatches: 0,
-      processedScenes: scenes.length,
-      totalScenes: scenes.length,
-      cachedScenes: cachedCount
-    });
-    return plans;
-  }
-  const batches = [];
-  for (let i = 0; i < uncachedScenes.length; i += STOCK_QUERY_BATCH_SIZE) {
-    batches.push(uncachedScenes.slice(i, i + STOCK_QUERY_BATCH_SIZE));
-  }
-  const totalBatches = batches.length;
-  logger.info(`[QueryGen] Generating stock queries: ${uncachedScenes.length} uncached scenes partitioned into ${totalBatches} batches (batch size ${STOCK_QUERY_BATCH_SIZE}).`);
-  onProgress?.(`Preparing stock queries... ${cachedCount} cached scenes found. Generating ${totalBatches} batches...`, 0.02, {
-    phase: "query_generation",
-    currentBatch: 0,
-    totalBatches,
-    processedScenes: cachedCount,
-    totalScenes: scenes.length,
-    cachedScenes: cachedCount
-  });
-  let processedScenesCount = cachedCount;
-  for (let bIdx = 0; bIdx < batches.length; bIdx++) {
-    const currentBatch = batches[bIdx];
-    const batchProgressPct = bIdx / totalBatches * 0.95;
-    onProgress?.(
-      `Generating stock queries: batch ${bIdx + 1}/${totalBatches} (${currentBatch.length} scenes)...`,
-      batchProgressPct,
-      {
-        phase: "query_generation",
-        currentBatch: bIdx + 1,
-        totalBatches,
-        processedScenes: processedScenesCount,
-        totalScenes: scenes.length,
-        cachedScenes: cachedCount
-      }
-    );
-    const batchResults = await processBatchChunk({
-      projectDir,
-      apiKey,
-      model,
-      batch: currentBatch,
-      globalContext,
-      batchIndex: bIdx,
-      totalBatches,
-      onProgress
-    });
-    const cacheEntriesToSave = {};
-    for (const item of currentBatch) {
-      const res = batchResults.get(item.sceneId);
-      if (res) {
-        plans.set(item.sceneId, res.plan);
-        cacheEntriesToSave[item.cacheKey] = {
-          plan: res.plan,
-          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          contextVersion: globalContext.version,
-          modelUsed: res.modelUsed,
-          generationMode: res.mode
-        };
-      } else {
-        const fb = sanitizePlan$1(buildFallbackPlan(item.packet, globalContext));
-        plans.set(item.sceneId, fb);
-        cacheEntriesToSave[item.cacheKey] = {
-          plan: fb,
-          generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          contextVersion: globalContext.version,
-          generationMode: "rule_fallback"
-        };
-      }
-      processedScenesCount++;
-    }
-    if (useCache && Object.keys(cacheEntriesToSave).length > 0) {
-      saveQueryCacheEntries(projectDir, cacheEntriesToSave);
-    }
-    onProgress?.(
-      `Stock query batch ${bIdx + 1}/${totalBatches} completed.`,
-      (bIdx + 1) / totalBatches * 0.95,
-      {
-        phase: "query_generation",
-        currentBatch: bIdx + 1,
-        totalBatches,
-        processedScenes: processedScenesCount,
-        totalScenes: scenes.length,
-        cachedScenes: cachedCount
-      }
-    );
-  }
-  onProgress?.(`All ${scenes.length} stock query plans ready.`, 1, {
-    phase: "query_generation",
-    currentBatch: totalBatches,
-    totalBatches,
-    processedScenes: scenes.length,
-    totalScenes: scenes.length,
-    cachedScenes: cachedCount
-  });
-  return plans;
-}
-function tokenize(text) {
-  return new Set(
-    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2)
-  );
-}
-function overlapScore(ref, candidate) {
-  if (ref.size === 0) return 0;
-  let hits = 0;
-  ref.forEach((t) => {
-    if (candidate.has(t)) hits++;
-  });
-  return Math.min(1, hits / Math.max(1, Math.min(ref.size, 5)));
-}
-function candidateTokens(c) {
-  const titleTokens = tokenize(c.title);
-  const tagTokens = new Set(c.tags.flatMap((t) => t.toLowerCase().split(/\s+/).filter((x) => x.length > 2)));
-  return /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
-}
-function localRelevanceScore(c, ctx) {
-  const refTokens = /* @__PURE__ */ new Set([...tokenize(ctx.visualIntent), ...tokenize(ctx.narration)]);
-  return overlapScore(refTokens, candidateTokens(c));
-}
-function globalSubjectScore(c, ctx) {
-  const anchors = new Set([
-    ...ctx.globalContext.exactTopicAnchors,
-    ...ctx.globalContext.contextualAnchors
-  ].flatMap((a) => a.toLowerCase().split(/\s+/)));
-  return overlapScore(anchors, candidateTokens(c));
-}
-function geographyScore(c, ctx) {
-  const geos = [
-    ctx.globalContext.geography.primaryCountry,
-    ctx.globalContext.geography.primaryRegion,
-    ...ctx.globalContext.geography.secondaryLocations
-  ].filter(Boolean);
-  if (geos.length === 0) return 0.5;
-  const geoTokens = new Set(geos.flatMap((g) => g.toLowerCase().split(/\s+/)));
-  return overlapScore(geoTokens, candidateTokens(c));
-}
-function timePeriodScore(c, ctx) {
-  const period = (ctx.preferredTimePeriod ?? ctx.globalContext.timeContext.primaryPeriod).toLowerCase();
-  const tokens = candidateTokens(c);
-  const historicTerms = /* @__PURE__ */ new Set(["historical", "vintage", "antique", "old", "century", "archival"]);
-  const isModerrn = period === "contemporary" || period === "modern";
-  if (isModerrn && tokens.has("contemporary")) return 1;
-  if (!isModerrn && [...historicTerms].some((t) => tokens.has(t))) return 1;
-  if (isModerrn && [...historicTerms].some((t) => tokens.has(t))) return 0.2;
-  return 0.5;
-}
-function chapterPurposeScore(c, ctx) {
-  const refTokens = /* @__PURE__ */ new Set([...tokenize(ctx.chapterTitle), ...tokenize(ctx.chapterPurpose)]);
-  return overlapScore(refTokens, candidateTokens(c));
-}
-function technicalScore(c) {
-  const minDim = Math.min(c.width, c.height);
-  if (minDim >= 2160) return 1;
-  if (minDim >= 1080) return 0.9;
-  if (minDim >= 720) return 0.6;
-  return 0.3;
-}
-function compositionScore(c, preferredAr) {
-  const [pw, ph] = preferredAr.split(":").map(Number);
-  const preferred = pw / ph;
-  const actual = c.width / c.height;
-  if (!preferred || !actual) return 0.5;
-  const diff = Math.abs(preferred - actual) / preferred;
-  return Math.max(0, 1 - diff * 2);
-}
-function durationScore(c, sceneDuration) {
-  if (c.mediaType === "photo") return 0.8;
-  const clipDur = c.durationSecs ?? 0;
-  if (clipDur <= 0) return 0.4;
-  if (clipDur >= sceneDuration) return 1;
-  return Math.max(0.2, clipDur / sceneDuration);
-}
-function applyPenalties(c, ctx) {
-  const reasons = [];
-  let total = 0;
-  const tokens = candidateTokens(c);
-  for (const community of ctx.globalContext.communities) {
-    for (const wrong of community.mustNotConfuseWith) {
-      const wrongTokens = tokenize(wrong);
-      if ([...wrongTokens].some((t) => tokens.has(t))) {
-        total += 60;
-        reasons.push(`Wrong community: contains "${wrong}" (should be "${community.name}")`);
-      }
-    }
-  }
-  for (const forbidden of ctx.globalContext.forbiddenSubstitutions) {
-    const fTokens = tokenize(forbidden);
-    if ([...fTokens].filter((t) => t.length > 3).some((t) => tokens.has(t))) {
-      total += 50;
-      reasons.push(`Forbidden substitution: ${forbidden}`);
-    }
-  }
-  for (const neg of ctx.globalContext.negativeKeywords) {
-    const negTokens = tokenize(neg);
-    if ([...negTokens].some((t) => tokens.has(t))) {
-      total += 30;
-      reasons.push(`Negative keyword: ${neg}`);
-    }
-  }
-  if (ctx.usedAssetIds.has(c.assetId)) {
-    total += 20;
-    reasons.push("Asset already used");
-  }
-  return { total, reasons };
-}
-function getMatchLabel(score, penalties) {
-  const adjusted = score - penalties;
-  if (adjusted >= 80) return "STRONG_MATCH";
-  if (adjusted >= 65) return "ACCEPTABLE";
-  if (adjusted >= 50) return "ILLUSTRATIVE";
-  return "REJECTED";
-}
-function getVisualTruthLabel(c, ctx, localScore, globalScore) {
-  const tokens = candidateTokens(c);
-  const hasExactAnchor = ctx.globalContext.exactTopicAnchors.some(
-    (a) => a.toLowerCase().split(/\s+/).every((t) => tokens.has(t))
-  );
-  if (hasExactAnchor && localScore >= 0.5) return "EXACT_SUBJECT";
-  if (globalScore >= 0.3 && localScore >= 0.3) return "CONTEXTUAL_MATCH";
-  const isHistorical = ctx.globalContext.timeContext.historicalPeriods.length > 0 && (tokens.has("historical") || tokens.has("vintage") || tokens.has("archival"));
-  if (isHistorical) return "HISTORICAL";
-  return "ILLUSTRATIVE";
-}
-function scoreContextCandidate(candidate, ctx) {
-  const local = localRelevanceScore(candidate, ctx) * 30;
-  const global = globalSubjectScore(candidate, ctx) * 25;
-  const geo = geographyScore(candidate, ctx) * 15;
-  const time = timePeriodScore(candidate, ctx) * 10;
-  const chapter = chapterPurposeScore(candidate, ctx) * 10;
-  const tech = (technicalScore(candidate) * 0.6 + compositionScore(candidate, ctx.preferredAspectRatio) * 0.4) * 5;
-  const dur = durationScore(candidate, ctx.sceneDurationSecs);
-  const sequenceContinuity = dur * 5;
-  const rawScore = local + global + geo + time + chapter + tech + sequenceContinuity;
-  const { total: penalties, reasons: penaltyReasons } = applyPenalties(candidate, ctx);
-  const totalScore = Math.max(0, rawScore - penalties);
-  const matchLabel = getMatchLabel(rawScore, penalties);
-  const visualTruthLabel = getVisualTruthLabel(candidate, ctx, local / 30, global / 25);
-  return {
-    localRelevance: Math.round(local),
-    globalSubjectRelevance: Math.round(global),
-    geographyMatch: Math.round(geo),
-    timePeriodMatch: Math.round(time),
-    chapterPurposeMatch: Math.round(chapter),
-    technicalQuality: Math.round(tech),
-    sequenceContinuity: Math.round(sequenceContinuity),
-    totalScore: Math.round(totalScore),
-    penalties: -Math.round(penalties),
-    penaltyReasons,
-    matchLabel,
-    visualTruthLabel
-  };
-}
-function rankContextCandidates(candidates, ctx) {
-  return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
 }
 const ffmpegStatic = require("ffmpeg-static");
 const ffprobeStatic = require("ffprobe-static");
@@ -15265,7 +18762,7 @@ function assertSceneIdentityPreserved(beforeScenes, afterScenes, throwOnError = 
   }
   return true;
 }
-function toOrientation(ar) {
+function toOrientation$1(ar) {
   if (ar === "9:16") return "portrait";
   if (ar === "1:1") return "square";
   return "landscape";
@@ -15504,7 +19001,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     logger.warn("[StockEngine] No GlobalContext available. Running in basic query mode.");
     onProgress("Warning: No global context. Running in basic query mode.", 0.05);
   }
-  const orientation = toOrientation(preferredAspectRatio);
+  const orientation = toOrientation$1(preferredAspectRatio);
   const assignments = [];
   let assignedCount = 0;
   let failedCount = 0;
@@ -15883,1750 +19380,422 @@ async function runContextAwareStockEngine(params, onProgress = () => {
     assignments
   };
 }
-function getStockCandidatesForProject(projectDir, sceneIndex) {
-  const all = loadStockCandidates(projectDir);
-  if (typeof sceneIndex === "number") {
-    const key = `scene_${sceneIndex}`;
-    return all[key] || all[String(sceneIndex)] || [];
-  }
-  return all;
-}
-async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
-  try {
-    const candidatesStore = loadStockCandidates(projectDir);
-    const sceneKey = `scene_${sceneIndex}`;
-    const sceneCandidates = candidatesStore[sceneKey] || candidatesStore[String(sceneIndex)] || [];
-    const candidate = sceneCandidates.find((c) => c.candidateId === candidateId);
-    if (!candidate) {
-      return { success: false, error: `Candidate ${candidateId} not found for scene ${sceneIndex}` };
-    }
-    const stockDir = path.join(projectDir, "assets", "stock");
-    fs__namespace.mkdirSync(stockDir, { recursive: true });
-    let manifest = loadAssetsManifest(stockDir);
-    let asset = manifest.find((a) => a.assetId === candidate.result.assetId);
-    if (!asset || !fs__namespace.existsSync(asset.localPath) || fs__namespace.statSync(asset.localPath).size === 0) {
-      logger.info(`[Storyboard] Downloading candidate asset ${candidate.result.assetId} for scene ${sceneIndex}`);
-      const queryUsed = candidate.result.searchQuery || candidate.result.title || `scene_${sceneIndex}`;
-      try {
-        asset = await downloadAsset(candidate.result, sceneIndex, queryUsed, stockDir, manifest);
-      } catch (dlErr) {
-        const msg = dlErr instanceof Error ? dlErr.message : String(dlErr);
-        logger.error(`[Storyboard] Download failed for candidate ${candidateId}: ${msg}`);
-        return { success: false, error: `Download failed: ${msg}. Existing media retained.` };
-      }
-      if (!fs__namespace.existsSync(asset.localPath) || fs__namespace.statSync(asset.localPath).size === 0) {
-        return { success: false, error: "Downloaded file is missing or empty. Existing media retained." };
-      }
-      manifest = manifest.filter((a) => a.assetId !== asset.assetId);
-      manifest.push(asset);
-      saveAssetsManifest(stockDir, manifest);
-    }
-    for (const c of sceneCandidates) {
-      c.selected = c.candidateId === candidateId;
-    }
-    candidatesStore[sceneKey] = sceneCandidates;
-    saveStockCandidates(projectDir, candidatesStore);
-    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
-    if (fs__namespace.existsSync(assignmentsPath)) {
-      const assignments = readJsonSafe$1(assignmentsPath, []);
-      const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
-      if (idx >= 0) {
-        assignments[idx].asset = asset;
-        assignments[idx].selectedCandidateId = candidateId;
-        assignments[idx].candidates = sceneCandidates;
-        assignments[idx].score = candidate.score.totalScore;
-        assignments[idx].status = "assigned";
-        if (assignments[idx].approvalStatus !== "approved") {
-          assignments[idx].approvalStatus = "auto_selected";
-        }
-        atomicWriteJson(assignmentsPath, assignments);
-      }
-    }
-    const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
-    if (fs__namespace.existsSync(planPath)) {
-      const plan = readJsonSafe$1(planPath, {});
-      for (const ch of plan.chapters ?? []) {
-        const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-        for (const seq of seqs) {
-          for (const sc of seq.scenes ?? []) {
-            if (sc.sceneIndex === sceneIndex) {
-              sc.localPath = asset.localPath;
-              sc.mediaFile = path.basename(asset.localPath);
-              sc.mediaType = asset.mediaType === "photo" ? "image" : "video";
-            }
-          }
-        }
-      }
-      atomicWriteJson(planPath, plan);
-    }
-    logger.info(`[Storyboard] Successfully switched scene ${sceneIndex} to candidate ${candidateId}`);
-    return { success: true, asset };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.error(`[Storyboard] Selection error: ${msg}`);
-    return { success: false, error: msg };
-  }
-}
-function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
-  try {
-    const candidatesStore = loadStockCandidates(projectDir);
-    const sceneKey = `scene_${sceneIndex}`;
-    const sceneCandidates = candidatesStore[sceneKey] || candidatesStore[String(sceneIndex)] || [];
-    if (candidateId) {
-      for (const c of sceneCandidates) {
-        if (c.candidateId === candidateId) {
-          c.approved = true;
-          c.selected = true;
-        } else {
-          c.approved = false;
-        }
-      }
-      candidatesStore[sceneKey] = sceneCandidates;
-      saveStockCandidates(projectDir, candidatesStore);
-    }
-    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
-    if (fs__namespace.existsSync(assignmentsPath)) {
-      const assignments = readJsonSafe$1(assignmentsPath, []);
-      const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
-      if (idx >= 0) {
-        assignments[idx].approvalStatus = "approved";
-        assignments[idx].reviewedAt = (/* @__PURE__ */ new Date()).toISOString();
-        if (candidateId) {
-          assignments[idx].selectedCandidateId = candidateId;
-        }
-        atomicWriteJson(assignmentsPath, assignments);
-      }
-    }
-    return { success: true };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return { success: false, error: msg };
-  }
-}
-function calculateStoryboardSummary(projectDir) {
-  const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe$1(assignmentsPath, []) : [];
-  const totalScenes = assignments.length;
-  let assignedScenes = 0;
-  let approvedScenes = 0;
-  let needsReviewScenes = 0;
-  let missingScenes = 0;
-  let totalScoreSum = 0;
-  let scoredScenesCount = 0;
-  const seenAssetIds = /* @__PURE__ */ new Set();
-  let duplicateAvoidedCount = 0;
-  for (const a of assignments) {
-    if (a.asset && a.asset.localPath && fs__namespace.existsSync(a.asset.localPath)) {
-      assignedScenes++;
-      if (seenAssetIds.has(a.asset.assetId)) ;
-      else {
-        seenAssetIds.add(a.asset.assetId);
-      }
-    } else {
-      missingScenes++;
-    }
-    if (a.approvalStatus === "approved") {
-      approvedScenes++;
-    } else if (a.status === "failed" || !a.asset || a.score < 50) {
-      needsReviewScenes++;
-    }
-    if (typeof a.score === "number" && a.score > 0) {
-      totalScoreSum += a.score;
-      scoredScenesCount++;
-    }
-    for (const c of a.candidates ?? []) {
-      if (c.score?.reusePenalty < 0) {
-        duplicateAvoidedCount++;
-      }
-    }
-  }
-  const averageScore = scoredScenesCount > 0 ? Math.round(totalScoreSum / scoredScenesCount) : 0;
-  return {
-    totalScenes,
-    assignedScenes,
-    approvedScenes,
-    needsReviewScenes,
-    missingScenes,
-    averageScore,
-    duplicateAssetsAvoided: duplicateAvoidedCount
-  };
-}
-function registerStockHandlers(ipcMain) {
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_SEARCH_START,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const config = loadConfig();
-      if (!config.pexelsApiKey && !config.pixabayApiKey) {
-        return {
-          success: false,
-          error: "No stock API keys configured. Go to Settings to add Pexels or Pixabay key."
-        };
-      }
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, { message, progress });
-      };
-      try {
-        const geminiApiKey = normalizeApiKey(config.geminiApiKey ?? "");
-        if (geminiApiKey) {
-          const result2 = await runContextAwareStockEngine(
-            {
-              projectDir: params.projectDir,
-              pexelsApiKey: config.pexelsApiKey ?? "",
-              pixabayApiKey: config.pixabayApiKey,
-              preferredAspectRatio: "16:9",
-              apiKey: geminiApiKey,
-              forceReanalysis: params.forceReanalysis ?? false
-            },
-            sendProgress
-          );
-          return result2;
-        }
-        const result = await runStockEngine(
-          {
-            projectDir: params.projectDir,
-            pexelsApiKey: config.pexelsApiKey ?? "",
-            pixabayApiKey: config.pixabayApiKey,
-            preferredAspectRatio: "16:9"
-          },
-          sendProgress
-        );
-        return result;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`Stock engine error: ${msg}`);
-        return { success: false, error: msg, totalScenes: 0, assignedScenes: 0, failedScenes: 0, assignments: [] };
-      }
-    }
+function tokenize(text) {
+  return new Set(
+    text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter((t) => t.length > 2)
   );
-  ipcMain.handle(IPC_CHANNELS.STOCK_REVIEW_GET, (_event, projectDir) => {
-    const stockDir = path.join(projectDir, "assets", "stock");
-    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
-    let assignments = [];
-    try {
-      if (fs__namespace.existsSync(assignmentsPath)) {
-        assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
-      }
-    } catch {
-    }
-    const manifest = loadAssetsManifest(stockDir);
-    const assigned = assignments.filter((a) => a.status === "assigned").length;
-    const review = {
-      assignments,
-      totalScenes: assignments.length,
-      assignedScenes: assigned,
-      stockAssetsJson: manifest
-    };
-    return review;
+}
+function jaccardSimilarity(a, b) {
+  if (a.size === 0 && b.size === 0) return 0;
+  let intersection = 0;
+  a.forEach((token) => {
+    if (b.has(token)) intersection++;
   });
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_SCENE_REPLACE,
-    async (_event, params) => {
-      const config = loadConfig();
-      if (!config.pexelsApiKey && !config.pixabayApiKey) {
-        throw new Error("No stock API keys configured");
-      }
-      try {
-        const asset = await replaceSceneAsset(
-          params.projectDir,
-          params.sceneIndex,
-          params.query,
-          config.pexelsApiKey ?? "",
-          config.pixabayApiKey
-        );
-        const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
-        if (fs__namespace.existsSync(assignmentsPath)) {
-          const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
-          const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
-          if (idx >= 0) {
-            assignments[idx].asset = asset;
-            assignments[idx].usedQuery = params.query;
-            assignments[idx].status = "assigned";
-            fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
-          }
-        }
-        return { success: true, asset };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_SCENE_LOCK,
-    (_event, params) => {
-      const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
-      if (!fs__namespace.existsSync(assignmentsPath)) return { success: false, error: "No assignments found" };
-      const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
-      const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
-      if (idx >= 0) {
-        assignments[idx].locked = params.locked;
-        fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
-      }
-      return { success: true };
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_SCENE_UPLOAD,
-    (_event, params) => {
-      if (!fs__namespace.existsSync(params.filePath)) {
-        return { success: false, error: `File not found: ${params.filePath}` };
-      }
-      const stockDir = path.join(params.projectDir, "assets", "stock");
-      fs__namespace.mkdirSync(stockDir, { recursive: true });
-      const stat = fs__namespace.statSync(params.filePath);
-      const asset = {
-        assetId: `manual_${params.sceneIndex}_${Date.now()}`,
-        provider: "pexels",
-        // placeholder; not actually from Pexels
-        mediaType: params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? "video" : "photo",
-        localPath: params.filePath,
-        thumbnailUrl: "",
-        downloadUrl: params.filePath,
-        creator: "User",
-        searchQuery: "manual upload",
-        downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        fileSizeBytes: stat.size
-      };
-      const manifest = loadAssetsManifest(stockDir);
-      const updated = manifest.filter((a) => !a.assetId.startsWith(`manual_${params.sceneIndex}_`));
-      updated.push(asset);
-      saveAssetsManifest(stockDir, updated);
-      const planPath = path.join(params.projectDir, "analysis", "master-edit-plan.json");
-      if (fs__namespace.existsSync(planPath)) {
-        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-        const allScenes = (plan.chapters ?? []).flatMap((ch) => ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
-        const scene = allScenes.find((s) => s.sceneIndex === params.sceneIndex);
-        if (scene) {
-          scene.localPath = params.filePath;
-          scene.mediaFile = path.basename(params.filePath);
-          scene.mediaType = params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? "video" : "image";
-          fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-        }
-      }
-      const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
-      if (fs__namespace.existsSync(assignmentsPath)) {
-        const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
-        const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
-        if (idx >= 0) {
-          assignments[idx].asset = asset;
-          assignments[idx].status = "assigned";
-          assignments[idx].manualOverride = true;
-          assignments[idx].locked = true;
-          fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
-        }
-      }
-      return { success: true, asset };
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_CONTEXT_ANALYZE,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const config = loadConfig();
-      const geminiKey = normalizeApiKey(config.geminiApiKey ?? "");
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, { message, progress });
-      };
-      try {
-        const transcriptPath = path.join(params.projectDir, "analysis", "transcript.json");
-        const transcript = fs__namespace.existsSync(transcriptPath) ? JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8")) : null;
-        let scriptText = null;
-        if (params.scriptPath && fs__namespace.existsSync(params.scriptPath)) {
-          scriptText = fs__namespace.readFileSync(params.scriptPath, "utf-8");
-          logger.info(`[ContextAnalyze] Reading script from frontend param: ${params.scriptPath}`);
-        }
-        if (!scriptText) {
-          try {
-            const stateFile = fs__namespace.existsSync(path.join(params.projectDir, "project-state.json")) ? path.join(params.projectDir, "project-state.json") : path.join(params.projectDir, "project.json");
-            const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
-            const savedScriptPath = st?.inputs?.scriptPath;
-            if (savedScriptPath && fs__namespace.existsSync(savedScriptPath)) {
-              scriptText = fs__namespace.readFileSync(savedScriptPath, "utf-8");
-              logger.info(`[ContextAnalyze] Reading script from project-state.json: ${savedScriptPath}`);
-            }
-          } catch {
-          }
-        }
-        if (!scriptText && transcript?.fullText) {
-          scriptText = transcript.fullText;
-          logger.info("[ContextAnalyze] No script file found, using transcript.fullText");
-        }
-        if (!scriptText && !transcript) {
-          return { success: false, error: "No script or transcript found. Please add a script file to the project first." };
-        }
-        const ctx = await analyzeGlobalContext({
-          projectDir: params.projectDir,
-          apiKey: geminiKey,
-          model: config.preferredModel ?? "gemini-3.5-flash",
-          scriptText,
-          transcript,
-          forceRegenerate: params.forceRegenerate ?? false,
-          onProgress: sendProgress
-        });
-        let warning;
-        if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
-          if (!geminiKey) {
-            warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn.";
-          } else {
-            warning = "Gemini AI tạm thời quá tải hoặc không phản hồi. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
-          }
-        }
-        return { success: true, context: ctx, warning };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(IPC_CHANNELS.STOCK_CONTEXT_GET, (_event, projectDir) => {
-    const ctx = loadGlobalContext(projectDir);
-    return ctx;
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_CONTEXT_SAVE,
-    (_event, params) => {
-      try {
-        params.context.version = (params.context.version ?? 0) + 1;
-        saveGlobalContext(params.projectDir, params.context);
-        return { success: true, version: params.context.version };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_CANDIDATES_GET,
-    (_event, params) => {
-      return getStockCandidatesForProject(params.projectDir, params.sceneIndex);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_CANDIDATE_SELECT,
-    async (_event, params) => {
-      return selectCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_CANDIDATE_APPROVE,
-    (_event, params) => {
-      return approveCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.STOCK_STORYBOARD_SUMMARY_GET,
-    (_event, projectDir) => {
-      return calculateStoryboardSummary(projectDir);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.PRODUCTION_SETTINGS_GET,
-    (_event, projectDir) => {
-      return loadProductionSettings(projectDir);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.PRODUCTION_SETTINGS_SET,
-    (_event, params) => {
-      return saveProductionSettings(params.projectDir, params.settings);
-    }
-  );
-  ipcMain.handle(IPC_CHANNELS.CLAIM_GET_LEDGER, (_event, projectDir) => {
-    try {
-      const ledgerPath = getClaimLedgerPath(projectDir);
-      return readJsonSafe$1(ledgerPath, null);
-    } catch (err) {
-      logger.error(`[ClaimIPC] Failed to load claim ledger: ${String(err)}`);
-      return null;
-    }
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.CLAIM_UPDATE_STATUS,
-    (_event, params) => {
-      return updateClaimStatus(params.projectDir, params.claimId, params.status, params.warningText);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.CLAIM_ADD_SOURCE,
-    (_event, params) => {
-      return addEvidenceSource(params.projectDir, params.source);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.CLAIM_REMOVE_SOURCE,
-    (_event, params) => {
-      try {
-        const ledgerPath = getClaimLedgerPath(params.projectDir);
-        const ledger = readJsonSafe$1(ledgerPath, null);
-        if (!ledger) return { success: false, error: "Ledger not found" };
-        ledger.sources = ledger.sources.filter((s) => s.id !== params.sourceId);
-        for (const claim of ledger.claims) {
-          claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== params.sourceId);
-          if (claim.evidenceSourceIds.length === 0 && claim.verificationStatus === "VERIFIED") {
-            claim.verificationStatus = "UNSOURCED";
-          }
-        }
-        atomicWriteJson(ledgerPath, ledger);
-        return { success: true };
-      } catch (err) {
-        return { success: false, error: String(err) };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.CLAIM_LINK_SOURCE,
-    (_event, params) => {
-      return linkSourceToClaim(params.projectDir, params.claimId, params.sourceId, params.newStatus);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.CLAIM_UNLINK_SOURCE,
-    (_event, params) => {
-      return unlinkSourceFromClaim(params.projectDir, params.claimId, params.sourceId);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS,
-    (_event, params) => {
-      return exportClaimManifests(params.projectDir, params.exportDir);
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.VISUAL_TRUTH_GET_DATA,
-    (_event, projectDir) => {
-      try {
-        return loadVisualTruthStore(projectDir);
-      } catch (err) {
-        logger.error(`[VisualTruthIPC] Failed to load visual truth data: ${String(err)}`);
-        return null;
-      }
-    }
-  );
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
 }
-function registerAudioHandlers(ipcMain) {
-  ipcMain.handle(
-    IPC_CHANNELS.AUDIO_SEARCH_START,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, { message, progress });
-      };
-      try {
-        const result = await runAudioDirector(params.projectDir, sendProgress);
-        return result;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`[AudioIPC] Search error: ${msg}`);
-        return { success: false, error: msg, sections: [], sfxAssignments: [] };
-      }
-    }
-  );
-  ipcMain.handle(IPC_CHANNELS.AUDIO_PLAN_GET, (_event, projectDir) => {
-    return loadAudioPlan(projectDir);
-  });
-  ipcMain.handle(
-    IPC_CHANNELS.AUDIO_PLAN_SAVE,
-    (_event, params) => {
-      try {
-        saveAudioPlan(params.projectDir, params.plan);
-        return { success: true };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        return { success: false, error: msg };
-      }
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.AUDIO_APPROVE_SECTION,
-    (_event, params) => {
-      const plan = loadAudioPlan(params.projectDir);
-      if (!plan) return { success: false, error: "No audio plan found" };
-      const section = plan.sections.find((s) => s.sectionId === params.sectionId);
-      if (!section) return { success: false, error: "Section not found" };
-      section.approved = params.approved;
-      if (params.volumeDb !== void 0) section.volumeDb = params.volumeDb;
-      if (params.fadeInSecs !== void 0) section.fadeInSecs = params.fadeInSecs;
-      if (params.fadeOutSecs !== void 0) section.fadeOutSecs = params.fadeOutSecs;
-      saveAudioPlan(params.projectDir, plan);
-      return { success: true, plan };
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.AUDIO_APPROVE_SFX,
-    (_event, params) => {
-      const plan = loadAudioPlan(params.projectDir);
-      if (!plan) return { success: false, error: "No audio plan found" };
-      const sfx = plan.sfxAssignments.find((s) => s.sceneIndex === params.sceneIndex);
-      if (!sfx) return { success: false, error: "SFX assignment not found" };
-      sfx.approved = params.approved;
-      if (params.volumeDb !== void 0) sfx.volumeDb = params.volumeDb;
-      saveAudioPlan(params.projectDir, plan);
-      return { success: true, plan };
-    }
-  );
-  ipcMain.handle(
-    IPC_CHANNELS.AUDIO_DOWNLOAD_APPROVED,
-    async (event, params) => {
-      const win = electron.BrowserWindow.fromWebContents(event.sender);
-      const plan = loadAudioPlan(params.projectDir);
-      if (!plan) return { success: false, error: "No audio plan found" };
-      const sendProgress = (message, progress) => {
-        win?.webContents.send(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, { message, progress });
-      };
-      try {
-        const updatedPlan = await downloadApprovedAudio(params.projectDir, plan, sendProgress);
-        return { success: true, plan: updatedPlan };
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.error(`[AudioIPC] Download error: ${msg}`);
-        return { success: false, error: msg };
-      }
-    }
-  );
+function semanticScore(candidate, ctx) {
+  const intentTokens = tokenize(ctx.visualIntent);
+  const narrationTokens = tokenize(ctx.narrationText);
+  const refTokens = /* @__PURE__ */ new Set([...intentTokens, ...narrationTokens]);
+  const titleTokens = tokenize(candidate.title);
+  const tagTokens = new Set(candidate.tags.flatMap((t) => t.toLowerCase().split(/\s+/)));
+  const candidateTokens2 = /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
+  return Math.min(1, jaccardSimilarity(refTokens, candidateTokens2) * 5);
 }
-const SHOCK_STAT_REGEX = /\d+%|\$\d[\d,.]*|\d+[\d,.]* (năm|ngày|giờ|tháng|người|triệu|tỷ|billion|million|thousand|dollars|years|days)/i;
-const HOOK_WINDOW_SECONDS = 30;
-const SENTENCE_END_REGEX = /[.!?]$/;
-const PHRASE_BREAK_REGEX = /[,;:]$/;
-const MIN_PAUSE_FOR_SPLIT = 0.5;
-const MAX_WORDS_PER_PHRASE = 5;
-const DEFAULT_WORDS_PER_PHRASE = 3;
-function groupWordsIntoPhrases(words, sceneId, emphasisType) {
-  const phrases = [];
-  if (words.length === 0) return phrases;
-  let phraseIndex = 0;
-  let currentChunk = [];
-  const commitChunk = () => {
-    if (currentChunk.length === 0) return;
-    const text = currentChunk.map((w) => w.word).join(" ").trim();
-    if (!text) {
-      currentChunk = [];
-      return;
-    }
-    const highlightWords = [];
-    for (const w of currentChunk) {
-      if (SHOCK_STAT_REGEX.test(w.word)) highlightWords.push(w.word);
-    }
-    const fontPreset = emphasisType === "punchline" ? "serif_italic" : "sans_bold_caps";
-    const baseColor = fontPreset === "serif_italic" ? "yellow_pale" : "white";
-    const boxHighlight = emphasisType === "shock_stat" && highlightWords.length > 0;
-    const skew = emphasisType === "list_transition";
-    const presetType = emphasisType === "hook" || emphasisType === "punchline" ? "big_statement" : emphasisType === "list_transition" ? "news_chyron" : emphasisType === "shock_stat" ? "data_note" : "big_statement";
-    phrases.push({
-      id: `cap_${sceneId}_${String(phraseIndex).padStart(3, "0")}`,
-      sceneId,
-      text,
-      startTime: currentChunk[0].start,
-      endTime: currentChunk[currentChunk.length - 1].end,
-      emphasisType,
-      highlightWords,
-      presetType,
-      style: { fontPreset, boxHighlight, skew, baseColor }
-    });
-    phraseIndex++;
-    currentChunk = [];
-  };
-  for (let i = 0; i < words.length; i++) {
-    const word = words[i];
-    const nextWord = words[i + 1];
-    currentChunk.push(word);
-    const hasSentenceEnd = SENTENCE_END_REGEX.test(word.word);
-    const hasPhraseBreak = PHRASE_BREAK_REGEX.test(word.word);
-    const pauseToNext = nextWord ? nextWord.start - word.end : 999;
-    const atMaxWords = currentChunk.length >= MAX_WORDS_PER_PHRASE;
-    const atDefaultWords = currentChunk.length >= DEFAULT_WORDS_PER_PHRASE;
-    const isLast = !nextWord;
-    if (isLast || hasSentenceEnd || pauseToNext >= MIN_PAUSE_FOR_SPLIT || hasPhraseBreak && currentChunk.length >= 2 || atMaxWords || atDefaultWords && pauseToNext >= 0.25) {
-      commitChunk();
-    }
-  }
-  commitChunk();
-  return phrases;
+function technicalScore(candidate) {
+  const minDim = Math.min(candidate.width, candidate.height);
+  if (minDim >= 2160) return 1;
+  if (minDim >= 1080) return 0.9;
+  if (minDim >= 720) return 0.6;
+  return 0.3;
 }
-function buildFallbackCaptionPlan(transcript, scenes) {
-  logger.warn("[CaptionPlanner] Using algorithmic fallback -- basic captions generated, please review manually");
-  const activeRanges = [];
-  const phrases = [];
-  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, transcript.duration);
-  activeRanges.push({ startTime: 0, endTime: hookEnd, reason: "hook" });
-  const seenChapters = /* @__PURE__ */ new Set();
-  for (const scene of scenes) {
-    if (!seenChapters.has(scene.chapterId)) {
-      seenChapters.add(scene.chapterId);
-      if (scene.startTime > hookEnd + 2) {
-        activeRanges.push({
-          startTime: scene.startTime,
-          endTime: Math.min(scene.startTime + 8, scene.endTime),
-          reason: "list_transition",
-          chapterId: scene.chapterId
-        });
-      }
-    }
-  }
-  const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
-  for (const range of activeRanges) {
-    const sceneInRange = scenes.find(
-      (s) => s.startTime <= range.endTime && s.endTime >= range.startTime
-    ) ?? scenes[0];
-    const wordsInRange = allWords.filter(
-      (w) => w.start >= range.startTime && w.end <= range.endTime
-    );
-    const rangeIdStr = `${range.reason}_${Math.round(range.startTime)}`;
-    const scenePhrases = groupWordsIntoPhrases(
-      wordsInRange,
-      sceneInRange?.sceneId ?? "scene_unknown",
-      range.reason
-    );
-    for (const p of scenePhrases) {
-      p.id = `cap_${rangeIdStr}_${p.id.split("_").pop()}`;
-      phrases.push(p);
-    }
-  }
-  return {
-    enabled: true,
-    activeRanges,
-    phrases,
-    generatedByFallback: true,
-    generationSource: "fallback",
-    generationReason: "No Gemini API key or all Gemini models unavailable",
-    hookWindowSeconds: HOOK_WINDOW_SECONDS,
-    sourceDuration: transcript.duration,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
+function compositionScore(candidate, preferredAr) {
+  const [pw, ph] = preferredAr.split(":").map(Number);
+  const preferred = pw / ph;
+  const actual = candidate.width / candidate.height;
+  if (!preferred || !actual) return 0.5;
+  const diff = Math.abs(preferred - actual) / preferred;
+  return Math.max(0, 1 - diff * 2);
 }
-function buildGeminiPrompt(scenes, allWords) {
-  const scenePayload = scenes.map((scene) => ({
-    sceneId: scene.sceneId,
-    chapterId: scene.chapterId,
-    narrativeText: scene.narrativeText,
-    visualIntent: scene.visualIntent ?? "",
-    startTime: scene.startTime,
-    endTime: scene.endTime,
-    words: allWords.filter((w) => w.start >= scene.startTime && w.end <= scene.endTime + 0.5)
-  }));
-  return `Bạn là chuyên gia dựng "dynamic kinetic captions" cho video documentary/listicle theo phong cách giữ chân người xem cao (giống các kênh YouTube top-tier dạng "X Foods/Things Disappearing...").
-
-Nhiệm vụ: Với danh sách scene dưới đây (kèm narrativeText và khung thời gian), xác định:
-
-BƯỚC A — Chọn khoảng thời gian BẬT caption (activeRanges), CHỈ theo 4 loại lý do sau, không bật tùy tiện:
-1. "hook": 15-30 giây đầu tiên của toàn video (bất kể nội dung gì).
-2. "list_transition": ngay tại câu chuyển sang một mục/số thứ tự mới trong danh sách.
-3. "shock_stat": câu chứa số liệu, phần trăm, so sánh gây sốc, hoặc dữ kiện cốt lõi.
-4. "punchline": câu đúc kết, cảnh báo, hoặc câu thúc giục hành động.
-
-TUYỆT ĐỐI KHÔNG bật caption cho các đoạn giải thích sâu, phân tích nguyên nhân, mô tả lịch sử/bối cảnh dài dòng.
-
-BƯỚC B — Chia narrativeText thành cụm từ 2-4 chữ, đồng bộ với word timestamps đã cung cấp. Không tự bịa timestamp.
-
-BƯỚC C — Gán style cho mỗi phrase:
-- emphasisType: kế thừa từ activeRange chứa nó
-- highlightWords: từ khóa quan trọng nhất (số liệu, danh từ riêng, động từ mạnh) — tối đa 1-2 từ
-- fontPreset: "sans_bold_caps" mặc định; "serif_italic" nếu đoạn có giọng chậm/tâm sự
-- boxHighlight: true CHỈ khi emphasisType là "shock_stat" hoặc mang tính cảnh báo rõ rệt
-- skew: true CHỈ khi emphasisType là "list_transition"
-- baseColor: "white" mặc định, "yellow_pale" khi fontPreset là "serif_italic"
-
-Dữ liệu đầu vào:
-${JSON.stringify(scenePayload, null, 2)}
-
-BƯỚC D — Với mỗi phrase, chọn presetType theo quy tắc:
-- "hook" hoặc "punchline" → presetType = "big_statement" (chiếm trọn màn hình, tạo sức nặng tối đa)
-- "list_transition" → presetType = "news_chyron" (cảm giác như 1 bản tin/headline mở màn cho mục mới), chia text thành 2 chyronSegments: segment đầu là mệnh đề chính (nền đỏ #E8352B, chữ trắng, font sans_bold_caps), segment sau là phần bổ nghĩa (nền trắng ngà #F5F0E6, chữ đen, font serif)
-- "shock_stat" → MẶC ĐỊNH presetType = "data_note" (note nhỏ góc màn hình, không che B-roll đang phát) TRỪ KHI số liệu đó là luận điểm trung tâm của cả video thì mới dùng "big_statement". Với data_note, điền field "dataNote.label" là bản rút gọn số liệu dưới 8 từ.
-
-QUY TẮC RIÊNG CHO 30 GIÂY ĐẦU (hook window, 0-30s):
-Trong khoảng này, coi MỌI cụm từ được nói ra đều đáng hiện caption (không chỉ áp dụng 4 trigger như phần còn lại video) để tối đa hoá pattern interrupt. Luân phiên presetType giữa "big_statement" và "news_chyron" theo nhịp câu (không dùng "data_note" trong hook window — hook cần chiếm trọn màn hình, không phải note nhỏ). Ngoài hook window, áp dụng đúng 4 trigger đã nêu và cho phép nhiều khoảng trống hoàn toàn tắt caption.
-
-Trả về CHÍNH XÁC JSON theo schema sau, không thêm text ngoài JSON:
-{
-  "enabled": true,
-  "activeRanges": [
-    { "startTime": 0, "endTime": 28.5, "reason": "hook" }
-  ],
-  "phrases": [
-    {
-      "id": "cap_001",
-      "sceneId": "...",
-      "text": "RIGHT NOW",
-      "startTime": 0.0,
-      "endTime": 0.6,
-      "emphasisType": "hook",
-      "highlightWords": ["NOW"],
-      "presetType": "big_statement",
-      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": false, "skew": false, "baseColor": "white" }
-    },
-    {
-      "id": "cap_002",
-      "sceneId": "...",
-      "text": "40% tăng mỗi năm",
-      "startTime": 45.0,
-      "endTime": 47.5,
-      "emphasisType": "shock_stat",
-      "highlightWords": ["40%"],
-      "presetType": "data_note",
-      "dataNote": { "label": "Tăng 40% từ 2023", "position": "bottom_right" },
-      "style": { "fontPreset": "sans_bold_caps", "boxHighlight": true, "skew": false, "baseColor": "white" }
-    }
-  ]
-}`;
+function durationScore(candidate, sceneDuration) {
+  if (candidate.mediaType === "photo") return 0.8;
+  const clipDur = candidate.durationSecs ?? 0;
+  if (clipDur <= 0) return 0.4;
+  if (clipDur >= sceneDuration) return 1;
+  return Math.max(0.2, clipDur / sceneDuration);
 }
-async function generateCaptionPlan(params) {
-  const { projectDir, apiKey, forceRegenerate = false } = params;
-  const progress = params.onProgress ?? (() => {
-  });
-  const modelId = params.model ?? "gemini-3.5-flash";
-  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
-  if (!forceRegenerate && fs__namespace.existsSync(captionPlanPath)) {
-    logger.info("[CaptionPlanner] Using cached caption-plan.json");
-    return JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
-  }
-  progress("Loading transcript...", 0.05);
-  const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
-  if (!fs__namespace.existsSync(transcriptPath)) {
-    throw new Error("Missing transcript.json -- please run Transcription step first");
-  }
-  const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-  progress("Loading edit plan...", 0.1);
-  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-  if (!fs__namespace.existsSync(planPath)) {
-    throw new Error("Missing master-edit-plan.json -- please run Planning step first");
-  }
-  const editPlan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-  const scenes = [];
-  for (const chapter of editPlan.chapters ?? []) {
-    const chapterId = chapter.id ?? chapter.chapterId ?? `ch_${scenes.length}`;
-    const sequences = chapter.sequences ?? chapter.chapters_seq ?? [];
-    for (const seq of sequences) {
-      for (const scene of seq.scenes ?? []) {
-        scenes.push({
-          sceneId: scene.id ?? scene.sceneId ?? `scene_${scenes.length}`,
-          chapterId,
-          narrativeText: scene.narrativeText ?? scene.narration ?? "",
-          visualIntent: scene.visualIntent ?? "",
-          startTime: scene.startTime ?? 0,
-          endTime: scene.endTime ?? (scene.startTime ?? 0) + (scene.duration ?? 5),
-          isPatternInterrupt: scene.isPatternInterrupt ?? false
-        });
-      }
-    }
-  }
-  logger.info(`[CaptionPlanner] ${scenes.length} scenes, ${transcript.segments.length} segments`);
-  const allWords = transcript.segments.flatMap((seg) => seg.words ?? []);
-  const fallbackModels = getAvailableModelsForTask("caption_planning", modelId);
-  let plan = null;
-  for (let attempt = 0; attempt < fallbackModels.length; attempt++) {
-    const currentModel = fallbackModels[attempt];
-    try {
-      progress(
-        attempt === 0 ? `Sending caption planning request to Gemini (${currentModel})...` : `Retrying with ${currentModel}...`,
-        0.2 + attempt * 0.1
-      );
-      const ai = new genai.GoogleGenAI({ apiKey: normalizeApiKey(apiKey), httpOptions: { apiVersion: "v1beta" } });
-      const prompt = buildGeminiPrompt(scenes, allWords);
-      const response = await ai.models.generateContent({
-        model: currentModel,
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: { responseMimeType: "application/json", temperature: 0.1, maxOutputTokens: 8192 }
-      });
-      const rawJson = response.text ?? "";
-      const parsed = JSON.parse(rawJson);
-      parsed.generatedByFallback = false;
-      parsed.generationSource = "gemini";
-      parsed.generationModel = currentModel;
-      parsed.hookWindowSeconds = HOOK_WINDOW_SECONDS;
-      parsed.sourceDuration = transcript.duration;
-      parsed.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      if (!Array.isArray(parsed.phrases) || !Array.isArray(parsed.activeRanges)) {
-        throw new Error("Response JSON missing phrases or activeRanges");
-      }
-      progress("Validating Gemini caption plan...", 0.6 + attempt * 0.05);
-      sanitizePlan(parsed, transcript.duration);
-      plan = parsed;
-      recordModelSuccess(currentModel);
-      logger.info(`[CaptionPlanner] Gemini succeeded with ${currentModel}, ${plan.phrases.length} phrases`);
-      break;
-    } catch (err) {
-      const { kind, message } = classifyGeminiErrorKind(err);
-      recordModelFailure(currentModel, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = fallbackModels[attempt + 1];
-        logger.warn(`[CaptionPlanner] Model ${currentModel} not found for this account. Falling back to ${nextModel ?? "rule-based fallback"}.`);
-      } else if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
-        const nextModel = fallbackModels[attempt + 1];
-        logger.warn(`[CaptionPlanner] ${currentModel} failed (${kind}): ${message.slice(0, 100)}. Switching immediately to ${nextModel ?? "fallback"}...`);
-      } else {
-        logger.warn(`[CaptionPlanner] ${currentModel} failed: ${message.slice(0, 100)}`);
-      }
-    }
-  }
-  if (!plan) {
-    progress("Gemini AI unavailable -- using algorithmic fallback...", 0.7);
-    plan = buildFallbackCaptionPlan(transcript, scenes);
-  }
-  progress("Saving caption-plan.json...", 0.9);
-  fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
-  const tmpPath = captionPlanPath + ".tmp";
-  fs__namespace.writeFileSync(tmpPath, JSON.stringify(plan, null, 2), "utf-8");
-  fs__namespace.renameSync(tmpPath, captionPlanPath);
-  logger.info(`[CaptionPlanner] Saved ${plan.phrases.length} phrases to caption-plan.json`);
-  progress("Complete!", 1);
-  return plan;
+function scoreCandidate(candidate, ctx) {
+  const sem = semanticScore(candidate, ctx) * 0.5;
+  const tech = technicalScore(candidate) * 0.2;
+  const comp = compositionScore(candidate, ctx.preferredAspectRatio) * 0.15;
+  const dur = durationScore(candidate, ctx.sceneDurationSecs) * 0.15;
+  const reuse = ctx.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
+  return Math.max(0, sem + tech + comp + dur - reuse);
 }
-function sanitizePlan(plan, sourceDuration) {
-  const dur = sourceDuration;
+function rankCandidates(candidates, ctx) {
+  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx) })).sort((a, b) => b.score - a.score);
+}
+async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
+  const allCandidates = [];
   const seenIds = /* @__PURE__ */ new Set();
-  let autoIdx = 0;
-  for (const p of plan.phrases) {
-    p.startTime = Math.max(0, Math.min(p.startTime, dur));
-    p.endTime = Math.max(p.startTime + 0.1, Math.min(p.endTime, dur));
-    if (!p.id || seenIds.has(p.id)) {
-      p.id = `cap_${String(++autoIdx).padStart(4, "0")}`;
-      logger.warn(`[CaptionPlanner] Duplicate/missing phrase ID fixed -> ${p.id}`);
+  const addCandidates = (results) => {
+    for (const r of results) {
+      if (!seenIds.has(r.assetId)) {
+        seenIds.add(r.assetId);
+        allCandidates.push(r);
+      }
     }
-    seenIds.add(p.id);
+  };
+  const cleanQueries = dedupeStockQueries(queries.map((q) => sanitizeStockQuery(q)));
+  if (pexelsApiKey) {
+    for (const query of cleanQueries) {
+      const cached = cache.get(`pexels_v:${query}`);
+      if (cached) {
+        addCandidates(cached);
+      } else {
+        const res = await pexelsSearchVideos(query, pexelsApiKey, 8, preferredOrientation);
+        cache.set(`pexels_v:${query}`, res);
+        addCandidates(res);
+      }
+      if (allCandidates.length >= 10) break;
+    }
   }
-  const validRanges = plan.activeRanges.filter((r) => {
-    const valid = r.endTime > r.startTime && r.startTime >= 0 && r.endTime <= dur + 1;
-    if (!valid) logger.warn(`[CaptionPlanner] Removed invalid range ${r.startTime} -> ${r.endTime}`);
-    return valid;
-  });
-  plan.activeRanges = validRanges;
-  for (const r of plan.activeRanges) {
-    r.startTime = Math.max(0, r.startTime);
-    r.endTime = Math.min(r.endTime, dur);
+  if (allCandidates.length >= 3) {
+    logger.info(`[StockEngine] Pexels returned enough candidates (${allCandidates.length}). Pixabay skipped to preserve API quota.`);
+    return allCandidates;
   }
-  plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
-  plan.phrases.sort((a, b) => a.startTime - b.startTime);
-  const hookEnd = Math.min(HOOK_WINDOW_SECONDS, dur);
-  const hookRange = plan.activeRanges.find((r) => r.reason === "hook");
-  if (!hookRange) {
-    logger.warn("[CaptionPlanner] Gemini missing hook range -- adding default 0 -> " + hookEnd);
-    plan.activeRanges.unshift({ startTime: 0, endTime: hookEnd, reason: "hook" });
-    plan.activeRanges.sort((a, b) => a.startTime - b.startTime);
-  } else if (hookRange.endTime < hookEnd - 0.5) {
-    logger.warn(`[CaptionPlanner] Gemini hook range ends at ${hookRange.endTime}s -- extending to ${hookEnd}s`);
-    hookRange.endTime = hookEnd;
-  }
-}
-function loadCaptionPlan(projectDir) {
-  const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
-  if (!fs__namespace.existsSync(planPath)) return null;
-  try {
-    return JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-function saveCaptionPlan(projectDir, plan) {
-  const planPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
-  fs__namespace.mkdirSync(path__namespace.dirname(planPath), { recursive: true });
-  fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
-  logger.info(`[CaptionPlanner] Saved caption-plan.json manually (${plan.phrases.length} phrases)`);
-}
-const ffmpegPath$1 = require("ffmpeg-static");
-function ffmpegRun$1(args) {
-  return new Promise((resolve, reject2) => {
-    const proc = cp.spawn(ffmpegPath$1, args, { windowsHide: true });
-    const stderr = [];
-    proc.stderr.on("data", (d) => stderr.push(d.toString()));
-    proc.on("close", (code) => {
-      if (code === 0) resolve();
-      else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-3).join("")}`));
-    });
-    proc.on("error", reject2);
-  });
-}
-function registerCaptionHandlers(ipcMain) {
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_GENERATE_PLAN, async (event, params) => {
-    const win = electron.BrowserWindow.fromWebContents(event.sender);
-    const sendProgress = (msg, pct) => {
-      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
-    };
-    try {
-      const appCfg = loadConfig();
-      let apiKey = normalizeApiKey(appCfg.geminiApiKey ?? "");
-      if (!apiKey) {
-        const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
-        if (fs__namespace.existsSync(configPath)) {
+  if (pixabayApiKey) {
+    if (isPixabayPaused()) {
+      const waitSec = getPixabayPauseRemainingSecs();
+      logger.info(`[Pixabay] Rate limit paused (${waitSec}s remaining). Skipping Pixabay for this scene.`);
+    } else {
+      const pxOrientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
+      const pixabayQueries = cleanQueries.slice(0, 2);
+      for (const query of pixabayQueries) {
+        if (isPixabayPaused()) break;
+        const cached = cache.get(`pixabay_v:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
           try {
-            const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
-            apiKey = normalizeApiKey(cfg.geminiApiKey ?? "");
-          } catch {
+            const res = await pixabaySearchVideos(query, pixabayApiKey, 8, pxOrientation);
+            cache.set(`pixabay_v:${query}`, res);
+            addCandidates(res);
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Video search failed for query "${query}": ${pxErr}`);
+          }
+        }
+        if (allCandidates.length >= 10) break;
+      }
+    }
+  }
+  if (allCandidates.length < 3) {
+    for (const query of cleanQueries.slice(0, 2)) {
+      if (pexelsApiKey) {
+        const cached = cache.get(`pexels_p:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          const res = await pexelsSearchPhotos(query, pexelsApiKey, 6, preferredOrientation);
+          cache.set(`pexels_p:${query}`, res);
+          addCandidates(res);
+        }
+      }
+      if (pixabayApiKey && !isPixabayPaused() && allCandidates.length < 2) {
+        const cached = cache.get(`pixabay_p:${query}`);
+        if (cached) {
+          addCandidates(cached);
+        } else {
+          try {
+            const orientation = preferredOrientation === "portrait" ? "vertical" : "horizontal";
+            const res = await pixabaySearchPhotos(query, pixabayApiKey, 6, orientation);
+            cache.set(`pixabay_p:${query}`, res);
+            addCandidates(res);
+          } catch (pxErr) {
+            logger.warn(`[Pixabay] Photo search failed for query "${query}": ${pxErr}`);
           }
         }
       }
-      if (!apiKey) apiKey = normalizeApiKey(process.env.GEMINI_API_KEY ?? "");
-      const plan = await generateCaptionPlan({
-        projectDir: params.projectDir,
-        apiKey,
-        model: params.model,
-        forceRegenerate: params.forceRegenerate ?? false,
-        onProgress: sendProgress
-      });
-      return { success: true, plan };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[CaptionsIPC] generate-plan failed: ${msg}`);
-      return { success: false, error: msg };
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_GET_PLAN, async (_event, projectDir) => {
-    try {
-      const plan = loadCaptionPlan(projectDir);
-      return { success: true, plan };
-    } catch (err) {
-      return { success: false, error: String(err) };
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_UPDATE_PHRASE, async (_event, params) => {
-    try {
-      const plan = loadCaptionPlan(params.projectDir);
-      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
-      const idx = plan.phrases.findIndex((p) => p.id === params.phraseId);
-      if (idx === -1) return { success: false, error: `Không tìm thấy phrase id=${params.phraseId}` };
-      plan.phrases[idx] = { ...plan.phrases[idx], ...params.updates };
-      saveCaptionPlan(params.projectDir, plan);
-      logger.info(`[CaptionsIPC] Updated phrase ${params.phraseId}`);
-      return { success: true, plan };
-    } catch (err) {
-      return { success: false, error: String(err) };
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_TOGGLE_RANGE, async (_event, params) => {
-    try {
-      const plan = loadCaptionPlan(params.projectDir);
-      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
-      if (params.captionEnabled !== void 0) {
-        plan.enabled = params.captionEnabled;
-      }
-      if (params.rangeIndex >= 0 && params.rangeIndex < plan.activeRanges.length) {
-        const range = plan.activeRanges[params.rangeIndex];
-        range.disabled = !params.enabled;
-      }
-      saveCaptionPlan(params.projectDir, plan);
-      return { success: true, plan };
-    } catch (err) {
-      return { success: false, error: String(err) };
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (event, params) => {
-    const win = electron.BrowserWindow.fromWebContents(event.sender);
-    const sendProgress = (msg, pct) => {
-      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
-      win?.webContents.send(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, { message: msg, progress: pct });
-    };
-    try {
-      const plan = loadCaptionPlan(params.projectDir);
-      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
-      const overlayPath = path__namespace.join(params.projectDir, "assets", "captions", "overlay.mp4");
-      const duration = params.videoDurationInSeconds ?? 600;
-      sendProgress("Bundling Remotion composition...", 0.05);
-      await renderCaptionsOverlay({
-        captionPlan: plan,
-        videoDurationInSeconds: duration,
-        outputPath: overlayPath,
-        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.05 + pct * 4e-3),
-        onRenderProgress: (pct) => sendProgress(`Render: ${Math.round(pct * 100)}%`, 0.5 + pct * 0.48)
-      });
-      logger.info(`[CaptionsIPC] Regenerated Remotion overlay: ${overlayPath}`);
-      return { success: true, overlayPath };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[CaptionsIPC] regenerate-overlay failed: ${msg}`);
-      return { success: false, error: msg };
-    }
-  });
-  ipcMain.handle(IPC_CHANNELS.CAPTIONS_PREVIEW_RENDER, async (event, params) => {
-    const win = electron.BrowserWindow.fromWebContents(event.sender);
-    const sendProgress = (msg, pct) => {
-      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
-    };
-    try {
-      const plan = loadCaptionPlan(params.projectDir);
-      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
-      const outputDir = path__namespace.join(params.projectDir, "output");
-      const possibleVideos = ["final_output.mp4", "preview_source.mp4"];
-      let sourceVideo = null;
-      for (const v of possibleVideos) {
-        const vp = path__namespace.join(outputDir, v);
-        if (fs__namespace.existsSync(vp)) {
-          sourceVideo = vp;
-          break;
-        }
-      }
-      if (!sourceVideo) {
-        const tmpRaw = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${Buffer.from(params.projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)}`, "raw_video.mp4");
-        if (fs__namespace.existsSync(tmpRaw)) sourceVideo = tmpRaw;
-      }
-      if (!sourceVideo) {
-        return { success: false, error: "Chưa có video source để preview — render video trước" };
-      }
-      sendProgress("Đang cắt đoạn preview...", 0.1);
-      const previewDir = path__namespace.join(params.projectDir, "output", "_preview_tmp");
-      fs__namespace.mkdirSync(previewDir, { recursive: true });
-      const clipPath = path__namespace.join(previewDir, "preview_clip.mp4");
-      const duration = Math.min(params.endTime - params.startTime, 15);
-      await ffmpegRun$1([
-        "-y",
-        "-ss",
-        String(params.startTime),
-        "-i",
-        sourceVideo,
-        "-t",
-        String(duration),
-        "-c",
-        "copy",
-        clipPath
-      ]);
-      sendProgress("Đang render caption overlay (Remotion)...", 0.3);
-      const previewPhrases = plan.phrases.filter((p) => p.startTime >= params.startTime && p.endTime <= params.endTime + 1).map((p) => ({
-        ...p,
-        startTime: p.startTime - params.startTime,
-        endTime: p.endTime - params.startTime
-      }));
-      const previewPlan = { ...plan, phrases: previewPhrases };
-      const overlayPath = path__namespace.join(previewDir, "preview_overlay.mp4");
-      await renderCaptionsOverlay({
-        captionPlan: previewPlan,
-        videoDurationInSeconds: duration,
-        outputPath: overlayPath,
-        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.3 + pct * 2e-3),
-        onRenderProgress: (pct) => sendProgress(`Caption overlay: ${Math.round(pct * 100)}%`, 0.35 + pct * 0.4)
-      });
-      sendProgress("Compositing preview...", 0.8);
-      const previewOutput = path__namespace.join(previewDir, "preview_captioned.mp4");
-      await ffmpegRun$1([
-        "-y",
-        "-i",
-        clipPath,
-        "-i",
-        overlayPath,
-        "-filter_complex",
-        "[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]",
-        "-map",
-        "[outv]",
-        "-map",
-        "0:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "ultrafast",
-        "-crf",
-        "28",
-        "-c:a",
-        "copy",
-        "-pix_fmt",
-        "yuv420p",
-        previewOutput
-      ]);
-      try {
-        fs__namespace.unlinkSync(overlayPath);
-      } catch {
-      }
-      sendProgress("Preview xong!", 1);
-      logger.info(`[CaptionsIPC] Preview render: ${previewOutput}`);
-      return { success: true, previewPath: previewOutput };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[CaptionsIPC] preview-render failed: ${msg}`);
-      return { success: false, error: msg };
-    }
-  });
-}
-const PIPELINE_SCHEMA_VERSION = 1;
-const PIPELINE_EXECUTION_STAGES = [
-  "validating",
-  "transcribing",
-  "planning",
-  "captions",
-  "global-context",
-  "stock-search",
-  "audio-search",
-  "preflight",
-  "rendering",
-  "postflight"
-];
-const APP_INSTANCE_ID$1 = uuid.v4();
-function normalizeProjectDir(projectDir) {
-  if (!projectDir) return "";
-  const resolved = path__namespace.resolve(projectDir);
-  return path__namespace.normalize(resolved);
-}
-function getPipelineStatePath(projectDir) {
-  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.json");
-}
-function getPipelineStateBackupPath(projectDir) {
-  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.backup.json");
-}
-function isProcessAlive$1(pid) {
-  if (!pid || pid <= 0) return false;
-  try {
-    return process.kill(pid, 0);
-  } catch (err) {
-    const code = err.code;
-    return code === "EPERM";
-  }
-}
-function createLease(runId, currentStage) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  return {
-    runId,
-    appInstanceId: APP_INSTANCE_ID$1,
-    pid: process.pid,
-    acquiredAt: now,
-    heartbeatAt: now,
-    currentStage
-  };
-}
-function updateHeartbeat(state2) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  if (state2.lease) {
-    state2.lease.heartbeatAt = now;
-    state2.lease.currentStage = state2.currentStage;
-  } else {
-    state2.lease = createLease(state2.runId, state2.currentStage);
-  }
-  state2.updatedAt = now;
-}
-function releaseLease(state2) {
-  delete state2.lease;
-  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-}
-function isLeaseStale(lease, heartbeatTimeoutMs = 15e3) {
-  if (!lease) return false;
-  if (lease.appInstanceId !== APP_INSTANCE_ID$1) {
-    if (!isProcessAlive$1(lease.pid)) {
-      return true;
-    }
-    const lastHeartbeat2 = new Date(lease.heartbeatAt).getTime();
-    if (isNaN(lastHeartbeat2) || Date.now() - lastHeartbeat2 > heartbeatTimeoutMs) {
-      return true;
-    }
-    return true;
-  }
-  const lastHeartbeat = new Date(lease.heartbeatAt).getTime();
-  if (!isNaN(lastHeartbeat) && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
-    return true;
-  }
-  return false;
-}
-function toSnapshot(state2) {
-  return {
-    version: state2.version,
-    runId: state2.runId,
-    projectDir: state2.projectDir,
-    currentStage: state2.currentStage,
-    overallStatus: state2.overallStatus,
-    stages: state2.stages,
-    updatedAt: state2.updatedAt,
-    lease: state2.lease,
-    warnings: state2.warnings,
-    fatalErrors: state2.fatalErrors,
-    renderOutputPath: state2.renderOutputPath,
-    preflightReportPath: state2.preflightReportPath,
-    postflightReportPath: state2.postflightReportPath
-  };
-}
-function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
-  let scriptHash2;
-  if (scriptPath && fs__namespace.existsSync(scriptPath)) {
-    try {
-      const content = fs__namespace.readFileSync(scriptPath);
-      scriptHash2 = crypto__namespace.createHash("md5").update(content).digest("hex");
-    } catch {
     }
   }
-  let voiceoverSize;
-  let voiceoverMtimeMs;
-  if (voiceoverPath && fs__namespace.existsSync(voiceoverPath)) {
-    try {
-      const stat = fs__namespace.statSync(voiceoverPath);
-      voiceoverSize = stat.size;
-      voiceoverMtimeMs = stat.mtimeMs;
-    } catch {
-    }
-  }
-  return {
-    scriptPath,
-    scriptHash: scriptHash2,
-    voiceoverPath,
-    voiceoverSize,
-    voiceoverMtimeMs
-  };
+  return allCandidates;
 }
-function createDefaultStageStates() {
-  const stages = {};
-  for (const stage of PIPELINE_EXECUTION_STAGES) {
-    stages[stage] = {
-      status: "pending",
-      progress: 0
-    };
-  }
-  return stages;
+function toOrientation(ar) {
+  if (ar === "9:16") return "portrait";
+  if (ar === "1:1") return "square";
+  return "landscape";
 }
-function createInitialPipelineState(options, fingerprint, runId) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const rId = runId ?? uuid.v4();
-  return {
-    schemaVersion: PIPELINE_SCHEMA_VERSION,
-    version: 1,
-    runId: rId,
-    projectDir: normalizeProjectDir(options.projectDir),
-    currentStage: "idle",
-    overallStatus: "idle",
-    startedAt: now,
-    updatedAt: now,
-    inputFingerprint: fingerprint,
-    options: {
-      ...options,
-      projectDir: normalizeProjectDir(options.projectDir)
-    },
-    stages: createDefaultStageStates(),
-    warnings: [],
-    fatalErrors: []
-  };
-}
-function loadPipelineState(projectDir) {
-  const statePath = getPipelineStatePath(projectDir);
-  const backupPath = getPipelineStateBackupPath(projectDir);
-  if (fs__namespace.existsSync(statePath)) {
-    try {
-      const raw = fs__namespace.readFileSync(statePath, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && parsed.stages) {
-        if (!parsed.version) parsed.version = 1;
-        return parsed;
-      }
-    } catch (err) {
-      logger.warn(`[PipelineState] Primary state corrupt, trying backup: ${String(err)}`);
-    }
-  }
-  if (fs__namespace.existsSync(backupPath)) {
-    try {
-      const rawBackup = fs__namespace.readFileSync(backupPath, "utf-8");
-      const parsedBackup = JSON.parse(rawBackup);
-      if (parsedBackup && typeof parsedBackup === "object" && parsedBackup.stages) {
-        logger.info(`[PipelineState] Successfully recovered pipeline state from backup`);
-        if (!parsedBackup.version) parsedBackup.version = 1;
-        return parsedBackup;
-      }
-    } catch {
-    }
-  }
-  return null;
-}
-function savePipelineStateAtomic(projectDir, state2) {
-  const normDir = normalizeProjectDir(projectDir);
-  state2.projectDir = normDir;
-  state2.version = (state2.version || 0) + 1;
-  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const finalPath = getPipelineStatePath(normDir);
-  const backupPath = getPipelineStateBackupPath(normDir);
-  const dir = path__namespace.dirname(finalPath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  if (fs__namespace.existsSync(finalPath)) {
-    try {
-      fs__namespace.copyFileSync(finalPath, backupPath);
-    } catch {
-    }
-  }
-  const tmpPath = path__namespace.join(
-    dir,
-    `auto-pipeline-state.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
-  );
-  const content = JSON.stringify(state2, null, 2);
-  fs__namespace.writeFileSync(tmpPath, content, "utf-8");
-  fs__namespace.renameSync(tmpPath, finalPath);
-  try {
-    fs__namespace.copyFileSync(finalPath, backupPath);
-  } catch {
-  }
-}
-function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
-  const invalidated = /* @__PURE__ */ new Set();
-  const voiceoverChanged = oldState.inputFingerprint.voiceoverPath !== newFingerprint.voiceoverPath || oldState.inputFingerprint.voiceoverSize !== newFingerprint.voiceoverSize || oldState.inputFingerprint.voiceoverMtimeMs !== newFingerprint.voiceoverMtimeMs;
-  const scriptChanged = oldState.inputFingerprint.scriptPath !== newFingerprint.scriptPath || oldState.inputFingerprint.scriptHash !== newFingerprint.scriptHash;
-  if (voiceoverChanged) {
-    return [
-      "transcribing",
-      "planning",
-      "captions",
-      "global-context",
-      "stock-search",
-      "audio-search",
-      "preflight",
-      "rendering",
-      "postflight"
-    ];
-  }
-  if (scriptChanged) {
-    return [
-      "planning",
-      "captions",
-      "global-context",
-      "stock-search",
-      "audio-search",
-      "preflight",
-      "rendering",
-      "postflight"
-    ];
-  }
-  if (oldState.options.whisperModel !== newOptions.whisperModel && newOptions.whisperModel) {
-    return [
-      "transcribing",
-      "planning",
-      "captions",
-      "global-context",
-      "stock-search",
-      "audio-search",
-      "preflight",
-      "rendering",
-      "postflight"
-    ];
-  }
-  if (oldState.options.forceRegenerateCaptions !== newOptions.forceRegenerateCaptions && newOptions.forceRegenerateCaptions) {
-    invalidated.add("captions");
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  if (oldState.options.preferredStockProvider !== newOptions.preferredStockProvider) {
-    invalidated.add("stock-search");
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldProfileMode = resolveContentProfileMode(oldState.options);
-  const newProfileMode = resolveContentProfileMode(newOptions);
-  const oldContentType = oldState.options.contentType ?? "default";
-  const newContentType = newOptions.contentType ?? "default";
-  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
-    invalidated.add("stock-search");
-    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
-      invalidated.add("audio-search");
-    }
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === "health" ? "custom-mix" : "legacy");
-  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === "health" ? "custom-mix" : "legacy");
-  if (oldVisualMode !== newVisualMode) {
-    invalidated.add("stock-search");
-    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
-      invalidated.add("audio-search");
-    }
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
-    visualSourceMode: oldState.options.visualSourceMode,
-    visualMixConfig: oldState.options.visualMixConfig,
-    contentType: oldContentType
-  }) : void 0;
-  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
-    visualSourceMode: newOptions.visualSourceMode,
-    visualMixConfig: newOptions.visualMixConfig,
-    contentType: newContentType
-  }) : void 0;
-  const stripDefaultAiMode = (cfg) => {
-    if (!cfg || typeof cfg !== "object" || !("aiImageMode" in cfg)) return cfg;
-    const { aiImageMode, ...rest } = cfg;
-    return aiImageMode === "prompt" ? { ...rest, aiImageMode } : rest;
-  };
-  const oldVisualConfigStr = JSON.stringify(
-    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
-  );
-  const newVisualConfigStr = JSON.stringify(
-    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
-  );
-  const visualConfigChanged = oldVisualConfigStr !== newVisualConfigStr || oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio || oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio || oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution || oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior || resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig);
-  if (visualConfigChanged) {
-    invalidated.add("stock-search");
-    if (oldContentType === "health" || newContentType === "health") {
-      invalidated.add("audio-search");
-    }
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
-    invalidated.add("audio-search");
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  if (oldState.options.fps !== newOptions.fps || oldState.options.resolution?.width !== newOptions.resolution?.width || oldState.options.resolution?.height !== newOptions.resolution?.height || oldState.options.outputName !== newOptions.outputName) {
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  return Array.from(invalidated);
-}
-function applyInvalidation(state2, invalidatedStages) {
-  for (const stage of invalidatedStages) {
-    if (state2.stages[stage]) {
-      state2.stages[stage] = {
-        status: "pending",
-        progress: 0,
-        message: "Invalidated due to input/setting change"
-      };
-    }
-  }
-}
-function isTranscriptionValid(projectDir, voiceoverPath) {
-  const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
-  const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
-  if (!fs__namespace.existsSync(transcriptPath)) {
-    return false;
-  }
-  try {
-    if (voiceoverPath && fs__namespace.existsSync(voiceoverPath) && fs__namespace.existsSync(cacheMetaPath)) {
-      const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
-      const stat = fs__namespace.statSync(voiceoverPath);
-      const expectedHash = `${voiceoverPath}:${stat.size}:${stat.mtimeMs}`;
-      if (meta.hash && meta.hash !== expectedHash) return false;
-    }
-    const transcript = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
-    return !!(transcript && transcript.segments && transcript.segments.length > 0);
-  } catch {
-    return false;
-  }
-}
-function isPlanningValid(projectDir) {
-  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-  if (!fs__namespace.existsSync(planPath)) return false;
-  try {
-    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    if (!plan || !Array.isArray(plan.chapters) || plan.chapters.length === 0) {
-      return false;
-    }
-    const sceneCount = plan.chapters.reduce(
-      (acc, ch) => {
-        const seqs = ch.chapters_seq ?? ch.sequences ?? [];
-        return acc + seqs.reduce((sAcc, seq) => sAcc + (seq.scenes?.length ?? 0), 0);
-      },
-      0
-    );
-    return sceneCount > 0;
-  } catch {
-    return false;
-  }
-}
-function isCaptionsValid(projectDir) {
-  const captionPlanPath = path__namespace.join(projectDir, "analysis", "caption-plan.json");
-  if (!fs__namespace.existsSync(captionPlanPath)) return false;
-  try {
-    const plan = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
-    return !!(plan && typeof plan.enabled === "boolean");
-  } catch {
-    return false;
-  }
-}
-function isGlobalContextValid(projectDir, scriptHash2) {
-  const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
-  if (!fs__namespace.existsSync(contextPath)) return false;
-  try {
-    const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
-    if (!ctx || !ctx.primarySubject) return false;
-    if (scriptHash2 && ctx._scriptHash && ctx._scriptHash !== scriptHash2) ;
-    return true;
-  } catch {
-    return false;
-  }
-}
-function checkStockCompletion(projectDir) {
-  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+async function runStockEngine(params, onProgress = () => {
+}) {
+  const { projectDir, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9", targetSceneIndices } = params;
+  setPixabayProjectDir(projectDir);
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) {
     return {
+      success: false,
       totalScenes: 0,
       assignedScenes: 0,
-      downloadedScenes: 0,
-      missingScenes: 0,
-      lowConfidenceScenes: 0,
-      missingSceneIndices: []
+      failedScenes: 0,
+      assignments: [],
+      error: "No edit plan found. Run AI Planning first."
     };
   }
-  let totalScenes = 0;
-  const sceneIndices = [];
-  try {
-    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    const chapters = plan.chapters ?? [];
-    for (const ch of chapters) {
-      const seqs = ch.chapters_seq ?? ch.sequences ?? [];
-      for (const seq of seqs) {
-        for (const sc of seq.scenes ?? []) {
-          totalScenes++;
-          sceneIndices.push(sc.sceneIndex);
-        }
-      }
-    }
-  } catch {
+  const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+  const stockDir = path.join(projectDir, "assets", "stock");
+  fs__namespace.mkdirSync(stockDir, { recursive: true });
+  const prodSettings = loadProductionSettings(projectDir);
+  const stockCandidatesStore = loadStockCandidates(projectDir);
+  const cache = new QueryCache(stockDir);
+  let manifest = loadAssetsManifest(stockDir);
+  const usedAssetIds = new Set(manifest.map((a) => a.assetId));
+  const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe$1(reviewPath, []) : [];
+  const existingMap = /* @__PURE__ */ new Map();
+  for (const a of existingAssignments) {
+    existingMap.set(a.sceneIndex, a);
   }
-  const assignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
-  let assignmentList = [];
-  if (fs__namespace.existsSync(assignmentsPath)) {
-    try {
-      const parsed = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
-      if (Array.isArray(parsed)) {
-        assignmentList = parsed;
-      } else if (parsed && typeof parsed === "object") {
-        if (Array.isArray(parsed.assignments)) {
-          assignmentList = parsed.assignments;
-        } else if (parsed.assignments && typeof parsed.assignments === "object") {
-          assignmentList = Object.values(parsed.assignments);
-        }
-      }
-    } catch {
+  const flattenedEntries = flattenEditPlanScenes(plan);
+  const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
+      return false;
     }
-  }
-  const assignmentMap = /* @__PURE__ */ new Map();
-  for (const a of assignmentList) {
-    if (a && typeof a.sceneIndex === "number") {
-      assignmentMap.set(a.sceneIndex, a);
-    }
-  }
-  let assignedScenes = 0;
-  let downloadedScenes = 0;
-  let lowConfidenceScenes = 0;
-  const missingSceneIndices = [];
-  for (const idx of sceneIndices) {
-    const assign = assignmentMap.get(idx);
-    if (!assign || assign.status !== "assigned") {
-      missingSceneIndices.push(idx);
-      continue;
-    }
-    assignedScenes++;
-    let mediaExists = false;
-    const candidates = [];
-    if (assign.asset?.localPath) {
-      candidates.push(assign.asset.localPath);
-      if (!path__namespace.isAbsolute(assign.asset.localPath)) {
-        candidates.push(path__namespace.join(projectDir, assign.asset.localPath));
-      }
-    }
-    if (assign.asset?.filename) {
-      candidates.push(path__namespace.join(projectDir, "assets", "stock", assign.asset.filename));
-    }
-    const anyAsset = assign.asset;
-    if (anyAsset?.mediaFile) {
-      candidates.push(path__namespace.join(projectDir, "assets", "stock", anyAsset.mediaFile));
-    }
-    if (anyAsset?.localAsset) {
-      candidates.push(path__namespace.join(projectDir, "assets", "stock", anyAsset.localAsset));
-    }
-    for (const candidatePath of candidates) {
-      try {
-        if (fs__namespace.existsSync(candidatePath) && fs__namespace.statSync(candidatePath).size > 0) {
-          mediaExists = true;
-          break;
-        }
-      } catch {
-      }
-    }
-    if (mediaExists) {
-      downloadedScenes++;
-    } else {
-      missingSceneIndices.push(idx);
-    }
-    if (assign.score !== void 0 && assign.score < 50) {
-      lowConfidenceScenes++;
-    }
-  }
-  return {
-    totalScenes,
-    assignedScenes,
-    downloadedScenes,
-    missingScenes: missingSceneIndices.length,
-    lowConfidenceScenes,
-    missingSceneIndices
-  };
-}
-function checkVisualCompletion(projectDir) {
-  return checkStockCompletion(projectDir);
-}
-function isAudioValid(projectDir, requireMusic, contentType) {
-  const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
-  if (!fs__namespace.existsSync(audioPlanPath)) return false;
-  try {
-    const plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
-    if (!plan || !Array.isArray(plan.sections)) return false;
-    if (requireMusic) {
-      const hasDownloadedMusic = plan.sections.some(
-        (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
-      );
-      if (!hasDownloadedMusic) return false;
-    }
-    if (contentType === "health") {
-      const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
-      if (fs__namespace.existsSync(healthPlanPath)) {
-        try {
-          const healthPlan = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
-          const hasSfxCues = (healthPlan.scenes || []).some((s) => s.sfxCue);
-          if (hasSfxCues) {
-            if (!plan.healthSfx?.enabled) return false;
-            const expectedHash = computeHealthMotionHash(healthPlan);
-            if (plan.healthSfx.planHash !== expectedHash) return false;
-          }
-        } catch {
-        }
-      }
+    const existing = existingMap.get(scene.sceneIndex);
+    if (scene.locked || existing?.locked) return false;
+    if (existing?.manualOverride) return false;
+    if (existing?.approvalStatus === "approved") return false;
+    if (!targetSceneIndices && existing?.asset?.provider === "google-flow" && existing?.status === "assigned" && existing?.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
+      return false;
     }
     return true;
-  } catch {
-    return false;
-  }
-}
-function isPreflightValid(projectDir) {
-  const preflightPath = path__namespace.join(projectDir, "analysis", "render-preflight.json");
-  if (!fs__namespace.existsSync(preflightPath)) return false;
-  try {
-    const report = JSON.parse(fs__namespace.readFileSync(preflightPath, "utf-8"));
-    return report && report.status !== "failed";
-  } catch {
-    return false;
-  }
-}
-function reconcileProjectArtifacts(projectDir, options) {
-  const voPath = options?.voiceoverPath || "";
-  const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs__namespace.existsSync(path__namespace.join(projectDir, "analysis", "transcript.json"));
-  const planningValid = isPlanningValid(projectDir);
-  const captionsValid = isCaptionsValid(projectDir);
-  const globalContextValid = isGlobalContextValid(projectDir);
-  const stockCompletion = checkStockCompletion(projectDir);
-  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic);
-  const preflightValid = isPreflightValid(projectDir);
-  const outputDir = path__namespace.join(projectDir, "output");
-  let renderValid = false;
-  if (fs__namespace.existsSync(outputDir)) {
-    try {
-      const files = fs__namespace.readdirSync(outputDir).filter(
-        (f) => f.endsWith(".mp4") && !f.startsWith("_") && !f.includes(".partial") && !f.includes(".working")
+  });
+  if (targetSceneIndices) {
+    const expectedTargetCount = targetSceneIndices.length;
+    const actualEligibleTargetCount = scenesToProcess.length;
+    const totalProjectScenes = flattenedEntries.length;
+    logger.info(
+      `[VisualMix] Stock ownership: expected=${expectedTargetCount} actualEligible=${actualEligibleTargetCount} totalProjectScenes=${totalProjectScenes}`
+    );
+    if (expectedTargetCount < totalProjectScenes && actualEligibleTargetCount > expectedTargetCount) {
+      throw new Error(
+        `VISUAL_MIX_STOCK_SCOPE_VIOLATION: Expected at most ${expectedTargetCount} scenes but stock engine targeted ${actualEligibleTargetCount} scenes out of ${totalProjectScenes}.`
       );
-      if (files.length > 0) {
-        const stat = fs__namespace.statSync(path__namespace.join(outputDir, files[0]));
-        if (stat.size > 1024) renderValid = true;
-      }
-    } catch {
     }
   }
-  const qaPath = path__namespace.join(projectDir, "analysis", "render-qa.json");
-  const postflightValid = renderValid && fs__namespace.existsSync(qaPath);
+  const assignments = [];
+  let assignedCount = 0;
+  let failedCount = 0;
+  const orientation = toOrientation(preferredAspectRatio);
+  for (const entry of flattenedEntries) {
+    const existing = existingMap.get(entry.sceneIndex);
+    const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved";
+    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex);
+    if ((isLocked || isExcluded) && existing) {
+      assignments.push(existing);
+      if (existing.status === "assigned") assignedCount++;
+    }
+  }
+  onProgress(`Starting stock search for ${scenesToProcess.length} scenes...`, 0.01);
+  for (let i = 0; i < scenesToProcess.length; i++) {
+    const entry = scenesToProcess[i];
+    const { scene, sceneId, chapterTitle, chapterPurpose } = entry;
+    const pct = 0.05 + i / scenesToProcess.length * 0.85;
+    const queries = scene.searchQueries?.length ? scene.searchQueries : [scene.visualIntent ?? scene.narrativeText ?? "nature background"].slice(0, 4);
+    const visualIntent = scene.visualIntent ?? queries[0] ?? "";
+    const narrationText = scene.narrativeText ?? "";
+    const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
+    onProgress(
+      `[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - "${queries[0]}"`,
+      pct
+    );
+    const assignment = {
+      sceneId,
+      sceneIndex: scene.sceneIndex,
+      narrationText,
+      startTime: scene.startTime,
+      endTime: scene.endTime,
+      visualIntent,
+      searchQueries: queries,
+      usedQuery: queries[0],
+      asset: null,
+      score: 0,
+      locked: false,
+      manualOverride: false,
+      status: "searching"
+    };
+    try {
+      const candidates = await searchForScene(
+        queries,
+        pexelsApiKey,
+        pixabayApiKey,
+        orientation,
+        cache
+      );
+      if (candidates.length === 0) {
+        assignment.status = "failed";
+        assignment.errorMessage = "No candidates found from any provider";
+        failedCount++;
+      } else {
+        const assignmentHistory = assignments.map((a) => ({
+          sceneIndex: a.sceneIndex,
+          provider: a.asset?.provider,
+          assetId: a.asset?.assetId,
+          creator: a.asset?.creator,
+          title: a.asset?.searchQuery,
+          downloadUrl: a.asset?.downloadUrl,
+          thumbnailUrl: a.asset?.thumbnailUrl,
+          isLocked: a.locked
+        }));
+        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+          const scoringCtx = {
+            narration: narrationText,
+            visualIntent,
+            chapterTitle,
+            chapterPurpose,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            assignmentHistory,
+            isLocked: scene.locked
+          };
+          const topCandidates = rankCandidatesForScene(
+            sceneId,
+            scene.sceneIndex,
+            candidates,
+            scoringCtx,
+            prodSettings.candidatesPerScene || 3
+          );
+          stockCandidatesStore[sceneId] = topCandidates;
+          const winner = topCandidates.find((c) => c.selected) || topCandidates[0];
+          const usedQuery = queries[0];
+          const downloadedAsset = await downloadAsset(
+            winner.result,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          );
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+          manifest.push(downloadedAsset);
+          usedAssetIds.add(downloadedAsset.assetId);
+          scene.localPath = downloadedAsset.localPath;
+          scene.mediaFile = path.basename(downloadedAsset.localPath);
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          assignment.asset = downloadedAsset;
+          assignment.score = winner.score.totalScore;
+          assignment.usedQuery = usedQuery;
+          assignment.status = "assigned";
+          assignment.candidates = topCandidates;
+          assignment.selectedCandidateId = winner.candidateId;
+          assignment.approvalStatus = "auto_selected";
+          assignment.scoreBreakdown = winner.score;
+          assignedCount++;
+        } else {
+          const ranked = rankCandidates(candidates, {
+            visualIntent,
+            narrationText,
+            sceneDurationSecs: sceneDuration,
+            preferredAspectRatio,
+            usedAssetIds
+          });
+          const winner = ranked[0];
+          const usedQuery = queries.find(
+            (q) => winner.searchQuery !== void 0 ? winner.searchQuery === q : true
+          ) ?? queries[0];
+          const downloadedAsset = await downloadAsset(
+            winner,
+            scene.sceneIndex,
+            usedQuery,
+            stockDir,
+            manifest
+          );
+          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+          manifest.push(downloadedAsset);
+          usedAssetIds.add(downloadedAsset.assetId);
+          scene.localPath = downloadedAsset.localPath;
+          scene.mediaFile = path.basename(downloadedAsset.localPath);
+          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+          assignment.asset = downloadedAsset;
+          assignment.score = winner.score;
+          assignment.usedQuery = usedQuery;
+          assignment.status = "assigned";
+          assignedCount++;
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[StockEngine] Scene ${scene.sceneIndex} failed: ${msg}`);
+      assignment.status = "failed";
+      assignment.errorMessage = msg;
+      failedCount++;
+    }
+    assignments.push(assignment);
+    cache.save();
+    saveAssetsManifest(stockDir, manifest);
+  }
+  assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  atomicWriteJson(planPath, plan);
+  if (params.assignmentSink) {
+    const owned = targetSceneIndices ? assignments.filter((a) => targetSceneIndices.includes(a.sceneIndex)) : assignments;
+    await params.assignmentSink(owned);
+  } else {
+    atomicWriteJson(reviewPath, assignments);
+  }
+  if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+    saveStockCandidates(projectDir, stockCandidatesStore);
+  }
+  onProgress(
+    `Done - ${assignedCount}/${flattenedEntries.length} scenes assigned, ${failedCount} failed`,
+    1
+  );
   return {
-    transcribingValid,
-    planningValid,
-    captionsValid,
-    globalContextValid,
-    stockCompletion,
-    audioValid,
-    preflightValid,
-    renderValid,
-    postflightValid
+    success: true,
+    totalScenes: flattenedEntries.length,
+    assignedScenes: assignedCount,
+    failedScenes: failedCount,
+    assignments
   };
+}
+async function replaceSceneAsset(projectDir, sceneIndex, newQuery, pexelsApiKey, pixabayApiKey, preferredAspectRatio = "16:9") {
+  const stockDir = path.join(projectDir, "assets", "stock");
+  const cache = new QueryCache(stockDir);
+  const manifest = loadAssetsManifest(stockDir);
+  const orientation = toOrientation(preferredAspectRatio);
+  const sanitizedQuery = sanitizeStockQuery(newQuery);
+  const candidates = await searchForScene(
+    [sanitizedQuery],
+    pexelsApiKey,
+    pixabayApiKey,
+    orientation,
+    cache
+  );
+  if (candidates.length === 0) throw new Error(`No results for query "${sanitizedQuery}"`);
+  const usedIds = new Set(manifest.map((a) => a.assetId));
+  const ranked = rankCandidates(candidates, {
+    visualIntent: newQuery,
+    narrationText: newQuery,
+    sceneDurationSecs: 10,
+    preferredAspectRatio,
+    usedAssetIds: usedIds
+  });
+  const winner = ranked[0];
+  const asset = await downloadAsset(winner, sceneIndex, newQuery, stockDir, manifest);
+  const updatedManifest = manifest.filter((a) => a.assetId !== asset.assetId);
+  updatedManifest.push(asset);
+  saveAssetsManifest(stockDir, updatedManifest);
+  cache.save();
+  const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+  if (fs__namespace.existsSync(planPath)) {
+    const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    const flat = flattenEditPlanScenes(plan);
+    const sceneEntry = flat.find((s) => s.sceneIndex === sceneIndex);
+    if (sceneEntry) {
+      sceneEntry.scene.localPath = asset.localPath;
+      sceneEntry.scene.mediaFile = path.basename(asset.localPath);
+      sceneEntry.scene.mediaType = asset.mediaType === "photo" ? "image" : "video";
+      atomicWriteJson(planPath, plan);
+    }
+  }
+  return asset;
 }
 function probeAudioDuration(filePath) {
   return new Promise((resolve) => {
@@ -17670,16 +19839,16 @@ function probeAudioDuration(filePath) {
 function resolveGeminiApiKey() {
   try {
     const appCfg = loadConfig();
-    const key = normalizeApiKey(appCfg.geminiApiKey ?? "");
-    if (key) return key;
+    const key2 = normalizeApiKey(appCfg.geminiApiKey ?? "");
+    if (key2) return key2;
   } catch {
   }
   try {
     const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
     if (fs__namespace.existsSync(configPath)) {
       const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
-      const key = normalizeApiKey(cfg.geminiApiKey ?? "");
-      if (key) return key;
+      const key2 = normalizeApiKey(cfg.geminiApiKey ?? "");
+      if (key2) return key2;
     }
   } catch {
   }
@@ -18337,10 +20506,10 @@ class VisualMixPlanner {
     return finalPlan;
   }
 }
-const ffmpegPath = require("ffmpeg-static");
-function ffmpegRun(args) {
+const ffmpegPath$1 = require("ffmpeg-static");
+function ffmpegRun$1(args) {
   return new Promise((resolve, reject2) => {
-    const proc = cp.spawn(ffmpegPath, args, { windowsHide: true });
+    const proc = cp.spawn(ffmpegPath$1, args, { windowsHide: true });
     const stderr = [];
     proc.stderr.on("data", (d) => stderr.push(d.toString()));
     proc.on("close", (code) => {
@@ -18356,7 +20525,7 @@ async function normalizeImageTo1080p(sourcePath, destPath, width = 1920, height 
     fs__namespace.mkdirSync(destDir, { recursive: true });
   }
   const vf = `scale=${width}:${height}:force_original_aspect_ratio=increase,crop=${width}:${height},setsar=1`;
-  await ffmpegRun(["-y", "-i", sourcePath, "-vf", vf, destPath]);
+  await ffmpegRun$1(["-y", "-i", sourcePath, "-vf", vf, destPath]);
 }
 class AsyncSemaphore {
   constructor(maxConcurrency) {
@@ -18901,18 +21070,18 @@ class ManualAiAssetGate {
     return this.listeners.get(keyOf(projectDir))?.size ?? 0;
   }
   subscribe(projectDir, cb) {
-    const key = keyOf(projectDir);
-    let set = this.listeners.get(key);
+    const key2 = keyOf(projectDir);
+    let set = this.listeners.get(key2);
     if (!set) {
       set = /* @__PURE__ */ new Set();
-      this.listeners.set(key, set);
+      this.listeners.set(key2, set);
     }
     set.add(cb);
     return () => {
-      const s = this.listeners.get(key);
+      const s = this.listeners.get(key2);
       if (!s) return;
       s.delete(cb);
-      if (s.size === 0) this.listeners.delete(key);
+      if (s.size === 0) this.listeners.delete(key2);
     };
   }
   /**
@@ -19092,25 +21261,25 @@ function describeManualAiWait(info) {
   return `${aiPart} — AI ${info.ready}/${info.expected} imported · Stock ${info.stockReady}/${info.stockExpected} ready`;
 }
 function getManualAiStatus(projectDir) {
-  const norm = normalizeProjectDir(projectDir);
-  const status = evaluateManualAiStatusForProject(norm);
-  const jsonExists = fs__namespace.existsSync(getManualAiPromptJsonPath(norm));
-  const txtExists = fs__namespace.existsSync(getManualAiPromptTxtPath(norm));
+  const norm2 = normalizeProjectDir(projectDir);
+  const status = evaluateManualAiStatusForProject(norm2);
+  const jsonExists = fs__namespace.existsSync(getManualAiPromptJsonPath(norm2));
+  const txtExists = fs__namespace.existsSync(getManualAiPromptTxtPath(norm2));
   logger.debug(
-    `[ManualAI:Status] projectDir=${norm} promptJsonExists=${jsonExists} promptTxtExists=${txtExists} expected=${status.expected} ready=${status.ready}`
+    `[ManualAI:Status] projectDir=${norm2} promptJsonExists=${jsonExists} promptTxtExists=${txtExists} expected=${status.expected} ready=${status.ready}`
   );
   return status;
 }
 function broadcastManualAiStatus(projectDir, status) {
-  const norm = normalizeProjectDir(projectDir);
-  const s = status ?? getManualAiStatus(norm);
+  const norm2 = normalizeProjectDir(projectDir);
+  const s = status ?? getManualAiStatus(norm2);
   try {
     if (typeof electron.BrowserWindow !== "undefined" && typeof electron.BrowserWindow.getAllWindows === "function") {
       const windows = electron.BrowserWindow.getAllWindows();
       for (const win of windows) {
         if (!win.isDestroyed()) {
           win.webContents.send(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, {
-            projectDir: norm,
+            projectDir: norm2,
             status: s
           });
         }
@@ -19125,7 +21294,8 @@ function sha256(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
 function cleanText(text) {
-  return (text || "").replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
 function extractNumbers(text) {
   const matches = text.match(/\b\d+(?:[.,]\d+)?%?\b/g);
@@ -19667,6 +21837,31 @@ function applySmartOverlayPass(directions, scriptText, profile) {
     }
   }
 }
+function applyRetentionAdvisoryToDirections(directions, retentionPlan) {
+  const planMap = /* @__PURE__ */ new Map();
+  for (const s of retentionPlan.scenes) {
+    planMap.set(s.sceneIndex, s);
+  }
+  for (const d of directions) {
+    const hint = planMap.get(d.sceneIndex);
+    if (!hint) continue;
+    if (hint.avoidSpoiler) {
+      const avoidMsg = "premature visual reveal of later payoff or mechanism";
+      if (!d.avoid.includes(avoidMsg)) {
+        d.avoid.push(avoidMsg);
+      }
+    }
+    if (hint.role === "hook" && hint.intensity === "high") {
+      d.hookLevel = "high";
+      d.sceneRole = "hook";
+    } else if (hint.role === "payoff") {
+      d.sceneRole = "reveal";
+      if (!d.viewerShouldNotice.toLowerCase().includes("payoff") && !d.viewerShouldNotice.toLowerCase().includes("reveal")) {
+        d.viewerShouldNotice = `${d.viewerShouldNotice} (clear payoff reveal)`;
+      }
+    }
+  }
+}
 async function prepareManualAiVisualDirection(params) {
   const { projectDir, plan, profile, globalContext, preferredModel, forceRegenerate = false, onProgress } = params;
   const aiScenes = plan.scenes.filter((s) => s.strategy === "ai-still").sort((a, b) => a.sceneIndex - b.sceneIndex);
@@ -19811,6 +22006,9 @@ async function prepareManualAiVisualDirection(params) {
       );
     }
     sceneDirectionsList = aiScenes.map((s) => directionsMap.get(s.sceneIndex));
+    if (params.retentionPlan) {
+      applyRetentionAdvisoryToDirections(sceneDirectionsList, params.retentionPlan);
+    }
     applySmartOverlayPass(sceneDirectionsList, fullScriptText);
     const overlayCount2 = sceneDirectionsList.filter((d) => d.textOverlay.enabled).length;
     const artifact = {
@@ -20037,6 +22235,25 @@ async function runMixedVisualEngine(params) {
     let directorBundle;
     try {
       const apiKey = resolveGeminiApiKey();
+      let retentionPlan = null;
+      try {
+        const rawScenes2 = plan.scenes.map((s) => ({
+          sceneIndex: s.sceneIndex,
+          duration: s.duration,
+          narration: s.narration,
+          visualIntent: s.visualIntent,
+          shotType: s.shotType,
+          energyLevel: s.energyLevel,
+          visualStrategy: s.strategy,
+          category: s.category,
+          motionPreset: s.motionPreset
+        }));
+        retentionPlan = await ensureRetentionPlan(projectDir, {
+          scenes: rawScenes2
+        });
+      } catch (err) {
+        logger.warn(`[MixedVisualEngine] Retention plan generation skipped (non-fatal): ${String(err)}`);
+      }
       directorBundle = await prepareManualAiVisualDirection({
         projectDir,
         plan,
@@ -20045,6 +22262,7 @@ async function runMixedVisualEngine(params) {
         scriptText,
         apiKey,
         preferredModel: options.geminiModel,
+        retentionPlan,
         onProgress: (msg, pct) => onProgress(msg, 0.04 + pct * 0.04)
       });
       visualDirectorMetrics = directorBundle?.metrics;
@@ -21566,19 +23784,13 @@ async function runRenderStage(options, onProgress, signal) {
   checkAborted(signal);
   const outputDir = path__namespace.join(options.projectDir, "output");
   fs__namespace.mkdirSync(outputDir, { recursive: true });
-  try {
-    const outputFiles = fs__namespace.readdirSync(outputDir);
-    for (const file of outputFiles) {
-      if (file.endsWith(".partial.mp4") || file.includes("_working.mp4")) {
-        const partialPath = path__namespace.join(outputDir, file);
-        try {
-          fs__namespace.unlinkSync(partialPath);
-          logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${file}`);
-        } catch {
-        }
+  if (!renderJobCoordinator.isActive(options.projectDir)) {
+    try {
+      for (const removed of cleanupOrphanOutputPartials(options.projectDir)) {
+        logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${path__namespace.basename(removed)}`);
       }
+    } catch {
     }
-  } catch {
   }
   const baseTargetName = options.outputName || "final_output";
   const defaultCompletedVideo = path__namespace.join(outputDir, `${baseTargetName}.mp4`);
@@ -21624,7 +23836,7 @@ async function runRenderStage(options, onProgress, signal) {
   }
   onProgress(`Starting render (${targetName}.mp4)...`, 0.02);
   checkAborted(signal);
-  const result = await renderVideo({
+  const { promise } = startCoordinatedRender({
     projectDir: options.projectDir,
     voiceoverPath: options.voiceoverPath,
     outputName: targetName,
@@ -21632,11 +23844,14 @@ async function runRenderStage(options, onProgress, signal) {
     fps: options.fps,
     transitionSettings: options.transitionSettings,
     captionPlan,
+    source: "pipeline",
+    externalSignal: signal,
     onProgress: (p) => {
-      checkAborted(signal);
+      if (signal?.aborted) return;
       onProgress(p.stage, p.progress);
     }
   });
+  const result = await promise;
   checkAborted(signal);
   return {
     success: true,
@@ -21645,7 +23860,15 @@ async function runRenderStage(options, onProgress, signal) {
     stats: {
       outputPath: result.outputPath,
       durationSecs: result.durationSecs,
-      fileSizeBytes: result.fileSizeBytes
+      fileSizeBytes: result.fileSizeBytes,
+      renderCacheResumable: false,
+      ...result.cache ? {
+        reusedScenes: result.cache.reusedScenes,
+        totalScenes: result.cache.totalScenes,
+        reusedOverlayBlocks: result.cache.reusedOverlayBlocks,
+        totalOverlayBlocks: result.cache.totalOverlayBlocks,
+        resourceProfile: result.cache.resourceProfile
+      } : {}
     }
   };
 }
@@ -21701,28 +23924,53 @@ async function runPostflightStage(options, renderResult, onProgress, signal) {
     }
   };
 }
+function applyRenderRecoveryToState(state2, recon) {
+  const rr = recon.renderRecovery;
+  if (recon.renderValid || !rr || !rr.resumable || !state2.stages.rendering) return;
+  if (state2.stages.rendering.status === "completed") return;
+  const pct = rr.totalScenes > 0 ? rr.completedScenes / rr.totalScenes : 0;
+  state2.stages.rendering = {
+    ...state2.stages.rendering,
+    status: "pending",
+    progress: Math.max(state2.stages.rendering.progress ?? 0, Math.min(0.99, 0.08 + pct * 0.68)),
+    message: rr.message ?? `Render interrupted — ${rr.completedScenes}/${rr.totalScenes} scenes cached`,
+    stats: {
+      ...state2.stages.rendering.stats || {},
+      renderCacheResumable: true,
+      cachedScenes: rr.completedScenes,
+      totalScenes: rr.totalScenes,
+      cachedOverlayBlocks: rr.completedOverlayBlocks,
+      totalOverlayBlocks: rr.totalOverlayBlocks,
+      renderPhase: rr.currentPhase
+    }
+  };
+}
 class PipelineOrchestrator {
   activeInstances = /* @__PURE__ */ new Map();
   heartbeatTimers = /* @__PURE__ */ new Map();
   projectMutexes = /* @__PURE__ */ new Map();
+  /** True when a pipeline run for this project is active in this process. */
+  isRunning(projectDir) {
+    return this.activeInstances.has(normalizeProjectDir(projectDir));
+  }
   /**
    * Chạy tác vụ với mutex trên projectDir để ngăn chặn start/resume/recover đồng thời.
    */
   async withProjectLock(projectDir, fn) {
-    const norm = normalizeProjectDir(projectDir);
-    const currentLock = this.projectMutexes.get(norm) ?? Promise.resolve();
+    const norm2 = normalizeProjectDir(projectDir);
+    const currentLock = this.projectMutexes.get(norm2) ?? Promise.resolve();
     let resolveLock;
     const nextLock = new Promise((res) => {
       resolveLock = res;
     });
-    this.projectMutexes.set(norm, nextLock);
+    this.projectMutexes.set(norm2, nextLock);
     try {
       await currentLock;
       return await fn();
     } finally {
       resolveLock();
-      if (this.projectMutexes.get(norm) === nextLock) {
-        this.projectMutexes.delete(norm);
+      if (this.projectMutexes.get(norm2) === nextLock) {
+        this.projectMutexes.delete(norm2);
       }
     }
   }
@@ -21748,30 +23996,30 @@ class PipelineOrchestrator {
    */
   startHeartbeat(projectDir, runId) {
     this.stopHeartbeat(projectDir);
-    const norm = normalizeProjectDir(projectDir);
+    const norm2 = normalizeProjectDir(projectDir);
     const timer = setInterval(() => {
-      const instance = this.activeInstances.get(norm);
+      const instance = this.activeInstances.get(norm2);
       if (!instance || instance.runId !== runId) {
-        this.stopHeartbeat(norm);
+        this.stopHeartbeat(norm2);
         return;
       }
-      const state2 = loadPipelineState(norm);
+      const state2 = loadPipelineState(norm2);
       if (state2 && state2.runId === runId && state2.overallStatus === "running") {
         updateHeartbeat(state2);
-        savePipelineStateAtomic(norm, state2);
+        savePipelineStateAtomic(norm2, state2);
       }
     }, 3e3);
-    this.heartbeatTimers.set(norm, timer);
+    this.heartbeatTimers.set(norm2, timer);
   }
   /**
    * Dừng timer heartbeat.
    */
   stopHeartbeat(projectDir) {
-    const norm = normalizeProjectDir(projectDir);
-    const timer = this.heartbeatTimers.get(norm);
+    const norm2 = normalizeProjectDir(projectDir);
+    const timer = this.heartbeatTimers.get(norm2);
     if (timer) {
       clearInterval(timer);
-      this.heartbeatTimers.delete(norm);
+      this.heartbeatTimers.delete(norm2);
     }
   }
   /**
@@ -21784,7 +24032,7 @@ class PipelineOrchestrator {
    * 6. Emit snapshot hoàn chỉnh tới renderer.
    */
   async completeStage(state2, stage, result, stageStartTime) {
-    const norm = normalizeProjectDir(state2.projectDir);
+    const norm2 = normalizeProjectDir(state2.projectDir);
     const durationMs = Date.now() - stageStartTime;
     state2.stages[stage] = {
       status: "completed",
@@ -21809,7 +24057,7 @@ class PipelineOrchestrator {
       state2.lease.heartbeatAt = state2.updatedAt;
       state2.lease.currentStage = stage;
     }
-    savePipelineStateAtomic(norm, state2);
+    savePipelineStateAtomic(norm2, state2);
     this.broadcastProgress(state2);
   }
   /**
@@ -21819,30 +24067,30 @@ class PipelineOrchestrator {
   async startPipeline(options) {
     const { projectDir } = options;
     if (!projectDir) throw new Error("projectDir is required to start Auto Production Pipeline.");
-    const norm = normalizeProjectDir(projectDir);
-    return this.withProjectLock(norm, async () => {
-      const existing = this.activeInstances.get(norm);
+    const norm2 = normalizeProjectDir(projectDir);
+    return this.withProjectLock(norm2, async () => {
+      const existing = this.activeInstances.get(norm2);
       if (existing) {
-        logger.warn(`[Pipeline] Pipeline is already running in memory for project: ${norm}`);
-        const currentState = loadPipelineState(norm);
+        logger.warn(`[Pipeline] Pipeline is already running in memory for project: ${norm2}`);
+        const currentState = loadPipelineState(norm2);
         return {
           runId: existing.runId,
-          state: currentState ?? createInitialPipelineState(options, computeInputFingerprint(norm, options.scriptPath, options.voiceoverPath), existing.runId)
+          state: currentState ?? createInitialPipelineState(options, computeInputFingerprint(norm2, options.scriptPath, options.voiceoverPath), existing.runId)
         };
       }
-      let state2 = loadPipelineState(norm);
+      let state2 = loadPipelineState(norm2);
       if (state2 && state2.overallStatus === "running") {
         const isRunningInAnotherProcess = state2.lease && state2.lease.appInstanceId !== APP_INSTANCE_ID && isProcessAlive(state2.lease.pid) && !isLeaseStale(state2.lease);
         if (isRunningInAnotherProcess) {
           throw new Error(`Pipeline is currently running in another process (PID ${state2.lease?.pid || "unknown"}).`);
         } else {
-          logger.info(`[Pipeline] Reclaiming lease from prior unmanaged/stale run for ${norm}`);
+          logger.info(`[Pipeline] Reclaiming lease from prior unmanaged/stale run for ${norm2}`);
           state2.overallStatus = "interrupted";
           releaseLease(state2);
-          savePipelineStateAtomic(norm, state2);
+          savePipelineStateAtomic(norm2, state2);
         }
       }
-      const fingerprint = computeInputFingerprint(norm, options.scriptPath, options.voiceoverPath);
+      const fingerprint = computeInputFingerprint(norm2, options.scriptPath, options.voiceoverPath);
       const runId = uuid.v4();
       if (!state2) {
         state2 = createInitialPipelineState(options, fingerprint, runId);
@@ -21861,13 +24109,13 @@ class PipelineOrchestrator {
         state2.fatalErrors = [];
       }
       state2.lease = createLease(runId, "validating");
-      savePipelineStateAtomic(norm, state2);
+      savePipelineStateAtomic(norm2, state2);
       this.broadcastProgress(state2);
       const abortController = new AbortController();
-      this.startHeartbeat(norm, runId);
+      this.startHeartbeat(norm2, runId);
       const instance = {
         runId,
-        projectDir: norm,
+        projectDir: norm2,
         abortController,
         stageStartTime: Date.now(),
         currentStage: "validating",
@@ -21875,7 +24123,7 @@ class PipelineOrchestrator {
         // replaced below
       };
       instance.promise = this.executePipelineLoop(state2, abortController);
-      this.activeInstances.set(norm, instance);
+      this.activeInstances.set(norm2, instance);
       return { runId, state: state2 };
     });
   }
@@ -21884,22 +24132,22 @@ class PipelineOrchestrator {
    */
   async resumePipeline(projectDir) {
     if (!projectDir) throw new Error("projectDir is required to resume pipeline.");
-    const norm = normalizeProjectDir(projectDir);
-    return this.withProjectLock(norm, async () => {
-      const existing = this.activeInstances.get(norm);
+    const norm2 = normalizeProjectDir(projectDir);
+    return this.withProjectLock(norm2, async () => {
+      const existing = this.activeInstances.get(norm2);
       if (existing) {
-        const currentState = loadPipelineState(norm);
+        const currentState = loadPipelineState(norm2);
         return { runId: existing.runId, state: currentState };
       }
-      let state2 = loadPipelineState(norm);
+      let state2 = loadPipelineState(norm2);
       if (!state2) {
-        throw new Error(`No pipeline state found to resume for project: ${norm}`);
+        throw new Error(`No pipeline state found to resume for project: ${norm2}`);
       }
       if (isLeaseStale(state2.lease)) {
-        logger.info(`[Pipeline] Reclaiming stale lease before resume on ${norm}`);
+        logger.info(`[Pipeline] Reclaiming stale lease before resume on ${norm2}`);
         releaseLease(state2);
       }
-      const recon = reconcileProjectArtifacts(norm, state2.options);
+      const recon = reconcileProjectArtifacts(norm2, state2.options);
       if (recon.transcribingValid && state2.stages.transcribing) state2.stages.transcribing.status = "completed";
       if (recon.planningValid && state2.stages.planning) state2.stages.planning.status = "completed";
       if (recon.captionsValid && state2.stages.captions) state2.stages.captions.status = "completed";
@@ -21913,8 +24161,9 @@ class PipelineOrchestrator {
       if (recon.preflightValid && state2.stages.preflight) state2.stages.preflight.status = "completed";
       if (recon.renderValid && state2.stages.rendering) state2.stages.rendering.status = "completed";
       if (recon.postflightValid && state2.stages.postflight) state2.stages.postflight.status = "completed";
+      applyRenderRecoveryToState(state2, recon);
       const currentFingerprint = computeInputFingerprint(
-        norm,
+        norm2,
         state2.options.scriptPath,
         state2.options.voiceoverPath
       );
@@ -21932,20 +24181,20 @@ class PipelineOrchestrator {
       const firstPending = PIPELINE_EXECUTION_STAGES.find((s) => state2.stages[s]?.status !== "completed") || "validating";
       state2.currentStage = firstPending;
       state2.lease = createLease(runId, firstPending);
-      savePipelineStateAtomic(norm, state2);
+      savePipelineStateAtomic(norm2, state2);
       this.broadcastProgress(state2);
       const abortController = new AbortController();
-      this.startHeartbeat(norm, runId);
+      this.startHeartbeat(norm2, runId);
       const instance = {
         runId,
-        projectDir: norm,
+        projectDir: norm2,
         abortController,
         stageStartTime: Date.now(),
         currentStage: firstPending,
         promise: Promise.resolve(state2)
       };
       instance.promise = this.executePipelineLoop(state2, abortController);
-      this.activeInstances.set(norm, instance);
+      this.activeInstances.set(norm2, instance);
       return { runId, state: state2 };
     });
   }
@@ -21987,16 +24236,16 @@ class PipelineOrchestrator {
    * Lấy trạng thái hiện tại của pipeline. Tự động kiểm tra stale lease nếu app khởi động lại.
    */
   getStatus(projectDir) {
-    const norm = normalizeProjectDir(projectDir);
-    const state2 = loadPipelineState(norm);
+    const norm2 = normalizeProjectDir(projectDir);
+    const state2 = loadPipelineState(norm2);
     if (!state2) return null;
-    if (state2.overallStatus === "running" && !this.activeInstances.has(norm)) {
-      logger.warn(`[Pipeline] Running state with no active in-memory orchestrator detected on getStatus for ${norm}. Marking interrupted.`);
+    if (state2.overallStatus === "running" && !this.activeInstances.has(norm2)) {
+      logger.warn(`[Pipeline] Running state with no active in-memory orchestrator detected on getStatus for ${norm2}. Marking interrupted.`);
       state2.overallStatus = "interrupted";
       releaseLease(state2);
       state2.version = (state2.version ?? 0) + 1;
       state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      savePipelineStateAtomic(norm, state2);
+      savePipelineStateAtomic(norm2, state2);
     }
     return state2;
   }
@@ -22004,10 +24253,10 @@ class PipelineOrchestrator {
    * Phục hồi pipeline bị gián đoạn (crash recovery / bootstrap recovery).
    */
   async recoverInterruptedPipeline(projectDir) {
-    const norm = normalizeProjectDir(projectDir);
-    return this.withProjectLock(norm, async () => {
-      if (this.activeInstances.has(norm)) {
-        const active = this.activeInstances.get(norm);
+    const norm2 = normalizeProjectDir(projectDir);
+    return this.withProjectLock(norm2, async () => {
+      if (this.activeInstances.has(norm2)) {
+        const active = this.activeInstances.get(norm2);
         return {
           recovered: false,
           previousRunId: active.runId,
@@ -22017,7 +24266,7 @@ class PipelineOrchestrator {
           warnings: ["Pipeline is currently active in memory."]
         };
       }
-      const state2 = loadPipelineState(norm);
+      const state2 = loadPipelineState(norm2);
       if (!state2) {
         return {
           recovered: false,
@@ -22031,7 +24280,7 @@ class PipelineOrchestrator {
       const warnings = [];
       const completedStages = [];
       const invalidStages = [];
-      const recon = reconcileProjectArtifacts(norm, state2.options);
+      const recon = reconcileProjectArtifacts(norm2, state2.options);
       if (recon.transcribingValid) {
         completedStages.push("transcribing");
         state2.stages.transcribing = {
@@ -22143,6 +24392,10 @@ class PipelineOrchestrator {
         invalidStages.push("rendering");
         state2.stages.rendering.status = "pending";
       }
+      applyRenderRecoveryToState(state2, recon);
+      if (recon.renderRecovery?.resumable && recon.renderRecovery.message) {
+        warnings.push(recon.renderRecovery.message.replace("\n", " — "));
+      }
       if (recon.postflightValid) {
         completedStages.push("postflight");
         state2.stages.postflight = {
@@ -22163,9 +24416,9 @@ class PipelineOrchestrator {
       releaseLease(state2);
       state2.version = (state2.version ?? 0) + 1;
       state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-      savePipelineStateAtomic(norm, state2);
+      savePipelineStateAtomic(norm2, state2);
       this.broadcastProgress(state2);
-      logger.info(`[Pipeline] Recovered interrupted pipeline for ${norm}. Next resume stage: ${resumeFrom || "all completed"}`);
+      logger.info(`[Pipeline] Recovered interrupted pipeline for ${norm2}. Next resume stage: ${resumeFrom || "all completed"}`);
       return {
         recovered: true,
         previousRunId,
@@ -22181,25 +24434,25 @@ class PipelineOrchestrator {
    * Chạy lại một stage cụ thể (dành cho debugging hoặc sửa lỗi).
    */
   async retryStage(projectDir, targetStage) {
-    const norm = normalizeProjectDir(projectDir);
-    let state2 = loadPipelineState(norm);
-    if (!state2) throw new Error(`No pipeline state found for project: ${norm}`);
+    const norm2 = normalizeProjectDir(projectDir);
+    let state2 = loadPipelineState(norm2);
+    if (!state2) throw new Error(`No pipeline state found for project: ${norm2}`);
     const stageIdx = PIPELINE_EXECUTION_STAGES.indexOf(targetStage);
     if (stageIdx >= 0) {
       const downstream = PIPELINE_EXECUTION_STAGES.slice(stageIdx);
       applyInvalidation(state2, [...downstream]);
     }
     state2.version = (state2.version ?? 0) + 1;
-    savePipelineStateAtomic(norm, state2);
-    return this.resumePipeline(norm);
+    savePipelineStateAtomic(norm2, state2);
+    return this.resumePipeline(norm2);
   }
   /**
    * Chạy từ một stage chỉ định.
    */
   async runFromStage(projectDir, stage, overrideOptions) {
-    const norm = normalizeProjectDir(projectDir);
-    let state2 = loadPipelineState(norm);
-    if (!state2) throw new Error(`No pipeline state found for project: ${norm}`);
+    const norm2 = normalizeProjectDir(projectDir);
+    let state2 = loadPipelineState(norm2);
+    if (!state2) throw new Error(`No pipeline state found for project: ${norm2}`);
     if (overrideOptions) {
       state2.options = { ...state2.options, ...overrideOptions };
     }
@@ -22209,8 +24462,8 @@ class PipelineOrchestrator {
       applyInvalidation(state2, [...downstream]);
     }
     state2.version = (state2.version ?? 0) + 1;
-    savePipelineStateAtomic(norm, state2);
-    return this.resumePipeline(norm);
+    savePipelineStateAtomic(norm2, state2);
+    return this.resumePipeline(norm2);
   }
   /**
    * Xử lý khi ứng dụng sắp tắt (before-quit / will-quit).
@@ -22218,6 +24471,7 @@ class PipelineOrchestrator {
    */
   handleAppQuit() {
     logger.info(`[Pipeline] Application is closing. Gracefully saving active pipeline checkpoints...`);
+    void renderJobCoordinator.abortAll("app-closed");
     for (const [projectDir, instance] of this.activeInstances.entries()) {
       try {
         instance.abortController.abort();
@@ -22243,7 +24497,7 @@ class PipelineOrchestrator {
    * Vòng lặp chính thực thi tuần tự các stage.
    */
   async executePipelineLoop(state2, abortController) {
-    const norm = normalizeProjectDir(state2.projectDir);
+    const norm2 = normalizeProjectDir(state2.projectDir);
     const signal = abortController.signal;
     const currentRunId = state2.runId;
     let lastRenderResult = { outputPath: state2.renderOutputPath || "" };
@@ -22251,7 +24505,7 @@ class PipelineOrchestrator {
       state2.overallStatus = "running";
       state2.startedAt = state2.startedAt || (/* @__PURE__ */ new Date()).toISOString();
       state2.version = (state2.version ?? 0) + 1;
-      savePipelineStateAtomic(norm, state2);
+      savePipelineStateAtomic(norm2, state2);
       this.broadcastProgress(state2);
       for (let i = 0; i < PIPELINE_EXECUTION_STAGES.length; i++) {
         const stage = PIPELINE_EXECUTION_STAGES[i];
@@ -22272,15 +24526,19 @@ class PipelineOrchestrator {
           state2.lease.currentStage = stage;
           state2.lease.heartbeatAt = (/* @__PURE__ */ new Date()).toISOString();
         }
+        const priorStage = state2.stages[stage];
+        const resumingCachedRender = stage === "rendering" && priorStage?.stats?.renderCacheResumable === true;
         state2.stages[stage] = {
           status: "running",
-          progress: 0,
+          // Resuming from render cache: do not reset progress to 0
+          progress: resumingCachedRender ? priorStage.progress ?? 0 : 0,
           startedAt: (/* @__PURE__ */ new Date()).toISOString(),
-          message: `Running ${stage}...`
+          message: resumingCachedRender ? "Resuming cached render..." : `Running ${stage}...`,
+          ...resumingCachedRender ? { stats: priorStage.stats } : {}
         };
         state2.version = (state2.version ?? 0) + 1;
         state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        savePipelineStateAtomic(norm, state2);
+        savePipelineStateAtomic(norm2, state2);
         this.broadcastProgress(state2);
         const stageStartTime = Date.now();
         const onProgress = (message, progress, meta) => {
@@ -22300,7 +24558,7 @@ class PipelineOrchestrator {
           if (state2.lease) {
             state2.lease.heartbeatAt = state2.updatedAt;
           }
-          savePipelineStateAtomic(norm, state2);
+          savePipelineStateAtomic(norm2, state2);
           this.broadcastProgress(state2);
         };
         let stageResult;
@@ -22368,7 +24626,7 @@ class PipelineOrchestrator {
           state2.version = (state2.version ?? 0) + 1;
           state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
           releaseLease(state2);
-          savePipelineStateAtomic(norm, state2);
+          savePipelineStateAtomic(norm2, state2);
           this.broadcastProgress(state2);
           return state2;
         }
@@ -22383,7 +24641,7 @@ class PipelineOrchestrator {
           state2.version = (state2.version ?? 0) + 1;
           state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
           releaseLease(state2);
-          savePipelineStateAtomic(norm, state2);
+          savePipelineStateAtomic(norm2, state2);
           this.broadcastProgress(state2);
           return state2;
         }
@@ -22396,23 +24654,1546 @@ class PipelineOrchestrator {
         state2.version = (state2.version ?? 0) + 1;
         state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
         releaseLease(state2);
-        savePipelineStateAtomic(norm, state2);
+        savePipelineStateAtomic(norm2, state2);
         this.broadcastProgress(state2);
         logger.info(`[Pipeline] Pipeline ${state2.runId} completed successfully!`);
         void thumbnailAutoTrigger.startIfEligible({
-          projectDir: norm,
+          projectDir: norm2,
           renderOutputPath: state2.renderOutputPath,
           scriptPath: state2.options?.scriptPath
         });
       }
     } finally {
-      this.stopHeartbeat(norm);
-      this.activeInstances.delete(norm);
+      this.stopHeartbeat(norm2);
+      this.activeInstances.delete(norm2);
     }
     return state2;
   }
 }
 const pipelineOrchestrator = new PipelineOrchestrator();
+const attempted = /* @__PURE__ */ new Set();
+function key(projectDir) {
+  return path__namespace.normalize(path__namespace.resolve(projectDir));
+}
+async function maybeAutoResumeRender(projectDir, deps) {
+  const k = key(projectDir);
+  if (attempted.has(k)) return false;
+  attempted.add(k);
+  if (renderJobCoordinator.isActive(projectDir) || deps.isPipelineActive(projectDir)) return false;
+  const info = inspectRenderRecovery(projectDir);
+  if (!info.canAutoResume) return false;
+  const pipeline = deps.getPipelineStatus(projectDir);
+  if (!pipeline) return false;
+  const interrupted = pipeline.overallStatus === "interrupted" || pipeline.overallStatus === "running";
+  const renderPending = pipeline.stages?.rendering?.status !== "completed";
+  if (!interrupted || !renderPending) return false;
+  const rec = readActiveRender(projectDir);
+  if (!rec || rec.status !== "interrupted" || rec.interruptionReason === "user-cancelled") return false;
+  rec.autoResumeCount = (rec.autoResumeCount ?? 0) + 1;
+  writeActiveRender(projectDir, rec);
+  logger.info(
+    `[RenderAutoResume] Resuming interrupted Auto Pipeline render for ${projectDir} (${info.completedScenes}/${info.totalScenes} scenes cached)`
+  );
+  try {
+    await deps.resumePipeline(projectDir);
+    return true;
+  } catch (err) {
+    logger.warn(`[RenderAutoResume] Auto resume failed: ${String(err)}`);
+    return false;
+  }
+}
+function scheduleRenderAutoResume(projectDir, deps, delayMs = 2e3) {
+  const t = setTimeout(() => {
+    void maybeAutoResumeRender(projectDir, deps).catch(
+      (err) => logger.warn(`[RenderAutoResume] ${String(err)}`)
+    );
+  }, delayMs);
+  t.unref?.();
+}
+const FALLBACK_PROJECTS_DIR = process.platform === "win32" ? "D:\\Video_factory_hutteries" : path.join(electron.app.getPath("documents"), "Video_factory_hutteries");
+function getConfigPath() {
+  return path.join(electron.app.getPath("userData"), "config.json");
+}
+function readConfig() {
+  try {
+    const cfgPath = getConfigPath();
+    if (fs__namespace.existsSync(cfgPath)) {
+      return JSON.parse(fs__namespace.readFileSync(cfgPath, "utf-8"));
+    }
+  } catch {
+  }
+  return {};
+}
+function writeConfig(cfg) {
+  fs__namespace.writeFileSync(getConfigPath(), JSON.stringify(cfg, null, 2), "utf-8");
+}
+function getProjectsDir() {
+  return readConfig().projectsDir ?? FALLBACK_PROJECTS_DIR;
+}
+getProjectsDir();
+function ensureProjectsDir() {
+  const dir = getProjectsDir();
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+}
+function createProjectFolderStructure(projectDir) {
+  const dirs = [
+    "source",
+    "media/images",
+    "media/videos",
+    "media/music",
+    "media/sfx",
+    "analysis",
+    "planning",
+    "renders/segments",
+    "qa",
+    "output",
+    "logs"
+  ];
+  for (const dir of dirs) {
+    fs__namespace.mkdirSync(path.join(projectDir, dir), { recursive: true });
+  }
+}
+function defaultSettings() {
+  return {
+    videoType: "documentary",
+    aspectRatio: "16:9",
+    resolution: { width: 1920, height: 1080 },
+    fps: 30,
+    pacing: "balanced"
+  };
+}
+function saveProjectState(state2) {
+  const statePath = path.join(state2.projectDir, "project-state.json");
+  fs__namespace.writeFileSync(statePath, JSON.stringify(state2, null, 2), "utf-8");
+}
+function registerProjectHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.PROJECT_CREATE, async (_event, name) => {
+    try {
+      ensureProjectsDir();
+      const safeName = name.replace(/[^a-zA-Z0-9-_\s]/g, "").trim().replace(/\s+/g, "-");
+      const projectDir = path.join(getProjectsDir(), safeName);
+      if (fs__namespace.existsSync(projectDir)) {
+        throw new Error(
+          `Project "${safeName}" already exists at ${projectDir}`
+        );
+      }
+      createProjectFolderStructure(projectDir);
+      const state2 = {
+        id: uuid.v4(),
+        name: safeName,
+        projectDir,
+        status: "NEW",
+        settings: defaultSettings(),
+        inputs: {
+          scriptPath: null,
+          voiceoverPath: null,
+          imagesFolder: null,
+          videosFolder: null,
+          musicFolder: null,
+          sfxFolder: null,
+          contentType: "default",
+          contentProfileMode: "auto",
+          visualSourceMode: "legacy"
+        },
+        stats: {
+          totalImages: 0,
+          totalVideos: 0,
+          totalMusic: 0,
+          totalSfx: 0,
+          voiceDurationSeconds: 0,
+          estimatedScenes: 0,
+          estimatedChapters: 0
+        },
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        lastOperation: null,
+        error: null
+      };
+      saveProjectState(state2);
+      logger.info(`Project created: ${safeName}`, { projectDir });
+      return { success: true, state: state2 };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`Failed to create project: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECT_OPEN,
+    async (_event, projectDir) => {
+      try {
+        const statePath = path.join(projectDir, "project-state.json");
+        if (!fs__namespace.existsSync(statePath)) {
+          throw new Error(`No project-state.json found in ${projectDir}`);
+        }
+        const state2 = JSON.parse(
+          fs__namespace.readFileSync(statePath, "utf-8")
+        );
+        if (state2.inputs) {
+          state2.inputs.contentType ??= "default";
+          state2.inputs.contentProfileMode ??= resolveContentProfileMode(state2.inputs);
+          state2.inputs.visualSourceMode ??= "legacy";
+        }
+        logger.info(`Project opened: ${state2.name}`, { projectDir });
+        scheduleRenderAutoResume(projectDir, {
+          resumePipeline: (dir) => pipelineOrchestrator.resumePipeline(dir),
+          getPipelineStatus: (dir) => pipelineOrchestrator.getStatus(dir),
+          isPipelineActive: (dir) => pipelineOrchestrator.isRunning(dir)
+        });
+        return { success: true, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to open project: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECT_SAVE,
+    async (_event, state2) => {
+      try {
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state2);
+        return { success: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to save project: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECT_UPDATE_INPUTS,
+    async (_event, projectDir, inputs) => {
+      try {
+        const statePath = path.join(projectDir, "project-state.json");
+        const state2 = JSON.parse(
+          fs__namespace.readFileSync(statePath, "utf-8")
+        );
+        state2.inputs = { ...state2.inputs, ...inputs };
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state2);
+        return { success: true, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to update inputs: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PROJECT_UPDATE_SETTINGS,
+    async (_event, projectDir, settings) => {
+      try {
+        const statePath = path.join(projectDir, "project-state.json");
+        const state2 = JSON.parse(
+          fs__namespace.readFileSync(statePath, "utf-8")
+        );
+        state2.settings = { ...state2.settings, ...settings };
+        state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+        saveProjectState(state2);
+        return { success: true, state: state2 };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Failed to update settings: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.GET_PROJECTS_DIR, () => {
+    ensureProjectsDir();
+    return getProjectsDir();
+  });
+  ipcMain.handle(IPC_CHANNELS.SET_PROJECTS_DIR, (_event, newDir) => {
+    try {
+      if (!newDir || typeof newDir !== "string") return { success: false, error: "Invalid path" };
+      fs__namespace.mkdirSync(newDir, { recursive: true });
+      const cfg = readConfig();
+      cfg.projectsDir = newDir;
+      writeConfig(cfg);
+      return { success: true, projectsDir: newDir };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { success: false, error: msg };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.GET_APP_VERSION, () => electron.app.getVersion());
+}
+const FFPROBE_PATH = ffprobeStatic$2.path;
+const IMAGE_EXTS = /* @__PURE__ */ new Set([".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]);
+const VIDEO_EXTS = /* @__PURE__ */ new Set([".mp4", ".mov", ".avi", ".mkv", ".webm", ".m4v", ".mxf"]);
+const AUDIO_EXTS = /* @__PURE__ */ new Set([".mp3", ".wav", ".aac", ".m4a", ".ogg", ".flac", ".opus"]);
+async function probeMedia(filePath) {
+  return new Promise((resolve, reject2) => {
+    const { spawn } = require("child_process");
+    const proc = spawn(FFPROBE_PATH, [
+      "-v",
+      "quiet",
+      "-print_format",
+      "json",
+      "-show_streams",
+      "-show_format",
+      filePath
+    ]);
+    let stdout = "";
+    let stderr = "";
+    proc.stdout.on("data", (d) => stdout += d.toString());
+    proc.stderr.on("data", (d) => stderr += d.toString());
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        ffmpegLogger.error(`ffprobe failed for ${filePath}: ${stderr}`);
+        reject2(new Error(`ffprobe exited ${code}: ${stderr.slice(0, 200)}`));
+      } else {
+        try {
+          resolve(JSON.parse(stdout));
+        } catch {
+          reject2(new Error("Failed to parse ffprobe JSON"));
+        }
+      }
+    });
+    proc.on("error", (err) => {
+      reject2(new Error(`Failed to spawn ffprobe: ${err.message}`));
+    });
+  });
+}
+function buildMediaItem(filePath, probe) {
+  const ext = path.extname(filePath).toLowerCase();
+  const stat = fs__namespace.statSync(filePath);
+  const streams = probe.streams || [];
+  const format = probe.format || {};
+  const videoStream = streams.find((s) => s.codec_type === "video");
+  streams.find((s) => s.codec_type === "audio");
+  const isImage = IMAGE_EXTS.has(ext);
+  const isVideo = VIDEO_EXTS.has(ext);
+  const isAudio = AUDIO_EXTS.has(ext);
+  const width = videoStream?.width;
+  const height = videoStream?.height;
+  const duration = parseFloat(
+    videoStream?.duration || format.duration || "0"
+  );
+  const fps = videoStream?.r_frame_rate ? (() => {
+    const parts = videoStream.r_frame_rate.split("/");
+    return parts.length === 2 ? Math.round(parseFloat(parts[0]) / parseFloat(parts[1])) : parseFloat(videoStream.r_frame_rate);
+  })() : void 0;
+  const ar = width && height ? `${Math.round(width / height * 100) / 100}:1` : void 0;
+  return {
+    type: isImage ? "image" : isVideo ? "video" : "audio",
+    path: filePath,
+    filename: path.basename(filePath),
+    fileSize: stat.size,
+    width: isImage || isVideo ? width : void 0,
+    height: isImage || isVideo ? height : void 0,
+    duration: isVideo ? isNaN(duration) ? void 0 : duration : void 0,
+    audioDuration: isAudio ? isNaN(duration) ? void 0 : duration : void 0,
+    fps: isVideo ? fps : void 0,
+    codec: videoStream?.codec_name,
+    aspectRatio: ar,
+    tags: [],
+    description: "",
+    usageCount: 0,
+    importedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+function scanFolder(folderPath, extensions) {
+  const results = [];
+  if (!fs__namespace.existsSync(folderPath)) return results;
+  function recurse(dir) {
+    let entries;
+    try {
+      entries = fs__namespace.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const fullPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        recurse(fullPath);
+      } else if (extensions.has(path.extname(entry.name).toLowerCase())) {
+        results.push(fullPath);
+      }
+    }
+  }
+  recurse(folderPath);
+  return results;
+}
+function registerMediaHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.MEDIA_SCAN,
+    async (event, params) => {
+      const result = {
+        images: [],
+        videos: [],
+        music: [],
+        sfx: [],
+        errors: []
+      };
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.MEDIA_SCAN_PROGRESS, { message, progress });
+        logger.info(`[SCAN] ${message} (${Math.round(progress * 100)}%)`);
+      };
+      const processFiles = async (files, bucket, label, offset, range) => {
+        for (let i = 0; i < files.length; i++) {
+          const fp = files[i];
+          const progress = offset + i / Math.max(files.length, 1) * range;
+          sendProgress(`Analyzing ${label}: ${path.basename(fp)}`, progress);
+          try {
+            const probe = await probeMedia(fp);
+            const item = buildMediaItem(fp, probe);
+            const id = uuid.v4();
+            bucket.push({ id, ...item });
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            result.errors.push({ path: fp, error: msg });
+            logger.warn(`Failed to probe ${fp}: ${msg}`);
+          }
+        }
+      };
+      sendProgress("Scanning image folder...", 0);
+      const imageFiles = params.imagesFolder ? scanFolder(params.imagesFolder, IMAGE_EXTS) : [];
+      sendProgress("Scanning video folder...", 0.05);
+      const videoFiles = params.videosFolder ? scanFolder(params.videosFolder, VIDEO_EXTS) : [];
+      sendProgress("Scanning music folder...", 0.1);
+      const musicFiles = params.musicFolder ? scanFolder(params.musicFolder, AUDIO_EXTS) : [];
+      sendProgress("Scanning SFX folder...", 0.12);
+      const sfxFiles = params.sfxFolder ? scanFolder(params.sfxFolder, AUDIO_EXTS) : [];
+      const total = imageFiles.length + videoFiles.length + musicFiles.length + sfxFiles.length;
+      logger.info(`Found ${total} media files total`, {
+        images: imageFiles.length,
+        videos: videoFiles.length,
+        music: musicFiles.length,
+        sfx: sfxFiles.length
+      });
+      await processFiles(imageFiles, result.images, "image", 0.15, 0.3);
+      await processFiles(videoFiles, result.videos, "video", 0.45, 0.35);
+      await processFiles(musicFiles, result.music, "music", 0.8, 0.1);
+      await processFiles(sfxFiles, result.sfx, "sfx", 0.9, 0.08);
+      const allMedia = [
+        ...result.images,
+        ...result.videos,
+        ...result.music,
+        ...result.sfx
+      ];
+      const indexPath = path.join(params.projectDir, "analysis", "media-index.json");
+      fs__namespace.mkdirSync(path.join(params.projectDir, "analysis"), { recursive: true });
+      fs__namespace.writeFileSync(indexPath, JSON.stringify(allMedia, null, 2), "utf-8");
+      sendProgress(`Scan complete — ${total} assets indexed`, 1);
+      logger.info("Media scan complete", {
+        images: result.images.length,
+        videos: result.videos.length,
+        music: result.music.length,
+        sfx: result.sfx.length,
+        errors: result.errors.length
+      });
+      return result;
+    }
+  );
+}
+function registerTranscribeHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_CHECK_MODEL, (_event, modelName) => {
+    const cacheDir = getModelsDir();
+    const modelFile = path.join(cacheDir, `models--Systran--faster-whisper-${modelName}`);
+    return {
+      exists: fs__namespace.existsSync(modelFile),
+      path: modelFile,
+      modelsDir: cacheDir
+    };
+  });
+  ipcMain.handle(IPC_CHANNELS.TRANSCRIBE_GET, (_event, projectDir) => {
+    const transcriptPath = path.join(projectDir, "analysis", "transcript.json");
+    if (!fs__namespace.existsSync(transcriptPath)) return null;
+    try {
+      return JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.TRANSCRIBE_START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.TRANSCRIBE_PROGRESS, { message, progress });
+        logger.info(`[TRANSCRIBE] ${message}`);
+      };
+      try {
+        sendProgress("Initializing Whisper...", 0.02);
+        const transcriptPath = path.join(params.projectDir, "analysis", "transcript.json");
+        const cacheMetaPath = path.join(params.projectDir, "analysis", "transcript-meta.json");
+        if (fs__namespace.existsSync(cacheMetaPath) && fs__namespace.existsSync(transcriptPath)) {
+          const meta = JSON.parse(fs__namespace.readFileSync(cacheMetaPath, "utf-8"));
+          const stat2 = fs__namespace.statSync(params.voiceoverPath);
+          const currentHash = `${params.voiceoverPath}:${stat2.size}:${stat2.mtimeMs}`;
+          if (meta.hash === currentHash && meta.model === params.modelName) {
+            sendProgress("Using cached transcript", 1);
+            const cached = JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8"));
+            return { success: true, transcript: cached, cached: true };
+          }
+        }
+        const transcript = await transcribeAudio(
+          params.voiceoverPath,
+          params.modelName,
+          (msg, prog) => sendProgress(msg, prog ?? 0.3)
+        );
+        sendProgress("Saving transcript...", 0.95);
+        fs__namespace.mkdirSync(path.join(params.projectDir, "analysis"), { recursive: true });
+        fs__namespace.writeFileSync(transcriptPath, JSON.stringify(transcript, null, 2), "utf-8");
+        const stat = fs__namespace.statSync(params.voiceoverPath);
+        fs__namespace.writeFileSync(
+          cacheMetaPath,
+          JSON.stringify({
+            hash: `${params.voiceoverPath}:${stat.size}:${stat.mtimeMs}`,
+            model: params.modelName,
+            generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }),
+          "utf-8"
+        );
+        sendProgress(`Done — ${transcript.segments.length} segments`, 1);
+        logger.info("Transcript saved", { segments: transcript.segments.length });
+        return { success: true, transcript, cached: false };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Transcription failed: ${msg}`);
+        sendProgress(`Error: ${msg}`, -1);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
+function registerPlannerHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.CONFIG_SET, (_event, key2, value) => {
+    const config = loadConfig();
+    const cleanValue = normalizeApiKey(value);
+    config[key2] = cleanValue;
+    saveConfig(config);
+    return { success: true };
+  });
+  ipcMain.handle(IPC_CHANNELS.CONFIG_GET, (_event, key2) => {
+    const config = loadConfig();
+    return config[key2] ?? null;
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.CONFIG_VERIFY_KEY,
+    async (_event, params) => {
+      const { key: key2, configKey, model } = params;
+      if (configKey === "geminiApiKey" || !configKey) {
+        return await verifyGeminiApiKey(key2, model);
+      }
+      const clean = normalizeApiKey(key2);
+      if (!clean) {
+        return { valid: false, status: "EMPTY", message: "API key is empty" };
+      }
+      return { valid: true, status: "SAVED_NOT_VERIFIED" };
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.PLAN_GET, (_event, projectDir) => {
+    const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+    if (!fs__namespace.existsSync(planPath)) return null;
+    try {
+      return JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+    } catch {
+      return null;
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.PLAN_GENERATE,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const config = loadConfig();
+      const apiKey = normalizeApiKey(config.geminiApiKey ?? "");
+      if (!apiKey) {
+        return { success: false, error: "Gemini API key not configured. Go to Settings to add it." };
+      }
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.PLAN_PROGRESS, { message, progress });
+      };
+      try {
+        const plan = await buildEditPlan({
+          projectDir: params.projectDir,
+          apiKey,
+          model: params.model,
+          onProgress: sendProgress
+        });
+        return { success: true, plan };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Edit planning failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
+function progressSender(event) {
+  const win = electron.BrowserWindow.fromWebContents(event.sender);
+  return (p) => {
+    if (win && !win.isDestroyed()) win.webContents.send(IPC_CHANNELS.RENDER_PROGRESS, p);
+  };
+}
+async function awaitRenderAndTriggerThumbnail(projectDir, promise) {
+  try {
+    const result = await promise;
+    if (result && result.outputPath && fs__namespace.existsSync(result.outputPath)) {
+      void thumbnailAutoTrigger.startIfEligible({
+        projectDir,
+        renderOutputPath: result.outputPath
+      });
+    }
+    return { success: true, result };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (isRenderCancelledError(err)) {
+      logger.info(`Render stopped: ${msg}`);
+      return { success: false, error: msg, cancelled: true };
+    }
+    logger.error(`Render failed: ${msg}`);
+    return { success: false, error: msg };
+  }
+}
+function registerRenderHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.RENDER_START,
+    async (event, params) => {
+      const sendProgress = progressSender(event);
+      try {
+        const captionPlan = loadRenderCaptionPlan(params.projectDir);
+        if (captionPlan) {
+          logger.info(`[RenderIPC] Caption plan loaded: ${captionPlan.phrases.length} phrases, enabled=${captionPlan.enabled}`);
+        } else {
+          logger.info("[RenderIPC] No enabled caption plan -- skipping caption burn");
+        }
+        const { promise, attached } = startCoordinatedRender({
+          ...params,
+          captionPlan,
+          // truyền vào renderer — undefined = bỏ qua burn step
+          source: "manual",
+          onProgress: sendProgress
+        });
+        if (attached) logger.info("[RenderIPC] Render already running for this project — attached to existing job");
+        return await awaitRenderAndTriggerThumbnail(params.projectDir, promise);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof RenderBusyError) logger.warn(`[RenderIPC] ${msg}`);
+        else logger.error(`Render failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.RENDER_CANCEL, (_event, params) => {
+    const cancelled = renderJobCoordinator.cancel(params.projectDir, "user-cancelled");
+    return { success: cancelled };
+  });
+  ipcMain.handle(IPC_CHANNELS.RENDER_RECOVERY_GET, (_event, params) => {
+    const info = inspectRenderRecovery(params.projectDir);
+    const active = renderJobCoordinator.getActiveInfo(params.projectDir);
+    return { ...info, activeProgress: active?.lastProgress ?? null, activeSource: active?.source ?? null };
+  });
+  ipcMain.handle(IPC_CHANNELS.RENDER_RESUME_CACHED, async (event, params) => {
+    const sendProgress = progressSender(event);
+    try {
+      const info = inspectRenderRecovery(params.projectDir);
+      if (!info.resumeParams) {
+        return { success: false, error: "No interrupted render found to resume." };
+      }
+      const { promise } = startCoordinatedRender({
+        projectDir: params.projectDir,
+        ...info.resumeParams,
+        captionPlan: loadRenderCaptionPlan(params.projectDir),
+        source: "manual",
+        onProgress: sendProgress
+      });
+      return await awaitRenderAndTriggerThumbnail(params.projectDir, promise);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[RenderIPC] Resume failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.RENDER_CACHE_CLEAR, (_event, params) => {
+    if (renderJobCoordinator.isActive(params.projectDir) || readActiveRender(params.projectDir)?.status === "running") {
+      return { success: false, error: "A render is currently active for this project. Cancel it before clearing the cache." };
+    }
+    try {
+      const removed = clearRenderCache(params.projectDir);
+      logger.info(`[RenderIPC] Cleared render cache for ${params.projectDir} (${removed} entries)`);
+      return { success: true, removed, cacheSizeBytes: getRenderCacheSizeBytes(params.projectDir) };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.RENDER_PREFERENCES_GET, () => loadRenderPreferences());
+  ipcMain.handle(IPC_CHANNELS.RENDER_PREFERENCES_SET, (_event, patch) => saveRenderPreferences(patch));
+  ipcMain.handle(IPC_CHANNELS.RENDER_ENCODER_PROBE, async (_event, params) => {
+    if (process.platform !== "darwin") return { ok: false, reason: "Apple VideoToolbox is only available on macOS." };
+    return probeVideoToolbox(!!params?.force);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.RENDER_PREFLIGHT_RUN,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      win?.webContents.send(IPC_CHANNELS.RENDER_QA_PROGRESS, {
+        stage: "preflight",
+        progress: 0.2,
+        message: "Running preflight checks..."
+      });
+      let captionPlan = void 0;
+      const captionPlanPath = path__namespace.join(params.projectDir, "analysis", "caption-plan.json");
+      if (fs__namespace.existsSync(captionPlanPath)) {
+        try {
+          captionPlan = JSON.parse(fs__namespace.readFileSync(captionPlanPath, "utf-8"));
+        } catch {
+        }
+      }
+      let voiceoverPath;
+      try {
+        const stateFile = fs__namespace.existsSync(path__namespace.join(params.projectDir, "project-state.json")) ? path__namespace.join(params.projectDir, "project-state.json") : path__namespace.join(params.projectDir, "project.json");
+        if (fs__namespace.existsSync(stateFile)) {
+          const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+          voiceoverPath = st?.inputs?.voiceoverPath;
+        }
+      } catch {
+      }
+      const { report } = await runRenderPreflightCached({
+        projectDir: params.projectDir,
+        voiceoverPath,
+        captionPlan
+      }, { force: true });
+      win?.webContents.send(IPC_CHANNELS.RENDER_QA_PROGRESS, {
+        stage: "preflight",
+        progress: 1,
+        message: `Preflight completed: ${report.status}`
+      });
+      return report;
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.RENDER_QA_GET,
+    (_event, params) => {
+      const qaPath = path__namespace.join(params.projectDir, "analysis", "render-qa.json");
+      const preflightPath = path__namespace.join(params.projectDir, "analysis", "render-preflight.json");
+      if (fs__namespace.existsSync(qaPath)) {
+        return readJsonSafe$1(qaPath, null);
+      }
+      if (fs__namespace.existsSync(preflightPath)) {
+        return readJsonSafe$1(preflightPath, null);
+      }
+      return null;
+    }
+  );
+}
+function getStockCandidatesForProject(projectDir, sceneIndex) {
+  const all = loadStockCandidates(projectDir);
+  if (typeof sceneIndex === "number") {
+    const key2 = `scene_${sceneIndex}`;
+    return all[key2] || all[String(sceneIndex)] || [];
+  }
+  return all;
+}
+async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
+  try {
+    const candidatesStore = loadStockCandidates(projectDir);
+    const sceneKey = `scene_${sceneIndex}`;
+    const sceneCandidates = candidatesStore[sceneKey] || candidatesStore[String(sceneIndex)] || [];
+    const candidate = sceneCandidates.find((c) => c.candidateId === candidateId);
+    if (!candidate) {
+      return { success: false, error: `Candidate ${candidateId} not found for scene ${sceneIndex}` };
+    }
+    const stockDir = path.join(projectDir, "assets", "stock");
+    fs__namespace.mkdirSync(stockDir, { recursive: true });
+    let manifest = loadAssetsManifest(stockDir);
+    let asset = manifest.find((a) => a.assetId === candidate.result.assetId);
+    if (!asset || !fs__namespace.existsSync(asset.localPath) || fs__namespace.statSync(asset.localPath).size === 0) {
+      logger.info(`[Storyboard] Downloading candidate asset ${candidate.result.assetId} for scene ${sceneIndex}`);
+      const queryUsed = candidate.result.searchQuery || candidate.result.title || `scene_${sceneIndex}`;
+      try {
+        asset = await downloadAsset(candidate.result, sceneIndex, queryUsed, stockDir, manifest);
+      } catch (dlErr) {
+        const msg = dlErr instanceof Error ? dlErr.message : String(dlErr);
+        logger.error(`[Storyboard] Download failed for candidate ${candidateId}: ${msg}`);
+        return { success: false, error: `Download failed: ${msg}. Existing media retained.` };
+      }
+      if (!fs__namespace.existsSync(asset.localPath) || fs__namespace.statSync(asset.localPath).size === 0) {
+        return { success: false, error: "Downloaded file is missing or empty. Existing media retained." };
+      }
+      manifest = manifest.filter((a) => a.assetId !== asset.assetId);
+      manifest.push(asset);
+      saveAssetsManifest(stockDir, manifest);
+    }
+    for (const c of sceneCandidates) {
+      c.selected = c.candidateId === candidateId;
+    }
+    candidatesStore[sceneKey] = sceneCandidates;
+    saveStockCandidates(projectDir, candidatesStore);
+    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+    if (fs__namespace.existsSync(assignmentsPath)) {
+      const assignments = readJsonSafe$1(assignmentsPath, []);
+      const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
+      if (idx >= 0) {
+        assignments[idx].asset = asset;
+        assignments[idx].selectedCandidateId = candidateId;
+        assignments[idx].candidates = sceneCandidates;
+        assignments[idx].score = candidate.score.totalScore;
+        assignments[idx].status = "assigned";
+        if (assignments[idx].approvalStatus !== "approved") {
+          assignments[idx].approvalStatus = "auto_selected";
+        }
+        atomicWriteJson(assignmentsPath, assignments);
+      }
+    }
+    const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
+    if (fs__namespace.existsSync(planPath)) {
+      const plan = readJsonSafe$1(planPath, {});
+      for (const ch of plan.chapters ?? []) {
+        const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+        for (const seq of seqs) {
+          for (const sc of seq.scenes ?? []) {
+            if (sc.sceneIndex === sceneIndex) {
+              sc.localPath = asset.localPath;
+              sc.mediaFile = path.basename(asset.localPath);
+              sc.mediaType = asset.mediaType === "photo" ? "image" : "video";
+            }
+          }
+        }
+      }
+      atomicWriteJson(planPath, plan);
+    }
+    logger.info(`[Storyboard] Successfully switched scene ${sceneIndex} to candidate ${candidateId}`);
+    return { success: true, asset };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[Storyboard] Selection error: ${msg}`);
+    return { success: false, error: msg };
+  }
+}
+function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
+  try {
+    const candidatesStore = loadStockCandidates(projectDir);
+    const sceneKey = `scene_${sceneIndex}`;
+    const sceneCandidates = candidatesStore[sceneKey] || candidatesStore[String(sceneIndex)] || [];
+    if (candidateId) {
+      for (const c of sceneCandidates) {
+        if (c.candidateId === candidateId) {
+          c.approved = true;
+          c.selected = true;
+        } else {
+          c.approved = false;
+        }
+      }
+      candidatesStore[sceneKey] = sceneCandidates;
+      saveStockCandidates(projectDir, candidatesStore);
+    }
+    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+    if (fs__namespace.existsSync(assignmentsPath)) {
+      const assignments = readJsonSafe$1(assignmentsPath, []);
+      const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
+      if (idx >= 0) {
+        assignments[idx].approvalStatus = "approved";
+        assignments[idx].reviewedAt = (/* @__PURE__ */ new Date()).toISOString();
+        if (candidateId) {
+          assignments[idx].selectedCandidateId = candidateId;
+        }
+        atomicWriteJson(assignmentsPath, assignments);
+      }
+    }
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { success: false, error: msg };
+  }
+}
+function calculateStoryboardSummary(projectDir) {
+  const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe$1(assignmentsPath, []) : [];
+  const totalScenes = assignments.length;
+  let assignedScenes = 0;
+  let approvedScenes = 0;
+  let needsReviewScenes = 0;
+  let missingScenes = 0;
+  let totalScoreSum = 0;
+  let scoredScenesCount = 0;
+  const seenAssetIds = /* @__PURE__ */ new Set();
+  let duplicateAvoidedCount = 0;
+  for (const a of assignments) {
+    if (a.asset && a.asset.localPath && fs__namespace.existsSync(a.asset.localPath)) {
+      assignedScenes++;
+      if (seenAssetIds.has(a.asset.assetId)) ;
+      else {
+        seenAssetIds.add(a.asset.assetId);
+      }
+    } else {
+      missingScenes++;
+    }
+    if (a.approvalStatus === "approved") {
+      approvedScenes++;
+    } else if (a.status === "failed" || !a.asset || a.score < 50) {
+      needsReviewScenes++;
+    }
+    if (typeof a.score === "number" && a.score > 0) {
+      totalScoreSum += a.score;
+      scoredScenesCount++;
+    }
+    for (const c of a.candidates ?? []) {
+      if (c.score?.reusePenalty < 0) {
+        duplicateAvoidedCount++;
+      }
+    }
+  }
+  const averageScore = scoredScenesCount > 0 ? Math.round(totalScoreSum / scoredScenesCount) : 0;
+  return {
+    totalScenes,
+    assignedScenes,
+    approvedScenes,
+    needsReviewScenes,
+    missingScenes,
+    averageScore,
+    duplicateAssetsAvoided: duplicateAvoidedCount
+  };
+}
+function registerStockHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SEARCH_START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const config = loadConfig();
+      if (!config.pexelsApiKey && !config.pixabayApiKey) {
+        return {
+          success: false,
+          error: "No stock API keys configured. Go to Settings to add Pexels or Pixabay key."
+        };
+      }
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.STOCK_SEARCH_PROGRESS, { message, progress });
+      };
+      try {
+        const geminiApiKey = normalizeApiKey(config.geminiApiKey ?? "");
+        if (geminiApiKey) {
+          const result2 = await runContextAwareStockEngine(
+            {
+              projectDir: params.projectDir,
+              pexelsApiKey: config.pexelsApiKey ?? "",
+              pixabayApiKey: config.pixabayApiKey,
+              preferredAspectRatio: "16:9",
+              apiKey: geminiApiKey,
+              forceReanalysis: params.forceReanalysis ?? false
+            },
+            sendProgress
+          );
+          return result2;
+        }
+        const result = await runStockEngine(
+          {
+            projectDir: params.projectDir,
+            pexelsApiKey: config.pexelsApiKey ?? "",
+            pixabayApiKey: config.pixabayApiKey,
+            preferredAspectRatio: "16:9"
+          },
+          sendProgress
+        );
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`Stock engine error: ${msg}`);
+        return { success: false, error: msg, totalScenes: 0, assignedScenes: 0, failedScenes: 0, assignments: [] };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.STOCK_REVIEW_GET, (_event, projectDir) => {
+    const stockDir = path.join(projectDir, "assets", "stock");
+    const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
+    let assignments = [];
+    try {
+      if (fs__namespace.existsSync(assignmentsPath)) {
+        assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      }
+    } catch {
+    }
+    const manifest = loadAssetsManifest(stockDir);
+    const assigned = assignments.filter((a) => a.status === "assigned").length;
+    const review = {
+      assignments,
+      totalScenes: assignments.length,
+      assignedScenes: assigned,
+      stockAssetsJson: manifest
+    };
+    return review;
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SCENE_REPLACE,
+    async (_event, params) => {
+      const config = loadConfig();
+      if (!config.pexelsApiKey && !config.pixabayApiKey) {
+        throw new Error("No stock API keys configured");
+      }
+      try {
+        const asset = await replaceSceneAsset(
+          params.projectDir,
+          params.sceneIndex,
+          params.query,
+          config.pexelsApiKey ?? "",
+          config.pixabayApiKey
+        );
+        const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
+        if (fs__namespace.existsSync(assignmentsPath)) {
+          const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+          const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
+          if (idx >= 0) {
+            assignments[idx].asset = asset;
+            assignments[idx].usedQuery = params.query;
+            assignments[idx].status = "assigned";
+            fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+          }
+        }
+        return { success: true, asset };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SCENE_LOCK,
+    (_event, params) => {
+      const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
+      if (!fs__namespace.existsSync(assignmentsPath)) return { success: false, error: "No assignments found" };
+      const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+      const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
+      if (idx >= 0) {
+        assignments[idx].locked = params.locked;
+        fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+      }
+      return { success: true };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_SCENE_UPLOAD,
+    (_event, params) => {
+      if (!fs__namespace.existsSync(params.filePath)) {
+        return { success: false, error: `File not found: ${params.filePath}` };
+      }
+      const stockDir = path.join(params.projectDir, "assets", "stock");
+      fs__namespace.mkdirSync(stockDir, { recursive: true });
+      const stat = fs__namespace.statSync(params.filePath);
+      const asset = {
+        assetId: `manual_${params.sceneIndex}_${Date.now()}`,
+        provider: "pexels",
+        // placeholder; not actually from Pexels
+        mediaType: params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? "video" : "photo",
+        localPath: params.filePath,
+        thumbnailUrl: "",
+        downloadUrl: params.filePath,
+        creator: "User",
+        searchQuery: "manual upload",
+        downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        fileSizeBytes: stat.size
+      };
+      const manifest = loadAssetsManifest(stockDir);
+      const updated = manifest.filter((a) => !a.assetId.startsWith(`manual_${params.sceneIndex}_`));
+      updated.push(asset);
+      saveAssetsManifest(stockDir, updated);
+      const planPath = path.join(params.projectDir, "analysis", "master-edit-plan.json");
+      if (fs__namespace.existsSync(planPath)) {
+        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+        const allScenes = (plan.chapters ?? []).flatMap((ch) => ch.sequences ?? []).flatMap((seq) => seq.scenes ?? []);
+        const scene = allScenes.find((s) => s.sceneIndex === params.sceneIndex);
+        if (scene) {
+          scene.localPath = params.filePath;
+          scene.mediaFile = path.basename(params.filePath);
+          scene.mediaType = params.filePath.match(/\.(mp4|mov|avi|mkv|webm)$/i) ? "video" : "image";
+          fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+        }
+      }
+      const assignmentsPath = path.join(params.projectDir, "analysis", "stock-assignments.json");
+      if (fs__namespace.existsSync(assignmentsPath)) {
+        const assignments = JSON.parse(fs__namespace.readFileSync(assignmentsPath, "utf-8"));
+        const idx = assignments.findIndex((a) => a.sceneIndex === params.sceneIndex);
+        if (idx >= 0) {
+          assignments[idx].asset = asset;
+          assignments[idx].status = "assigned";
+          assignments[idx].manualOverride = true;
+          assignments[idx].locked = true;
+          fs__namespace.writeFileSync(assignmentsPath, JSON.stringify(assignments, null, 2), "utf-8");
+        }
+      }
+      return { success: true, asset };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CONTEXT_ANALYZE,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const config = loadConfig();
+      const geminiKey = normalizeApiKey(config.geminiApiKey ?? "");
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.STOCK_CONTEXT_PROGRESS, { message, progress });
+      };
+      try {
+        const transcriptPath = path.join(params.projectDir, "analysis", "transcript.json");
+        const transcript = fs__namespace.existsSync(transcriptPath) ? JSON.parse(fs__namespace.readFileSync(transcriptPath, "utf-8")) : null;
+        let scriptText = null;
+        if (params.scriptPath && fs__namespace.existsSync(params.scriptPath)) {
+          scriptText = fs__namespace.readFileSync(params.scriptPath, "utf-8");
+          logger.info(`[ContextAnalyze] Reading script from frontend param: ${params.scriptPath}`);
+        }
+        if (!scriptText) {
+          try {
+            const stateFile = fs__namespace.existsSync(path.join(params.projectDir, "project-state.json")) ? path.join(params.projectDir, "project-state.json") : path.join(params.projectDir, "project.json");
+            const st = JSON.parse(fs__namespace.readFileSync(stateFile, "utf-8"));
+            const savedScriptPath = st?.inputs?.scriptPath;
+            if (savedScriptPath && fs__namespace.existsSync(savedScriptPath)) {
+              scriptText = fs__namespace.readFileSync(savedScriptPath, "utf-8");
+              logger.info(`[ContextAnalyze] Reading script from project-state.json: ${savedScriptPath}`);
+            }
+          } catch {
+          }
+        }
+        if (!scriptText && transcript?.fullText) {
+          scriptText = transcript.fullText;
+          logger.info("[ContextAnalyze] No script file found, using transcript.fullText");
+        }
+        if (!scriptText && !transcript) {
+          return { success: false, error: "No script or transcript found. Please add a script file to the project first." };
+        }
+        const ctx = await analyzeGlobalContext({
+          projectDir: params.projectDir,
+          apiKey: geminiKey,
+          model: config.preferredModel ?? "gemini-3.5-flash",
+          scriptText,
+          transcript,
+          forceRegenerate: params.forceRegenerate ?? false,
+          onProgress: sendProgress
+        });
+        let warning;
+        if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
+          if (!geminiKey) {
+            warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn.";
+          } else {
+            warning = "Gemini AI tạm thời quá tải hoặc không phản hồi. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
+          }
+        }
+        return { success: true, context: ctx, warning };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.STOCK_CONTEXT_GET, (_event, projectDir) => {
+    const ctx = loadGlobalContext(projectDir);
+    return ctx;
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CONTEXT_SAVE,
+    (_event, params) => {
+      try {
+        params.context.version = (params.context.version ?? 0) + 1;
+        saveGlobalContext(params.projectDir, params.context);
+        return { success: true, version: params.context.version };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATES_GET,
+    (_event, params) => {
+      return getStockCandidatesForProject(params.projectDir, params.sceneIndex);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATE_SELECT,
+    async (_event, params) => {
+      return selectCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_CANDIDATE_APPROVE,
+    (_event, params) => {
+      return approveCandidateForScene(params.projectDir, params.sceneIndex, params.candidateId);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.STOCK_STORYBOARD_SUMMARY_GET,
+    (_event, projectDir) => {
+      return calculateStoryboardSummary(projectDir);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_SETTINGS_GET,
+    (_event, projectDir) => {
+      return loadProductionSettings(projectDir);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_SETTINGS_SET,
+    (_event, params) => {
+      return saveProductionSettings(params.projectDir, params.settings);
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.CLAIM_GET_LEDGER, (_event, projectDir) => {
+    try {
+      const ledgerPath = getClaimLedgerPath(projectDir);
+      return readJsonSafe$1(ledgerPath, null);
+    } catch (err) {
+      logger.error(`[ClaimIPC] Failed to load claim ledger: ${String(err)}`);
+      return null;
+    }
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_UPDATE_STATUS,
+    (_event, params) => {
+      return updateClaimStatus(params.projectDir, params.claimId, params.status, params.warningText);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_ADD_SOURCE,
+    (_event, params) => {
+      return addEvidenceSource(params.projectDir, params.source);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_REMOVE_SOURCE,
+    (_event, params) => {
+      try {
+        const ledgerPath = getClaimLedgerPath(params.projectDir);
+        const ledger = readJsonSafe$1(ledgerPath, null);
+        if (!ledger) return { success: false, error: "Ledger not found" };
+        ledger.sources = ledger.sources.filter((s) => s.id !== params.sourceId);
+        for (const claim of ledger.claims) {
+          claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== params.sourceId);
+          if (claim.evidenceSourceIds.length === 0 && claim.verificationStatus === "VERIFIED") {
+            claim.verificationStatus = "UNSOURCED";
+          }
+        }
+        atomicWriteJson(ledgerPath, ledger);
+        return { success: true };
+      } catch (err) {
+        return { success: false, error: String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_LINK_SOURCE,
+    (_event, params) => {
+      return linkSourceToClaim(params.projectDir, params.claimId, params.sourceId, params.newStatus);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_UNLINK_SOURCE,
+    (_event, params) => {
+      return unlinkSourceFromClaim(params.projectDir, params.claimId, params.sourceId);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.CLAIM_EXPORT_MANIFESTS,
+    (_event, params) => {
+      return exportClaimManifests(params.projectDir, params.exportDir);
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.VISUAL_TRUTH_GET_DATA,
+    (_event, projectDir) => {
+      try {
+        return loadVisualTruthStore(projectDir);
+      } catch (err) {
+        logger.error(`[VisualTruthIPC] Failed to load visual truth data: ${String(err)}`);
+        return null;
+      }
+    }
+  );
+}
+function registerAudioHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_SEARCH_START,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.AUDIO_SEARCH_PROGRESS, { message, progress });
+      };
+      try {
+        const result = await runAudioDirector(params.projectDir, sendProgress);
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[AudioIPC] Search error: ${msg}`);
+        return { success: false, error: msg, sections: [], sfxAssignments: [] };
+      }
+    }
+  );
+  ipcMain.handle(IPC_CHANNELS.AUDIO_PLAN_GET, (_event, projectDir) => {
+    return loadAudioPlan(projectDir);
+  });
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_PLAN_SAVE,
+    (_event, params) => {
+      try {
+        saveAudioPlan(params.projectDir, params.plan);
+        return { success: true };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_APPROVE_SECTION,
+    (_event, params) => {
+      const plan = loadAudioPlan(params.projectDir);
+      if (!plan) return { success: false, error: "No audio plan found" };
+      const section = plan.sections.find((s) => s.sectionId === params.sectionId);
+      if (!section) return { success: false, error: "Section not found" };
+      section.approved = params.approved;
+      if (params.volumeDb !== void 0) section.volumeDb = params.volumeDb;
+      if (params.fadeInSecs !== void 0) section.fadeInSecs = params.fadeInSecs;
+      if (params.fadeOutSecs !== void 0) section.fadeOutSecs = params.fadeOutSecs;
+      saveAudioPlan(params.projectDir, plan);
+      return { success: true, plan };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_APPROVE_SFX,
+    (_event, params) => {
+      const plan = loadAudioPlan(params.projectDir);
+      if (!plan) return { success: false, error: "No audio plan found" };
+      const sfx = plan.sfxAssignments.find((s) => s.sceneIndex === params.sceneIndex);
+      if (!sfx) return { success: false, error: "SFX assignment not found" };
+      sfx.approved = params.approved;
+      if (params.volumeDb !== void 0) sfx.volumeDb = params.volumeDb;
+      saveAudioPlan(params.projectDir, plan);
+      return { success: true, plan };
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.AUDIO_DOWNLOAD_APPROVED,
+    async (event, params) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const plan = loadAudioPlan(params.projectDir);
+      if (!plan) return { success: false, error: "No audio plan found" };
+      const sendProgress = (message, progress) => {
+        win?.webContents.send(IPC_CHANNELS.AUDIO_DOWNLOAD_PROGRESS, { message, progress });
+      };
+      try {
+        const updatedPlan = await downloadApprovedAudio(params.projectDir, plan, sendProgress);
+        return { success: true, plan: updatedPlan };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[AudioIPC] Download error: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
+const ffmpegPath = require("ffmpeg-static");
+function ffmpegRun(args) {
+  return new Promise((resolve, reject2) => {
+    const proc = cp.spawn(ffmpegPath, args, { windowsHide: true });
+    const stderr = [];
+    proc.stderr.on("data", (d) => stderr.push(d.toString()));
+    proc.on("close", (code) => {
+      if (code === 0) resolve();
+      else reject2(new Error(`FFmpeg exited ${code}: ${stderr.slice(-3).join("")}`));
+    });
+    proc.on("error", reject2);
+  });
+}
+function registerCaptionHandlers(ipcMain) {
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_GENERATE_PLAN, async (event, params) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const sendProgress = (msg, pct) => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
+    };
+    try {
+      const appCfg = loadConfig();
+      let apiKey = normalizeApiKey(appCfg.geminiApiKey ?? "");
+      if (!apiKey) {
+        const configPath = path__namespace.join(os__namespace.homedir(), ".auto-edit-config.json");
+        if (fs__namespace.existsSync(configPath)) {
+          try {
+            const cfg = JSON.parse(fs__namespace.readFileSync(configPath, "utf-8"));
+            apiKey = normalizeApiKey(cfg.geminiApiKey ?? "");
+          } catch {
+          }
+        }
+      }
+      if (!apiKey) apiKey = normalizeApiKey(process.env.GEMINI_API_KEY ?? "");
+      const plan = await generateCaptionPlan({
+        projectDir: params.projectDir,
+        apiKey,
+        model: params.model,
+        forceRegenerate: params.forceRegenerate ?? false,
+        onProgress: sendProgress
+      });
+      return { success: true, plan };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[CaptionsIPC] generate-plan failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_GET_PLAN, async (_event, projectDir) => {
+    try {
+      const plan = loadCaptionPlan(projectDir);
+      return { success: true, plan };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_UPDATE_PHRASE, async (_event, params) => {
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      const idx = plan.phrases.findIndex((p) => p.id === params.phraseId);
+      if (idx === -1) return { success: false, error: `Không tìm thấy phrase id=${params.phraseId}` };
+      plan.phrases[idx] = { ...plan.phrases[idx], ...params.updates };
+      saveCaptionPlan(params.projectDir, plan);
+      logger.info(`[CaptionsIPC] Updated phrase ${params.phraseId}`);
+      return { success: true, plan };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_TOGGLE_RANGE, async (_event, params) => {
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      if (params.captionEnabled !== void 0) {
+        plan.enabled = params.captionEnabled;
+      }
+      if (params.rangeIndex >= 0 && params.rangeIndex < plan.activeRanges.length) {
+        const range = plan.activeRanges[params.rangeIndex];
+        range.disabled = !params.enabled;
+      }
+      saveCaptionPlan(params.projectDir, plan);
+      return { success: true, plan };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_REGENERATE_ASS, async (event, params) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const sendProgress = (msg, pct) => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_RENDER_PROGRESS, { message: msg, progress: pct });
+    };
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      const overlayPath = path__namespace.join(params.projectDir, "assets", "captions", "overlay.mp4");
+      const duration = params.videoDurationInSeconds ?? 600;
+      sendProgress("Bundling Remotion composition...", 0.05);
+      await renderCaptionsOverlay({
+        captionPlan: plan,
+        videoDurationInSeconds: duration,
+        outputPath: overlayPath,
+        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.05 + pct * 4e-3),
+        onRenderProgress: (pct) => sendProgress(`Render: ${Math.round(pct * 100)}%`, 0.5 + pct * 0.48)
+      });
+      logger.info(`[CaptionsIPC] Regenerated Remotion overlay: ${overlayPath}`);
+      return { success: true, overlayPath };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[CaptionsIPC] regenerate-overlay failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.CAPTIONS_PREVIEW_RENDER, async (event, params) => {
+    const win = electron.BrowserWindow.fromWebContents(event.sender);
+    const sendProgress = (msg, pct) => {
+      win?.webContents.send(IPC_CHANNELS.CAPTIONS_PROGRESS, { message: msg, progress: pct });
+    };
+    try {
+      const plan = loadCaptionPlan(params.projectDir);
+      if (!plan) return { success: false, error: "Chưa có caption-plan.json" };
+      const outputDir = path__namespace.join(params.projectDir, "output");
+      const possibleVideos = ["final_output.mp4", "preview_source.mp4"];
+      let sourceVideo = null;
+      for (const v of possibleVideos) {
+        const vp = path__namespace.join(outputDir, v);
+        if (fs__namespace.existsSync(vp)) {
+          sourceVideo = vp;
+          break;
+        }
+      }
+      if (!sourceVideo) {
+        const tmpRaw = path__namespace.join(os__namespace.tmpdir(), `auto-edit-render-${Buffer.from(params.projectDir).toString("base64").replace(/[^a-zA-Z0-9]/g, "").slice(0, 16)}`, "raw_video.mp4");
+        if (fs__namespace.existsSync(tmpRaw)) sourceVideo = tmpRaw;
+      }
+      if (!sourceVideo) {
+        return { success: false, error: "Chưa có video source để preview — render video trước" };
+      }
+      sendProgress("Đang cắt đoạn preview...", 0.1);
+      const previewDir = path__namespace.join(params.projectDir, "output", "_preview_tmp");
+      fs__namespace.mkdirSync(previewDir, { recursive: true });
+      const clipPath = path__namespace.join(previewDir, "preview_clip.mp4");
+      const duration = Math.min(params.endTime - params.startTime, 15);
+      await ffmpegRun([
+        "-y",
+        "-ss",
+        String(params.startTime),
+        "-i",
+        sourceVideo,
+        "-t",
+        String(duration),
+        "-c",
+        "copy",
+        clipPath
+      ]);
+      sendProgress("Đang render caption overlay (Remotion)...", 0.3);
+      const previewPhrases = plan.phrases.filter((p) => p.startTime >= params.startTime && p.endTime <= params.endTime + 1).map((p) => ({
+        ...p,
+        startTime: p.startTime - params.startTime,
+        endTime: p.endTime - params.startTime
+      }));
+      const previewPlan = { ...plan, phrases: previewPhrases };
+      const overlayPath = path__namespace.join(previewDir, "preview_overlay.mp4");
+      await renderCaptionsOverlay({
+        captionPlan: previewPlan,
+        videoDurationInSeconds: duration,
+        outputPath: overlayPath,
+        onBundleProgress: (pct) => sendProgress(`Bundle: ${Math.round(pct)}%`, 0.3 + pct * 2e-3),
+        onRenderProgress: (pct) => sendProgress(`Caption overlay: ${Math.round(pct * 100)}%`, 0.35 + pct * 0.4)
+      });
+      sendProgress("Compositing preview...", 0.8);
+      const previewOutput = path__namespace.join(previewDir, "preview_captioned.mp4");
+      await ffmpegRun([
+        "-y",
+        "-i",
+        clipPath,
+        "-i",
+        overlayPath,
+        "-filter_complex",
+        "[1:v]colorkey=0x00ff00:0.1:0.05[ov];[0:v][ov]overlay=0:0[outv]",
+        "-map",
+        "[outv]",
+        "-map",
+        "0:a?",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "ultrafast",
+        "-crf",
+        "28",
+        "-c:a",
+        "copy",
+        "-pix_fmt",
+        "yuv420p",
+        previewOutput
+      ]);
+      try {
+        fs__namespace.unlinkSync(overlayPath);
+      } catch {
+      }
+      sendProgress("Preview xong!", 1);
+      logger.info(`[CaptionsIPC] Preview render: ${previewOutput}`);
+      return { success: true, previewPath: previewOutput };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[CaptionsIPC] preview-render failed: ${msg}`);
+      return { success: false, error: msg };
+    }
+  });
+}
 function registerPipelineHandlers(ipcMain) {
   ipcMain.handle(
     IPC_CHANNELS.PIPELINE_START,
@@ -22795,9 +26576,9 @@ function registerManualAiHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_STATUS, async (_event, params) => {
     try {
       if (!params?.projectDir) return null;
-      const norm = normalizeProjectDir(params.projectDir);
-      logger.debug(`[ManualAI:GetStatus] projectDir=${norm}`);
-      return getManualAiStatus(norm);
+      const norm2 = normalizeProjectDir(params.projectDir);
+      logger.debug(`[ManualAI:GetStatus] projectDir=${norm2}`);
+      return getManualAiStatus(norm2);
     } catch (err) {
       logger.error(`[ManualAI-IPC] GetStatus failed: ${String(err)}`);
       return null;
@@ -22806,8 +26587,8 @@ function registerManualAiHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, async (_event, params) => {
     try {
       if (!params?.projectDir) return { success: false, error: "projectDir is required." };
-      const norm = normalizeProjectDir(params.projectDir);
-      const text = readManualAiPromptText(norm);
+      const norm2 = normalizeProjectDir(params.projectDir);
+      const text = readManualAiPromptText(norm2);
       if (text === null) return { success: false, error: "No prompt pack exists yet." };
       return { success: true, text };
     } catch (err) {
@@ -22817,12 +26598,12 @@ function registerManualAiHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, async (_event, params) => {
     try {
       if (!params?.projectDir) return { success: false, error: "projectDir is required." };
-      const norm = normalizeProjectDir(params.projectDir);
-      const text = readManualAiPromptText(norm);
+      const norm2 = normalizeProjectDir(params.projectDir);
+      const text = readManualAiPromptText(norm2);
       if (text === null) return { success: false, error: "No prompt pack exists yet." };
       const opts = {
         title: "Export AI image prompts",
-        defaultPath: path__namespace.join(norm, "manual-ai-prompts.txt"),
+        defaultPath: path__namespace.join(norm2, "manual-ai-prompts.txt"),
         filters: [{ name: "Text", extensions: ["txt"] }]
       };
       const win = electron.BrowserWindow.getFocusedWindow();
@@ -22837,8 +26618,8 @@ function registerManualAiHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, async (_event, params) => {
     try {
       if (!params?.projectDir) return { success: false, error: "projectDir is required." };
-      const norm = normalizeProjectDir(params.projectDir);
-      const txt = getManualAiPromptTxtPath(norm);
+      const norm2 = normalizeProjectDir(params.projectDir);
+      const txt = getManualAiPromptTxtPath(norm2);
       if (!fs__namespace.existsSync(txt)) return { success: false, error: "Prompt file does not exist yet." };
       const openError = await electron.shell.openPath(txt);
       if (openError) {
@@ -22881,9 +26662,9 @@ function registerManualAiHandlers(ipcMain) {
         if (!params?.projectDir || !Array.isArray(params.filePaths)) {
           return { success: false, error: "projectDir and filePaths are required." };
         }
-        const norm = normalizeProjectDir(params.projectDir);
+        const norm2 = normalizeProjectDir(params.projectDir);
         const plan = planManualAiImport({
-          projectDir: norm,
+          projectDir: norm2,
           filePaths: params.filePaths,
           replaceExisting: params.replaceExisting
         });
@@ -22900,14 +26681,14 @@ function registerManualAiHandlers(ipcMain) {
         if (!params?.projectDir || !Array.isArray(params.mappings)) {
           return { success: false, error: "projectDir and mappings are required." };
         }
-        const norm = normalizeProjectDir(params.projectDir);
+        const norm2 = normalizeProjectDir(params.projectDir);
         const result = await commitManualAiImport({
-          projectDir: norm,
+          projectDir: norm2,
           mappings: params.mappings,
           replaceExisting: params.replaceExisting,
           allowLowResolution: params.allowLowResolution
         });
-        broadcastManualAiStatus(norm, result.status);
+        broadcastManualAiStatus(norm2, result.status);
         return { success: true, result };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -23919,7 +27700,8 @@ electron.app.on("window-all-closed", () => {
     electron.app.quit();
   }
 });
-electron.app.on("before-quit", () => {
+let renderShutdownStarted = false;
+electron.app.on("before-quit", (event) => {
   pipelineOrchestrator.handleAppQuit();
   researchSidecar.markAppQuitting();
   researchSidecar.stop().catch((error) => {
@@ -23927,6 +27709,28 @@ electron.app.on("before-quit", () => {
   });
   thumbnailOrchestrator.handleAppQuit();
   flowkitRuntimeManager.handleAppQuit();
+  if (!renderShutdownStarted && (renderJobCoordinator.hasAnyActive() || getLiveRenderProcessCount() > 0)) {
+    renderShutdownStarted = true;
+    event.preventDefault();
+    void (async () => {
+      try {
+        await renderJobCoordinator.abortAll("app-closed", 4e3);
+        await terminateAllRenderProcesses(1500);
+      } catch (err) {
+        logger.warn(`[App] Render shutdown error: ${String(err)}`);
+      } finally {
+        electron.app.quit();
+      }
+    })();
+  }
+});
+process.on("exit", () => {
+  for (const pid of getLiveRenderProcessPids()) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+    }
+  }
 });
 process.on("uncaughtException", (error) => {
   logger.error("[App] Uncaught exception:", error);

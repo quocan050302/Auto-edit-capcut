@@ -17,6 +17,9 @@ import { runHealthVisualEngine } from '../health/health-visual-engine'
 import { HealthSfxDirector, SfxDirectorSceneInput } from '../health/health-sfx-director'
 import type { HealthSfxCuePlan } from '../health/health-visual-types'
 import type { ManualAiWaitInfo } from '../../../shared/types'
+import { startCoordinatedRender } from '../render-cache/render-service'
+import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
+import { cleanupOrphanOutputPartials } from '../render-cache/render-cache-manager'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
 import {
   isTranscriptionValid,
@@ -767,22 +770,17 @@ export async function runRenderStage(
   const outputDir = path.join(options.projectDir, 'output')
   fs.mkdirSync(outputDir, { recursive: true })
 
-  // Clean up any stale partial files from an interrupted prior run
-  try {
-    const outputFiles = fs.readdirSync(outputDir)
-    for (const file of outputFiles) {
-      if (file.endsWith('.partial.mp4') || file.includes('_working.mp4')) {
-        const partialPath = path.join(outputDir, file)
-        try {
-          fs.unlinkSync(partialPath)
-          logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${file}`)
-        } catch {
-          /* ignore */
-        }
+  // Cache reconciliation instead of bulk deletion: only orphan publish temp files
+  // (<name>.partial.mp4) are removed, and only when no render is active for this project.
+  // Completed render checkpoints live in .cache/render-v2 and are never touched here.
+  if (!renderJobCoordinator.isActive(options.projectDir)) {
+    try {
+      for (const removed of cleanupOrphanOutputPartials(options.projectDir)) {
+        logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${path.basename(removed)}`)
       }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
   }
 
   // Kiểm tra xem đã có video render hoàn chỉnh và hợp lệ trên đĩa chưa
@@ -838,7 +836,9 @@ export async function runRenderStage(
   onProgress(`Starting render (${targetName}.mp4)...`, 0.02)
   checkAborted(signal)
 
-  const result = await renderVideo({
+  // Shared project-level render job (same mutex as Manual Render). The pipeline's
+  // AbortSignal is linked so Cancel/quit stops FFmpeg/Remotion and keeps checkpoints.
+  const { promise } = startCoordinatedRender({
     projectDir: options.projectDir,
     voiceoverPath: options.voiceoverPath,
     outputName: targetName,
@@ -846,11 +846,14 @@ export async function runRenderStage(
     fps: options.fps,
     transitionSettings: options.transitionSettings,
     captionPlan,
+    source: 'pipeline',
+    externalSignal: signal,
     onProgress: (p) => {
-      checkAborted(signal)
+      if (signal?.aborted) return
       onProgress(p.stage, p.progress)
     }
   })
+  const result = await promise
 
   checkAborted(signal)
 
@@ -861,7 +864,17 @@ export async function runRenderStage(
     stats: {
       outputPath: result.outputPath,
       durationSecs: result.durationSecs,
-      fileSizeBytes: result.fileSizeBytes
+      fileSizeBytes: result.fileSizeBytes,
+      renderCacheResumable: false,
+      ...(result.cache
+        ? {
+            reusedScenes: result.cache.reusedScenes,
+            totalScenes: result.cache.totalScenes,
+            reusedOverlayBlocks: result.cache.reusedOverlayBlocks,
+            totalOverlayBlocks: result.cache.totalOverlayBlocks,
+            resourceProfile: result.cache.resourceProfile
+          }
+        : {})
     }
   }
 }

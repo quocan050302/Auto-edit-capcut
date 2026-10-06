@@ -11,6 +11,8 @@ import {
   resolveContentProfileMode,
 } from "../../../shared/types";
 import { logger } from "../logger";
+import { pipelineOrchestrator } from "../pipeline/pipeline-orchestrator";
+import { scheduleRenderAutoResume } from "../render-cache/render-auto-resume";
 
 // ── Configurable storage root ──────────────────────────────────────────────
 // Reads from userData/config.json { "projectsDir": "..." }
@@ -166,6 +168,13 @@ export function registerProjectHandlers(ipcMain: IpcMain): void {
           state.inputs.visualSourceMode ??= 'legacy';
         }
         logger.info(`Project opened: ${state.name}`, { projectDir });
+        // Resumable Render Engine V2: one-time crash auto-resume of an interrupted
+        // Auto Pipeline render (never for user-cancelled or manual renders).
+        scheduleRenderAutoResume(projectDir, {
+          resumePipeline: (dir) => pipelineOrchestrator.resumePipeline(dir),
+          getPipelineStatus: (dir) => pipelineOrchestrator.getStatus(dir),
+          isPipelineActive: (dir) => pipelineOrchestrator.isRunning(dir),
+        });
         return { success: true, state };
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
