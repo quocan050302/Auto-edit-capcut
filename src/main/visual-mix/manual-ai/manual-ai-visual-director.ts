@@ -34,8 +34,9 @@ function sha256(parts: string[]): string {
   return crypto.createHash('sha256').update(parts.join('||')).digest('hex')
 }
 
-function cleanText(text: string | undefined): string {
-  return (text || '')
+function cleanText(text: any): string {
+  if (typeof text !== 'string') return ''
+  return text
     .replace(/["'`]/g, '')
     .replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, ' ')
     .replace(/\s+/g, ' ')

@@ -26,8 +26,9 @@ import {
 // ─── Text helpers ────────────────────────────────────────────────────────────
 
 /** Removes quotes / odd symbols but keeps Unicode letters (scripts may be non-English). */
-function cleanText(text: string | undefined): string {
-  return (text || '')
+function cleanText(text: any): string {
+  if (typeof text !== 'string') return ''
+  return text
     .replace(/["'`]/g, '')
     .replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, ' ')
     .replace(/\s+/g, ' ')
