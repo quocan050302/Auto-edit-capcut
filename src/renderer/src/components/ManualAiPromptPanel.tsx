@@ -358,7 +358,23 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
               {rejectionAction(r)}
             </div>
           ))}
-          <div>
+          <div style={{ display: 'flex', gap: '8px', marginTop: '4px' }}>
+            {pendingRejections.some(r => r.code === 'LOW_RESOLUTION') && (
+              <button 
+                type="button" 
+                className="btn btn-secondary btn-sm" 
+                style={{ fontSize: '11px', padding: '2px 8px' }} 
+                disabled={busy}
+                onClick={() => {
+                  const mappings = pendingRejections
+                    .filter(r => r.code === 'LOW_RESOLUTION' && r.sceneIndex !== undefined)
+                    .map(r => ({ filePath: r.filePath, fileName: r.fileName, sceneIndex: r.sceneIndex!, via: 'filename' as const }));
+                  if (mappings.length > 0) void commit(mappings, { allowLowResolution: true });
+                }}
+              >
+                Accept All
+              </button>
+            )}
             <button type="button" className="btn btn-secondary btn-sm" style={{ fontSize: '11px', padding: '2px 8px' }} onClick={() => setPendingRejections([])}>
               Dismiss
             </button>
