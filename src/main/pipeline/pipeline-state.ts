@@ -491,7 +491,8 @@ export function determineInvalidatedStages(
     oldVisualConfigStr !== newVisualConfigStr ||
     oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio ||
     oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio ||
-    oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution
+    oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution ||
+    oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior
 
   if (visualConfigChanged) {
     invalidated.add('stock-search')

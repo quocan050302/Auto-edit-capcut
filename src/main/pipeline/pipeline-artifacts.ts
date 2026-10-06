@@ -228,6 +228,16 @@ export function checkStockCompletion(projectDir: string): StockCompletionResult 
   }
 }
 
+/**
+ * Provider-agnostic completion check for Custom Mix (Google Flow AI, Pexels, Pixabay, local).
+ * A scene is complete when it has one assigned, existing media file - regardless of provider.
+ * It never implies that missing scenes should be repaired with Stock.
+ * Legacy flow keeps using checkStockCompletion().
+ */
+export function checkVisualCompletion(projectDir: string): StockCompletionResult {
+  return checkStockCompletion(projectDir)
+}
+
 export function isAudioValid(projectDir: string, requireMusic?: boolean, contentType?: ContentType): boolean {
   const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
   if (!fs.existsSync(audioPlanPath)) return false

@@ -822,7 +822,14 @@ export async function runContextAwareStockEngine(
 
   // Atomic saves
   atomicWriteJson(planPath, plan)
-  atomicWriteJson(reviewPath, assignments)
+  if (params.assignmentSink) {
+    const owned = targetSceneIndices
+      ? assignments.filter((a) => targetSceneIndices.includes(a.sceneIndex))
+      : assignments
+    await params.assignmentSink(owned)
+  } else {
+    atomicWriteJson(reviewPath, assignments)
+  }
   if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
     saveStockCandidates(projectDir, stockCandidatesStore)
   }

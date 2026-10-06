@@ -7,7 +7,8 @@ import type {
   ContentProfileMode,
   VisualSourceMode,
   VisualMixConfig,
-  AiImageOutputResolution
+  AiImageOutputResolution,
+  AiFailureBehavior
 } from '../../../../shared/types'
 import {
   resolveVisualMixConfig,
@@ -128,6 +129,8 @@ interface VisualSourceSectionProps {
   onSetAiRatio: (ai: number) => void
   onSetStockRatio: (stock: number) => void
   onSelectResolution?: (res: AiImageOutputResolution) => void
+  aiFailureBehavior?: AiFailureBehavior
+  onSelectFailureBehavior?: (behavior: AiFailureBehavior) => void
   isAdvanced?: boolean
 }
 
@@ -142,6 +145,8 @@ function VisualSourceSection({
   onSetAiRatio,
   onSetStockRatio,
   onSelectResolution,
+  aiFailureBehavior = 'strict',
+  onSelectFailureBehavior,
   isAdvanced
 }: VisualSourceSectionProps): React.ReactElement {
   const containerClass = isAdvanced ? 'panel' : 'setup-section'
@@ -448,6 +453,61 @@ function VisualSourceSection({
               </div>
             </div>
 
+            {/* AI Generation Failure handling (strict by default) */}
+            {currentAiPercent > 0 && (
+              <details
+                id={`ai-failure-handling${idSuffix}`}
+                style={{ fontSize: '11px', color: 'var(--text-secondary)' }}
+              >
+                <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                  Failure handling — {aiFailureBehavior === 'stock-fallback' ? 'Allow Stock fallback' : 'Keep selected mix'}
+                </summary>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px' }}>
+                  <div style={{ fontWeight: 600 }}>AI Generation Failure</div>
+                  <label style={{ display: 'flex', gap: '6px', alignItems: 'flex-start', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      id={`ai-failure-strict${idSuffix}`}
+                      name={`ai-failure-behavior${idSuffix}`}
+                      checked={aiFailureBehavior !== 'stock-fallback'}
+                      onChange={() => onSelectFailureBehavior?.('strict')}
+                      disabled={isRunning}
+                    />
+                    <span>
+                      <strong>Keep selected mix — Recommended</strong>
+                      <br />
+                      Retry AI and pause if an AI visual cannot be generated.
+                    </span>
+                  </label>
+                  <label style={{ display: 'flex', gap: '6px', alignItems: 'flex-start', cursor: 'pointer' }}>
+                    <input
+                      type="radio"
+                      id={`ai-failure-stock-fallback${idSuffix}`}
+                      name={`ai-failure-behavior${idSuffix}`}
+                      checked={aiFailureBehavior === 'stock-fallback'}
+                      onChange={() => onSelectFailureBehavior?.('stock-fallback')}
+                      disabled={isRunning}
+                    />
+                    <span>
+                      <strong>Allow Stock fallback</strong>
+                      <br />
+                      Replace failed AI visuals with Pexels/Pixabay footage.
+                    </span>
+                  </label>
+                  {aiFailureBehavior === 'stock-fallback' && (
+                    <div id={`ai-failure-warning${idSuffix}`} style={{ color: '#fbbf24' }}>
+                      ⚠️ AI failures may increase the final footage percentage.
+                    </div>
+                  )}
+                </div>
+              </details>
+            )}
+            {currentAiPercent === 100 && aiFailureBehavior !== 'stock-fallback' && (
+              <div id={`ai-only-helper${idSuffix}`} style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
+                100% AI mode — Stock fallback disabled by default.
+              </div>
+            )}
+
             {/* Google Flow status for Custom Mix */}
             {currentAiPercent > 0 ? (
               flowHealth.checking === false &&
@@ -596,6 +656,7 @@ export function InputPage({
       aiImageRatio: aiRatio,
       stockFootageRatio: stockRatio,
       imageOutputResolution: effectiveMix.imageOutputResolution,
+      aiFailureBehavior: inputs.visualMixConfig?.aiFailureBehavior ?? 'strict',
       width: inputs.visualMixConfig?.width ?? 1920,
       height: inputs.visualMixConfig?.height ?? 1080,
       motionEnabled: inputs.visualMixConfig?.motionEnabled ?? true,
@@ -605,6 +666,17 @@ export function InputPage({
 
     await onUpdateInputs({
       visualSourceMode: mode,
+      visualMixConfig: nextConfig
+    })
+  }
+
+  async function handleSelectFailureBehavior(behavior: AiFailureBehavior): Promise<void> {
+    if (isRunning) return
+    const nextConfig: VisualMixConfig = {
+      ...effectiveMix,
+      aiFailureBehavior: behavior
+    }
+    await onUpdateInputs({
       visualMixConfig: nextConfig
     })
   }
@@ -870,6 +942,8 @@ export function InputPage({
           onSetAiRatio={handleSetAiRatio}
           onSetStockRatio={handleSetStockRatio}
           onSelectResolution={handleSelectResolution}
+          aiFailureBehavior={effectiveMix.aiFailureBehavior}
+          onSelectFailureBehavior={handleSelectFailureBehavior}
           isAdvanced={false}
         />
 
@@ -1343,6 +1417,8 @@ export function InputPage({
         onSetAiRatio={handleSetAiRatio}
         onSetStockRatio={handleSetStockRatio}
         onSelectResolution={handleSelectResolution}
+        aiFailureBehavior={effectiveMix.aiFailureBehavior}
+        onSelectFailureBehavior={handleSelectFailureBehavior}
         isAdvanced={true}
       />
 

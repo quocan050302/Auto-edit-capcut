@@ -7,7 +7,8 @@ import { normalizeImageTo1080p } from '../health/health-image-generator'
 import type {
   VisualMixScenePlan,
   VisualMixConfig,
-  VisualMixProfile
+  VisualMixProfile,
+  AiVisualFailureStage
 } from '../../../shared/types'
 import { recordVisualAssetQueued } from './visual-mix-cache'
 
@@ -29,7 +30,9 @@ export interface GenerationItemResult {
   sceneIndex: number
   success: boolean
   assetPath?: string
+  /** True ONLY when the item failed AND aiFailureBehavior === 'stock-fallback'. */
   fallbackToStock?: boolean
+  failureStage?: AiVisualFailureStage
   cached?: boolean
   reason?: string
   performance?: GenerationItemPerformance
@@ -43,6 +46,9 @@ export interface PoolProgressStats {
   exporting: number
   normalizing: number
   completed: number
+  /** AI scenes that failed after bounded retries (always AI-owned unless fallback is approved). */
+  failed: number
+  /** Failed scenes eligible for Stock (0 in strict mode). */
   fallbackStock: number
 }
 
@@ -154,13 +160,15 @@ export class FlowImagePool {
 
     const total = items.length
     let completedCount = 0
-    let fallbackCount = 0
+    let failedCount = 0
     let generatingCount = 0
     let exportingCount = 0
     let normalizingCount = 0
 
+    const stockFallbackEnabled = (items[0]?.config.aiFailureBehavior ?? 'strict') === 'stock-fallback'
+
     const updateProgress = (message: string): void => {
-      const finished = completedCount + fallbackCount
+      const finished = completedCount + failedCount
       const progress = total > 0 ? finished / total : 1.0
       const stats: PoolProgressStats = {
         total,
@@ -170,9 +178,54 @@ export class FlowImagePool {
         exporting: exportingCount,
         normalizing: normalizingCount,
         completed: completedCount,
-        fallbackStock: fallbackCount
+        failed: failedCount,
+        fallbackStock: stockFallbackEnabled ? failedCount : 0
       }
       onProgress?.(message, progress, stats)
+    }
+
+    /**
+     * Records an AI failure. The scene STAYS AI-owned (strategy 'ai-still', status 'ai-failed').
+     * It is only flagged as Stock-eligible when the user explicitly enabled 'stock-fallback';
+     * even then the manifest is only rewritten to 'fallback-stock' by the engine once the
+     * fallback is actually approved and executed.
+     */
+    const failItem = async (
+      item: GenerationPoolItem,
+      stage: AiVisualFailureStage,
+      reason: string
+    ): Promise<GenerationItemResult> => {
+      failedCount++
+      const behavior = item.config.aiFailureBehavior ?? 'strict'
+      const stockAllowed = behavior === 'stock-fallback'
+      logger.warn(
+        `[AIVisualFailure] scene=${item.scene.sceneIndex} stage=${stage} reason="${reason}" behavior=${behavior} stockFallback=${stockAllowed}`
+      )
+      updateProgress(
+        stockAllowed
+          ? `Scene ${item.scene.sceneIndex} failed (${stage}); eligible for Stock fallback`
+          : `Scene ${item.scene.sceneIndex} failed (${stage}); keeping AI ownership (strict)`
+      )
+
+      await recordVisualAssetQueued(item.projectDir, {
+        sceneIndex: item.scene.sceneIndex,
+        strategy: 'ai-still',
+        profile: item.profile,
+        promptHash: item.scene.generationHash || 'hash',
+        prompt: item.scene.imagePrompt,
+        status: 'ai-failed',
+        failureStage: stage,
+        error: reason,
+        generatedAt: new Date().toISOString()
+      })
+
+      return {
+        sceneIndex: item.scene.sceneIndex,
+        success: false,
+        fallbackToStock: stockAllowed,
+        failureStage: stage,
+        reason
+      }
     }
 
     // 1. FlowKit Throttling & Effective Concurrency (Section 42 & 43)
@@ -216,7 +269,8 @@ export class FlowImagePool {
           return {
             sceneIndex: item.scene.sceneIndex,
             success: false,
-            fallbackToStock: true,
+            fallbackToStock: false,
+            failureStage: 'cancelled' as AiVisualFailureStage,
             reason: 'Pipeline execution was cancelled.'
           }
         }
@@ -256,6 +310,21 @@ export class FlowImagePool {
                   `[FlowImagePool] Scene ${item.scene.sceneIndex} retry attempt ${attempt}/${maxRetries}...`
                 )
                 await new Promise((r) => setTimeout(r, 2500 * attempt))
+                // Respect FlowKit cooldown: a transient cooldown is NOT a permanent failure.
+                if (typeof this.client.getFlowThrottle === 'function') {
+                  try {
+                    const t = await this.client.getFlowThrottle()
+                    if (t?.cooldownActive && (t.cooldownRemainingS ?? 0) > 0) {
+                      const waitS = Math.min(t.cooldownRemainingS, 120)
+                      logger.info(
+                        `[FlowImagePool] FlowKit cooldown active, waiting ${waitS}s before retrying scene ${item.scene.sceneIndex}`
+                      )
+                      await new Promise((r) => setTimeout(r, waitS * 1000))
+                    }
+                  } catch {
+                    /* ignore */
+                  }
+                }
               }
 
               genResult = await this.client.generateImage({
@@ -291,27 +360,8 @@ export class FlowImagePool {
         }
 
         if (!genResult || !genResult.mediaId) {
-          fallbackCount++
           const reason = lastError ? lastError.message : 'Generation failed without mediaId'
-          logger.warn(`[FlowImagePool] Scene ${item.scene.sceneIndex} failed generation: ${reason}`)
-          updateProgress(`Scene ${item.scene.sceneIndex} failed, falling back to stock...`)
-
-          await recordVisualAssetQueued(item.projectDir, {
-            sceneIndex: item.scene.sceneIndex,
-            strategy: 'stock',
-            profile: item.profile,
-            promptHash: item.scene.generationHash || 'hash',
-            status: 'fallback-stock',
-            error: reason,
-            generatedAt: new Date().toISOString()
-          })
-
-          return {
-            sceneIndex: item.scene.sceneIndex,
-            success: false,
-            fallbackToStock: true,
-            reason
-          }
+          return failItem(item, 'generation', reason)
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -346,6 +396,7 @@ export class FlowImagePool {
         let exportSuccess = false
         let effectiveWidth = 1920
         let effectiveHeight = 1080
+        let exportFailure: { stage: AiVisualFailureStage; reason: string } | null = null
 
         try {
           if (signal?.aborted) {
@@ -365,59 +416,25 @@ export class FlowImagePool {
           effectiveWidth = dims?.width || exportResult.width
           effectiveHeight = dims?.height || exportResult.height
 
-          // Section 13: For 1080p, do NOT upscale low-res originals (< 1920x1080)
+          // For 1080p, do NOT upscale low-res originals (< 1920x1080)
           if (effectiveWidth < 1920 || effectiveHeight < 1080) {
-            logger.warn(
-              `[FlowImagePool] Scene ${item.scene.sceneIndex} quality gate failed: ${effectiveWidth}x${effectiveHeight} < 1920x1080. Not upscaling; falling back to stock.`
-            )
             if (fs.existsSync(tempExportPath)) {
               try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
             }
-            fallbackCount++
-            const reason = `Resolution ${effectiveWidth}x${effectiveHeight} below quality gate`
-
-            await recordVisualAssetQueued(item.projectDir, {
-              sceneIndex: item.scene.sceneIndex,
-              strategy: 'stock',
-              profile: item.profile,
-              promptHash: item.scene.generationHash || 'hash',
-              status: 'fallback-stock',
-              error: reason,
-              generatedAt: new Date().toISOString()
-            })
-
-            return {
-              sceneIndex: item.scene.sceneIndex,
-              success: false,
-              fallbackToStock: true,
-              reason
+            exportFailure = {
+              stage: 'quality-gate',
+              reason: `Resolution ${effectiveWidth}x${effectiveHeight} is below 1920x1080 quality gate (not upscaled)`
             }
+          } else {
+            exportSuccess = true
           }
-
-          exportSuccess = true
         } catch (expErr) {
           if (tempExportPath && fs.existsSync(tempExportPath)) {
             try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
           }
-          fallbackCount++
-          const reason = expErr instanceof Error ? expErr.message : String(expErr)
-          logger.warn(`[FlowImagePool] Export failed for scene ${item.scene.sceneIndex}: ${reason}`)
-
-          await recordVisualAssetQueued(item.projectDir, {
-            sceneIndex: item.scene.sceneIndex,
-            strategy: 'stock',
-            profile: item.profile,
-            promptHash: item.scene.generationHash || 'hash',
-            status: 'fallback-stock',
-            error: reason,
-            generatedAt: new Date().toISOString()
-          })
-
-          return {
-            sceneIndex: item.scene.sceneIndex,
-            success: false,
-            fallbackToStock: true,
-            reason
+          exportFailure = {
+            stage: 'export',
+            reason: expErr instanceof Error ? expErr.message : String(expErr)
           }
         } finally {
           tExpEnd = Date.now()
@@ -426,12 +443,8 @@ export class FlowImagePool {
         }
 
         if (!exportSuccess) {
-          return {
-            sceneIndex: item.scene.sceneIndex,
-            success: false,
-            fallbackToStock: true,
-            reason: 'Export stage failed'
-          }
+          const f = exportFailure ?? { stage: 'export' as AiVisualFailureStage, reason: 'Export stage failed' }
+          return failItem(item, f.stage, f.reason)
         }
 
         // ══════════════════════════════════════════════════════════════
@@ -513,26 +526,8 @@ export class FlowImagePool {
           if (tempExportPath && fs.existsSync(tempExportPath)) {
             try { fs.unlinkSync(tempExportPath) } catch { /* ignore */ }
           }
-          fallbackCount++
           const reason = normErr instanceof Error ? normErr.message : String(normErr)
-          logger.warn(`[FlowImagePool] Normalization failed for scene ${item.scene.sceneIndex}: ${reason}`)
-
-          await recordVisualAssetQueued(item.projectDir, {
-            sceneIndex: item.scene.sceneIndex,
-            strategy: 'stock',
-            profile: item.profile,
-            promptHash: item.scene.generationHash || 'hash',
-            status: 'fallback-stock',
-            error: reason,
-            generatedAt: new Date().toISOString()
-          })
-
-          return {
-            sceneIndex: item.scene.sceneIndex,
-            success: false,
-            fallbackToStock: true,
-            reason
-          }
+          return failItem(item, 'normalization', reason)
         } finally {
           normalizingCount--
           releaseNorm()

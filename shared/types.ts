@@ -127,11 +127,27 @@ export type VisualSourceMode = 'legacy' | 'custom-mix'
 
 export type AiImageOutputResolution = '1080p' | '2k' | '4k'
 
+/**
+ * What to do when an AI-owned scene cannot be generated after bounded retries.
+ * - 'strict' (default): never replace an AI-owned scene with Stock; report Needs Attention.
+ * - 'stock-fallback': failed AI scenes may be replaced with Pexels/Pixabay footage.
+ */
+export type AiFailureBehavior = 'strict' | 'stock-fallback'
+
+export type AiVisualFailureStage =
+  | 'generation'
+  | 'export'
+  | 'quality-gate'
+  | 'normalization'
+  | 'cancelled'
+
 export interface VisualMixConfig {
   mode?: VisualSourceMode
   aiImageRatio: number
   stockFootageRatio: number
   imageOutputResolution: AiImageOutputResolution
+  /** Defaults to 'strict' when missing (old projects never opt into Stock fallback implicitly). */
+  aiFailureBehavior?: AiFailureBehavior
   motionEnabled: boolean
   requestedGenerationConcurrency: number
   exportConcurrency: number
@@ -296,6 +312,7 @@ export function normalizeVisualMixConfig(
     aiImageRatio: aiRatio,
     stockFootageRatio: stockRatio,
     imageOutputResolution,
+    aiFailureBehavior: config?.aiFailureBehavior === 'stock-fallback' ? 'stock-fallback' : 'strict',
     motionEnabled: config?.motionEnabled ?? true,
     requestedGenerationConcurrency,
     exportConcurrency,
@@ -1013,6 +1030,13 @@ export interface StockRunParams {
   pixabayApiKey?: string
   preferredAspectRatio?: string  // e.g. '16:9'
   targetSceneIndices?: number[]
+  /**
+   * Custom Mix only: when provided, the engine hands its newly produced assignments
+   * (target scenes only) to this sink instead of rewriting analysis/stock-assignments.json.
+   * The sink owner (VisualAssignmentStore) is then the single serialized writer, so
+   * concurrent AI + Stock branches can never lose each other's updates.
+   */
+  assignmentSink?: (assignments: StockSceneAssignment[]) => void | Promise<void>
 }
 
 /** Result from a completed stock engine run */
@@ -2094,7 +2118,17 @@ export interface GeneratedVisualAssetRecord {
   profile: VisualMixProfile
   promptHash: string
   prompt?: string
-  status: 'pending' | 'generating' | 'exporting' | 'completed' | 'failed' | 'fallback-stock'
+  status:
+    | 'pending'
+    | 'queued'
+    | 'generating'
+    | 'exporting'
+    | 'normalizing'
+    | 'completed'
+    | 'failed'
+    | 'ai-failed'
+    | 'fallback-stock'
+  failureStage?: AiVisualFailureStage
   mediaId?: string
   flowProjectId?: string
   outputPath?: string

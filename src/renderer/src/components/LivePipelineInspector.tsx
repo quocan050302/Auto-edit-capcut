@@ -353,6 +353,14 @@ export function LivePipelineInspector({
                   </strong>
                 </div>
 
+                {stageData?.stats?.failureBehavior !== undefined && (
+                  <div style={{ display: 'flex', justifyContent: 'space-between', color: 'var(--text-secondary)' }}>
+                    <span>Failure behavior:</span>
+                    <strong style={{ color: 'var(--text-primary)' }}>
+                      {stageData.stats.failureBehavior === 'stock-fallback' ? 'Allow Stock fallback' : 'Keep selected mix'}
+                    </strong>
+                  </div>
+                )}
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginTop: '4px' }}>
                   <div style={{ background: 'var(--bg-void)', padding: '6px 8px', borderRadius: '4px' }}>
                     <span style={{ color: 'var(--text-muted)', fontSize: '9px', display: 'block' }}>AI IMAGES</span>
@@ -375,6 +383,14 @@ export function LivePipelineInspector({
                 {typeof stageData?.stats?.aiFallbackToStock === 'number' && (stageData.stats.aiFallbackToStock as number) > 0 && (
                   <div style={{ fontSize: '10px', color: '#f59e0b' }}>
                     ⚡ {stageData.stats.aiFallbackToStock} AI scene{(stageData.stats.aiFallbackToStock as number) > 1 ? 's' : ''} fell back to stock footage
+                  </div>
+                )}
+                {typeof stageData?.stats?.failedAiScenes === 'number' && (stageData.stats.failedAiScenes as number) > 0 && (
+                  <div id="ai-visuals-need-attention" style={{ fontSize: '10px', color: '#f87171' }}>
+                    AI Visuals Need Attention — {stageData.stats.failedAiScenes} failed
+                    {Array.isArray(stageData.stats.failedAiSceneIndices)
+                      ? ` (scenes ${(stageData.stats.failedAiSceneIndices as number[]).join(', ')})`
+                      : ''}. Re-run the stage to retry only the failed AI visuals.
                   </div>
                 )}
               </div>
