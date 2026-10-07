@@ -372,15 +372,29 @@ function parseRate(rate?: string): number {
   return Number.isFinite(v) ? v : 0
 }
 
+const mediaProbeCache = new Map<string, { probe: MediaProbe; statTimeMs: number; size: number }>()
+
 /**
  * Probes a media file. Returns null if ffprobe is unavailable or the file is unreadable.
  */
-export function probeMedia(
+export async function probeMedia(
   filePath: string,
   opts: { signal?: AbortSignal; timeoutMs?: number } = {}
 ): Promise<MediaProbe | null> {
   const ffprobe = getFfprobeBinary()
   if (!ffprobe || !filePath || !fs.existsSync(filePath)) return Promise.resolve(null)
+
+  let stat: fs.Stats
+  try {
+    stat = fs.statSync(filePath)
+  } catch {
+    return Promise.resolve(null)
+  }
+
+  const cached = mediaProbeCache.get(filePath)
+  if (cached && cached.statTimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.probe
+  }
 
   return new Promise((resolve) => {
     const proc = spawn(
@@ -433,7 +447,7 @@ export function probeMedia(
         const duration =
           parseFloat(String(data.format?.duration ?? '')) || parseFloat(String(v?.duration ?? '')) || 0
         const nb = v?.nb_frames !== undefined ? Number(v.nb_frames) : NaN
-        finish({
+        const resultProbe = {
           hasVideo: !!v,
           hasAudio: !!a,
           width: Number(v?.width) || 0,
@@ -441,7 +455,9 @@ export function probeMedia(
           duration,
           fps: parseRate(String(v?.avg_frame_rate ?? '')) || parseRate(String(v?.r_frame_rate ?? '')),
           frames: Number.isFinite(nb) && nb > 0 ? nb : null
-        })
+        }
+        mediaProbeCache.set(filePath, { probe: resultProbe, statTimeMs: stat.mtimeMs, size: stat.size })
+        finish(resultProbe)
       } catch {
         finish(null)
       }

@@ -1157,7 +1157,9 @@ async function renderVideoV2(
     }
 
     // ── 4. Persistent render workspace (resumable) ───────────────────────────
-    workspace = new RenderWorkspace(projectDir, prepared.renderFingerprint)
+    // Using assemblyFingerprint instead of renderFingerprint prevents massive I/O copying
+    // when only captions/music change, since the base scene assembly remains identical.
+    workspace = new RenderWorkspace(projectDir, prepared.assemblyFingerprint)
     workspace.ensure()
     const stale = workspace.cleanupStalePartials()
     const previousActive = readActiveRender(projectDir)
@@ -1175,6 +1177,16 @@ async function renderVideoV2(
         encoderMode: encoder.mode
       }
     })
+    
+    if (existing && manifest.renderFingerprint !== prepared.renderFingerprint) {
+      manifest.renderFingerprint = prepared.renderFingerprint
+      manifest.audioMix = { status: 'pending', fingerprint: '' }
+      manifest.composite = { status: 'pending', fingerprint: '' }
+      manifest.compositeRemotion = undefined
+      manifest.overlayBlocks = []
+      manifest.finalOutput = undefined
+    }
+
     manifest.outputName = outputName
     manifest.settings.resourceProfile = limits.profile
     manifest.settings.encoderMode = encoder.mode
