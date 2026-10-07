@@ -159,6 +159,10 @@ export class GoogleFlowClient {
 
     logger.info(`[GoogleFlowClient] Generating candidate ${request.optionId} (single request, no internal retry)`)
 
+    const callerHeader = request.caller
+      ? `long-form-video-factory/${request.caller}`
+      : 'long-form-video-factory/thumbnail-studio'
+
     let resp: Response
     try {
       resp = await this.fetchWithTimeout(
@@ -167,7 +171,7 @@ export class GoogleFlowClient {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'x-flowkit-caller': 'long-form-video-factory/thumbnail-studio'
+            'x-flowkit-caller': callerHeader
           },
           body: JSON.stringify(payload)
         },
@@ -229,13 +233,93 @@ export class GoogleFlowClient {
     throw new Error(`FLOW_GENERATION_FAILED: ${errMsg}`)
   }
 
+  public async getFlowThrottle(): Promise<{
+    maxConcurrent: number
+    minIntervalS: number
+    cooldownActive: boolean
+    cooldownRemainingS: number
+  }> {
+    try {
+      const resp = await this.fetchWithTimeout(`${this.bridgeUrl}/api/flow/status`, { method: 'GET' }, 3000)
+      if (resp.ok) {
+        const data = (await resp.json()) as any
+        const throttle = data?.generation_throttle
+        const maxConc = typeof throttle?.max_concurrent === 'number' ? throttle.max_concurrent : 1
+        const minInt = typeof throttle?.min_interval_s === 'number' ? throttle.min_interval_s : 3
+        const cooldown = Boolean(throttle?.cooldown_active)
+        const cooldownRem = typeof throttle?.cooldown_remaining_s === 'number' ? throttle.cooldown_remaining_s : 0
+        return {
+          maxConcurrent: maxConc,
+          minIntervalS: minInt,
+          cooldownActive: cooldown,
+          cooldownRemainingS: cooldownRem
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+    return {
+      maxConcurrent: 1,
+      minIntervalS: 3,
+      cooldownActive: false,
+      cooldownRemainingS: 0
+    }
+  }
+
   public async exportImage(request: ThumbnailExportRequest): Promise<ThumbnailExportResult> {
     const destDir = path.dirname(request.destinationPath)
     if (!fs.existsSync(destDir)) {
       fs.mkdirSync(destDir, { recursive: true })
     }
 
-    // First attempt: 4K export
+    const pref = request.preferredQuality || (request.quality === '2k' ? '2k' : '4k')
+
+    // Performance optimization (Section 14): When preferredQuality is '2k',
+    // do NOT attempt 4K first. Jump directly to 2K export.
+    if (pref === '2k') {
+      const result2k = await this.tryExportAtQuality(request.mediaId, request.projectId, '2k', request.destinationPath)
+      if (result2k.success && result2k.buffer) {
+        fs.writeFileSync(request.destinationPath, result2k.buffer)
+        const dims = probeImageDimensions(result2k.buffer)
+        const stats = fs.statSync(request.destinationPath)
+        return {
+          filePath: request.destinationPath,
+          fileSize: stats.size,
+          width: dims?.width || 2560,
+          height: dims?.height || 1440,
+          actualQuality: '2k-fallback'
+        }
+      }
+
+      // If direct 2K fails, try original fallback if available
+      if (request.fallbackToOriginalUrl) {
+        logger.warn(`[GoogleFlowClient] Direct 2K export failed (${result2k.error}). Falling back to original image download from fifeUrl...`)
+        try {
+          const origResp = await this.fetchWithTimeout(request.fallbackToOriginalUrl, { method: 'GET' }, 30000)
+          if (origResp.ok) {
+            const arrayBuf = await origResp.arrayBuffer()
+            const buf = Buffer.from(arrayBuf)
+            fs.writeFileSync(request.destinationPath, buf)
+            const dims = probeImageDimensions(buf)
+            const stats = fs.statSync(request.destinationPath)
+            return {
+              filePath: request.destinationPath,
+              fileSize: stats.size,
+              width: dims?.width || 1376,
+              height: dims?.height || 768,
+              actualQuality: 'original-fallback',
+              is4kPlanGated: true
+            }
+          }
+        } catch (fifeErr) {
+          logger.error(`[GoogleFlowClient] Original fifeUrl download failed: ${fifeErr}`)
+        }
+      }
+
+      throw new Error(`FLOW_EXPORT_FAILED: Failed to export 2K image for media ${request.mediaId}: ${result2k.error || 'Unknown error'}`)
+    }
+
+    // Default / 4K path: First attempt 4K export
     let result = await this.tryExportAtQuality(request.mediaId, request.projectId, '4k', request.destinationPath)
 
     if (result.success && result.buffer) {

@@ -36,7 +36,13 @@ import type {
   ThumbnailJobState,
   ThumbnailCandidate,
   ThumbnailPlan,
-  ThumbnailProgressPayload
+  ThumbnailProgressPayload,
+  ManualAiStatus,
+  ManualAiImportMapping,
+  ManualAiImportPlan,
+  ManualAiImportResult,
+  RenderRecoveryInfo,
+  RenderPreferencesDTO
 } from '../../shared/types'
 import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
@@ -174,6 +180,30 @@ const api = {
 
     getQaReport: (params: { projectDir: string }): Promise<RenderQaReport | null> =>
       ipcRenderer.invoke(IPC_CHANNELS.RENDER_QA_GET, params),
+
+    // ── Resumable Render Engine V2 ──
+    cancel: (params: { projectDir: string }): Promise<{ success: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_CANCEL, params),
+
+    getRecovery: (params: { projectDir: string }): Promise<RenderRecoveryInfo & {
+      activeProgress?: { stage: string; progress: number } | null
+      activeSource?: string | null
+    }> => ipcRenderer.invoke(IPC_CHANNELS.RENDER_RECOVERY_GET, params),
+
+    resumeCached: (params: { projectDir: string }): Promise<{ success: boolean; result?: unknown; error?: string; cancelled?: boolean }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_RESUME_CACHED, params),
+
+    clearCache: (params: { projectDir: string }): Promise<{ success: boolean; removed?: number; cacheSizeBytes?: number; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_CACHE_CLEAR, params),
+
+    getPreferences: (): Promise<RenderPreferencesDTO> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFERENCES_GET),
+
+    setPreferences: (patch: Partial<RenderPreferencesDTO>): Promise<RenderPreferencesDTO> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_PREFERENCES_SET, patch),
+
+    probeEncoder: (params?: { force?: boolean }): Promise<{ ok: boolean; reason?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.RENDER_ENCODER_PROBE, params),
 
     onQaProgress: (callback: (data: { stage: string; progress: number; message: string }) => void) => {
       const handler = (_event: Electron.IpcRendererEvent, data: { stage: string; progress: number; message: string }): void =>
@@ -414,6 +444,57 @@ const api = {
       ipcRenderer.on(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
       return () => {
         ipcRenderer.off(IPC_CHANNELS.PIPELINE_PROGRESS, handler)
+      }
+    }
+  },
+
+  manualAi: {
+    getStatus: (projectDir: string): Promise<ManualAiStatus | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_STATUS, { projectDir }),
+
+    getPromptText: (projectDir: string): Promise<{ success: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
+
+    exportTxt: (
+      projectDir: string
+    ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, { projectDir }),
+
+    openPromptFile: (projectDir: string): Promise<{ success: boolean; filePath?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, { projectDir }),
+
+    selectImages: (
+      mode: 'files' | 'folder'
+    ): Promise<{ success: boolean; filePaths: string[]; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES, { mode }),
+
+    planImport: (params: {
+      projectDir: string
+      filePaths: string[]
+      replaceExisting?: boolean
+    }): Promise<{ success: boolean; plan?: ManualAiImportPlan; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT, params),
+
+    commitImport: (params: {
+      projectDir: string
+      mappings: ManualAiImportMapping[]
+      replaceExisting?: boolean
+      allowLowResolution?: boolean
+    }): Promise<{ success: boolean; result?: ManualAiImportResult; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_COMMIT_IMPORT, params),
+
+    onStatusUpdated: (
+      callback: (payload: { projectDir: string; status: ManualAiStatus }) => void
+    ): (() => void) => {
+      const handler = (
+        _event: Electron.IpcRendererEvent,
+        payload: { projectDir: string; status: ManualAiStatus }
+      ): void => {
+        callback(payload)
+      }
+      ipcRenderer.on(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler)
+      return () => {
+        ipcRenderer.off(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler)
       }
     }
   },

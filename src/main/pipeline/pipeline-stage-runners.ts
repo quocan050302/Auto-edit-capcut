@@ -13,6 +13,13 @@ import { runStockEngine } from '../stock/stock-engine'
 import { runAudioDirector, loadAudioPlan } from '../audio/audio-director'
 import { runRenderPreflight } from '../qa/render-preflight'
 import { renderVideo } from '../renderer'
+import { runHealthVisualEngine } from '../health/health-visual-engine'
+import { HealthSfxDirector, SfxDirectorSceneInput } from '../health/health-sfx-director'
+import type { HealthSfxCuePlan } from '../health/health-visual-types'
+import type { ManualAiWaitInfo } from '../../../shared/types'
+import { startCoordinatedRender } from '../render-cache/render-service'
+import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
+import { cleanupOrphanOutputPartials } from '../render-cache/render-cache-manager'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
 import {
   isTranscriptionValid,
@@ -35,7 +42,16 @@ import type {
   RenderQaReport
 } from './pipeline-types'
 
-export type StageProgressCallback = (message: string, progress: number) => void
+/** Optional structured metadata attached to a progress event (null clears it). */
+export interface StageProgressMeta {
+  manualAiWait?: ManualAiWaitInfo | null
+}
+
+export type StageProgressCallback = (
+  message: string,
+  progress: number,
+  meta?: StageProgressMeta
+) => void
 
 export interface StageRunResult<T = unknown> {
   success: boolean
@@ -399,6 +415,14 @@ export async function runGlobalContextStage(
   }
 }
 
+import { resolveVisualMixConfig } from '../visual-mix/visual-mix-config'
+import { runMixedVisualEngine } from '../visual-mix/mixed-visual-engine'
+import {
+  detectOrResolveContentProfile,
+  loadContentProfileArtifact
+} from '../visual-mix/content-profile-detector'
+import { resolveContentProfileMode } from '../../../shared/types'
+
 // ─── Stage 6: Stock Search & Candidate Ranking ───────────────────────────────
 
 export async function runStockSearchStage(
@@ -407,6 +431,26 @@ export async function runStockSearchStage(
   signal?: AbortSignal
 ): Promise<StageRunResult> {
   checkAborted(signal)
+
+  const mix = resolveVisualMixConfig(options)
+
+  if (mix.mode === 'custom-mix') {
+    const mode = options.contentProfileMode ?? resolveContentProfileMode(options)
+    onProgress('Resolving content profile...', 0.02)
+    const detection = await detectOrResolveContentProfile({
+      projectDir: options.projectDir,
+      mode
+    })
+    const profile = detection.resolvedProfile
+
+    return runMixedVisualEngine({
+      options,
+      profile,
+      mix,
+      onProgress,
+      signal
+    })
+  }
 
   // Đảm bảo Global Context đã tồn tại trước khi chạy stock
   if (!isGlobalContextValid(options.projectDir)) {
@@ -541,8 +585,13 @@ export async function runAudioSearchStage(
   checkAborted(signal)
   const audioPlanPath = path.join(options.projectDir, 'analysis', 'audio-plan.json')
 
+  const profileArtifact = loadContentProfileArtifact(options.projectDir)
+  const isHealthAudio = profileArtifact
+    ? profileArtifact.resolvedProfile === 'health'
+    : (options.contentProfileMode === 'health' || options.contentType === 'health')
+
   // Check cache nếu audio plan đã tồn tại và hợp lệ
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic)) {
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? 'health' : 'default')) {
     const cachedPlan = loadAudioPlan(options.projectDir)
     if (cachedPlan) {
       const downloadedMusicCount = cachedPlan.sections.filter(
@@ -576,8 +625,49 @@ export async function runAudioSearchStage(
 
   checkAborted(signal)
 
+  // Health Mode: Auto-plan, auto-approve, and download Health cinematic SFX only when profile === 'health'
+  if (isHealthAudio) {
+    const healthPlanPath = path.join(options.projectDir, 'analysis', 'health-visual-plan.json')
+    if (fs.existsSync(healthPlanPath)) {
+      try {
+        const healthPlan = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+        const sfxCues = new Map<number, HealthSfxCuePlan>()
+        const sfxScenes: SfxDirectorSceneInput[] = []
+        for (const sc of healthPlan.scenes || []) {
+          if (sc.sfxCue) {
+            sfxCues.set(sc.sceneIndex, sc.sfxCue)
+            sfxScenes.push({
+              sceneIndex: sc.sceneIndex,
+              startTime: sc.startTime,
+              endTime: sc.endTime,
+              duration: sc.duration,
+              category: sc.category,
+              narration: sc.narration,
+              visualIntent: sc.visualIntent,
+              motionPreset: sc.motionPreset
+            })
+          }
+        }
+        if (sfxCues.size > 0) {
+          onProgress('Planning and downloading Health cinematic SFX...', 0.90)
+          await HealthSfxDirector.applyHealthSfxToAudioPlan(
+            options.projectDir,
+            sfxCues,
+            sfxScenes,
+            options.openverseToken
+          )
+        }
+      } catch (err) {
+        logger.warn(`[HealthSFX] Failed to apply Health SFX: ${err}`)
+      }
+    }
+  }
+
   const plan = loadAudioPlan(options.projectDir)
   const downloadedMusicCount = plan?.sections.filter(
+    (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+  ).length ?? 0
+  const downloadedSfxCount = plan?.sfxAssignments.filter(
     (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
   ).length ?? 0
 
@@ -594,16 +684,16 @@ export async function runAudioSearchStage(
     warning = 'No background music tracks were downloaded. Video will render voiceover-only.'
   }
 
-  onProgress(`Audio plan ready (${downloadedMusicCount} music tracks)`, 1.0)
+  onProgress(`Audio plan ready (${downloadedMusicCount} music tracks, ${downloadedSfxCount} SFX)`, 1.0)
   return {
     success: true,
     warning,
     artifactPath: audioPlanPath,
-    data: result,
+    data: plan || result,
     stats: {
-      sectionsCount: result.sections.length,
+      sectionsCount: plan?.sections.length ?? result.sections.length,
       downloadedMusicCount,
-      sfxCount: result.sfxAssignments.length
+      sfxCount: plan?.sfxAssignments.length ?? result.sfxAssignments.length
     }
   }
 }
@@ -680,22 +770,17 @@ export async function runRenderStage(
   const outputDir = path.join(options.projectDir, 'output')
   fs.mkdirSync(outputDir, { recursive: true })
 
-  // Clean up any stale partial files from an interrupted prior run
-  try {
-    const outputFiles = fs.readdirSync(outputDir)
-    for (const file of outputFiles) {
-      if (file.endsWith('.partial.mp4') || file.includes('_working.mp4')) {
-        const partialPath = path.join(outputDir, file)
-        try {
-          fs.unlinkSync(partialPath)
-          logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${file}`)
-        } catch {
-          /* ignore */
-        }
+  // Cache reconciliation instead of bulk deletion: only orphan publish temp files
+  // (<name>.partial.mp4) are removed, and only when no render is active for this project.
+  // Completed render checkpoints live in .cache/render-v2 and are never touched here.
+  if (!renderJobCoordinator.isActive(options.projectDir)) {
+    try {
+      for (const removed of cleanupOrphanOutputPartials(options.projectDir)) {
+        logger.info(`[RenderStage] Cleaned up stale partial file from interrupted run: ${path.basename(removed)}`)
       }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
   }
 
   // Kiểm tra xem đã có video render hoàn chỉnh và hợp lệ trên đĩa chưa
@@ -751,7 +836,9 @@ export async function runRenderStage(
   onProgress(`Starting render (${targetName}.mp4)...`, 0.02)
   checkAborted(signal)
 
-  const result = await renderVideo({
+  // Shared project-level render job (same mutex as Manual Render). The pipeline's
+  // AbortSignal is linked so Cancel/quit stops FFmpeg/Remotion and keeps checkpoints.
+  const { promise } = startCoordinatedRender({
     projectDir: options.projectDir,
     voiceoverPath: options.voiceoverPath,
     outputName: targetName,
@@ -759,11 +846,14 @@ export async function runRenderStage(
     fps: options.fps,
     transitionSettings: options.transitionSettings,
     captionPlan,
+    source: 'pipeline',
+    externalSignal: signal,
     onProgress: (p) => {
-      checkAborted(signal)
+      if (signal?.aborted) return
       onProgress(p.stage, p.progress)
     }
   })
+  const result = await promise
 
   checkAborted(signal)
 
@@ -774,7 +864,17 @@ export async function runRenderStage(
     stats: {
       outputPath: result.outputPath,
       durationSecs: result.durationSecs,
-      fileSizeBytes: result.fileSizeBytes
+      fileSizeBytes: result.fileSizeBytes,
+      renderCacheResumable: false,
+      ...(result.cache
+        ? {
+            reusedScenes: result.cache.reusedScenes,
+            totalScenes: result.cache.totalScenes,
+            reusedOverlayBlocks: result.cache.reusedOverlayBlocks,
+            totalOverlayBlocks: result.cache.totalOverlayBlocks,
+            resourceProfile: result.cache.resourceProfile
+          }
+        : {})
     }
   }
 }

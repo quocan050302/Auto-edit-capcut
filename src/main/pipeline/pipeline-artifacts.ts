@@ -7,8 +7,12 @@ import type {
   AudioPlan,
   RenderQaReport,
   StockSceneAssignment,
-  AutoPipelineOptions
+  AutoPipelineOptions,
+  ContentType,
+  RenderRecoveryInfo
 } from '../../../shared/types'
+import { computeHealthMotionHash } from '../health/health-visual-cache'
+import { inspectRenderRecovery } from '../render-cache/render-recovery'
 
 export interface StockCompletionResult {
   totalScenes: number
@@ -226,7 +230,17 @@ export function checkStockCompletion(projectDir: string): StockCompletionResult 
   }
 }
 
-export function isAudioValid(projectDir: string, requireMusic?: boolean): boolean {
+/**
+ * Provider-agnostic completion check for Custom Mix (Google Flow AI, Pexels, Pixabay, local).
+ * A scene is complete when it has one assigned, existing media file - regardless of provider.
+ * It never implies that missing scenes should be repaired with Stock.
+ * Legacy flow keeps using checkStockCompletion().
+ */
+export function checkVisualCompletion(projectDir: string): StockCompletionResult {
+  return checkStockCompletion(projectDir)
+}
+
+export function isAudioValid(projectDir: string, requireMusic?: boolean, contentType?: ContentType): boolean {
   const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
   if (!fs.existsSync(audioPlanPath)) return false
 
@@ -237,8 +251,26 @@ export function isAudioValid(projectDir: string, requireMusic?: boolean): boolea
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
       )
-      return hasDownloadedMusic
+      if (!hasDownloadedMusic) return false
     }
+
+    if (contentType === 'health') {
+      const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
+      if (fs.existsSync(healthPlanPath)) {
+        try {
+          const healthPlan = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+          const hasSfxCues = (healthPlan.scenes || []).some((s: any) => s.sfxCue)
+          if (hasSfxCues) {
+            if (!plan.healthSfx?.enabled) return false
+            const expectedHash = computeHealthMotionHash(healthPlan)
+            if (plan.healthSfx.planHash !== expectedHash) return false
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     return true
   } catch {
     return false
@@ -267,6 +299,8 @@ export interface ArtifactReconciliationSummary {
   preflightValid: boolean
   renderValid: boolean
   postflightValid: boolean
+  /** Resumable Render Engine V2 cache state (present when no final MP4 exists yet). */
+  renderRecovery?: RenderRecoveryInfo
 }
 
 /**
@@ -305,6 +339,27 @@ export function reconcileProjectArtifacts(
   const qaPath = path.join(projectDir, 'analysis', 'render-qa.json')
   const postflightValid = renderValid && fs.existsSync(qaPath)
 
+  // Render cache recovery: when the final MP4 is not there yet, report what the
+  // interrupted render already completed so it can resume from the last checkpoint.
+  let renderRecovery: RenderRecoveryInfo | undefined
+  if (!renderValid) {
+    try {
+      renderRecovery = inspectRenderRecovery(projectDir, {
+        fallbackParams: options?.voiceoverPath
+          ? {
+              voiceoverPath: options.voiceoverPath,
+              outputName: options.outputName || 'final_output',
+              resolution: options.resolution ?? { width: 1920, height: 1080 },
+              fps: options.fps ?? 30,
+              transitionSettings: options.transitionSettings
+            }
+          : undefined
+      })
+    } catch {
+      renderRecovery = undefined
+    }
+  }
+
   return {
     transcribingValid,
     planningValid,
@@ -314,6 +369,7 @@ export function reconcileProjectArtifacts(
     audioValid,
     preflightValid,
     renderValid,
-    postflightValid
+    postflightValid,
+    renderRecovery
   }
 }

@@ -1,12 +1,17 @@
-import React, { useState, useEffect, useRef } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import type {
   ProjectState,
   VideoTransitionType,
   TransitionRenderMode,
-  RenderQaReport
+  RenderQaReport,
+  RenderRecoveryInfo,
+  RenderPreferencesDTO,
+  RenderResourceProfileId,
+  RenderVideoEncoderMode
 } from '../../../../shared/types'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { RenderThumbnailCompanionCard } from '../components/thumbnail/RenderThumbnailCompanionCard'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -42,6 +47,29 @@ function fmtBytes(bytes: number): string {
   return `${(bytes / 1024).toFixed(0)} KB`
 }
 
+const RESOURCE_PROFILE_OPTIONS: Array<{ value: RenderResourceProfileId; label: string }> = [
+  { value: 'balanced', label: 'Balanced — Recommended for Mac' },
+  { value: 'low-power', label: 'Low Power — Keeps the Mac responsive' },
+  { value: 'fast', label: 'Fast — Uses more CPU and memory' }
+]
+
+const RECOVERY_STATUS_LABEL: Record<string, string> = {
+  none: 'No cache',
+  available: 'Cache available',
+  resuming: 'Resuming cached render',
+  'partially-invalidated': 'Cache partially invalidated',
+  complete: 'Render complete'
+}
+
+function phaseLabel(status?: string): string {
+  if (!status || status === 'pending') return 'pending'
+  if (status === 'completed') return 'cached'
+  if (status === 'invalid') return 'needs re-render'
+  return status
+}
+
+type RenderResponse = { success: boolean; result?: unknown; error?: string; cancelled?: boolean }
+
 // ─── Render Page ──────────────────────────────────────────────────────────────
 
 export function RenderPage({ project, onNavigate }: RenderPageProps): React.ReactElement {
@@ -75,6 +103,47 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
   const [chapterDuration, setChapterDuration] = useState(0.65)
 
   const voiceoverPath = project.inputs?.voiceoverPath ?? ''
+
+  // Resumable Render Engine V2 — recovery card + resource profile (Advanced)
+  const [recovery, setRecovery] = useState<RenderRecoveryInfo | null>(null)
+  const [renderPrefs, setRenderPrefs] = useState<RenderPreferencesDTO | null>(null)
+  const [encoderNote, setEncoderNote] = useState<string | null>(null)
+  const [confirmAction, setConfirmAction] = useState<'restart' | 'clear' | null>(null)
+  const [isCancelling, setIsCancelling] = useState(false)
+
+  const loadRecovery = useCallback(async (): Promise<void> => {
+    try {
+      const info = await window.api.render.getRecovery?.({ projectDir: project.projectDir })
+      if (info) setRecovery(info)
+    } catch { /* recovery info is optional */ }
+  }, [project.projectDir])
+
+  useEffect(() => {
+    void loadRecovery()
+    window.api.render.getPreferences?.().then((p) => p && setRenderPrefs(p)).catch(() => {})
+  }, [loadRecovery])
+
+  async function updateRenderPrefs(patch: Partial<RenderPreferencesDTO>): Promise<void> {
+    try {
+      const next = await window.api.render.setPreferences(patch)
+      setRenderPrefs(next)
+    } catch { /* ignore */ }
+  }
+
+  async function handleEncoderChange(mode: RenderVideoEncoderMode): Promise<void> {
+    setEncoderNote(null)
+    if (mode === 'videotoolbox-h264') {
+      setEncoderNote('Testing Apple VideoToolbox on this Mac...')
+      const probe = await window.api.render.probeEncoder({ force: true }).catch(() => ({ ok: false, reason: 'Probe failed' }))
+      if (!probe.ok) {
+        setEncoderNote(`Apple VideoToolbox is not available: ${probe.reason ?? 'unknown reason'}. Keeping Software H.264.`)
+        await updateRenderPrefs({ videoEncoder: 'software-h264' })
+        return
+      }
+      setEncoderNote('Apple VideoToolbox verified. Falls back to Software H.264 automatically if it fails.')
+    }
+    await updateRenderPrefs({ videoEncoder: mode })
+  }
   const resMap = {
     '1920x1080': { width: 1920, height: 1080 },
     '1280x720': { width: 1280, height: 720 },
@@ -192,6 +261,28 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
 
     // Step 2: Start render pipeline
     setProgress({ stage: 'Starting render...', progress: 0.05 })
+
+    const res = resolution as keyof typeof resMap
+    await runRenderWithProgress(() =>
+      window.api.render.start({
+        projectDir: project.projectDir,
+        voiceoverPath,
+        outputName,
+        resolution: resMap[res],
+        fps,
+        transitionSettings: {
+          enabled: transitionEnabled,
+          mode: transitionMode,
+          singleType: transitionMode === 'single' ? selectedTransition : undefined,
+          defaultDuration: transitionDuration,
+          chapterDuration
+        }
+      })
+    )
+  }
+
+  /** Shared progress wiring for Start Render and Resume Cached Render. */
+  async function runRenderWithProgress(invoke: () => Promise<RenderResponse>): Promise<void> {
     startTimer()
 
     const unsub = window.api.render.onProgress((data) => setProgress(data))
@@ -207,24 +298,12 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
     )
 
     try {
-      const res = resolution as keyof typeof resMap
-      const response = await window.api.render.start({
-        projectDir: project.projectDir,
-        voiceoverPath,
-        outputName,
-        resolution: resMap[res],
-        fps,
-        transitionSettings: {
-          enabled: transitionEnabled,
-          mode: transitionMode,
-          singleType: transitionMode === 'single' ? selectedTransition : undefined,
-          defaultDuration: transitionDuration,
-          chapterDuration
-        }
-      })
+      const response = await invoke()
 
       if (response.success && response.result) {
         setResult(response.result as RenderResult)
+      } else if (response.cancelled) {
+        setError('Render stopped. Completed scenes are kept, so the next render continues from the cache.')
       } else {
         setError(response.error ?? 'Render failed')
       }
@@ -232,13 +311,48 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setIsRendering(false)
+      setIsCancelling(false)
       setProgress(null)
       setCaptionProgress(null)
       stopTimer()
       unsub()
       unsubCaption?.()
       unsubQa?.()
+      void loadRecovery()
     }
+  }
+
+  async function handleResumeCached(): Promise<void> {
+    setIsRendering(true)
+    setError(null)
+    setResult(null)
+    setCaptionProgress(null)
+    setProgress({ stage: 'Resuming cached render...', progress: 0.05 })
+    await runRenderWithProgress(() => window.api.render.resumeCached({ projectDir: project.projectDir }))
+  }
+
+  async function handleCancelRender(): Promise<void> {
+    setIsCancelling(true)
+    try {
+      await window.api.render.cancel({ projectDir: project.projectDir })
+    } catch {
+      setIsCancelling(false)
+    }
+  }
+
+  async function handleConfirmAction(): Promise<void> {
+    const action = confirmAction
+    setConfirmAction(null)
+    const cleared = await window.api.render.clearCache({ projectDir: project.projectDir }).catch((e: unknown) => ({
+      success: false,
+      error: e instanceof Error ? e.message : String(e)
+    }))
+    if (!cleared.success) {
+      setError(cleared.error ?? 'Could not clear the render cache')
+      return
+    }
+    await loadRecovery()
+    if (action === 'restart') await handleRender()
   }
 
   const pct = progress ? Math.round(progress.progress * 100) : 0
@@ -479,6 +593,102 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
         </div>
       </div>
 
+      {/* ── LAYER 1b: RENDER RECOVERY (resumable render cache) ── */}
+      {recovery && (recovery.manifestFound || (recovery.cacheSizeBytes ?? 0) > 0) && (
+        <div className="panel render-recovery-card" id="render-recovery-card">
+          <div className="panel-header">
+            <div className="panel-title">
+              <span className="panel-title-icon">♻️</span>
+              Render Recovery
+            </div>
+            <span
+              className={`panel-badge ${
+                recovery.status === 'complete'
+                  ? 'badge-success'
+                  : recovery.status === 'partially-invalidated'
+                  ? 'badge-warning'
+                  : recovery.status === 'none'
+                  ? ''
+                  : 'badge-success'
+              }`}
+              id="render-recovery-status"
+            >
+              {isRendering ? RECOVERY_STATUS_LABEL.resuming : RECOVERY_STATUS_LABEL[recovery.status ?? 'none']}
+            </span>
+          </div>
+          <div className="panel-body">
+            <div className="render-summary-grid">
+              <div className="render-summary-card">
+                <span className="render-summary-card__label">Scenes cached</span>
+                <span className="render-summary-card__value" id="render-recovery-scenes">
+                  {recovery.completedScenes} / {recovery.totalScenes}
+                </span>
+              </div>
+              <div className="render-summary-card">
+                <span className="render-summary-card__label">Scene assembly</span>
+                <span className="render-summary-card__value">{phaseLabel(recovery.assemblyStatus)}</span>
+              </div>
+              <div className="render-summary-card">
+                <span className="render-summary-card__label">Audio mix</span>
+                <span className="render-summary-card__value">{phaseLabel(recovery.audioMixStatus)}</span>
+              </div>
+              <div className="render-summary-card">
+                <span className="render-summary-card__label">Overlay blocks</span>
+                <span className="render-summary-card__value">
+                  {recovery.completedOverlayBlocks} / {recovery.totalOverlayBlocks}
+                </span>
+              </div>
+              <div className="render-summary-card">
+                <span className="render-summary-card__label">Estimated work saved</span>
+                <span className="render-summary-card__value text-brand" id="render-recovery-saved">
+                  {recovery.estimatedWorkSavedPct ?? 0}%
+                </span>
+              </div>
+              <div className="render-summary-card">
+                <span className="render-summary-card__label">Cache size</span>
+                <span className="render-summary-card__value">{fmtBytes(recovery.cacheSizeBytes ?? 0)}</span>
+              </div>
+            </div>
+
+            {recovery.message && !isRendering && (
+              <div className="text-xs text-muted mt-2" style={{ whiteSpace: 'pre-line' }}>{recovery.message}</div>
+            )}
+
+            <div className="flex gap-3 mt-4" style={{ flexWrap: 'wrap' }}>
+              {recovery.resumable && (
+                <button
+                  id="btn-resume-cached-render"
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={handleResumeCached}
+                  disabled={isRendering || isPreflightRunning}
+                >
+                  ▶ Resume Cached Render
+                </button>
+              )}
+              <button
+                id="btn-restart-render-scratch"
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setConfirmAction('restart')}
+                disabled={isRendering || isPreflightRunning || !hasPlan || isPreflightFailed}
+              >
+                Restart Render From Scratch
+              </button>
+              <button
+                id="btn-clear-render-cache"
+                type="button"
+                className="btn btn-ghost"
+                onClick={() => setConfirmAction('clear')}
+                disabled={isRendering || recovery.status === 'resuming'}
+              >
+                Clear Render Cache
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── LAYER 2: ADVANCED RENDER SETTINGS ACCORDION ── */}
       <CollapsibleSection
         title="Advanced render settings"
@@ -526,6 +736,49 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
               disabled={isRendering}
               placeholder="final_output"
             />
+          </div>
+
+          <div className="settings-field">
+            <label className="settings-label" htmlFor="render-resource-profile">Resource Profile</label>
+            <select
+              id="render-resource-profile"
+              className="settings-select"
+              value={renderPrefs?.resourceProfile ?? 'balanced'}
+              onChange={(e) => void updateRenderPrefs({ resourceProfile: e.target.value as RenderResourceProfileId })}
+              disabled={isRendering || !renderPrefs}
+            >
+              {RESOURCE_PROFILE_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
+            </select>
+          </div>
+
+          <div className="settings-field">
+            <label className="settings-label" htmlFor="render-video-encoder">Video encoder</label>
+            <select
+              id="render-video-encoder"
+              className="settings-select"
+              value={renderPrefs?.videoEncoder ?? 'software-h264'}
+              onChange={(e) => void handleEncoderChange(e.target.value as RenderVideoEncoderMode)}
+              disabled={isRendering || !renderPrefs}
+            >
+              <option value="software-h264">Software H.264 — Current Quality</option>
+              <option value="videotoolbox-h264">Apple VideoToolbox — Faster, Experimental</option>
+            </select>
+            {encoderNote && <div className="text-xs text-muted mt-2">{encoderNote}</div>}
+          </div>
+
+          <div className="settings-field" style={{ gridColumn: 'span 2' }}>
+            <label className="checkbox-label">
+              <input
+                id="render-remotion-hw"
+                type="checkbox"
+                checked={renderPrefs?.remotionHardwareAcceleration ?? false}
+                onChange={(e) => void updateRenderPrefs({ remotionHardwareAcceleration: e.target.checked })}
+                disabled={isRendering || !renderPrefs}
+              />
+              <span>Use Apple hardware acceleration for overlays — Experimental</span>
+            </label>
           </div>
         </div>
 
@@ -624,7 +877,20 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
         <div className="panel render-progress-card">
           <div className="panel-header">
             <div className="panel-title">Render Progress</div>
-            <span className="font-mono text-brand font-bold">{pct}%</span>
+            <div className="flex gap-3" style={{ alignItems: 'center' }}>
+              <span className="font-mono text-brand font-bold">{pct}%</span>
+              {!isPreflightRunning && (
+                <button
+                  id="btn-cancel-render"
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={handleCancelRender}
+                  disabled={isCancelling}
+                >
+                  {isCancelling ? 'Stopping...' : 'Cancel'}
+                </button>
+              )}
+            </div>
           </div>
           <div className="panel-body">
             <div className="progress-bar-wrap" style={{ height: '8px', marginBottom: '8px' }}>
@@ -747,6 +1013,20 @@ export function RenderPage({ project, onNavigate }: RenderPageProps): React.Reac
           onOpenStudio={() => onNavigate?.('thumbnails')}
         />
       )}
+
+      <ConfirmDialog
+        isOpen={confirmAction !== null}
+        title={confirmAction === 'restart' ? 'Restart render from scratch?' : 'Clear render cache?'}
+        message={
+          confirmAction === 'restart'
+            ? 'All cached scenes and render checkpoints for this project will be deleted and the video will be rendered again from the beginning. Your source media and finished videos are not affected.'
+            : 'All cached scenes and render checkpoints for this project will be deleted. Your source media and finished videos are not affected.'
+        }
+        confirmText={confirmAction === 'restart' ? 'Restart From Scratch' : 'Clear Cache'}
+        isDestructive
+        onConfirm={() => void handleConfirmAction()}
+        onCancel={() => setConfirmAction(null)}
+      />
     </div>
   )
 }

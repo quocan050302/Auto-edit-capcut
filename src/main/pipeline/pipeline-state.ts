@@ -7,6 +7,7 @@ import {
   PIPELINE_SCHEMA_VERSION,
   PIPELINE_EXECUTION_STAGES
 } from './pipeline-types'
+import { resolveVisualMixConfig, resolveContentProfileMode, resolveAiImageMode } from '../../../shared/types'
 import type {
   AutoPipelineState,
   AutoPipelineOptions,
@@ -433,6 +434,82 @@ export function determineInvalidatedStages(
   // Stock provider / settings thay đổi
   if (oldState.options.preferredStockProvider !== newOptions.preferredStockProvider) {
     invalidated.add('stock-search')
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
+  // Content profile mode hoặc legacy contentType thay đổi
+  const oldProfileMode = resolveContentProfileMode(oldState.options)
+  const newProfileMode = resolveContentProfileMode(newOptions)
+  const oldContentType = oldState.options.contentType ?? 'default'
+  const newContentType = newOptions.contentType ?? 'default'
+
+  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
+    invalidated.add('stock-search')
+    if (
+      oldProfileMode === 'health' ||
+      newProfileMode === 'health' ||
+      oldContentType === 'health' ||
+      newContentType === 'health'
+    ) {
+      invalidated.add('audio-search')
+    }
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
+  // Visual source mode thay đổi
+  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === 'health' ? 'custom-mix' : 'legacy')
+  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === 'health' ? 'custom-mix' : 'legacy')
+  if (oldVisualMode !== newVisualMode) {
+    invalidated.add('stock-search')
+    if (oldProfileMode === 'health' || newProfileMode === 'health' || oldContentType === 'health' || newContentType === 'health') {
+      invalidated.add('audio-search')
+    }
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
+  // Visual mix config hoặc legacy health visual config thay đổi
+  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: oldState.options.visualSourceMode,
+    visualMixConfig: oldState.options.visualMixConfig,
+    contentType: oldContentType
+  }) : undefined
+  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: newOptions.visualSourceMode,
+    visualMixConfig: newOptions.visualMixConfig,
+    contentType: newContentType
+  }) : undefined
+
+  // 'auto' is the default: strip it so projects saved before AI Image Mode existed compare equal.
+  const stripDefaultAiMode = (cfg: unknown): unknown => {
+    if (!cfg || typeof cfg !== 'object' || !('aiImageMode' in (cfg as object))) return cfg
+    const { aiImageMode, ...rest } = cfg as { aiImageMode?: string }
+    return aiImageMode === 'prompt' ? { ...rest, aiImageMode } : rest
+  }
+  const oldVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
+  )
+  const newVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
+  )
+  const visualConfigChanged =
+    oldVisualConfigStr !== newVisualConfigStr ||
+    oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio ||
+    oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio ||
+    oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution ||
+    oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior ||
+    resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig)
+
+  if (visualConfigChanged) {
+    invalidated.add('stock-search')
+    if (oldContentType === 'health' || newContentType === 'health') {
+      invalidated.add('audio-search')
+    }
     invalidated.add('preflight')
     invalidated.add('rendering')
     invalidated.add('postflight')

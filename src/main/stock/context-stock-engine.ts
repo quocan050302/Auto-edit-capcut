@@ -273,7 +273,8 @@ export async function runContextAwareStockEngine(
     preferredAspectRatio = "16:9",
     apiKey,
     model,
-    forceReanalysis = false
+    forceReanalysis = false,
+    targetSceneIndices
   } = params
 
   // Set project dir for persistent Pixabay cache
@@ -316,12 +317,34 @@ export async function runContextAwareStockEngine(
 
   // Identify locked/approved scenes that must NOT be overwritten
   const scenesToProcess = flattenedEntries.filter(({ scene }) => {
+    if (targetSceneIndices && !targetSceneIndices.includes(scene.sceneIndex)) {
+      return false
+    }
     const existing = existingMap.get(scene.sceneIndex)
     if (scene.locked || existing?.locked) return false
     if (existing?.manualOverride) return false
     if (existing?.approvalStatus === "approved") return false
+    if (!targetSceneIndices && existing?.asset?.provider === 'google-flow' && existing?.status === 'assigned' && existing?.asset?.localPath && fs.existsSync(existing.asset.localPath)) {
+      return false
+    }
     return true
   })
+
+  if (targetSceneIndices) {
+    const expectedTargetCount = targetSceneIndices.length
+    const actualEligibleTargetCount = scenesToProcess.length
+    const totalProjectScenes = flattenedEntries.length
+
+    logger.info(
+      `[VisualMix] Stock ownership: expected=${expectedTargetCount} actualEligible=${actualEligibleTargetCount} totalProjectScenes=${totalProjectScenes}`
+    )
+
+    if (expectedTargetCount < totalProjectScenes && actualEligibleTargetCount > expectedTargetCount) {
+      throw new Error(
+        `VISUAL_MIX_STOCK_SCOPE_VIOLATION: Expected at most ${expectedTargetCount} scenes but stock engine targeted ${actualEligibleTargetCount} scenes out of ${totalProjectScenes}.`
+      )
+    }
+  }
 
   onProgress(`Starting context-aware stock search for ${scenesToProcess.length} scenes...`, 0.01)
 
@@ -380,11 +403,12 @@ export async function runContextAwareStockEngine(
   let assignedCount = 0
   let failedCount = 0
 
-  // Preserve locked/approved assignments first
+  // Preserve locked/approved/unprocessed assignments first
   for (const entry of flattenedEntries) {
     const existing = existingMap.get(entry.sceneIndex)
     const isLocked = entry.scene.locked || existing?.locked || existing?.manualOverride || existing?.approvalStatus === "approved"
-    if (isLocked && existing) {
+    const isExcluded = targetSceneIndices && !targetSceneIndices.includes(entry.scene.sceneIndex)
+    if ((isLocked || isExcluded) && existing) {
       assignments.push(existing)
       if (existing.status === "assigned") assignedCount++
     }
@@ -798,7 +822,14 @@ export async function runContextAwareStockEngine(
 
   // Atomic saves
   atomicWriteJson(planPath, plan)
-  atomicWriteJson(reviewPath, assignments)
+  if (params.assignmentSink) {
+    const owned = targetSceneIndices
+      ? assignments.filter((a) => targetSceneIndices.includes(a.sceneIndex))
+      : assignments
+    await params.assignmentSink(owned)
+  } else {
+    atomicWriteJson(reviewPath, assignments)
+  }
   if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
     saveStockCandidates(projectDir, stockCandidatesStore)
   }

@@ -29,7 +29,9 @@ import {
   releaseLease,
   isLeaseStale,
   normalizeProjectDir,
-  toSnapshot
+  toSnapshot,
+  APP_INSTANCE_ID,
+  isProcessAlive
 } from './pipeline-state'
 import {
   isTranscriptionValid,
@@ -52,8 +54,38 @@ import {
   runPreflightStage,
   runRenderStage,
   runPostflightStage,
-  type StageRunResult
+  type StageRunResult,
+  type StageProgressMeta
 } from './pipeline-stage-runners'
+import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
+import type { ArtifactReconciliationSummary } from './pipeline-artifacts'
+
+/**
+ * When the final MP4 is missing but the render cache holds completed checkpoints,
+ * keep the rendering stage pending/interrupted with its cached progress instead of
+ * resetting it to 0 (Resumable Render Engine V2).
+ */
+function applyRenderRecoveryToState(state: AutoPipelineState, recon: ArtifactReconciliationSummary): void {
+  const rr = recon.renderRecovery
+  if (recon.renderValid || !rr || !rr.resumable || !state.stages.rendering) return
+  if (state.stages.rendering.status === 'completed') return
+  const pct = rr.totalScenes > 0 ? rr.completedScenes / rr.totalScenes : 0
+  state.stages.rendering = {
+    ...state.stages.rendering,
+    status: 'pending',
+    progress: Math.max(state.stages.rendering.progress ?? 0, Math.min(0.99, 0.08 + pct * 0.68)),
+    message: rr.message ?? `Render interrupted — ${rr.completedScenes}/${rr.totalScenes} scenes cached`,
+    stats: {
+      ...(state.stages.rendering.stats || {}),
+      renderCacheResumable: true,
+      cachedScenes: rr.completedScenes,
+      totalScenes: rr.totalScenes,
+      cachedOverlayBlocks: rr.completedOverlayBlocks,
+      totalOverlayBlocks: rr.totalOverlayBlocks,
+      renderPhase: rr.currentPhase
+    }
+  }
+}
 
 interface ActivePipelineInstance {
   runId: string
@@ -68,6 +100,11 @@ class PipelineOrchestrator {
   private activeInstances = new Map<string, ActivePipelineInstance>()
   private heartbeatTimers = new Map<string, NodeJS.Timeout>()
   private projectMutexes = new Map<string, Promise<unknown>>()
+
+  /** True when a pipeline run for this project is active in this process. */
+  public isRunning(projectDir: string): boolean {
+    return this.activeInstances.has(normalizeProjectDir(projectDir))
+  }
 
   /**
    * Chạy tác vụ với mutex trên projectDir để ngăn chặn start/resume/recover đồng thời.
@@ -324,6 +361,7 @@ class PipelineOrchestrator {
       if (recon.preflightValid && state.stages.preflight) state.stages.preflight.status = 'completed'
       if (recon.renderValid && state.stages.rendering) state.stages.rendering.status = 'completed'
       if (recon.postflightValid && state.stages.postflight) state.stages.postflight.status = 'completed'
+      applyRenderRecoveryToState(state, recon)
 
       // Kiểm tra fingerprint hiện tại
       const currentFingerprint = computeInputFingerprint(
@@ -604,6 +642,10 @@ class PipelineOrchestrator {
         invalidStages.push('rendering')
         state.stages.rendering.status = 'pending'
       }
+      applyRenderRecoveryToState(state, recon)
+      if (recon.renderRecovery?.resumable && recon.renderRecovery.message) {
+        warnings.push(recon.renderRecovery.message.replace('\n', ' — '))
+      }
 
       // Postflight
       if (recon.postflightValid) {
@@ -702,6 +744,9 @@ class PipelineOrchestrator {
    */
   public handleAppQuit(): void {
     logger.info(`[Pipeline] Application is closing. Gracefully saving active pipeline checkpoints...`)
+    // Mark render jobs as "app-closed" (interrupted, auto-resumable) BEFORE the pipeline
+    // abort propagates, so they are never mistaken for a user cancel.
+    void renderJobCoordinator.abortAll('app-closed')
     for (const [projectDir, instance] of this.activeInstances.entries()) {
       try {
         instance.abortController.abort()
@@ -769,11 +814,15 @@ class PipelineOrchestrator {
           state.lease.currentStage = stage
           state.lease.heartbeatAt = new Date().toISOString()
         }
+        const priorStage = state.stages[stage]
+        const resumingCachedRender = stage === 'rendering' && priorStage?.stats?.renderCacheResumable === true
         state.stages[stage] = {
           status: 'running',
-          progress: 0,
+          // Resuming from render cache: do not reset progress to 0
+          progress: resumingCachedRender ? priorStage.progress ?? 0 : 0,
           startedAt: new Date().toISOString(),
-          message: `Running ${stage}...`
+          message: resumingCachedRender ? 'Resuming cached render...' : `Running ${stage}...`,
+          ...(resumingCachedRender ? { stats: priorStage.stats } : {})
         }
         state.version = (state.version ?? 0) + 1
         state.updatedAt = new Date().toISOString()
@@ -783,7 +832,11 @@ class PipelineOrchestrator {
         const stageStartTime = Date.now()
 
         // Progress callback với guard chống ghi đè late progress event
-        const onProgress = (message: string, progress: number): void => {
+        const onProgress = (
+          message: string,
+          progress: number,
+          meta?: StageProgressMeta
+        ): void => {
           if (signal.aborted) return
           // Late event guard: bỏ qua nếu stage đã hoàn tất hoặc runId đã thay đổi
           if (state.runId !== currentRunId || state.stages[stage]?.status === 'completed') {
@@ -792,6 +845,10 @@ class PipelineOrchestrator {
           }
           state.stages[stage].message = message
           state.stages[stage].progress = Math.min(Math.max(progress, 0), 1)
+          if (meta && 'manualAiWait' in meta) {
+            if (meta.manualAiWait) state.stages[stage].manualAiWait = meta.manualAiWait
+            else delete state.stages[stage].manualAiWait
+          }
           state.version = (state.version ?? 0) + 1
           state.updatedAt = new Date().toISOString()
           if (state.lease) {
@@ -858,6 +915,7 @@ class PipelineOrchestrator {
         }
 
         // Xử lý kết quả stage
+        if (state.stages[stage]) delete state.stages[stage].manualAiWait
         if (stageResult.needsAttention) {
           logger.warn(`[Pipeline] Stage ${stage} requires user attention: ${stageResult.error}`)
           state.stages[stage].status = 'warning'

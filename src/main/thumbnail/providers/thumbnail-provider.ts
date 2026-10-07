@@ -5,8 +5,10 @@ export interface ThumbnailGenerateRequest {
   projectId?: string
   imageModel?: string
   aspectRatio?: '16:9' | 'IMAGE_ASPECT_RATIO_LANDSCAPE'
-  candidateId: string
-  optionId: 'A' | 'B' | 'C' | 'D' | 'E'
+  candidateId?: string
+  optionId?: 'A' | 'B' | 'C' | 'D' | 'E' | string
+  count?: number
+  caller?: string
 }
 
 export interface ThumbnailGenerateResult {
@@ -20,6 +22,7 @@ export interface ThumbnailExportRequest {
   mediaId: string
   projectId?: string
   quality: '4k' | '2k'
+  preferredQuality?: '2k' | '4k'
   fallbackToOriginalUrl?: string
   destinationPath: string
 }
