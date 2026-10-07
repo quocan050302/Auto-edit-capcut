@@ -473,9 +473,14 @@ export async function runContextAwareStockEngine(
   }
 
   // Process remaining scenes (Phase 6: Search & Download)
-  for (let i = 0; i < scenesToProcess.length; i++) {
-    const entry = scenesToProcess[i]
-    const { scene, sceneId, chapterTitle, chapterPurpose } = entry
+  let nextIndex = 0
+  let completedScenes = 0
+  
+  const worker = async () => {
+    while (nextIndex < scenesToProcess.length) {
+      const i = nextIndex++
+      const entry = scenesToProcess[i]
+      const { scene, sceneId, chapterTitle, chapterPurpose } = entry
     const pct = 0.20 + (i / scenesToProcess.length) * 0.75
     const narration = scene.narrativeText ?? ""
     const sceneDuration = scene.duration ?? (scene.endTime - scene.startTime)
@@ -795,9 +800,19 @@ export async function runContextAwareStockEngine(
     }
 
     assignments.push(assignment)
-    cache.save()
-    saveAssetsManifest(stockDir, manifest)
+    completedScenes++
+    if (completedScenes % 5 === 0 || completedScenes === scenesToProcess.length) {
+      cache.save()
+      saveAssetsManifest(stockDir, manifest)
+    }
   }
+  }
+
+  const workers = []
+  for (let w = 0; w < 3; w++) {
+    workers.push(worker())
+  }
+  await Promise.all(workers)
 
   // Sort assignments by sceneIndex
   assignments.sort((a, b) => a.sceneIndex - b.sceneIndex)

@@ -59,6 +59,7 @@ import {
 } from './pipeline-stage-runners'
 import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
 import type { ArtifactReconciliationSummary } from './pipeline-artifacts'
+import { pipelineProfiler } from '../performance/pipeline-profiler'
 
 /**
  * When the final MP4 is missing but the render cache holds completed checkpoints,
@@ -300,6 +301,7 @@ class PipelineOrchestrator {
 
       const abortController = new AbortController()
       this.startHeartbeat(norm, runId)
+      pipelineProfiler.startRun(norm, runId)
 
       const instance: ActivePipelineInstance = {
         runId,
@@ -393,6 +395,7 @@ class PipelineOrchestrator {
 
       const abortController = new AbortController()
       this.startHeartbeat(norm, runId)
+      pipelineProfiler.startRun(norm, runId)
 
       const instance: ActivePipelineInstance = {
         runId,
@@ -860,6 +863,7 @@ class PipelineOrchestrator {
 
         // Chạy stage runner tương ứng
         let stageResult: StageRunResult
+        pipelineProfiler.startStage(stage)
         try {
           switch (stage) {
             case 'validating':
@@ -904,6 +908,7 @@ class PipelineOrchestrator {
             state.overallStatus = 'cancelled'
             state.stages[stage].status = 'cancelled'
             state.stages[stage].message = 'Cancelled by user'
+            pipelineProfiler.endStage(stage, false)
             break
           }
           const msg = err instanceof Error ? err.message : String(err)
@@ -913,6 +918,7 @@ class PipelineOrchestrator {
             error: msg
           }
         }
+        pipelineProfiler.endStage(stage, stageResult.cached)
 
         // Xử lý kết quả stage
         if (state.stages[stage]) delete state.stages[stage].manualAiWait
@@ -928,6 +934,7 @@ class PipelineOrchestrator {
           releaseLease(state)
           savePipelineStateAtomic(norm, state)
           this.broadcastProgress(state)
+          pipelineProfiler.endRun()
           return state
         }
 
@@ -944,6 +951,7 @@ class PipelineOrchestrator {
           releaseLease(state)
           savePipelineStateAtomic(norm, state)
           this.broadcastProgress(state)
+          pipelineProfiler.endRun()
           return state
         }
 
@@ -971,6 +979,7 @@ class PipelineOrchestrator {
         })
       }
     } finally {
+      pipelineProfiler.endRun()
       this.stopHeartbeat(norm)
       this.activeInstances.delete(norm)
     }
