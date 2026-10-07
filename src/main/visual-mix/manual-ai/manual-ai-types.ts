@@ -76,6 +76,15 @@ export interface ManualAiVisualBrief {
   }
   modelUsed: string
   fallbackUsed: boolean
+  identityStrategy?: {
+    primaryEntityId?: string
+    identityContinuityPriority: 'low' | 'medium' | 'high'
+    recurringIdentityTraits: string[]
+    forbiddenSubstitutions: string[]
+    wardrobeContinuity: string[]
+    environmentContinuity: string[]
+    eraContinuity: string[]
+  }
 }
 
 export type ManualAiSceneRole =
@@ -145,8 +154,17 @@ export interface ManualAiSceneDirection {
       | 'center-right'
     emphasis?:
       | 'medium'
-      | 'high'
+    emphasis?: 'medium' | 'high'
     reason: string
+  }
+  identity?: {
+    entityIds: string[]
+    visible: boolean
+    strength: 'context' | 'visible' | 'dominant'
+    requiredTraits: string[]
+    optionalTraits: string[]
+    forbiddenTraits: string[]
+    continuityTraits: string[]
   }
   avoid: string[]
   confidence: number

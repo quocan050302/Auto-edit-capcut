@@ -41,6 +41,11 @@ const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 function resolveContentProfileMode(options) {
+  if (options?.contentProfileOverride && options.currentSourceHash) {
+    if (options.contentProfileOverride.sourceHash === options.currentSourceHash) {
+      return options.contentProfileOverride.mode;
+    }
+  }
   if (options?.contentProfileMode) {
     return options.contentProfileMode;
   }
@@ -3129,7 +3134,7 @@ class ThumbnailOrchestrator {
     }
     const settings = await loadProjectThumbnailSettings(projectDir);
     const script = this.resolveScriptText(projectDir, params.scriptPath);
-    const scriptHash2 = computeSha256(script || "no-script");
+    const scriptHash = computeSha256(script || "no-script");
     const templateSnapshot = params.templateSnapshot || settings.templateSnapshot || "";
     const templateSnapshotHash = computeSha256(templateSnapshot);
     const renderOutputPath = params.renderOutputPath || this.resolveRenderOutputPath(projectDir);
@@ -3164,7 +3169,7 @@ class ThumbnailOrchestrator {
     const readiness = await this.runtimeManager.ensureFlowReady();
     if (!readiness.ready) {
       logger.warn(`[ThumbnailOrchestrator] startJob preflight failed: ${readiness.blockingCode} — ${readiness.message}`);
-      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash: scriptHash2, templateSnapshotHash, round, params, settings, templateSnapshot });
+      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash, templateSnapshotHash, round, params, settings, templateSnapshot });
     }
     const abortController = new AbortController();
     const jobIdPlaceholder = `job-${Date.now()}`;
@@ -3200,7 +3205,7 @@ class ThumbnailOrchestrator {
             renderOutputPath,
             renderFileSize,
             renderMtimeMs,
-            scriptHash: scriptHash2,
+            scriptHash,
             templateSnapshotHash,
             generationRound: round,
             plan
@@ -3932,14 +3937,14 @@ class ThumbnailAutoTrigger {
       const renderFileSize = st.size;
       const renderMtimeMs = st.mtimeMs;
       const script = this.readScriptText(projectDir, params.scriptPath);
-      const scriptHash2 = computeSha256(script || "no-script");
+      const scriptHash = computeSha256(script || "no-script");
       const templateSnapshotHash = settings.templateSnapshotHash || computeSha256(settings.templateSnapshot || "");
       const round = 1;
       const jobKey = computeThumbnailJobKey({
         renderOutputPath: renderPath,
         renderFileSize,
         renderMtimeMs,
-        scriptHash: scriptHash2,
+        scriptHash,
         templateSnapshotHash,
         generationRound: round
       });
@@ -3961,7 +3966,7 @@ class ThumbnailAutoTrigger {
           renderOutputPath: renderPath,
           renderFileSize,
           renderMtimeMs,
-          scriptHash: scriptHash2,
+          scriptHash,
           templateSnapshotHash,
           generationRound: round
         });
@@ -4137,11 +4142,11 @@ function toSnapshot(state2) {
   };
 }
 function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
-  let scriptHash2;
+  let scriptHash;
   if (scriptPath && fs__namespace.existsSync(scriptPath)) {
     try {
       const content = fs__namespace.readFileSync(scriptPath);
-      scriptHash2 = crypto__namespace.createHash("md5").update(content).digest("hex");
+      scriptHash = crypto__namespace.createHash("md5").update(content).digest("hex");
     } catch {
     }
   }
@@ -4157,7 +4162,7 @@ function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
   }
   return {
     scriptPath,
-    scriptHash: scriptHash2,
+    scriptHash,
     voiceoverPath,
     voiceoverSize,
     voiceoverMtimeMs
@@ -7524,7 +7529,7 @@ function computeGlobalContextHash(ctx) {
   const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
   return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
 }
-function extractClaimsRuleBased(scenes, scriptHash2, ctxHash) {
+function extractClaimsRuleBased(scenes, scriptHash, ctxHash) {
   const claims = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const statRegex = /\b\d+(\.\d+)?\s*(%|percent|percentage)\b/i;
@@ -7586,7 +7591,7 @@ function extractClaimsRuleBased(scenes, scriptHash2, ctxHash) {
   }
   const ledger = {
     projectId: "default",
-    scriptHash: scriptHash2,
+    scriptHash,
     globalContextHash: ctxHash,
     claims,
     sources: [],
@@ -7706,12 +7711,12 @@ async function extractDocumentaryClaims(params) {
   const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
   const ledgerPath = getClaimLedgerPath(projectDir);
   const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
-  const scriptHash2 = computeScriptHash$1(fullText);
+  const scriptHash = computeScriptHash$1(fullText);
   const ctxHash = computeGlobalContextHash(globalContext);
   if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
     try {
       const existing = readJsonSafe$1(ledgerPath, null);
-      if (existing && existing.claims && existing.scriptHash === scriptHash2 && existing.globalContextHash === ctxHash) {
+      if (existing && existing.claims && existing.scriptHash === scriptHash && existing.globalContextHash === ctxHash) {
         logger.info(`[ClaimLedger] Using cached Claim & Evidence Ledger (${existing.claims.length} claims)`);
         onProgress?.(`Loaded cached Claim Ledger (${existing.claims.length} claims)`, 1);
         return existing;
@@ -7724,7 +7729,7 @@ async function extractDocumentaryClaims(params) {
   if (!cleanKey) {
     logger.warn(`[ClaimLedger] No Gemini API key provided. Using rule-based claim extraction.`);
     onProgress?.(`Gemini key unavailable — using rule-based claim extraction`, 0.5);
-    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash2, ctxHash);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
     atomicWriteJson(ledgerPath, fallbackLedger);
     return fallbackLedger;
   }
@@ -7822,14 +7827,14 @@ Respond with STRICT JSON matching this schema:
   }
   if (claims.length === 0) {
     logger.warn(`[ClaimLedger] AI returned no claims, executing rule-based fallback`);
-    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash2, ctxHash);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
     atomicWriteJson(ledgerPath, fallbackLedger);
     return fallbackLedger;
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const ledger = {
     projectId: path__namespace.basename(projectDir),
-    scriptHash: scriptHash2,
+    scriptHash,
     globalContextHash: ctxHash,
     claims,
     sources: [],
@@ -9304,6 +9309,791 @@ class HealthMotionDirector {
     return searchPool[sceneIndex % searchPool.length] || "push-in-center";
   }
 }
+class SfxCacheManager {
+  static getCachePath(projectDir) {
+    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
+  }
+  static getAudioDir(projectDir) {
+    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
+  }
+  /**
+   * Loads the cache manifest with full backward compatibility for schema v1.
+   * If entries lack provider/metadata fields from earlier versions, they still load cleanly.
+   */
+  static loadCacheManifest(projectDir) {
+    const p = this.getCachePath(projectDir);
+    if (fs__namespace.existsSync(p)) {
+      try {
+        const raw = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+        return {
+          schemaVersion: raw.schemaVersion || 1,
+          updatedAt: raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          entries: raw.entries || {}
+        };
+      } catch (err) {
+        logger.warn(`[SfxCache] Corrupted cache at ${p}, recreating: ${err}`);
+      }
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      entries: {}
+    };
+  }
+  /**
+   * Atomically saves cache manifest using a temporary file.
+   */
+  static saveCacheManifest(projectDir, manifest) {
+    const p = this.getCachePath(projectDir);
+    const dir = path__namespace.dirname(p);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const tmp = `${p}.tmp.${Date.now()}`;
+    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
+    fs__namespace.renameSync(tmp, p);
+  }
+  /**
+   * Retrieves a cached SFX if the file exists and is valid.
+   * Cleans up broken cache entries on miss.
+   */
+  static getCachedSfx(projectDir, type) {
+    if (type === "none") return null;
+    const manifest = this.loadCacheManifest(projectDir);
+    const entry = manifest.entries[type];
+    if (!entry) return null;
+    if (!entry.localPath || !fs__namespace.existsSync(entry.localPath)) {
+      logger.debug(`[SfxCache] Missing file for cached type=${type} at ${entry.localPath}`);
+      delete manifest.entries[type];
+      this.saveCacheManifest(projectDir, manifest);
+      return null;
+    }
+    try {
+      const stat = fs__namespace.statSync(entry.localPath);
+      if (stat.size < 512) {
+        logger.debug(`[SfxCache] Cached file too small (${stat.size} bytes) for type=${type}`);
+        delete manifest.entries[type];
+        this.saveCacheManifest(projectDir, manifest);
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    const provider = entry.provider || (entry.generated ? "procedural" : "openverse");
+    return {
+      type,
+      provider: "cache",
+      localPath: entry.localPath,
+      durationSecs: entry.durationSecs || 1,
+      sourceId: entry.assetId,
+      sourceLabel: entry.sourceLabel || `Cached (${provider})`,
+      creator: entry.creator || (provider === "procedural" ? "Local Procedural SFX" : "Cached SFX"),
+      license: entry.license || "Project Cache",
+      sourceUrl: entry.pageUrl || entry.sourceUrl,
+      generated: entry.generated ?? provider === "procedural"
+    };
+  }
+  /**
+   * Stores a successfully resolved SFX into the project cache manifest.
+   */
+  static recordCachedSfx(projectDir, resolved) {
+    const manifest = this.loadCacheManifest(projectDir);
+    const entry = {
+      assetId: resolved.sourceId || `${resolved.provider}-${resolved.type}`,
+      sfxType: resolved.type,
+      query: resolved.type,
+      localPath: resolved.localPath,
+      license: resolved.license || "Internal Asset",
+      creator: resolved.creator || resolved.sourceLabel || "SFX Engine",
+      pageUrl: resolved.sourceUrl || "",
+      downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      provider: resolved.provider,
+      sourceLabel: resolved.sourceLabel,
+      sourceUrl: resolved.sourceUrl,
+      durationSecs: resolved.durationSecs,
+      generated: resolved.generated
+    };
+    manifest.entries[resolved.type] = entry;
+    this.saveCacheManifest(projectDir, manifest);
+    logger.debug(`[SfxCache] Saved cache entry for type=${resolved.type} provider=${resolved.provider}`);
+  }
+}
+let cachedCapability = null;
+function inspectNodeVersion(nodeBin) {
+  try {
+    const res = cp.spawnSync(nodeBin, ["--version"], {
+      encoding: "utf-8",
+      timeout: 5e3,
+      windowsHide: true
+    });
+    if (res.status === 0 && res.stdout) {
+      const full = res.stdout.trim();
+      const match = full.match(/^v?(\d+)\./);
+      if (match) {
+        return { major: parseInt(match[1], 10), full };
+      }
+    }
+  } catch {
+  }
+  return null;
+}
+function findNode22Binary() {
+  if (process.env.HYPERFRAMES_NODE_BIN) {
+    const customBin = process.env.HYPERFRAMES_NODE_BIN;
+    if (fs__namespace.existsSync(customBin)) {
+      const v = inspectNodeVersion(customBin);
+      if (v && v.major >= 22) {
+        return { bin: customBin, version: v.full };
+      }
+      logger.warn(`[HyperFrames:Cap] HYPERFRAMES_NODE_BIN points to node ${v?.full || "unknown"} (< 22)`);
+    }
+  }
+  const systemNodeCandidates = process.platform === "win32" ? ["node.exe", "node"] : ["node"];
+  for (const candidate of systemNodeCandidates) {
+    const v = inspectNodeVersion(candidate);
+    if (v && v.major >= 22) {
+      return { bin: candidate, version: v.full };
+    }
+  }
+  if (process.platform !== "win32") {
+    const home = process.env.HOME || "";
+    const fallbackLocations = [
+      "/opt/homebrew/bin/node",
+      "/usr/local/bin/node",
+      path__namespace.join(home, ".nvm/versions/node/v22/bin/node"),
+      path__namespace.join(home, ".fnm/current/bin/node"),
+      path__namespace.join(home, ".volta/bin/node")
+    ];
+    for (const loc of fallbackLocations) {
+      if (fs__namespace.existsSync(loc)) {
+        const v = inspectNodeVersion(loc);
+        if (v && v.major >= 22) {
+          return { bin: loc, version: v.full };
+        }
+      }
+    }
+  }
+  return null;
+}
+function findNpxBinary(nodeBin) {
+  if (process.env.HYPERFRAMES_NPX_BIN && fs__namespace.existsSync(process.env.HYPERFRAMES_NPX_BIN)) {
+    return process.env.HYPERFRAMES_NPX_BIN;
+  }
+  if (nodeBin.includes(path__namespace.sep)) {
+    const dir = path__namespace.dirname(nodeBin);
+    const npxName = process.platform === "win32" ? "npx.cmd" : "npx";
+    const adjacent = path__namespace.join(dir, npxName);
+    if (fs__namespace.existsSync(adjacent)) {
+      return adjacent;
+    }
+  }
+  const defaultNpx = process.platform === "win32" ? "npx.cmd" : "npx";
+  try {
+    const res = cp.spawnSync(defaultNpx, ["--version"], {
+      encoding: "utf-8",
+      timeout: 5e3,
+      windowsHide: true
+    });
+    if (res.status === 0) {
+      return defaultNpx;
+    }
+  } catch {
+  }
+  return null;
+}
+async function checkHyperFramesCapability(forceFresh = false) {
+  if (cachedCapability && !forceFresh) {
+    return cachedCapability;
+  }
+  const nodeInfo = findNode22Binary();
+  if (!nodeInfo) {
+    cachedCapability = {
+      available: false,
+      reason: "No Node.js binary >= 22 found on system or via HYPERFRAMES_NODE_BIN"
+    };
+    logger.info(`[HyperFrames:Cap] unavailable: ${cachedCapability.reason}`);
+    return cachedCapability;
+  }
+  const npxBin = findNpxBinary(nodeInfo.bin);
+  if (!npxBin) {
+    cachedCapability = {
+      available: false,
+      nodeBin: nodeInfo.bin,
+      nodeMajor: parseInt(nodeInfo.version.replace(/^v/, "").split(".")[0], 10) || 0,
+      reason: "Node >= 22 found, but npx is not accessible"
+    };
+    logger.info(`[HyperFrames:Cap] unavailable: ${cachedCapability.reason}`);
+    return cachedCapability;
+  }
+  try {
+    const testRes = cp.spawnSync(npxBin, ["hyperframes", "--version"], {
+      encoding: "utf-8",
+      timeout: 1e4,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        PATH: nodeInfo.bin.includes(path__namespace.sep) ? `${path__namespace.dirname(nodeInfo.bin)}${path__namespace.delimiter}${process.env.PATH || ""}` : process.env.PATH
+      }
+    });
+    const nodeMajor = parseInt(nodeInfo.version.replace(/^v/, "").split(".")[0], 10) || 0;
+    if (testRes.status === 0 || testRes.stdout && testRes.stdout.includes(".")) {
+      cachedCapability = {
+        available: true,
+        nodeBin: nodeInfo.bin,
+        nodeMajor,
+        npxBin
+      };
+      logger.info(`[HyperFrames:Cap] available=true node=${nodeInfo.version} npx=${npxBin}`);
+      return cachedCapability;
+    }
+    cachedCapability = {
+      available: false,
+      nodeBin: nodeInfo.bin,
+      nodeMajor,
+      npxBin,
+      reason: `hyperframes command probe returned status ${testRes.status}: ${testRes.stderr || testRes.stdout || "unknown"}`
+    };
+    return cachedCapability;
+  } catch (err) {
+    const nodeMajor = parseInt(nodeInfo.version.replace(/^v/, "").split(".")[0], 10) || 0;
+    cachedCapability = {
+      available: false,
+      nodeBin: nodeInfo.bin,
+      nodeMajor,
+      npxBin,
+      reason: `hyperframes probe failed: ${String(err)}`
+    };
+    return cachedCapability;
+  }
+}
+function parseHyperFramesResolvedPath(stdout) {
+  const lines = stdout.split("\n");
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const arrowMatch = trimmed.match(/resolved\s+([^\s]+)\s+(?:→|->)\s+([^\s(]+)/i);
+    if (arrowMatch && arrowMatch[2]) {
+      return arrowMatch[2];
+    }
+    const genericArrow = trimmed.match(/(?:→|->)\s+([^\s(]+(?:\.wav|\.mp3|\.ogg|\.flac|\.aac|\.m4a))/i);
+    if (genericArrow && genericArrow[1]) {
+      return genericArrow[1];
+    }
+  }
+  for (const line of lines) {
+    if (line.includes("resolved")) {
+      const pathMatch = line.match(/(['"])?([A-Za-z0-9_.\-\/\\]+\.(?:wav|mp3|ogg|flac|aac|m4a))\1?/i);
+      if (pathMatch && pathMatch[2]) {
+        return pathMatch[2];
+      }
+    }
+  }
+  return null;
+}
+async function executeHyperFramesSfxResolve(options) {
+  const { intent, projectDir, capability, timeoutMs = 25e3, signal } = options;
+  if (!capability.available || !capability.npxBinary) {
+    return {
+      success: false,
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      error: capability.reason || "HyperFrames is not available"
+    };
+  }
+  const workspaceDir = path__namespace.join(projectDir, ".cache", "hyperframes-sfx");
+  if (!fs__namespace.existsSync(workspaceDir)) {
+    fs__namespace.mkdirSync(workspaceDir, { recursive: true });
+  }
+  const npxBin = capability.npxBinary;
+  const args = [
+    "hyperframes",
+    "media-use",
+    "resolve",
+    "--type",
+    "sfx",
+    "--intent",
+    intent,
+    "--project",
+    workspaceDir
+  ];
+  const env = {
+    ...process.env,
+    PATH: capability.nodeBinary && capability.nodeBinary.includes(path__namespace.sep) ? `${path__namespace.dirname(capability.nodeBinary)}${path__namespace.delimiter}${process.env.PATH || ""}` : process.env.PATH
+  };
+  logger.info(`[HyperFrames:SFX] Running external command: intent="${intent}" timeout=${timeoutMs}ms`);
+  return new Promise((resolve) => {
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+    let timedOut = false;
+    let completed = false;
+    const isWindows = process.platform === "win32";
+    const child = cp.spawn(npxBin, args, {
+      cwd: workspaceDir,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      shell: isWindows
+      // needed for npx.cmd on windows
+    });
+    const timer = setTimeout(() => {
+      if (completed) return;
+      timedOut = true;
+      logger.warn(`[HyperFrames:SFX] Command timed out after ${timeoutMs}ms, terminating child process`);
+      try {
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          try {
+            if (!child.killed) child.kill("SIGKILL");
+          } catch {
+          }
+        }, 2e3);
+      } catch {
+      }
+    }, timeoutMs);
+    if (signal) {
+      signal.addEventListener("abort", () => {
+        if (!completed) {
+          try {
+            child.kill("SIGTERM");
+          } catch {
+          }
+        }
+      });
+    }
+    child.stdout.on("data", (chunk) => {
+      stdoutBuffer += chunk.toString();
+      if (stdoutBuffer.length > 5e4) {
+        stdoutBuffer = stdoutBuffer.slice(-5e4);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderrBuffer += chunk.toString();
+      if (stderrBuffer.length > 5e4) {
+        stderrBuffer = stderrBuffer.slice(-5e4);
+      }
+    });
+    child.on("error", (err) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timer);
+      logger.warn(`[HyperFrames:SFX] Process error: ${err.message}`);
+      resolve({
+        success: false,
+        stdout: stdoutBuffer,
+        stderr: stderrBuffer,
+        exitCode: null,
+        error: err.message
+      });
+    });
+    child.on("close", (code) => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timer);
+      if (timedOut) {
+        resolve({
+          success: false,
+          stdout: stdoutBuffer,
+          stderr: stderrBuffer,
+          exitCode: code,
+          timedOut: true,
+          error: `Execution timed out after ${timeoutMs}ms`
+        });
+        return;
+      }
+      if (code !== 0) {
+        logger.warn(`[HyperFrames:SFX] CLI exited with code ${code}`);
+        resolve({
+          success: false,
+          stdout: stdoutBuffer,
+          stderr: stderrBuffer,
+          exitCode: code,
+          error: `Process exited with code ${code}`
+        });
+        return;
+      }
+      const parsedPath = parseHyperFramesResolvedPath(stdoutBuffer);
+      if (!parsedPath) {
+        logger.warn(`[HyperFrames:SFX] Could not parse output file from stdout: ${stdoutBuffer.slice(0, 300)}`);
+        resolve({
+          success: false,
+          stdout: stdoutBuffer,
+          stderr: stderrBuffer,
+          exitCode: code,
+          error: "No resolved path in stdout"
+        });
+        return;
+      }
+      const absolutePath = path__namespace.isAbsolute(parsedPath) ? parsedPath : path__namespace.resolve(workspaceDir, parsedPath);
+      if (!fs__namespace.existsSync(absolutePath)) {
+        logger.warn(`[HyperFrames:SFX] Output path does not exist on disk: ${absolutePath}`);
+        resolve({
+          success: false,
+          stdout: stdoutBuffer,
+          stderr: stderrBuffer,
+          exitCode: code,
+          error: `Resolved file not found: ${absolutePath}`
+        });
+        return;
+      }
+      const stat = fs__namespace.statSync(absolutePath);
+      if (stat.size < 512) {
+        logger.warn(`[HyperFrames:SFX] Output file is suspiciously small (${stat.size} bytes): ${absolutePath}`);
+        resolve({
+          success: false,
+          stdout: stdoutBuffer,
+          stderr: stderrBuffer,
+          exitCode: code,
+          error: `Resolved file too small (${stat.size}b)`
+        });
+        return;
+      }
+      resolve({
+        success: true,
+        resolvedPath: absolutePath,
+        stdout: stdoutBuffer,
+        stderr: stderrBuffer,
+        exitCode: code
+      });
+    });
+  });
+}
+const HYPERFRAMES_INTENT_MAP = {
+  "soft-whoosh": "subtle cinematic soft whoosh, clean documentary transition, no music",
+  "reverse-whoosh": "subtle reverse whoosh, restrained documentary transition",
+  "air-swish": "gentle airy swish, soft motion accent",
+  "digital-scan": "short subtle digital scan sweep, clean science documentary",
+  "soft-pulse": "soft organic pulse, subtle medical documentary accent",
+  "heartbeat": "subtle natural heartbeat, quiet medical documentary, non-horror",
+  "soft-impact": "restrained cinematic soft impact, documentary reveal accent",
+  "clock-tick": "single soft clock tick, clean close detail",
+  "subtle-riser": "short subtle cinematic riser, gentle documentary hook",
+  "none": ""
+};
+async function normalizeAndCopySfx(sourcePath, destPath, maxDurationSecs = 5) {
+  const ffmpegBin = getFfmpegBinary();
+  if (!ffmpegBin) {
+    try {
+      fs__namespace.copyFileSync(sourcePath, destPath);
+      return { success: true, durationSecs: 1 };
+    } catch {
+      return { success: false, durationSecs: 0 };
+    }
+  }
+  const destDir = path__namespace.dirname(destPath);
+  fs__namespace.mkdirSync(destDir, { recursive: true });
+  return new Promise((resolve) => {
+    const args = [
+      "-y",
+      "-t",
+      String(maxDurationSecs),
+      "-i",
+      sourcePath,
+      "-c:a",
+      "pcm_s16le",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      destPath
+    ];
+    const proc = cp.spawn(ffmpegBin, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    proc.stderr?.on("data", (d) => {
+      stderr += d.toString();
+    });
+    proc.on("close", async (code) => {
+      if (code !== 0 || !fs__namespace.existsSync(destPath)) {
+        logger.warn(`[HyperFrames:SFX] FFmpeg normalize failed (exit ${code}): ${stderr.slice(-200)}`);
+        try {
+          fs__namespace.copyFileSync(sourcePath, destPath);
+          resolve({ success: true, durationSecs: 1 });
+        } catch {
+          resolve({ success: false, durationSecs: 0 });
+        }
+        return;
+      }
+      const duration = await probeDuration$1(destPath);
+      resolve({ success: true, durationSecs: duration });
+    });
+    proc.on("error", (err) => {
+      logger.warn(`[HyperFrames:SFX] Normalization spawn error: ${err.message}`);
+      try {
+        fs__namespace.copyFileSync(sourcePath, destPath);
+        resolve({ success: true, durationSecs: 1 });
+      } catch {
+        resolve({ success: false, durationSecs: 0 });
+      }
+    });
+  });
+}
+async function probeDuration$1(filePath) {
+  const ffprobeBin = getFfprobeBinary();
+  if (!ffprobeBin || !fs__namespace.existsSync(ffprobeBin)) return 1;
+  return new Promise((resolve) => {
+    const proc = cp.spawn(ffprobeBin, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      filePath
+    ]);
+    let out = "";
+    proc.stdout?.on("data", (d) => {
+      out += d.toString();
+    });
+    proc.on("close", (code) => {
+      if (code === 0) {
+        const val = parseFloat(out.trim());
+        if (!isNaN(val) && val > 0) {
+          resolve(val);
+          return;
+        }
+      }
+      resolve(1);
+    });
+    proc.on("error", () => resolve(1));
+  });
+}
+async function resolveHyperframesSfx(request) {
+  if (request.type === "none") {
+    return null;
+  }
+  const capability = await checkHyperFramesCapability();
+  if (!capability.available) {
+    logger.debug(`[HyperFrames:SFX] type=${request.type} status=unavailable reason=${capability.reason || "capability check failed"}`);
+    return null;
+  }
+  const intent = HYPERFRAMES_INTENT_MAP[request.type] || request.intents[0] || `${request.type} sound effect`;
+  const workspaceDir = path__namespace.join(request.projectDir, ".cache", "hyperframes-sfx");
+  fs__namespace.mkdirSync(workspaceDir, { recursive: true });
+  const runResult = await executeHyperFramesSfxResolve({
+    type: request.type,
+    intent,
+    nodeBin: capability.nodeBin,
+    npxBin: capability.npxBin,
+    timeoutMs: 25e3
+  });
+  if (!runResult.success || !runResult.resolvedPath) {
+    logger.info(`[HyperFrames:SFX] type=${request.type} status=failed reason=${runResult.error || "no output"}`);
+    return null;
+  }
+  const destDir = path__namespace.join(request.projectDir, "assets", "audio", "health-sfx");
+  fs__namespace.mkdirSync(destDir, { recursive: true });
+  const destPath = path__namespace.join(destDir, `${request.type}_hyperframes.wav`);
+  const normalized = await normalizeAndCopySfx(runResult.resolvedPath, destPath);
+  if (!normalized.success || !fs__namespace.existsSync(destPath)) {
+    logger.warn(`[HyperFrames:SFX] Failed copying/normalizing resolved SFX at ${destPath}`);
+    return null;
+  }
+  logger.info(`[HyperFrames:SFX] type=${request.type} status=resolved duration=${normalized.durationSecs.toFixed(2)}s path=${destPath}`);
+  return {
+    type: request.type,
+    provider: "hyperframes",
+    localPath: destPath,
+    durationSecs: normalized.durationSecs,
+    sourceId: `hyperframes-${request.type}`,
+    sourceLabel: "HyperFrames Bundled Library",
+    creator: "HyperFrames SFX Library",
+    license: "HyperFrames Asset",
+    generated: false
+  };
+}
+function getRecipeForType(type) {
+  switch (type) {
+    case "soft-whoosh":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "anoisesrc=d=0.65:c=pink:r=48000,lowpass=f=900,afade=t=in:ss=0:d=0.25,afade=t=out:st=0.25:d=0.4,volume=0.8"
+        ],
+        expectedDuration: 0.65
+      };
+    case "reverse-whoosh":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "anoisesrc=d=0.80:c=pink:r=48000,lowpass=f=1100,afade=t=in:ss=0:d=0.65,afade=t=out:st=0.65:d=0.15,volume=0.8"
+        ],
+        expectedDuration: 0.8
+      };
+    case "air-swish":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "anoisesrc=d=0.55:c=white:r=48000,bandpass=f=2600:w=1400,afade=t=in:ss=0:d=0.15,afade=t=out:st=0.15:d=0.4,volume=0.5"
+        ],
+        expectedDuration: 0.55
+      };
+    case "digital-scan":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "aevalsrc=0.18*sin(2*PI*(750+600*t)*t):d=0.55:s=48000,afade=t=in:ss=0:d=0.08,afade=t=out:st=0.25:d=0.3,volume=0.6"
+        ],
+        expectedDuration: 0.55
+      };
+    case "soft-pulse":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=f=85:d=0.80:r=48000,afade=t=in:ss=0:d=0.15,afade=t=out:st=0.20:d=0.6,volume=0.7"
+        ],
+        expectedDuration: 0.8
+      };
+    case "heartbeat":
+      return {
+        args: [
+          "-filter_complex",
+          "sine=f=58:d=0.18:r=48000,afade=t=in:ss=0:d=0.03,afade=t=out:st=0.04:d=0.14[p1];sine=f=54:d=0.22:r=48000,afade=t=in:ss=0:d=0.03,afade=t=out:st=0.04:d=0.18,adelay=240|240[p2];[p1][p2]amix=inputs=2:dropout_transition=0,volume=0.85"
+        ],
+        expectedDuration: 0.46
+      };
+    case "soft-impact":
+      return {
+        args: [
+          "-filter_complex",
+          "sine=f=60:d=0.50:r=48000,afade=t=in:ss=0:d=0.02,afade=t=out:st=0.06:d=0.44[sub];anoisesrc=d=0.15:c=pink:r=48000,lowpass=f=1200,afade=t=in:ss=0:d=0.01,afade=t=out:st=0.02:d=0.13[trans];[sub][trans]amix=inputs=2:dropout_transition=0,volume=0.8"
+        ],
+        expectedDuration: 0.5
+      };
+    case "clock-tick":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "sine=f=1750:d=0.10:r=48000,afade=t=in:ss=0:d=0.005,afade=t=out:st=0.01:d=0.09,volume=0.4"
+        ],
+        expectedDuration: 0.1
+      };
+    case "subtle-riser":
+      return {
+        args: [
+          "-f",
+          "lavfi",
+          "-i",
+          "aevalsrc=0.15*sin(2*PI*(180+220*t*t)*t):d=1.20:s=48000,afade=t=in:ss=0:d=0.9,afade=t=out:st=0.9:d=0.3,volume=0.6"
+        ],
+        expectedDuration: 1.2
+      };
+    default:
+      return null;
+  }
+}
+async function probeAudioDuration$1(filePath, fallbackSecs) {
+  const ffprobeBin = getFfprobeBinary();
+  if (!ffprobeBin || !fs__namespace.existsSync(ffprobeBin)) {
+    return fallbackSecs;
+  }
+  return new Promise((resolve) => {
+    const proc = cp.spawn(ffprobeBin, [
+      "-v",
+      "error",
+      "-show_entries",
+      "format=duration",
+      "-of",
+      "default=noprint_wrappers=1:nokey=1",
+      filePath
+    ]);
+    let out = "";
+    proc.stdout?.on("data", (d) => {
+      out += d.toString();
+    });
+    proc.on("close", (code) => {
+      if (code === 0) {
+        const val = parseFloat(out.trim());
+        if (!isNaN(val) && val > 0) {
+          resolve(val);
+          return;
+        }
+      }
+      resolve(fallbackSecs);
+    });
+    proc.on("error", () => resolve(fallbackSecs));
+  });
+}
+async function generateProceduralSfx(request) {
+  if (request.type === "none") {
+    return null;
+  }
+  const recipe = getRecipeForType(request.type);
+  if (!recipe) {
+    logger.warn(`[ProceduralSFX] No procedural recipe for type=${request.type}`);
+    return null;
+  }
+  const ffmpegBin = getFfmpegBinary();
+  if (!ffmpegBin) {
+    logger.warn("[ProceduralSFX] FFmpeg binary not available");
+    return null;
+  }
+  const outDir = path__namespace.join(request.projectDir, "assets", "audio", "health-sfx");
+  fs__namespace.mkdirSync(outDir, { recursive: true });
+  const outPath = path__namespace.join(outDir, `${request.type}_procedural.wav`);
+  return new Promise((resolve) => {
+    const fullArgs = [
+      "-y",
+      ...recipe.args,
+      "-c:a",
+      "pcm_s16le",
+      "-ar",
+      "48000",
+      "-ac",
+      "2",
+      outPath
+    ];
+    const proc = cp.spawn(ffmpegBin, fullArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    let stderr = "";
+    proc.stderr?.on("data", (d) => {
+      stderr += d.toString();
+    });
+    proc.on("close", async (code) => {
+      if (code !== 0) {
+        logger.warn(`[ProceduralSFX] Failed generating ${request.type} (exit ${code}): ${stderr.slice(-200)}`);
+        resolve(null);
+        return;
+      }
+      if (!fs__namespace.existsSync(outPath)) {
+        logger.warn(`[ProceduralSFX] Generated file missing at ${outPath}`);
+        resolve(null);
+        return;
+      }
+      const stat = fs__namespace.statSync(outPath);
+      if (stat.size < 512) {
+        logger.warn(`[ProceduralSFX] Generated file too small (${stat.size} bytes) at ${outPath}`);
+        resolve(null);
+        return;
+      }
+      const durationSecs = await probeAudioDuration$1(outPath, recipe.expectedDuration);
+      logger.info(`[ProceduralSFX] Generated type=${request.type} path=${outPath} duration=${durationSecs.toFixed(2)}s`);
+      resolve({
+        type: request.type,
+        provider: "procedural",
+        localPath: outPath,
+        durationSecs,
+        sourceId: `procedural-${request.type}`,
+        sourceLabel: "Local Procedural SFX",
+        license: "Procedural Synthesis",
+        creator: "Local Procedural SFX",
+        generated: true
+      });
+    });
+    proc.on("error", (err) => {
+      logger.warn(`[ProceduralSFX] Error spawning ffmpeg: ${err.message}`);
+      resolve(null);
+    });
+  });
+}
 const OV_HOST = "api.openverse.org";
 function httpsGet(url2, headers, timeoutMs = 12e3) {
   return new Promise((resolve, reject2) => {
@@ -9715,6 +10505,403 @@ function saveAudioPlan(projectDir, plan) {
   const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
   fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
 }
+const HEALTH_SFX_QUERIES$1 = {
+  "soft-whoosh": ["whoosh soft", "cinematic whoosh", "air swish"],
+  "reverse-whoosh": ["reverse whoosh", "whoosh reverse", "reverse sweep"],
+  "air-swish": ["air swish", "breeze swish", "soft whoosh"],
+  "digital-scan": ["digital scan", "electronic chirp", "science beep subtle"],
+  "soft-pulse": ["soft tone pulse", "deep pulse subtle", "electronic pulse"],
+  "heartbeat": ["heartbeat single", "heart beat subtle", "heart thump"],
+  "soft-impact": ["soft impact", "subtle cinematic thud", "gentle hit"],
+  "clock-tick": ["clock tick", "watch tick", "clock click single"],
+  "subtle-riser": ["subtle riser", "short tension riser", "electronic swell"]
+};
+async function resolveOpenverseSfx(request, openverseToken) {
+  if (request.type === "none") {
+    return null;
+  }
+  const queries = HEALTH_SFX_QUERIES$1[request.type] || request.intents || [request.type];
+  let candidate = null;
+  let usedQuery = queries[0];
+  for (const q of queries) {
+    try {
+      const results = await openverseSearchAudio(q, "sound_effects", 5, openverseToken);
+      const shortClips = results.filter((r) => (r.durationSecs || 1) < 5);
+      if (shortClips.length > 0) {
+        candidate = shortClips[0];
+        usedQuery = q;
+        break;
+      } else if (results.length > 0) {
+        candidate = results[0];
+        usedQuery = q;
+        break;
+      }
+    } catch (err) {
+      logger.debug(`[OpenverseSFX] Search query "${q}" failed: ${err}`);
+    }
+  }
+  if (!candidate) {
+    logger.debug(`[OpenverseSFX] No candidate found for type=${request.type}`);
+    return null;
+  }
+  const destDir = path__namespace.join(request.projectDir, "assets", "audio", "health-sfx");
+  fs__namespace.mkdirSync(destDir, { recursive: true });
+  try {
+    const localPath = await downloadAudio(candidate, destDir);
+    if (!fs__namespace.existsSync(localPath) || fs__namespace.statSync(localPath).size < 512) {
+      return null;
+    }
+    logger.info(`[OpenverseSFX] Downloaded type=${request.type} query="${usedQuery}" -> ${localPath}`);
+    return {
+      type: request.type,
+      provider: "openverse",
+      localPath,
+      durationSecs: candidate.durationSecs || 1,
+      sourceId: candidate.id,
+      sourceLabel: `Openverse (${candidate.id})`,
+      creator: candidate.creator || "Openverse Audio",
+      license: candidate.license || "CC",
+      sourceUrl: candidate.foreignLandingUrl,
+      generated: false
+    };
+  } catch (err) {
+    logger.warn(`[OpenverseSFX] Download error for ${request.type}: ${err}`);
+    return null;
+  }
+}
+class SfxResolver {
+  /**
+   * Resolves a single SFX type through the prioritized provider cascade:
+   * 1. Project Cache
+   * 2. HyperFrames CLI (Node >= 22 required, external isolated process)
+   * 3. Procedural FFmpeg synthesis (local, deterministic lavfi, zero API)
+   * 4. Openverse audio search (optional last resort)
+   * Returns SfxResolverResult containing the resolved SFX and diagnostic attempts.
+   */
+  static async resolveSfxType(request, options = {}) {
+    const attempts = [];
+    if (request.type === "none") {
+      return { attempts };
+    }
+    try {
+      const cached = SfxCacheManager.getCachedSfx(request.projectDir, request.type);
+      if (cached) {
+        attempts.push({ provider: "cache", success: true });
+        return { resolved: cached, attempts };
+      }
+      attempts.push({ provider: "cache", success: false, reason: "Cache miss or file invalid" });
+    } catch (err) {
+      attempts.push({ provider: "cache", success: false, reason: String(err) });
+    }
+    if (!options.skipHyperframes) {
+      try {
+        const hfResolved = await resolveHyperframesSfx(request);
+        if (hfResolved) {
+          SfxCacheManager.recordCachedSfx(request.projectDir, hfResolved);
+          attempts.push({ provider: "hyperframes", success: true });
+          return { resolved: hfResolved, attempts };
+        }
+        attempts.push({ provider: "hyperframes", success: false, reason: "Unavailable, failed, or timed out" });
+      } catch (err) {
+        attempts.push({ provider: "hyperframes", success: false, reason: String(err) });
+      }
+    } else {
+      attempts.push({ provider: "hyperframes", success: false, reason: "Skipped by options" });
+    }
+    if (!options.skipProcedural) {
+      try {
+        const procResolved = await generateProceduralSfx(request);
+        if (procResolved) {
+          SfxCacheManager.recordCachedSfx(request.projectDir, procResolved);
+          attempts.push({ provider: "procedural", success: true });
+          return { resolved: procResolved, attempts };
+        }
+        attempts.push({ provider: "procedural", success: false, reason: "Synthesis failed or binary missing" });
+      } catch (err) {
+        attempts.push({ provider: "procedural", success: false, reason: String(err) });
+      }
+    } else {
+      attempts.push({ provider: "procedural", success: false, reason: "Skipped by options" });
+    }
+    if (!options.skipOpenverse) {
+      try {
+        const ovResolved = await resolveOpenverseSfx(request, options.openverseToken);
+        if (ovResolved) {
+          SfxCacheManager.recordCachedSfx(request.projectDir, ovResolved);
+          attempts.push({ provider: "openverse", success: true });
+          return { resolved: ovResolved, attempts };
+        }
+        attempts.push({ provider: "openverse", success: false, reason: "No result or download failed" });
+      } catch (err) {
+        attempts.push({ provider: "openverse", success: false, reason: String(err) });
+      }
+    } else {
+      attempts.push({ provider: "openverse", success: false, reason: "Skipped by options" });
+    }
+    return { attempts };
+  }
+  /**
+   * Resolves unique SFX types for a project.
+   * Resolves sequentially or bounded to avoid runaway child processes.
+   */
+  static async resolveUniqueTypes(projectDir, types, options = {}) {
+    const unique = Array.from(new Set(types.filter((t) => t !== "none")));
+    const resultMap = /* @__PURE__ */ new Map();
+    const stats = {
+      needed: unique.length,
+      cache: 0,
+      hyperframes: 0,
+      procedural: 0,
+      openverse: 0,
+      failed: 0
+    };
+    for (const type of unique) {
+      const req = {
+        type,
+        intents: [type],
+        projectDir
+      };
+      const res = await this.resolveSfxType(req, options);
+      if (res.resolved) {
+        resultMap.set(type, res.resolved);
+        const prov = res.resolved.provider;
+        if (prov === "cache") stats.cache++;
+        else if (prov === "hyperframes") stats.hyperframes++;
+        else if (prov === "procedural") stats.procedural++;
+        else if (prov === "openverse") stats.openverse++;
+      } else {
+        stats.failed++;
+        logger.warn(`[SfxResolver] All providers failed for SFX type=${type}`);
+      }
+    }
+    logger.info(
+      `[SfxResolver] needed=${stats.needed} cache=${stats.cache} hyperframes=${stats.hyperframes} procedural=${stats.procedural} openverse=${stats.openverse} failed=${stats.failed}`
+    );
+    return resultMap;
+  }
+}
+const STRONG_SFX_TYPES = /* @__PURE__ */ new Set(["soft-impact", "subtle-riser", "heartbeat"]);
+class RetentionSfxPlanner {
+  /**
+   * Augments existing semantic Health SFX cues with Retention intelligence.
+   *
+   * Rules:
+   * 1. Selective density target: roughly 15-25% maximum of total scenes.
+   * 2. Existing meaningful semantic cues win over generic retention cues (Test 94).
+   * 3. Roles mapped to subtle documentary accents:
+   *    - hook: subtle-riser or soft-whoosh
+   *    - re-hook: soft-whoosh or air-swish
+   *    - surprise: soft-impact
+   *    - payoff: soft-impact
+   *    - proof: soft-impact or digital-scan
+   *    - comparison: air-swish
+   *    - mechanism: digital-scan / soft-pulse (only when narratively justified)
+   *    - bridge, recap, conclusion: NO SFX
+   * 4. Density & Cooldown guards:
+   *    - Min gap between cues: ~4.5s
+   *    - Accent gap: ~10.0s
+   *    - Max 1 cue per scene normally
+   *    - No > 2 consecutive identical SFX types
+   *    - Suppress repetitive camera whooshes
+   */
+  static augmentCuesWithRetention(existingCues, scenes, retentionPlan) {
+    if (scenes.length === 0) {
+      return /* @__PURE__ */ new Map();
+    }
+    const sceneMap = new Map(scenes.map((s) => [s.sceneIndex, s]));
+    const retentionSceneMap = /* @__PURE__ */ new Map();
+    if (retentionPlan?.scenes) {
+      for (const rScene of retentionPlan.scenes) {
+        retentionSceneMap.set(rScene.sceneIndex, rScene);
+      }
+    }
+    const maxSfxScenes = Math.max(1, Math.floor(scenes.length * 0.25));
+    const candidates = /* @__PURE__ */ new Map();
+    for (const [idx, cue] of existingCues.entries()) {
+      candidates.set(idx, {
+        sceneIndex: idx,
+        cue: { ...cue },
+        isOriginal: true,
+        priority: cue.type === "clock-tick" || cue.type === "heartbeat" || cue.type === "digital-scan" ? 2 : 5
+      });
+    }
+    if (retentionPlan && retentionSceneMap.size > 0) {
+      for (const scene of scenes) {
+        const rPlan = retentionSceneMap.get(scene.sceneIndex);
+        if (!rPlan) continue;
+        const role = rPlan.role;
+        const text = `${scene.narration || ""} ${scene.visualIntent || ""}`.toLowerCase();
+        if (role === "bridge" || role === "recap" || role === "conclusion") {
+          continue;
+        }
+        if (/\b(warning|danger|fatal|emergency|poison|severe|lethal|overdose)\b/i.test(text)) {
+          continue;
+        }
+        let proposedType = null;
+        let volumeDb = -25;
+        let duration = 0.65;
+        let relativeStart = 0.1;
+        let priority = 10;
+        switch (role) {
+          case "hook":
+            proposedType = "subtle-riser";
+            volumeDb = -23;
+            duration = 1.2;
+            relativeStart = 0.1;
+            priority = 1;
+            break;
+          case "payoff":
+            proposedType = "soft-impact";
+            volumeDb = -23;
+            duration = 0.5;
+            relativeStart = 0.15;
+            priority = 2;
+            break;
+          case "surprise":
+            proposedType = "soft-impact";
+            volumeDb = -22;
+            duration = 0.5;
+            relativeStart = 0.1;
+            priority = 3;
+            break;
+          case "re-hook":
+            proposedType = "soft-whoosh";
+            volumeDb = -25;
+            duration = 0.65;
+            relativeStart = 0.15;
+            priority = 4;
+            break;
+          case "proof":
+            if (rPlan.proofPriority === "high" || rPlan.overlayPriority === "high") {
+              proposedType = "soft-impact";
+              volumeDb = -24;
+              duration = 0.5;
+              relativeStart = 0.2;
+              priority = 5;
+            }
+            break;
+          case "comparison":
+            proposedType = "air-swish";
+            volumeDb = -25;
+            duration = 0.55;
+            relativeStart = 0.15;
+            priority = 6;
+            break;
+          case "mechanism":
+            if (/\b(cell|receptor|molecule|flow|pump|filter|neuron|enzyme|absorb|vessel)\b/i.test(text)) {
+              proposedType = "digital-scan";
+              volumeDb = -26;
+              duration = 0.7;
+              relativeStart = 0.2;
+              priority = 7;
+            }
+            break;
+          default:
+            if (rPlan.patternInterrupt) {
+              proposedType = "air-swish";
+              volumeDb = -25;
+              duration = 0.55;
+              relativeStart = 0.1;
+              priority = 8;
+            }
+            break;
+        }
+        if (!proposedType) continue;
+        const existing = candidates.get(scene.sceneIndex);
+        if (existing) {
+          if (existing.cue.type === "clock-tick" || existing.cue.type === "heartbeat" || existing.cue.type === "digital-scan") {
+            continue;
+          }
+          if (priority < existing.priority) {
+            candidates.set(scene.sceneIndex, {
+              sceneIndex: scene.sceneIndex,
+              cue: {
+                sceneIndex: scene.sceneIndex,
+                type: proposedType,
+                relativeStart,
+                duration,
+                volumeDb,
+                reason: `retention-${role}`
+              },
+              isOriginal: false,
+              priority,
+              role
+            });
+          }
+        } else {
+          candidates.set(scene.sceneIndex, {
+            sceneIndex: scene.sceneIndex,
+            cue: {
+              sceneIndex: scene.sceneIndex,
+              type: proposedType,
+              relativeStart,
+              duration,
+              volumeDb,
+              reason: `retention-${role}`
+            },
+            isOriginal: false,
+            priority,
+            role
+          });
+        }
+      }
+    }
+    const sortedEntries = Array.from(candidates.values()).filter((e) => sceneMap.has(e.sceneIndex)).sort((a, b) => {
+      const sA = sceneMap.get(a.sceneIndex);
+      const sB = sceneMap.get(b.sceneIndex);
+      return sA.startTime - sB.startTime;
+    });
+    const finalCues = /* @__PURE__ */ new Map();
+    let lastCueTime = -999;
+    let lastStrongCueTime = -999;
+    const recentTypes = [];
+    for (const entry of sortedEntries) {
+      if (finalCues.size >= maxSfxScenes) {
+        break;
+      }
+      const scene = sceneMap.get(entry.sceneIndex);
+      const cueTime = scene.startTime + entry.cue.relativeStart;
+      const isStrong = STRONG_SFX_TYPES.has(entry.cue.type);
+      if (cueTime - lastCueTime < 4.5) {
+        continue;
+      }
+      if (isStrong && cueTime - lastStrongCueTime < 10) {
+        continue;
+      }
+      let chosenType = entry.cue.type;
+      const len = recentTypes.length;
+      if (len >= 2 && recentTypes[len - 1] === chosenType && recentTypes[len - 2] === chosenType) {
+        if (chosenType === "soft-whoosh") {
+          chosenType = "air-swish";
+        } else if (chosenType === "air-swish") {
+          chosenType = "soft-pulse";
+        } else {
+          continue;
+        }
+      }
+      if (chosenType === "soft-whoosh" && scene.motionPreset === "subtle-push-in") {
+        const lastType = recentTypes[recentTypes.length - 1];
+        if (lastType === "soft-whoosh") {
+          continue;
+        }
+      }
+      finalCues.set(entry.sceneIndex, {
+        ...entry.cue,
+        type: chosenType
+      });
+      lastCueTime = cueTime;
+      if (STRONG_SFX_TYPES.has(chosenType)) {
+        lastStrongCueTime = cueTime;
+      }
+      recentTypes.push(chosenType);
+    }
+    const densityPercent = Math.round(finalCues.size / scenes.length * 100);
+    logger.info(
+      `[RetentionSFX] planned=${finalCues.size} existingHealth=${existingCues.size} retentionAdded=${finalCues.size - existingCues.size >= 0 ? finalCues.size - existingCues.size : 0} density=${densityPercent}%`
+    );
+    return finalCues;
+  }
+}
 const HEALTH_SFX_QUERIES = {
   none: [],
   "soft-whoosh": ["soft whoosh", "gentle swoosh", "air whoosh"],
@@ -9741,33 +10928,16 @@ const HEALTH_SFX_PARAMS = {
 };
 class HealthSfxDirector {
   static getCachePath(projectDir) {
-    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
+    return SfxCacheManager.getCachePath(projectDir);
   }
   static getAudioDir(projectDir) {
-    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
+    return SfxCacheManager.getAudioDir(projectDir);
   }
   static loadCacheManifest(projectDir) {
-    const p = this.getCachePath(projectDir);
-    if (fs__namespace.existsSync(p)) {
-      try {
-        return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
-      } catch {
-      }
-    }
-    return {
-      schemaVersion: 1,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      entries: {}
-    };
+    return SfxCacheManager.loadCacheManifest(projectDir);
   }
   static saveCacheManifest(projectDir, manifest) {
-    const p = this.getCachePath(projectDir);
-    const dir = path__namespace.dirname(p);
-    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
-    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const tmp = `${p}.tmp.${Date.now()}`;
-    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
-    fs__namespace.renameSync(tmp, p);
+    SfxCacheManager.saveCacheManifest(projectDir, manifest);
   }
   /**
    * Plans subtle, context-matched SFX cues for Health AI scenes,
@@ -9870,72 +11040,30 @@ class HealthSfxDirector {
     return cueMap;
   }
   /**
-   * Downloads and caches Openverse audio files for each unique SFX type,
-   * returning local file paths for each type.
+   * Resolves and caches audio files for each unique SFX type.
+   * Leverages the prioritized SfxResolver:
+   * 1. Project cache
+   * 2. HyperFrames bundled / library resolver
+   * 3. Deterministic local FFmpeg synthesis
+   * 4. Openverse audio fallback
+   * Returns a Map of HealthSfxType to local file path.
    */
   static async resolveAndDownloadSfxTypes(projectDir, types, openverseToken) {
-    const sfxDir = this.getAudioDir(projectDir);
-    if (!fs__namespace.existsSync(sfxDir)) fs__namespace.mkdirSync(sfxDir, { recursive: true });
-    const manifest = this.loadCacheManifest(projectDir);
-    const resolved = /* @__PURE__ */ new Map();
-    for (const type of types) {
-      if (type === "none") continue;
-      const cached = manifest.entries[type];
-      if (cached && fs__namespace.existsSync(cached.localPath) && fs__namespace.statSync(cached.localPath).size > 1024) {
-        logger.info(`[HealthSFX] Reusing cached SFX for ${type}: ${cached.localPath}`);
-        resolved.set(type, cached.localPath);
-        continue;
-      }
-      const queries = HEALTH_SFX_QUERIES[type] || [type];
-      let candidate = null;
-      let usedQuery = queries[0];
-      for (const q of queries) {
-        try {
-          const results = await openverseSearchAudio(q, "sound_effects", 5, openverseToken);
-          const shortClips = results.filter((r) => (r.durationSecs || 1) < 5);
-          if (shortClips.length > 0) {
-            candidate = shortClips[0];
-            usedQuery = q;
-            break;
-          } else if (results.length > 0) {
-            candidate = results[0];
-            usedQuery = q;
-            break;
-          }
-        } catch (err) {
-          logger.warn(`[HealthSFX] Openverse search failed for query "${q}": ${err}`);
-        }
-      }
-      if (!candidate) {
-        logger.warn(`[HealthSFX] No suitable Openverse SFX found for type ${type}`);
-        continue;
-      }
-      try {
-        const localPath = await downloadAudio(candidate, sfxDir);
-        resolved.set(type, localPath);
-        manifest.entries[type] = {
-          assetId: candidate.id,
-          sfxType: type,
-          query: usedQuery,
-          localPath,
-          license: candidate.license,
-          creator: candidate.creator,
-          pageUrl: candidate.foreignLandingUrl,
-          downloadedAt: (/* @__PURE__ */ new Date()).toISOString()
-        };
-        this.saveCacheManifest(projectDir, manifest);
-        logger.info(`[HealthSFX] Downloaded and cached ${type} -> ${localPath}`);
-      } catch (err) {
-        logger.warn(`[HealthSFX] Failed to download SFX for ${type}: ${err}`);
+    const resolvedResult = await SfxResolver.resolveUniqueTypes(projectDir, types, { openverseToken });
+    const pathMap = /* @__PURE__ */ new Map();
+    for (const [type, resolved] of resolvedResult.entries()) {
+      if (resolved.localPath && fs__namespace.existsSync(resolved.localPath)) {
+        pathMap.set(type, resolved.localPath);
       }
     }
-    return resolved;
+    return pathMap;
   }
   /**
    * Applies planned Health SFX cues to the project's audio plan,
+   * augmenting with RetentionPlan if available,
    * setting approved: true and approvedLocalPath for Auto Production.
    */
-  static async applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken) {
+  static async applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan) {
     const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
     let plan = {
       generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -9948,29 +11076,32 @@ class HealthSfxDirector {
       } catch {
       }
     }
-    const uniqueTypes = Array.from(new Set(Array.from(cues.values()).map((c) => c.type)));
-    const downloadedMap = await this.resolveAndDownloadSfxTypes(projectDir, uniqueTypes, openverseToken);
+    const activeCues = retentionPlan ? RetentionSfxPlanner.augmentCuesWithRetention(cues, scenes, retentionPlan) : cues;
+    const uniqueTypes = Array.from(new Set(Array.from(activeCues.values()).map((c) => c.type)));
+    const resolvedDetailMap = await SfxResolver.resolveUniqueTypes(projectDir, uniqueTypes, { openverseToken });
     const healthSfxAssignments = [];
     const sceneMap = new Map(scenes.map((s) => [s.sceneIndex, s]));
-    for (const [sceneIndex, cue] of cues.entries()) {
+    for (const [sceneIndex, cue] of activeCues.entries()) {
       const scene = sceneMap.get(sceneIndex);
       if (!scene) continue;
-      const localPath = downloadedMap.get(cue.type);
+      const resolved = resolvedDetailMap.get(cue.type);
+      const localPath = resolved?.localPath;
       const sfxStart = scene.startTime + cue.relativeStart;
       const sfxEnd = Math.min(scene.endTime, sfxStart + cue.duration);
+      const creator = resolved?.creator || (resolved?.provider === "procedural" ? "Local Procedural SFX" : resolved?.provider === "hyperframes" ? "HyperFrames SFX Library" : "Openverse Audio");
       const assignment = {
         sceneIndex,
         startTime: sfxStart,
         endTime: sfxEnd,
         sfxQuery: cue.type,
         sfxCandidate: localPath ? {
-          id: `health-sfx-${cue.type}`,
+          id: resolved?.sourceId || `health-sfx-${cue.type}`,
           title: `Health SFX (${cue.type})`,
-          creator: "Openverse Health Audio",
-          foreignLandingUrl: "",
+          creator,
+          foreignLandingUrl: resolved?.sourceUrl || "",
           downloadUrl: "",
-          durationSecs: cue.duration,
-          license: "CC"
+          durationSecs: resolved?.durationSecs || cue.duration,
+          license: resolved?.license || "Project Cache"
         } : void 0,
         approved: !!localPath,
         approvedLocalPath: localPath,
@@ -9981,10 +11112,10 @@ class HealthSfxDirector {
       healthSfxAssignments.push(assignment);
     }
     const nonHealthSfx = (plan.sfxAssignments || []).filter(
-      (a) => !cues.has(a.sceneIndex) && !a.sfxQuery.startsWith("soft-") && !a.sfxQuery.startsWith("air-")
+      (a) => !activeCues.has(a.sceneIndex) && !a.sfxQuery.startsWith("soft-") && !a.sfxQuery.startsWith("air-")
     );
     plan.sfxAssignments = [...healthSfxAssignments, ...nonHealthSfx].sort((a, b) => a.startTime - b.startTime);
-    const hashPayload = Array.from(cues.entries()).map(([idx, c]) => `${idx}:${c.type}:${c.relativeStart}:${c.volumeDb}`).join("|");
+    const hashPayload = Array.from(activeCues.entries()).map(([idx, c]) => `${idx}:${c.type}:${c.relativeStart}:${c.volumeDb}`).join("|");
     const planHash = crypto__namespace.createHash("md5").update(hashPayload).digest("hex");
     plan.healthSfx = {
       enabled: true,
@@ -9997,6 +11128,24 @@ class HealthSfxDirector {
     fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
     logger.info(`[HealthSFX] Successfully integrated ${plan.healthSfx.cueCount} approved SFX into audio-plan.json`);
     return plan;
+  }
+  /**
+   * Repairs missing Health SFX in an existing audio plan without modifying valid background music.
+   * Used when audio-plan.json already has valid music sections but 0 or incomplete approved SFX.
+   */
+  static async repairMissingHealthSfx(projectDir, cues, scenes, openverseToken, retentionPlan) {
+    const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+    if (!fs__namespace.existsSync(audioPlanPath)) {
+      return this.applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan);
+    }
+    let existingPlan;
+    try {
+      existingPlan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+    } catch {
+      return this.applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan);
+    }
+    logger.info("[HealthSFX] Repair mode: resolving missing Health SFX while preserving existing music sections");
+    return this.applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan);
   }
 }
 const ANATOMY_REGEX = /\b(liver|stomach|gut|intestine|colon|kidney|heart|brain|lung|pancreas|organ|cell|cellular|tissue|blood\s*flow|bloodstream|vessel|artery|vein|neuron|synapse|digestive|immune|microbiome|bacteria|pathogen|antibody|hormone|enzyme|receptor|insulin|glucose|mitochondria|dna|gene|biology|anatomical|anatomy|arteries|veins|synapses|neurons)\b/i;
@@ -14064,6 +15213,13 @@ Resume from cached scene ${completedScenes + 1}`;
     return emptyInfo();
   }
 }
+function computeSourceFingerprint(scriptText) {
+  if (!scriptText) {
+    return "empty_source_hash";
+  }
+  const normalized = scriptText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  return crypto.createHash("sha256").update(normalized, "utf8").digest("hex");
+}
 function isTranscriptionValid(projectDir, voiceoverPath) {
   const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
   const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
@@ -14083,12 +15239,15 @@ function isTranscriptionValid(projectDir, voiceoverPath) {
     return false;
   }
 }
-function isPlanningValid(projectDir) {
+function isPlanningValid(projectDir, currentScriptHash) {
   const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) return false;
   try {
     const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
     if (!plan || !Array.isArray(plan.chapters) || plan.chapters.length === 0) {
+      return false;
+    }
+    if (currentScriptHash && plan.sourceHash && plan.sourceHash !== currentScriptHash) {
       return false;
     }
     const sceneCount = plan.chapters.reduce(
@@ -14113,13 +15272,15 @@ function isCaptionsValid(projectDir) {
     return false;
   }
 }
-function isGlobalContextValid(projectDir, scriptHash2) {
+function isGlobalContextValid(projectDir, scriptHash) {
   const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
   if (!fs__namespace.existsSync(contextPath)) return false;
   try {
     const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
     if (!ctx || !ctx.primarySubject) return false;
-    if (scriptHash2 && ctx._scriptHash && ctx._scriptHash !== scriptHash2) ;
+    if (scriptHash && ctx._scriptHash && ctx._scriptHash !== scriptHash) {
+      return false;
+    }
     return true;
   } catch {
     return false;
@@ -14255,6 +15416,10 @@ function isAudioValid(projectDir, requireMusic, contentType) {
           const hasSfxCues = (healthPlan.scenes || []).some((s) => s.sfxCue);
           if (hasSfxCues) {
             if (!plan.healthSfx?.enabled) return false;
+            const hasApprovedHealthSfx = (plan.sfxAssignments || []).some(
+              (a) => a.approved && a.approvedLocalPath && fs__namespace.existsSync(a.approvedLocalPath)
+            );
+            if (!hasApprovedHealthSfx) return false;
             const expectedHash = computeHealthMotionHash(healthPlan);
             if (plan.healthSfx.planHash !== expectedHash) return false;
           }
@@ -14278,11 +15443,15 @@ function isPreflightValid(projectDir) {
   }
 }
 function reconcileProjectArtifacts(projectDir, options) {
+  let sourceHash;
+  if (options?.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+    sourceHash = computeSourceFingerprint(fs__namespace.readFileSync(options.scriptPath, "utf-8"));
+  }
   const voPath = options?.voiceoverPath || "";
   const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs__namespace.existsSync(path__namespace.join(projectDir, "analysis", "transcript.json"));
-  const planningValid = isPlanningValid(projectDir);
+  const planningValid = isPlanningValid(projectDir, sourceHash);
   const captionsValid = isCaptionsValid(projectDir);
-  const globalContextValid = isGlobalContextValid(projectDir);
+  const globalContextValid = isGlobalContextValid(projectDir, sourceHash);
   const stockCompletion = checkStockCompletion(projectDir);
   const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic);
   const preflightValid = isPreflightValid(projectDir);
@@ -15033,9 +16202,6 @@ function validateScenePlanCoverage(transcript, scenes) {
 function getContextPath(projectDir) {
   return path.join(projectDir, "analysis", "global-script-context.json");
 }
-function scriptHash(text) {
-  return crypto.createHash("md5").update(text).digest("hex").slice(0, 16);
-}
 const SYSTEM_PROMPT$1 = `You are the Context-Aware Visual Research Engine for a long-form documentary.
 Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
 Rules:
@@ -15095,7 +16261,7 @@ async function analyzeGlobalContext(params) {
   } catch {
   }
   const contextPath = getContextPath(projectDir);
-  const hash = scriptHash(fullText);
+  const hash = computeSourceFingerprint(fullText);
   if (!forceRegenerate && fs__namespace.existsSync(contextPath)) {
     try {
       const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
@@ -15461,6 +16627,480 @@ function saveGlobalContext(projectDir, ctx) {
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
   fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
 }
+const CONTENT_PROFILE_SCHEMA_VERSION = 1;
+const ANATOMICAL_ORGAN_SIGNALS = [
+  "liver",
+  "kidney",
+  "kidneys",
+  "heart",
+  "brain",
+  "gut",
+  "lung",
+  "lungs",
+  "pancreas",
+  "stomach",
+  "intestine",
+  "intestines",
+  "colon",
+  "gallbladder",
+  "spleen",
+  "artery",
+  "arteries",
+  "vein",
+  "veins",
+  "bloodstream",
+  "blood vessel",
+  "blood vessels",
+  "neuron",
+  "neurons",
+  "synapse",
+  "synapses",
+  "neurotransmitter",
+  "microbiome",
+  "microbiota",
+  "cells",
+  "cellular",
+  "mitochondria",
+  "dna",
+  "rna"
+];
+const PHYSIOLOGICAL_MECHANISM_SIGNALS = [
+  "physiology",
+  "physiological",
+  "metabolism",
+  "metabolic",
+  "insulin",
+  "glucose",
+  "blood sugar",
+  "glycogen",
+  "insulin resistance",
+  "blood pressure",
+  "hypertension",
+  "cholesterol",
+  "triglyceride",
+  "inflammation",
+  "inflammatory",
+  "oxidation",
+  "oxidative stress",
+  "hormone",
+  "hormones",
+  "endocrine",
+  "cortisol",
+  "adrenaline",
+  "melatonin",
+  "dopamine",
+  "serotonin",
+  "digestive process",
+  "digestion",
+  "nutrient absorption",
+  "circadian rhythm",
+  "rem sleep",
+  "deep sleep",
+  "sleep cycle",
+  "autophagy",
+  "apoptosis",
+  "immune system",
+  "pathogen",
+  "antibody",
+  "antibodies"
+];
+const CLINICAL_MEDICAL_SIGNALS = [
+  "cardiovascular",
+  "gastrointestinal",
+  "neurological",
+  "biomarker",
+  "clinical trial",
+  "clinical trials",
+  "pathology",
+  "pathological",
+  "symptom",
+  "symptoms",
+  "medical diagnosis",
+  "human anatomy",
+  "anatomical structure",
+  "supplements",
+  "micronutrient",
+  "micronutrients",
+  "electrolyte",
+  "electrolytes"
+];
+const FALSE_POSITIVE_TRIGGERS = [
+  /\bfinancial health\b/i,
+  /\beconomic health\b/i,
+  /\bhealth of the economy\b/i,
+  /\bcompany health\b/i,
+  /\bbusiness health\b/i,
+  /\bmarket health\b/i,
+  /\bcommunity health\b/i,
+  /\bpolitical health\b/i,
+  /\bsystem health\b/i
+];
+function getContentProfilePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "content-profile.json");
+}
+function loadContentProfileArtifact(projectDir, currentSourceHash) {
+  const filePath = getContentProfilePath(projectDir);
+  if (!fs__namespace.existsSync(filePath)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && (parsed.resolvedProfile === "health" || parsed.resolvedProfile === "general")) {
+      if (currentSourceHash && parsed.sourceHash && parsed.sourceHash !== currentSourceHash) {
+        return null;
+      }
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+}
+function saveContentProfileArtifact(projectDir, detection) {
+  const analysisDir = path__namespace.join(projectDir, "analysis");
+  if (!fs__namespace.existsSync(analysisDir)) {
+    fs__namespace.mkdirSync(analysisDir, { recursive: true });
+  }
+  const filePath = getContentProfilePath(projectDir);
+  const tempPath = `${filePath}.${Date.now()}.tmp`;
+  fs__namespace.writeFileSync(tempPath, JSON.stringify(detection, null, 2), "utf-8");
+  fs__namespace.renameSync(tempPath, filePath);
+}
+function evaluateContentProfileSemantics(params) {
+  const { scriptText = "", scenes = [], globalContext } = params;
+  const sceneTexts = scenes.map((s) => `${s.narrativeText ?? s.narration ?? ""} ${s.visualIntent ?? s.visualDescription ?? ""}`);
+  const combinedText = `${scriptText} ${sceneTexts.join(" ")}`.toLowerCase();
+  const gSubject = (globalContext?.primarySubject || "").toLowerCase();
+  const gThesis = (globalContext?.centralThesis || "").toLowerCase();
+  const gAnchors = (globalContext?.exactTopicAnchors || []).map((a) => a.toLowerCase()).join(" ");
+  const gContextCombined = `${gSubject} ${gThesis} ${gAnchors}`;
+  const foundSignals = /* @__PURE__ */ new Set();
+  const allSignalList = [
+    ...ANATOMICAL_ORGAN_SIGNALS,
+    ...PHYSIOLOGICAL_MECHANISM_SIGNALS,
+    ...CLINICAL_MEDICAL_SIGNALS
+  ];
+  let totalSignalOccurrences = 0;
+  for (const signal of allSignalList) {
+    const regex = new RegExp(`\\b${signal.replace(/\s+/g, "\\s+")}\\b`, "gi");
+    const matchesInText = combinedText.match(regex);
+    const matchesInGlobal = gContextCombined.match(regex);
+    const count = (matchesInText?.length || 0) + (matchesInGlobal?.length ? matchesInGlobal.length * 2 : 0);
+    if (count > 0) {
+      foundSignals.add(signal);
+      totalSignalOccurrences += count;
+    }
+  }
+  let falsePositiveHits = 0;
+  for (const fpRegex of FALSE_POSITIVE_TRIGGERS) {
+    if (fpRegex.test(combinedText)) {
+      falsePositiveHits++;
+    }
+  }
+  const detectedSignals = Array.from(foundSignals);
+  const reasons = [];
+  const organHits = ANATOMICAL_ORGAN_SIGNALS.filter((s) => foundSignals.has(s));
+  const mechanismHits = PHYSIOLOGICAL_MECHANISM_SIGNALS.filter((s) => foundSignals.has(s));
+  const clinicalHits = CLINICAL_MEDICAL_SIGNALS.filter((s) => foundSignals.has(s));
+  const isGlobalSubjectMedical = ANATOMICAL_ORGAN_SIGNALS.some((s) => new RegExp(`\\b${s.replace(/\\s+/g, "\\\\s+")}\\b`, "gi").test(gSubject)) || PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => new RegExp(`\\b${s.replace(/\\s+/g, "\\\\s+")}\\b`, "gi").test(gSubject));
+  const hasStrongOrganPresence = organHits.length >= 2;
+  const hasDiverseSignals = organHits.length > 0 && mechanismHits.length > 0 || detectedSignals.length >= 4;
+  const isHeavySignalDensity = totalSignalOccurrences >= 5 && detectedSignals.length >= 2;
+  const isHealth = (hasDiverseSignals || isGlobalSubjectMedical || hasStrongOrganPresence && isHeavySignalDensity) && !(falsePositiveHits > 0 && detectedSignals.length < 3);
+  if (isHealth) {
+    if (organHits.length > 0) {
+      reasons.push(`Identified biological/anatomical organs: ${organHits.slice(0, 5).join(", ")}`);
+    }
+    if (mechanismHits.length > 0) {
+      reasons.push(`Detected physiological and metabolic mechanisms: ${mechanismHits.slice(0, 5).join(", ")}`);
+    }
+    if (clinicalHits.length > 0) {
+      reasons.push(`Referenced clinical or medical context: ${clinicalHits.slice(0, 4).join(", ")}`);
+    }
+    if (isGlobalSubjectMedical) {
+      reasons.push(`Global script context primary subject (${globalContext?.primarySubject}) centers on human physiology`);
+    }
+    if (reasons.length === 0) {
+      reasons.push(`Detected ${detectedSignals.length} distinct biological/physiological signals throughout script`);
+    }
+    const confidence2 = Math.min(0.98, Math.max(0.82, 0.8 + detectedSignals.length * 0.03 + (isGlobalSubjectMedical ? 0.08 : 0)));
+    return {
+      resolvedProfile: "health",
+      confidence: Math.round(confidence2 * 100) / 100,
+      reasons,
+      detectedSignals
+    };
+  }
+  if (falsePositiveHits > 0) {
+    reasons.push("Health terminology appears in metaphorical or financial/economic context");
+  } else if (detectedSignals.length === 0) {
+    reasons.push("No anatomical organs, clinical terms or physiological mechanisms detected");
+  } else {
+    reasons.push(
+      `Isolated mentions (${detectedSignals.slice(0, 3).join(", ")}) insufficient to establish medical/physiological focus`
+    );
+  }
+  reasons.push("Script narrative aligns with general documentary style (history, society, tech, culture, nature, or lifestyle)");
+  const confidence = Math.min(0.98, Math.max(0.88, 0.98 - detectedSignals.length * 0.03));
+  return {
+    resolvedProfile: "general",
+    confidence: Math.round(confidence * 100) / 100,
+    reasons,
+    detectedSignals
+  };
+}
+async function detectOrResolveContentProfile(params) {
+  const { projectDir, forceRefresh = false } = params;
+  const mode = params.mode ?? "auto";
+  if (mode === "health" || mode === "general") {
+    const overrideDetection = {
+      schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
+      mode,
+      resolvedProfile: mode,
+      confidence: 1,
+      reasons: [`Explicit user profile mode override: ${mode}`],
+      detectedSignals: [],
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    let overrideScriptText = params.scriptText ?? "";
+    if (!overrideScriptText) {
+      const possibleScriptPaths = [
+        path__namespace.join(projectDir, "source", "script.txt"),
+        path__namespace.join(projectDir, "source", "script.md"),
+        path__namespace.join(projectDir, "analysis", "script.txt")
+      ];
+      for (const p of possibleScriptPaths) {
+        if (fs__namespace.existsSync(p)) {
+          try {
+            overrideScriptText = fs__namespace.readFileSync(p, "utf-8");
+            break;
+          } catch {
+          }
+        }
+      }
+    }
+    if (overrideScriptText) {
+      overrideDetection.sourceHash = computeSourceFingerprint(overrideScriptText);
+    }
+    saveContentProfileArtifact(projectDir, overrideDetection);
+    logger.info(`[ContentProfile] Explicit profile override applied: ${mode}`);
+    return overrideDetection;
+  }
+  let scriptText = params.scriptText ?? "";
+  if (!scriptText) {
+    const possibleScriptPaths = [
+      path__namespace.join(projectDir, "source", "script.txt"),
+      path__namespace.join(projectDir, "source", "script.md"),
+      path__namespace.join(projectDir, "analysis", "script.txt")
+    ];
+    for (const p of possibleScriptPaths) {
+      if (fs__namespace.existsSync(p)) {
+        try {
+          scriptText = fs__namespace.readFileSync(p, "utf-8");
+          break;
+        } catch {
+        }
+      }
+    }
+  }
+  const currentSourceHash = scriptText ? computeSourceFingerprint(scriptText) : void 0;
+  if (!forceRefresh) {
+    const cached = loadContentProfileArtifact(projectDir, currentSourceHash);
+    if (cached && cached.mode === "auto") {
+      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`);
+      return cached;
+    }
+  }
+  let rawScenes = params.rawScenes;
+  if (!rawScenes) {
+    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+    if (fs__namespace.existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+        const scenes = [];
+        for (const ch of plan.chapters || []) {
+          const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+          for (const seq of seqs) {
+            for (const sc of seq.scenes || []) {
+              scenes.push({
+                sceneIndex: sc.sceneIndex,
+                narrativeText: sc.narrativeText ?? sc.narration ?? "",
+                visualIntent: sc.visualIntent ?? sc.visualDescription ?? ""
+              });
+            }
+          }
+        }
+        rawScenes = scenes;
+      } catch {
+      }
+    }
+  }
+  let globalContext = params.globalContext;
+  if (!globalContext) {
+    const ctxPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+    if (fs__namespace.existsSync(ctxPath)) {
+      try {
+        globalContext = JSON.parse(fs__namespace.readFileSync(ctxPath, "utf-8"));
+      } catch {
+      }
+    }
+  }
+  const evaluation = evaluateContentProfileSemantics({
+    scriptText,
+    scenes: rawScenes,
+    globalContext
+  });
+  let ci;
+  if (globalContext) {
+    ci = generateContentIntelligence({
+      projectDir,
+      scriptText,
+      globalContext
+    });
+  }
+  const detection = {
+    schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
+    mode: "auto",
+    resolvedProfile: evaluation.resolvedProfile,
+    confidence: evaluation.confidence,
+    reasons: evaluation.reasons,
+    detectedSignals: evaluation.detectedSignals,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sourceHash: currentSourceHash,
+    scriptSubject: ci?.subject?.primarySubject,
+    semanticProfile: ci ? {
+      humanMedical: ci.executionProfile.humanMedical,
+      humanMedicalConfidence: ci.executionProfile.humanMedicalConfidence,
+      primaryDomain: ci.domain.primaryDomain
+    } : void 0
+  };
+  saveContentProfileArtifact(projectDir, detection);
+  logger.info(
+    `[ContentProfile] Auto-detected profile: ${detection.resolvedProfile} (confidence=${detection.confidence}, signals=[${detection.detectedSignals.slice(0, 6).join(", ")}])`
+  );
+  return detection;
+}
+function getContentIntelligencePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "content-intelligence.json");
+}
+function loadContentIntelligence(projectDir, currentHash) {
+  const p = getContentIntelligencePath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    const data = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    if (data.sourceHash === currentHash) {
+      return data;
+    }
+  } catch {
+  }
+  return null;
+}
+function saveContentIntelligence(projectDir, ci) {
+  const p = getContentIntelligencePath(projectDir);
+  fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(p, JSON.stringify(ci, null, 2), "utf-8");
+}
+function generateContentIntelligence(params) {
+  const { projectDir, scriptText, globalContext } = params;
+  const sourceHash = computeSourceFingerprint(scriptText);
+  const cached = loadContentIntelligence(projectDir, sourceHash);
+  if (cached) return cached;
+  const evaluation = evaluateContentProfileSemantics({ scriptText, globalContext });
+  const primaryDomain = globalContext.targetAudience || "general documentary";
+  const ci = {
+    schemaVersion: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sourceHash,
+    subject: {
+      primarySubject: globalContext.primarySubject,
+      secondarySubjects: globalContext.secondarySubjects || [],
+      mainEntities: globalContext.exactTopicAnchors || []
+    },
+    domain: {
+      primaryDomain,
+      secondaryDomains: [],
+      confidence: evaluation.confidence
+    },
+    executionProfile: {
+      recommended: evaluation.resolvedProfile,
+      confidence: evaluation.confidence,
+      humanMedical: evaluation.resolvedProfile === "health",
+      humanMedicalConfidence: evaluation.resolvedProfile === "health" ? evaluation.confidence : 0,
+      reason: evaluation.reasons.join("; ")
+    },
+    documentaryAngle: globalContext.documentaryAngle || "",
+    visualOntology: {
+      people: globalContext.recurringPeople?.map((p) => p.role) || [],
+      places: globalContext.geography?.secondaryLocations || [],
+      environments: globalContext.visualWorld?.environment || [],
+      objects: globalContext.visualWorld?.recurringObjects || [],
+      activities: globalContext.visualWorld?.occupations || [],
+      infrastructure: globalContext.visualWorld?.architecture || [],
+      machinery: globalContext.visualWorld?.machinery || [],
+      documents: []
+    },
+    visualStyle: {
+      documentaryStyle: globalContext.visualWorld?.documentaryStyle || "",
+      lighting: globalContext.visualWorld?.colorMood || "",
+      colorMood: globalContext.visualWorld?.colorMood || "",
+      cameraLanguage: "observational"
+    },
+    forbiddenInterpretations: globalContext.forbiddenSubstitutions || [],
+    dangerousAmbiguities: [],
+    evidence: evaluation.reasons.map((r) => ({ signal: r, explanation: r })),
+    generatedBy: "deterministic-fallback"
+  };
+  saveContentIntelligence(projectDir, ci);
+  return ci;
+}
+const MEDICAL_UNSUPPORTED_DOMAINS = [
+  "kidney",
+  "liver",
+  "bladder",
+  "blood vessel",
+  "artery",
+  "organ",
+  "anatomy",
+  "physiology",
+  "biological tissue",
+  "medical",
+  "clinical",
+  "human cells",
+  "biological fluid",
+  "hormone",
+  "enzyme",
+  "filtering biological fluid",
+  "physiological activity",
+  "observable biological state",
+  "medical documentary"
+];
+function validateSemanticFidelity(textToValidate, contentIntelligence, sceneNarration) {
+  const lowerText = textToValidate.toLowerCase();
+  const lowerNarration = (sceneNarration || "").toLowerCase();
+  const unsupported = [];
+  if (contentIntelligence && !contentIntelligence.executionProfile.humanMedical) {
+    for (const term of MEDICAL_UNSUPPORTED_DOMAINS) {
+      if (lowerText.includes(term)) {
+        if (!lowerNarration.includes(term)) {
+          unsupported.push(term);
+        }
+      }
+    }
+    for (const term of contentIntelligence.forbiddenInterpretations) {
+      if (lowerText.includes(term.toLowerCase())) {
+        if (!lowerNarration.includes(term.toLowerCase())) {
+          unsupported.push(term.toLowerCase());
+        }
+      }
+    }
+  }
+  const isValid = unsupported.length === 0;
+  return {
+    valid: isValid,
+    score: isValid ? 1 : 0,
+    unsupportedConcepts: unsupported,
+    supportedConcepts: [],
+    reason: isValid ? "Passes semantic fidelity check" : `Unsupported domain introduction: ${unsupported.join(", ")}`
+  };
+}
 function extractVisualQueries(text) {
   const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
   const words = clean.split(/\s+/).filter((w) => w.length > 2);
@@ -15803,7 +17443,7 @@ function applyLocalMediaMatching(scene, localAssetSuggestion, mediaFiles) {
   scene.mediaType = "video";
   scene.localAsset = void 0;
 }
-function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
+function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced", sourceHash) {
   const skeletons = buildSceneSkeleton(transcript, pacing);
   const outline = buildAlgorithmicOutline(skeletons, transcript.duration);
   const skeletonMap = /* @__PURE__ */ new Map();
@@ -15887,7 +17527,8 @@ function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
     modelUsed: "rule-based-segmenter",
     openLoops: [],
     motifRegistry: [],
-    retentionFlags: initialFlags
+    retentionFlags: initialFlags,
+    sourceHash
   };
 }
 async function buildEditPlan(params) {
@@ -15941,6 +17582,7 @@ async function buildEditPlan(params) {
   } catch (err) {
     logger.warn(`Could not load script text or project settings: ${err}`);
   }
+  const sourceHash = scriptText ? computeSourceFingerprint(scriptText) : void 0;
   progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.1);
   const skeletons = buildSceneSkeleton(transcript, projectPacing);
   progress(
@@ -15950,7 +17592,7 @@ async function buildEditPlan(params) {
   const cleanApiKey = normalizeApiKey(apiKey);
   if (!cleanApiKey) {
     logger.warn("[PLAN] No API key provided, creating algorithmic edit plan");
-    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing);
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing, sourceHash);
     const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
     fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
     progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
@@ -16021,6 +17663,7 @@ async function buildEditPlan(params) {
     if (b === 0) primaryModelUsed = modelUsed;
   }
   progress("Assembling master edit plan...", 0.85);
+  const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null;
   const skeletonMap = /* @__PURE__ */ new Map();
   for (const skel of skeletons) {
     skeletonMap.set(skel.sceneIndex, skel);
@@ -16038,6 +17681,25 @@ async function buildEditPlan(params) {
         const aiData = allEnrichedMap.get(skel.sceneIndex);
         const rawQueries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
         const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)));
+        let finalIntent = aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll";
+        let finalQueries = queries;
+        if (ci) {
+          const intentFid = validateSemanticFidelity(finalIntent, ci, skel.narrativeText);
+          if (!intentFid.valid) {
+            logger.warn(`[SemanticGate] Rejected visualIntent "${finalIntent}" in Scene ${skel.sceneIndex}: ${intentFid.reason}`);
+            finalIntent = "Documentary cinematic b-roll";
+          }
+          finalQueries = queries.filter((q) => {
+            const fid = validateSemanticFidelity(q, ci, skel.narrativeText);
+            if (!fid.valid) {
+              logger.warn(`[SemanticGate] Rejected query "${q}" in Scene ${skel.sceneIndex}: ${fid.reason}`);
+            }
+            return fid.valid;
+          });
+          if (finalQueries.length === 0) {
+            finalQueries.push("documentary cinematic b-roll");
+          }
+        }
         const sc = {
           sceneIndex: skel.sceneIndex,
           // will be globally normalized below
@@ -16049,9 +17711,9 @@ async function buildEditPlan(params) {
           narrativeText: skel.narrativeText,
           transcriptSegmentIds: [...skel.transcriptSegmentIds],
           transitionIn: aiData?.transitionIn ?? "cut",
-          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
-          visualIntent: aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll",
-          searchQueries: queries,
+          visualNote: aiData?.visualNote ?? `Visual shot: ${finalQueries[0]}`,
+          visualIntent: finalIntent,
+          searchQueries: finalQueries,
           energyLevel: aiData?.energyLevel ?? inferEnergyLevelFromText(skel.narrativeText),
           shotType: aiData?.shotType ?? inferShotTypeFromText(skel.narrativeText)
         };
@@ -16122,7 +17784,8 @@ async function buildEditPlan(params) {
     modelUsed: finalModelUsed,
     openLoops: [],
     motifRegistry: [],
-    retentionFlags: initialFlags
+    retentionFlags: initialFlags,
+    sourceHash
   };
   progress("Saving master edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
@@ -22931,318 +24594,6 @@ Retry failed AI visuals.`;
     }
   };
 }
-const CONTENT_PROFILE_SCHEMA_VERSION = 1;
-const ANATOMICAL_ORGAN_SIGNALS = [
-  "liver",
-  "kidney",
-  "kidneys",
-  "heart",
-  "brain",
-  "gut",
-  "lung",
-  "lungs",
-  "pancreas",
-  "stomach",
-  "intestine",
-  "intestines",
-  "colon",
-  "gallbladder",
-  "spleen",
-  "artery",
-  "arteries",
-  "vein",
-  "veins",
-  "bloodstream",
-  "blood vessel",
-  "blood vessels",
-  "neuron",
-  "neurons",
-  "synapse",
-  "synapses",
-  "neurotransmitter",
-  "microbiome",
-  "microbiota",
-  "cells",
-  "cellular",
-  "mitochondria",
-  "dna",
-  "rna"
-];
-const PHYSIOLOGICAL_MECHANISM_SIGNALS = [
-  "physiology",
-  "physiological",
-  "metabolism",
-  "metabolic",
-  "insulin",
-  "glucose",
-  "blood sugar",
-  "glycogen",
-  "insulin resistance",
-  "blood pressure",
-  "hypertension",
-  "cholesterol",
-  "triglyceride",
-  "inflammation",
-  "inflammatory",
-  "oxidation",
-  "oxidative stress",
-  "hormone",
-  "hormones",
-  "endocrine",
-  "cortisol",
-  "adrenaline",
-  "melatonin",
-  "dopamine",
-  "serotonin",
-  "digestive process",
-  "digestion",
-  "nutrient absorption",
-  "circadian rhythm",
-  "rem sleep",
-  "deep sleep",
-  "sleep cycle",
-  "autophagy",
-  "apoptosis",
-  "immune system",
-  "pathogen",
-  "antibody",
-  "antibodies"
-];
-const CLINICAL_MEDICAL_SIGNALS = [
-  "cardiovascular",
-  "gastrointestinal",
-  "neurological",
-  "biomarker",
-  "clinical trial",
-  "clinical trials",
-  "pathology",
-  "pathological",
-  "symptom",
-  "symptoms",
-  "medical diagnosis",
-  "human anatomy",
-  "anatomical structure",
-  "supplements",
-  "micronutrient",
-  "micronutrients",
-  "electrolyte",
-  "electrolytes"
-];
-const FALSE_POSITIVE_TRIGGERS = [
-  /\bfinancial health\b/i,
-  /\beconomic health\b/i,
-  /\bhealth of the economy\b/i,
-  /\bcompany health\b/i,
-  /\bbusiness health\b/i,
-  /\bmarket health\b/i,
-  /\bcommunity health\b/i,
-  /\bpolitical health\b/i,
-  /\bsystem health\b/i
-];
-function getContentProfilePath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "content-profile.json");
-}
-function loadContentProfileArtifact(projectDir) {
-  const filePath = getContentProfilePath(projectDir);
-  if (!fs__namespace.existsSync(filePath)) return null;
-  try {
-    const raw = fs__namespace.readFileSync(filePath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed && (parsed.resolvedProfile === "health" || parsed.resolvedProfile === "general")) {
-      return parsed;
-    }
-  } catch {
-  }
-  return null;
-}
-function saveContentProfileArtifact(projectDir, detection) {
-  const analysisDir = path__namespace.join(projectDir, "analysis");
-  if (!fs__namespace.existsSync(analysisDir)) {
-    fs__namespace.mkdirSync(analysisDir, { recursive: true });
-  }
-  const filePath = getContentProfilePath(projectDir);
-  const tempPath = `${filePath}.${Date.now()}.tmp`;
-  fs__namespace.writeFileSync(tempPath, JSON.stringify(detection, null, 2), "utf-8");
-  fs__namespace.renameSync(tempPath, filePath);
-}
-function evaluateContentProfileSemantics(params) {
-  const { scriptText = "", scenes = [], globalContext } = params;
-  const sceneTexts = scenes.map((s) => `${s.narrativeText ?? s.narration ?? ""} ${s.visualIntent ?? s.visualDescription ?? ""}`);
-  const combinedText = `${scriptText} ${sceneTexts.join(" ")}`.toLowerCase();
-  const gSubject = (globalContext?.primarySubject || "").toLowerCase();
-  const gThesis = (globalContext?.centralThesis || "").toLowerCase();
-  const gAnchors = (globalContext?.exactTopicAnchors || []).map((a) => a.toLowerCase()).join(" ");
-  const gContextCombined = `${gSubject} ${gThesis} ${gAnchors}`;
-  const foundSignals = /* @__PURE__ */ new Set();
-  const allSignalList = [
-    ...ANATOMICAL_ORGAN_SIGNALS,
-    ...PHYSIOLOGICAL_MECHANISM_SIGNALS,
-    ...CLINICAL_MEDICAL_SIGNALS
-  ];
-  let totalSignalOccurrences = 0;
-  for (const signal of allSignalList) {
-    const regex = new RegExp(`\\b${signal.replace(/\s+/g, "\\s+")}\\b`, "gi");
-    const matchesInText = combinedText.match(regex);
-    const matchesInGlobal = gContextCombined.match(regex);
-    const count = (matchesInText?.length || 0) + (matchesInGlobal?.length ? matchesInGlobal.length * 2 : 0);
-    if (count > 0) {
-      foundSignals.add(signal);
-      totalSignalOccurrences += count;
-    }
-  }
-  let falsePositiveHits = 0;
-  for (const fpRegex of FALSE_POSITIVE_TRIGGERS) {
-    if (fpRegex.test(combinedText)) {
-      falsePositiveHits++;
-    }
-  }
-  const detectedSignals = Array.from(foundSignals);
-  const reasons = [];
-  const organHits = ANATOMICAL_ORGAN_SIGNALS.filter((s) => foundSignals.has(s));
-  const mechanismHits = PHYSIOLOGICAL_MECHANISM_SIGNALS.filter((s) => foundSignals.has(s));
-  const clinicalHits = CLINICAL_MEDICAL_SIGNALS.filter((s) => foundSignals.has(s));
-  const isGlobalSubjectMedical = ANATOMICAL_ORGAN_SIGNALS.some((s) => gSubject.includes(s)) || PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => gSubject.includes(s));
-  const hasStrongOrganPresence = organHits.length >= 2;
-  const hasDiverseSignals = organHits.length > 0 && mechanismHits.length > 0 || detectedSignals.length >= 4;
-  const isHeavySignalDensity = totalSignalOccurrences >= 5 && detectedSignals.length >= 2;
-  const isHealth = (hasDiverseSignals || isGlobalSubjectMedical || hasStrongOrganPresence && isHeavySignalDensity) && !(falsePositiveHits > 0 && detectedSignals.length < 3);
-  if (isHealth) {
-    if (organHits.length > 0) {
-      reasons.push(`Identified biological/anatomical organs: ${organHits.slice(0, 5).join(", ")}`);
-    }
-    if (mechanismHits.length > 0) {
-      reasons.push(`Detected physiological and metabolic mechanisms: ${mechanismHits.slice(0, 5).join(", ")}`);
-    }
-    if (clinicalHits.length > 0) {
-      reasons.push(`Referenced clinical or medical context: ${clinicalHits.slice(0, 4).join(", ")}`);
-    }
-    if (isGlobalSubjectMedical) {
-      reasons.push(`Global script context primary subject (${globalContext?.primarySubject}) centers on human physiology`);
-    }
-    if (reasons.length === 0) {
-      reasons.push(`Detected ${detectedSignals.length} distinct biological/physiological signals throughout script`);
-    }
-    const confidence2 = Math.min(0.98, Math.max(0.82, 0.8 + detectedSignals.length * 0.03 + (isGlobalSubjectMedical ? 0.08 : 0)));
-    return {
-      resolvedProfile: "health",
-      confidence: Math.round(confidence2 * 100) / 100,
-      reasons,
-      detectedSignals
-    };
-  }
-  if (falsePositiveHits > 0) {
-    reasons.push("Health terminology appears in metaphorical or financial/economic context");
-  } else if (detectedSignals.length === 0) {
-    reasons.push("No anatomical organs, clinical terms or physiological mechanisms detected");
-  } else {
-    reasons.push(
-      `Isolated mentions (${detectedSignals.slice(0, 3).join(", ")}) insufficient to establish medical/physiological focus`
-    );
-  }
-  reasons.push("Script narrative aligns with general documentary style (history, society, tech, culture, nature, or lifestyle)");
-  const confidence = Math.min(0.98, Math.max(0.88, 0.98 - detectedSignals.length * 0.03));
-  return {
-    resolvedProfile: "general",
-    confidence: Math.round(confidence * 100) / 100,
-    reasons,
-    detectedSignals
-  };
-}
-async function detectOrResolveContentProfile(params) {
-  const { projectDir, forceRefresh = false } = params;
-  const mode = params.mode ?? "auto";
-  if (mode === "health" || mode === "general") {
-    const overrideDetection = {
-      schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
-      mode,
-      resolvedProfile: mode,
-      confidence: 1,
-      reasons: [`Explicit user profile mode override: ${mode}`],
-      detectedSignals: [],
-      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    saveContentProfileArtifact(projectDir, overrideDetection);
-    logger.info(`[ContentProfile] Explicit profile override applied: ${mode}`);
-    return overrideDetection;
-  }
-  if (!forceRefresh) {
-    const cached = loadContentProfileArtifact(projectDir);
-    if (cached && cached.mode === "auto") {
-      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`);
-      return cached;
-    }
-  }
-  let scriptText = params.scriptText ?? "";
-  if (!scriptText) {
-    const possibleScriptPaths = [
-      path__namespace.join(projectDir, "source", "script.txt"),
-      path__namespace.join(projectDir, "source", "script.md"),
-      path__namespace.join(projectDir, "analysis", "script.txt")
-    ];
-    for (const p of possibleScriptPaths) {
-      if (fs__namespace.existsSync(p)) {
-        try {
-          scriptText = fs__namespace.readFileSync(p, "utf-8");
-          break;
-        } catch {
-        }
-      }
-    }
-  }
-  let rawScenes = params.rawScenes;
-  if (!rawScenes) {
-    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-    if (fs__namespace.existsSync(planPath)) {
-      try {
-        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-        const scenes = [];
-        for (const ch of plan.chapters || []) {
-          const seqs = ch.chapters_seq ?? ch.sequences ?? [];
-          for (const seq of seqs) {
-            for (const sc of seq.scenes || []) {
-              scenes.push({
-                sceneIndex: sc.sceneIndex,
-                narrativeText: sc.narrativeText ?? sc.narration ?? "",
-                visualIntent: sc.visualIntent ?? sc.visualDescription ?? ""
-              });
-            }
-          }
-        }
-        rawScenes = scenes;
-      } catch {
-      }
-    }
-  }
-  let globalContext = params.globalContext;
-  if (!globalContext) {
-    const ctxPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
-    if (fs__namespace.existsSync(ctxPath)) {
-      try {
-        globalContext = JSON.parse(fs__namespace.readFileSync(ctxPath, "utf-8"));
-      } catch {
-      }
-    }
-  }
-  const evaluation = evaluateContentProfileSemantics({
-    scriptText,
-    scenes: rawScenes,
-    globalContext
-  });
-  const detection = {
-    schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
-    mode: "auto",
-    resolvedProfile: evaluation.resolvedProfile,
-    confidence: evaluation.confidence,
-    reasons: evaluation.reasons,
-    detectedSignals: evaluation.detectedSignals,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  saveContentProfileArtifact(projectDir, detection);
-  logger.info(
-    `[ContentProfile] Auto-detected profile: ${detection.resolvedProfile} (confidence=${detection.confidence}, signals=[${detection.detectedSignals.slice(0, 6).join(", ")}])`
-  );
-  return detection;
-}
 function checkAborted(signal) {
   if (signal?.aborted) {
     throw new Error("Pipeline execution was cancelled.");
@@ -23326,7 +24677,14 @@ async function runTranscriptionStage(options, onProgress, signal) {
 async function runPlanningStage(options, onProgress, signal) {
   checkAborted(signal);
   const planPath = path__namespace.join(options.projectDir, "analysis", "master-edit-plan.json");
-  if (isPlanningValid(options.projectDir)) {
+  let sourceHash;
+  try {
+    if (options.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+      sourceHash = computeSourceFingerprint(fs__namespace.readFileSync(options.scriptPath, "utf-8"));
+    }
+  } catch {
+  }
+  if (isPlanningValid(options.projectDir, sourceHash)) {
     try {
       const cached = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
       onProgress("Using cached master edit plan", 1);
@@ -23428,7 +24786,11 @@ async function runGlobalContextStage(options, onProgress, signal) {
   }
   let ctx = null;
   let isCached = false;
-  if (isGlobalContextValid(options.projectDir)) {
+  let sourceHash;
+  if (scriptText) {
+    sourceHash = computeSourceFingerprint(scriptText);
+  }
+  if (isGlobalContextValid(options.projectDir, sourceHash)) {
     try {
       ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
       isCached = true;
@@ -23514,7 +24876,17 @@ async function runStockSearchStage(options, onProgress, signal) {
   checkAborted(signal);
   const mix = resolveVisualMixConfig(options);
   if (mix.mode === "custom-mix") {
-    const mode = options.contentProfileMode ?? resolveContentProfileMode(options);
+    let currentSourceHash;
+    try {
+      if (options.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+        currentSourceHash = computeSourceFingerprint(fs__namespace.readFileSync(options.scriptPath, "utf-8"));
+      }
+    } catch {
+    }
+    const mode = resolveContentProfileMode({
+      ...options,
+      currentSourceHash
+    });
     onProgress("Resolving content profile...", 0.02);
     const detection = await detectOrResolveContentProfile({
       projectDir: options.projectDir,
@@ -23659,6 +25031,68 @@ async function runAudioSearchStage(options, onProgress, signal) {
       };
     }
   }
+  const existingPlan = loadAudioPlan(options.projectDir);
+  const hasValidMusic = existingPlan ? existingPlan.sections.some((s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)) : false;
+  if (hasValidMusic && isHealthAudio) {
+    const healthPlanPath = path__namespace.join(options.projectDir, "analysis", "health-visual-plan.json");
+    if (fs__namespace.existsSync(healthPlanPath)) {
+      try {
+        const healthPlan = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+        const sfxCues = /* @__PURE__ */ new Map();
+        const sfxScenes = [];
+        for (const sc of healthPlan.scenes || []) {
+          if (sc.sfxCue) {
+            sfxCues.set(sc.sceneIndex, sc.sfxCue);
+            sfxScenes.push({
+              sceneIndex: sc.sceneIndex,
+              startTime: sc.startTime,
+              endTime: sc.endTime,
+              duration: sc.duration,
+              category: sc.category,
+              narration: sc.narration,
+              visualIntent: sc.visualIntent,
+              motionPreset: sc.motionPreset
+            });
+          }
+        }
+        if (sfxCues.size > 0) {
+          onProgress("Repairing and resolving Health cinematic SFX...", 0.5);
+          let retentionPlan = null;
+          try {
+            retentionPlan = await ensureRetentionPlan(options.projectDir);
+          } catch {
+          }
+          await HealthSfxDirector.repairMissingHealthSfx(
+            options.projectDir,
+            sfxCues,
+            sfxScenes,
+            options.openverseToken,
+            retentionPlan
+          );
+        }
+        const repairedPlan = loadAudioPlan(options.projectDir);
+        if (repairedPlan) {
+          const downloadedMusicCount2 = repairedPlan.sections.filter(
+            (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+          ).length;
+          onProgress(`Using existing music with resolved Health SFX (${downloadedMusicCount2} tracks)`, 1);
+          return {
+            success: true,
+            cached: true,
+            artifactPath: audioPlanPath,
+            data: repairedPlan,
+            stats: {
+              sectionsCount: repairedPlan.sections.length,
+              downloadedMusicCount: downloadedMusicCount2,
+              sfxCount: repairedPlan.sfxAssignments?.length ?? 0
+            }
+          };
+        }
+      } catch (err) {
+        logger.warn(`[HealthSFX] Failed repairing Health SFX: ${err}`);
+      }
+    }
+  }
   onProgress("Searching and downloading background music & SFX...", 0.05);
   checkAborted(signal);
   const result = await runAudioDirector(
@@ -23692,12 +25126,18 @@ async function runAudioSearchStage(options, onProgress, signal) {
           }
         }
         if (sfxCues.size > 0) {
-          onProgress("Planning and downloading Health cinematic SFX...", 0.9);
+          onProgress("Planning and resolving Health cinematic SFX...", 0.9);
+          let retentionPlan = null;
+          try {
+            retentionPlan = await ensureRetentionPlan(options.projectDir);
+          } catch {
+          }
           await HealthSfxDirector.applyHealthSfxToAudioPlan(
             options.projectDir,
             sfxCues,
             sfxScenes,
-            options.openverseToken
+            options.openverseToken,
+            retentionPlan
           );
         }
       } catch (err) {

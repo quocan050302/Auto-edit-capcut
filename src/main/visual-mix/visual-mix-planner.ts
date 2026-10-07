@@ -18,6 +18,10 @@ import { buildGeneralImagePrompt } from './general-image-prompt'
 import { HealthVisualPlanner, RawSceneData } from '../health/health-visual-planner'
 import { resolvePresetDefaults } from '../health/health-motion'
 
+import type { ContentIntelligence } from '../content-intelligence/content-intelligence-types'
+import type { VisualIdentityBible, SceneIdentityBinding } from '../content-intelligence/visual-identity-types'
+import { resolveSceneIdentity } from '../content-intelligence/scene-identity-resolver'
+
 export interface GeneralSceneClassification {
   category: string
   aiSuitabilityScore: number
@@ -204,8 +208,10 @@ export class VisualMixPlanner {
     config: VisualMixConfig
     profile: VisualMixProfile
     globalContext?: GlobalScriptContext
+    contentIntelligence?: ContentIntelligence
+    identityBible?: VisualIdentityBible
   }): VisualMixPlan {
-    const { projectDir, rawScenes, config, profile, globalContext } = params
+    const { projectDir, rawScenes, config, profile, globalContext, contentIntelligence, identityBible } = params
     const totalScenes = rawScenes.length
     const aiRatio = config.aiImageRatio
     const stockRatio = config.stockFootageRatio
@@ -404,11 +410,26 @@ export class VisualMixPlanner {
         motionPreset = motionPlan.motionPreset
         recentPresets.push(motionPlan.motionPreset)
 
+        let identityBinding: SceneIdentityBinding | undefined
+        if (identityBible && globalContext && contentIntelligence) {
+          identityBinding = resolveSceneIdentity({
+            sceneIndex: scene.sceneIndex,
+            sceneNarration: narration,
+            visualIntent,
+            identityBible,
+            globalContext,
+            contentIntelligence
+          })
+        }
+
         imagePrompt = buildGeneralImagePrompt({
           narration,
           visualIntent,
           globalContext,
-          sceneIndex: scene.sceneIndex
+          sceneIndex: scene.sceneIndex,
+          contentIntelligence,
+          identityBible,
+          identityBinding
         })
 
         generationHash = computeGenerationHash({

@@ -2,17 +2,19 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as crypto from 'crypto'
 import { logger } from '../logger'
-import { openverseSearchAudio } from '../audio/openverse'
-import { downloadAudio } from '../audio/audio-director'
 import type {
   HealthSfxType,
   HealthSfxCuePlan,
   HealthMotionPreset,
   HealthVisualCategory,
   AudioSfxAssignment,
-  AudioPlan,
-  AudioSearchResult
+  AudioPlan
 } from './health-visual-types'
+import { SfxCacheManager } from '../sfx/sfx-cache'
+import { SfxResolver } from '../sfx/sfx-resolver'
+import { RetentionSfxPlanner } from '../sfx/retention-sfx-planner'
+import type { RetentionPlan } from '../retention/retention-types'
+import type { HealthSfxCacheManifest, ResolvedSfx } from '../sfx/sfx-types'
 
 export interface SfxDirectorSceneInput {
   sceneIndex: number
@@ -25,22 +27,7 @@ export interface SfxDirectorSceneInput {
   motionPreset: HealthMotionPreset
 }
 
-export interface HealthSfxCacheEntry {
-  assetId: string
-  sfxType: HealthSfxType
-  query: string
-  localPath: string
-  license?: string
-  creator?: string
-  pageUrl?: string
-  downloadedAt: string
-}
-
-export interface HealthSfxCacheManifest {
-  schemaVersion: number
-  updatedAt: string
-  entries: Record<string, HealthSfxCacheEntry>
-}
+export type { HealthSfxCacheEntry, HealthSfxCacheManifest } from '../sfx/sfx-types'
 
 // ─── Query Candidates per SFX Type ──────────────────────────────────────────
 
@@ -74,37 +61,19 @@ export const HEALTH_SFX_PARAMS: Record<HealthSfxType, { volumeDb: number; durati
 
 export class HealthSfxDirector {
   public static getCachePath(projectDir: string): string {
-    return path.join(projectDir, 'analysis', 'health-sfx-cache.json')
+    return SfxCacheManager.getCachePath(projectDir)
   }
 
   public static getAudioDir(projectDir: string): string {
-    return path.join(projectDir, 'assets', 'audio', 'health-sfx')
+    return SfxCacheManager.getAudioDir(projectDir)
   }
 
   public static loadCacheManifest(projectDir: string): HealthSfxCacheManifest {
-    const p = this.getCachePath(projectDir)
-    if (fs.existsSync(p)) {
-      try {
-        return JSON.parse(fs.readFileSync(p, 'utf-8'))
-      } catch {
-        // fallback
-      }
-    }
-    return {
-      schemaVersion: 1,
-      updatedAt: new Date().toISOString(),
-      entries: {}
-    }
+    return SfxCacheManager.loadCacheManifest(projectDir)
   }
 
   public static saveCacheManifest(projectDir: string, manifest: HealthSfxCacheManifest): void {
-    const p = this.getCachePath(projectDir)
-    const dir = path.dirname(p)
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    manifest.updatedAt = new Date().toISOString()
-    const tmp = `${p}.tmp.${Date.now()}`
-    fs.writeFileSync(tmp, JSON.stringify(manifest, null, 2), 'utf-8')
-    fs.renameSync(tmp, p)
+    SfxCacheManager.saveCacheManifest(projectDir, manifest)
   }
 
   /**
@@ -241,94 +210,42 @@ export class HealthSfxDirector {
   }
 
   /**
-   * Downloads and caches Openverse audio files for each unique SFX type,
-   * returning local file paths for each type.
+   * Resolves and caches audio files for each unique SFX type.
+   * Leverages the prioritized SfxResolver:
+   * 1. Project cache
+   * 2. HyperFrames bundled / library resolver
+   * 3. Deterministic local FFmpeg synthesis
+   * 4. Openverse audio fallback
+   * Returns a Map of HealthSfxType to local file path.
    */
   public static async resolveAndDownloadSfxTypes(
     projectDir: string,
     types: HealthSfxType[],
     openverseToken?: string
   ): Promise<Map<HealthSfxType, string>> {
-    const sfxDir = this.getAudioDir(projectDir)
-    if (!fs.existsSync(sfxDir)) fs.mkdirSync(sfxDir, { recursive: true })
+    const resolvedResult = await SfxResolver.resolveUniqueTypes(projectDir, types, { openverseToken })
+    const pathMap = new Map<HealthSfxType, string>()
 
-    const manifest = this.loadCacheManifest(projectDir)
-    const resolved = new Map<HealthSfxType, string>()
-
-    for (const type of types) {
-      if (type === 'none') continue
-
-      // Check local cache
-      const cached = manifest.entries[type]
-      if (cached && fs.existsSync(cached.localPath) && fs.statSync(cached.localPath).size > 1024) {
-        logger.info(`[HealthSFX] Reusing cached SFX for ${type}: ${cached.localPath}`)
-        resolved.set(type, cached.localPath)
-        continue
-      }
-
-      // Search Openverse for this type
-      const queries = HEALTH_SFX_QUERIES[type] || [type]
-      let candidate: AudioSearchResult | null = null
-      let usedQuery = queries[0]
-
-      for (const q of queries) {
-        try {
-          const results = await openverseSearchAudio(q, 'sound_effects', 5, openverseToken)
-          // Prefer short clips (< 5 seconds)
-          const shortClips = results.filter((r) => (r.durationSecs || 1) < 5.0)
-          if (shortClips.length > 0) {
-            candidate = shortClips[0]
-            usedQuery = q
-            break
-          } else if (results.length > 0) {
-            candidate = results[0]
-            usedQuery = q
-            break
-          }
-        } catch (err) {
-          logger.warn(`[HealthSFX] Openverse search failed for query "${q}": ${err}`)
-        }
-      }
-
-      if (!candidate) {
-        logger.warn(`[HealthSFX] No suitable Openverse SFX found for type ${type}`)
-        continue
-      }
-
-      // Download candidate
-      try {
-        const localPath = await downloadAudio(candidate, sfxDir)
-        resolved.set(type, localPath)
-
-        manifest.entries[type] = {
-          assetId: candidate.id,
-          sfxType: type,
-          query: usedQuery,
-          localPath,
-          license: candidate.license,
-          creator: candidate.creator,
-          pageUrl: candidate.foreignLandingUrl,
-          downloadedAt: new Date().toISOString()
-        }
-        this.saveCacheManifest(projectDir, manifest)
-        logger.info(`[HealthSFX] Downloaded and cached ${type} -> ${localPath}`)
-      } catch (err) {
-        logger.warn(`[HealthSFX] Failed to download SFX for ${type}: ${err}`)
+    for (const [type, resolved] of resolvedResult.entries()) {
+      if (resolved.localPath && fs.existsSync(resolved.localPath)) {
+        pathMap.set(type, resolved.localPath)
       }
     }
 
-    return resolved
+    return pathMap
   }
 
   /**
    * Applies planned Health SFX cues to the project's audio plan,
+   * augmenting with RetentionPlan if available,
    * setting approved: true and approvedLocalPath for Auto Production.
    */
   public static async applyHealthSfxToAudioPlan(
     projectDir: string,
     cues: Map<number, HealthSfxCuePlan>,
     scenes: SfxDirectorSceneInput[],
-    openverseToken?: string
+    openverseToken?: string,
+    retentionPlan?: RetentionPlan | null
   ): Promise<AudioPlan> {
     const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
     let plan: AudioPlan = {
@@ -345,21 +262,30 @@ export class HealthSfxDirector {
       }
     }
 
+    // Augment cues with retention intelligence if available
+    const activeCues = retentionPlan
+      ? RetentionSfxPlanner.augmentCuesWithRetention(cues, scenes, retentionPlan)
+      : cues
+
     // Resolve unique SFX types
-    const uniqueTypes = Array.from(new Set(Array.from(cues.values()).map((c) => c.type)))
-    const downloadedMap = await this.resolveAndDownloadSfxTypes(projectDir, uniqueTypes, openverseToken)
+    const uniqueTypes = Array.from(new Set(Array.from(activeCues.values()).map((c) => c.type)))
+    const resolvedDetailMap = await SfxResolver.resolveUniqueTypes(projectDir, uniqueTypes, { openverseToken })
 
     // Build Health SFX assignments
     const healthSfxAssignments: AudioSfxAssignment[] = []
     const sceneMap = new Map(scenes.map((s) => [s.sceneIndex, s]))
 
-    for (const [sceneIndex, cue] of cues.entries()) {
+    for (const [sceneIndex, cue] of activeCues.entries()) {
       const scene = sceneMap.get(sceneIndex)
       if (!scene) continue
 
-      const localPath = downloadedMap.get(cue.type)
+      const resolved = resolvedDetailMap.get(cue.type)
+      const localPath = resolved?.localPath
       const sfxStart = scene.startTime + cue.relativeStart
       const sfxEnd = Math.min(scene.endTime, sfxStart + cue.duration)
+
+      // Set accurate provider creator metadata
+      const creator = resolved?.creator || (resolved?.provider === 'procedural' ? 'Local Procedural SFX' : resolved?.provider === 'hyperframes' ? 'HyperFrames SFX Library' : 'Openverse Audio')
 
       const assignment: AudioSfxAssignment = {
         sceneIndex,
@@ -368,13 +294,13 @@ export class HealthSfxDirector {
         sfxQuery: cue.type,
         sfxCandidate: localPath
           ? {
-              id: `health-sfx-${cue.type}`,
+              id: resolved?.sourceId || `health-sfx-${cue.type}`,
               title: `Health SFX (${cue.type})`,
-              creator: 'Openverse Health Audio',
-              foreignLandingUrl: '',
+              creator,
+              foreignLandingUrl: resolved?.sourceUrl || '',
               downloadUrl: '',
-              durationSecs: cue.duration,
-              license: 'CC'
+              durationSecs: resolved?.durationSecs || cue.duration,
+              license: resolved?.license || 'Project Cache'
             }
           : undefined,
         approved: !!localPath,
@@ -389,12 +315,12 @@ export class HealthSfxDirector {
 
     // Retain existing manual non-Health SFX assignments, replace or prepend Health assignments
     const nonHealthSfx = (plan.sfxAssignments || []).filter(
-      (a) => !cues.has(a.sceneIndex) && !a.sfxQuery.startsWith('soft-') && !a.sfxQuery.startsWith('air-')
+      (a) => !activeCues.has(a.sceneIndex) && !a.sfxQuery.startsWith('soft-') && !a.sfxQuery.startsWith('air-')
     )
     plan.sfxAssignments = [...healthSfxAssignments, ...nonHealthSfx].sort((a, b) => a.startTime - b.startTime)
 
     // Compute motion/sfx plan hash for cache validation
-    const hashPayload = Array.from(cues.entries())
+    const hashPayload = Array.from(activeCues.entries())
       .map(([idx, c]) => `${idx}:${c.type}:${c.relativeStart}:${c.volumeDb}`)
       .join('|')
     const planHash = crypto.createHash('md5').update(hashPayload).digest('hex')
@@ -412,5 +338,32 @@ export class HealthSfxDirector {
     logger.info(`[HealthSFX] Successfully integrated ${plan.healthSfx.cueCount} approved SFX into audio-plan.json`)
 
     return plan
+  }
+
+  /**
+   * Repairs missing Health SFX in an existing audio plan without modifying valid background music.
+   * Used when audio-plan.json already has valid music sections but 0 or incomplete approved SFX.
+   */
+  public static async repairMissingHealthSfx(
+    projectDir: string,
+    cues: Map<number, HealthSfxCuePlan>,
+    scenes: SfxDirectorSceneInput[],
+    openverseToken?: string,
+    retentionPlan?: RetentionPlan | null
+  ): Promise<AudioPlan> {
+    const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
+    if (!fs.existsSync(audioPlanPath)) {
+      return this.applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan)
+    }
+
+    let existingPlan: AudioPlan
+    try {
+      existingPlan = JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8'))
+    } catch {
+      return this.applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan)
+    }
+
+    logger.info('[HealthSFX] Repair mode: resolving missing Health SFX while preserving existing music sections')
+    return this.applyHealthSfxToAudioPlan(projectDir, cues, scenes, openverseToken, retentionPlan)
   }
 }

@@ -13,6 +13,7 @@ import type {
 } from '../../../shared/types'
 import { computeHealthMotionHash } from '../health/health-visual-cache'
 import { inspectRenderRecovery } from '../render-cache/render-recovery'
+import { computeSourceFingerprint } from './source-fingerprint'
 
 export interface StockCompletionResult {
   totalScenes: number
@@ -49,13 +50,16 @@ export function isTranscriptionValid(
   }
 }
 
-export function isPlanningValid(projectDir: string): boolean {
+export function isPlanningValid(projectDir: string, currentScriptHash?: string): boolean {
   const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
   if (!fs.existsSync(planPath)) return false
 
   try {
     const plan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
     if (!plan || !Array.isArray(plan.chapters) || plan.chapters.length === 0) {
+      return false
+    }
+    if (currentScriptHash && plan.sourceHash && plan.sourceHash !== currentScriptHash) {
       return false
     }
     const sceneCount = (plan.chapters as Array<{ sequences?: Array<{ scenes?: unknown[] }>; chapters_seq?: Array<{ scenes?: unknown[] }> }>).reduce(
@@ -262,6 +266,12 @@ export function isAudioValid(projectDir: string, requireMusic?: boolean, content
           const hasSfxCues = (healthPlan.scenes || []).some((s: any) => s.sfxCue)
           if (hasSfxCues) {
             if (!plan.healthSfx?.enabled) return false
+            // Section 63: If old audio-plan says healthSfx.enabled=true but approved SFX count = 0,
+            // do not treat as valid so resolver can retry filling missing Health SFX.
+            const hasApprovedHealthSfx = (plan.sfxAssignments || []).some(
+              (a) => a.approved && a.approvedLocalPath && fs.existsSync(a.approvedLocalPath)
+            )
+            if (!hasApprovedHealthSfx) return false
             const expectedHash = computeHealthMotionHash(healthPlan)
             if (plan.healthSfx.planHash !== expectedHash) return false
           }
@@ -310,11 +320,16 @@ export function reconcileProjectArtifacts(
   projectDir: string,
   options?: AutoPipelineOptions
 ): ArtifactReconciliationSummary {
+  let sourceHash: string | undefined
+  if (options?.scriptPath && fs.existsSync(options.scriptPath)) {
+    sourceHash = computeSourceFingerprint(fs.readFileSync(options.scriptPath, 'utf-8'))
+  }
+
   const voPath = options?.voiceoverPath || ''
   const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs.existsSync(path.join(projectDir, 'analysis', 'transcript.json'))
-  const planningValid = isPlanningValid(projectDir)
+  const planningValid = isPlanningValid(projectDir, sourceHash)
   const captionsValid = isCaptionsValid(projectDir)
-  const globalContextValid = isGlobalContextValid(projectDir)
+  const globalContextValid = isGlobalContextValid(projectDir, sourceHash)
   const stockCompletion = checkStockCompletion(projectDir)
   const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic)
   const preflightValid = isPreflightValid(projectDir)

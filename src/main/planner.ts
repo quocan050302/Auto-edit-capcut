@@ -17,6 +17,10 @@ import type { PacingScene } from './pacing-guard'
 import { buildSceneSkeleton, type SceneSkeleton } from './planning/scene-segmenter'
 import { validateScenePlanCoverage } from './planning/scene-validator'
 import { analyzeGlobalContext } from './stock/global-context-analyzer'
+import { computeSourceFingerprint } from './pipeline/source-fingerprint'
+import { loadContentIntelligence } from './content-intelligence/content-intelligence-analyzer'
+import { validateSemanticFidelity } from './content-intelligence/semantic-fidelity'
+import { generateVisualIdentityBible } from './content-intelligence/visual-identity-bible'
 
 // ─── Edit Plan Types ──────────────────────────────────────────────────────────
 
@@ -76,6 +80,7 @@ export interface MasterEditPlan extends MasterEditPlanRetentionExt {
   chapters: ChapterPlan[]
   generatedAt: string
   modelUsed: string
+  sourceHash?: string
 }
 
 // ─── Algorithmic rule-based helpers ──────────────────────────────────────────
@@ -523,7 +528,8 @@ function applyLocalMediaMatching(
 export function buildAlgorithmicPlan(
   transcript: TranscriptResult,
   projectName: string,
-  pacing: Pacing = 'balanced'
+  pacing: Pacing = 'balanced',
+  sourceHash?: string
 ): MasterEditPlan {
   const skeletons = buildSceneSkeleton(transcript, pacing)
   const outline = buildAlgorithmicOutline(skeletons, transcript.duration)
@@ -627,7 +633,8 @@ export function buildAlgorithmicPlan(
     modelUsed: 'rule-based-segmenter',
     openLoops: [],
     motifRegistry: [],
-    retentionFlags: initialFlags
+    retentionFlags: initialFlags,
+    sourceHash
   }
 }
 
@@ -709,6 +716,8 @@ export async function buildEditPlan(params: {
     logger.warn(`Could not load script text or project settings: ${err}`)
   }
 
+  const sourceHash = scriptText ? computeSourceFingerprint(scriptText) : undefined
+
   // 4. Deterministic Scene Segmentation (Sections 4, 5, 6, 7, 8)
   progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.10)
   const skeletons = buildSceneSkeleton(transcript, projectPacing)
@@ -720,7 +729,7 @@ export async function buildEditPlan(params: {
   const cleanApiKey = normalizeApiKey(apiKey)
   if (!cleanApiKey) {
     logger.warn('[PLAN] No API key provided, creating algorithmic edit plan')
-    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing)
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing, sourceHash)
     const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
     fs.writeFileSync(planPath, JSON.stringify(fallbackPlan, null, 2), 'utf-8')
     progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1.0)
@@ -804,7 +813,23 @@ export async function buildEditPlan(params: {
 
   // 8. Assemble Full Plan Structure (Chapters -> Sequences -> Scenes)
   progress('Assembling master edit plan...', 0.85)
+  
+  const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null
 
+  let identityBible: any = null
+  if (ci && ctx && scriptText && sourceHash) {
+    try {
+      identityBible = generateVisualIdentityBible({
+        projectDir,
+        scriptText,
+        globalContext: ctx,
+        contentIntelligence: ci
+      })
+      logger.info(`[PLAN] Visual Identity Bible generated. Mode: ${identityBible.identityMode}`)
+    } catch (err) {
+      logger.warn(`[PLAN] Failed to generate visual identity bible: ${err}`)
+    }
+  }
   const skeletonMap = new Map<number, SceneSkeleton>()
   for (const skel of skeletons) {
     skeletonMap.set(skel.sceneIndex, skel)
@@ -827,6 +852,29 @@ export async function buildEditPlan(params: {
           : extractVisualQueries(skel.narrativeText)
         const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)))
 
+        let finalIntent = aiData?.visualIntent ?? queries[0] ?? 'Documentary cinematic b-roll'
+        let finalQueries = queries
+
+        if (ci) {
+          const intentFid = validateSemanticFidelity(finalIntent, ci, skel.narrativeText)
+          if (!intentFid.valid) {
+            logger.warn(`[SemanticGate] Rejected visualIntent "${finalIntent}" in Scene ${skel.sceneIndex}: ${intentFid.reason}`)
+            finalIntent = 'Documentary cinematic b-roll'
+          }
+
+          finalQueries = queries.filter(q => {
+            const fid = validateSemanticFidelity(q, ci, skel.narrativeText)
+            if (!fid.valid) {
+              logger.warn(`[SemanticGate] Rejected query "${q}" in Scene ${skel.sceneIndex}: ${fid.reason}`)
+            }
+            return fid.valid
+          })
+
+          if (finalQueries.length === 0) {
+            finalQueries.push('documentary cinematic b-roll')
+          }
+        }
+
         const sc: ScenePlan = {
           sceneIndex: skel.sceneIndex, // will be globally normalized below
           mediaFile: '',
@@ -837,9 +885,9 @@ export async function buildEditPlan(params: {
           narrativeText: skel.narrativeText,
           transcriptSegmentIds: [...skel.transcriptSegmentIds],
           transitionIn: (aiData?.transitionIn as 'cut' | 'fade' | 'dissolve') ?? 'cut',
-          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
-          visualIntent: aiData?.visualIntent ?? queries[0] ?? 'Documentary cinematic b-roll',
-          searchQueries: queries,
+          visualNote: aiData?.visualNote ?? `Visual shot: ${finalQueries[0]}`,
+          visualIntent: finalIntent,
+          searchQueries: finalQueries,
           energyLevel: (aiData?.energyLevel as 'low' | 'medium' | 'high') ?? inferEnergyLevelFromText(skel.narrativeText),
           shotType: (aiData?.shotType as 'wide' | 'medium' | 'close-up' | 'abstract') ?? inferShotTypeFromText(skel.narrativeText)
         }
@@ -934,7 +982,8 @@ export async function buildEditPlan(params: {
     modelUsed: finalModelUsed,
     openLoops: [],
     motifRegistry: [],
-    retentionFlags: initialFlags
+    retentionFlags: initialFlags,
+    sourceHash
   }
 
   // 12. Save Master Edit Plan (Section 19)
