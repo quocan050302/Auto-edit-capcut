@@ -20,6 +20,7 @@ import { analyzeGlobalContext } from './stock/global-context-analyzer'
 import { computeSourceFingerprint } from './pipeline/source-fingerprint'
 import { loadContentIntelligence } from './content-intelligence/content-intelligence-analyzer'
 import { validateSemanticFidelity } from './content-intelligence/semantic-fidelity'
+import { generateVisualIdentityBible } from './content-intelligence/visual-identity-bible'
 
 // ─── Edit Plan Types ──────────────────────────────────────────────────────────
 
@@ -815,6 +816,20 @@ export async function buildEditPlan(params: {
   
   const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null
 
+  let identityBible: any = null
+  if (ci && ctx && scriptText && sourceHash) {
+    try {
+      identityBible = generateVisualIdentityBible({
+        projectDir,
+        scriptText,
+        globalContext: ctx,
+        contentIntelligence: ci
+      })
+      logger.info(`[PLAN] Visual Identity Bible generated. Mode: ${identityBible.identityMode}`)
+    } catch (err) {
+      logger.warn(`[PLAN] Failed to generate visual identity bible: ${err}`)
+    }
+  }
   const skeletonMap = new Map<number, SceneSkeleton>()
   for (const skel of skeletons) {
     skeletonMap.set(skel.sceneIndex, skel)

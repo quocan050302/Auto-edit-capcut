@@ -1,4 +1,7 @@
 import type { GlobalScriptContext } from '../../../shared/types'
+import type { ContentIntelligence } from '../content-intelligence/content-intelligence-types'
+import type { VisualIdentityBible, SceneIdentityBinding } from '../content-intelligence/visual-identity-types'
+import { enrichPromptWithIdentity } from '../content-intelligence/prompt-identity-enricher'
 
 export type GeneralVisualNiche =
   | 'history'
@@ -74,6 +77,9 @@ export interface GeneralImagePromptParams {
   globalContext?: GlobalScriptContext
   category?: string
   sceneIndex?: number
+  contentIntelligence?: ContentIntelligence
+  identityBible?: VisualIdentityBible
+  identityBinding?: SceneIdentityBinding
 }
 
 /**
@@ -102,5 +108,19 @@ export function buildGeneralImagePrompt(params: GeneralImagePromptParams): strin
     contextualAnchor = `context: ${globalContext.primarySubject.slice(0, 50)}, `
   }
 
-  return `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`
+  let prompt = `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`
+
+  if (params.identityBible && params.identityBinding) {
+    const enrichment = enrichPromptWithIdentity({
+      basePrompt: prompt,
+      scene: { sceneIndex: params.sceneIndex || 0, narration: params.narration, intent: params.visualIntent },
+      identityBible: params.identityBible,
+      binding: params.identityBinding,
+      globalContext: params.globalContext,
+      contentIntelligence: params.contentIntelligence
+    })
+    prompt = enrichment.prompt
+  }
+
+  return prompt
 }

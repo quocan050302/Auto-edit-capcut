@@ -22,7 +22,10 @@ import {
   type ManualAiVisualBrief,
   type ManualAiSceneDirection
 } from './manual-ai-types'
-
+import type { ContentIntelligence } from '../../content-intelligence/content-intelligence-types'
+import type { VisualIdentityBible, SceneIdentityBinding } from '../../content-intelligence/visual-identity-types'
+import { enrichPromptWithIdentity } from '../../content-intelligence/prompt-identity-enricher'
+import { resolveSceneIdentity } from '../../content-intelligence/scene-identity-resolver'
 // ─── Text helpers ────────────────────────────────────────────────────────────
 
 /** Removes quotes / odd symbols but keeps Unicode letters (scripts may be non-English). */
@@ -185,6 +188,9 @@ export interface ManualPromptParams {
   outputResolution: AiImageOutputResolution
   visualBrief?: ManualAiVisualBrief
   sceneDirection?: ManualAiSceneDirection
+  contentIntelligence?: ContentIntelligence
+  identityBible?: VisualIdentityBible
+  identityBinding?: SceneIdentityBinding
 }
 
 export function calculatePromptQualityScore(params: {
@@ -437,6 +443,19 @@ export function buildManualScenePrompt(params: ManualPromptParams): string {
   let prompt = compose(24, true, true)
   if (countWords(prompt) > 200) prompt = compose(20, true, false)
   if (countWords(prompt) > 200) prompt = compose(14, false, false)
+
+  if (params.identityBible && params.identityBinding) {
+    const enrichment = enrichPromptWithIdentity({
+      basePrompt: prompt,
+      scene: { sceneIndex: scene.sceneIndex, narration: scene.narration, intent: scene.visualIntent },
+      identityBible: params.identityBible,
+      binding: params.identityBinding,
+      globalContext: params.globalContext,
+      contentIntelligence: params.contentIntelligence
+    })
+    prompt = enrichment.prompt
+  }
+
   return prompt
 }
 
@@ -489,9 +508,11 @@ export function buildManualAiPromptPack(params: {
   outputResolution: AiImageOutputResolution
   visualBrief?: ManualAiVisualBrief
   sceneDirections?: Map<number, ManualAiSceneDirection> | ManualAiSceneDirection[]
+  contentIntelligence?: ContentIntelligence
+  identityBible?: VisualIdentityBible
   now?: Date
 }): ManualAiPromptPack {
-  const { plan, profile, globalContext, outputResolution, visualBrief, sceneDirections } = params
+  const { plan, profile, globalContext, outputResolution, visualBrief, sceneDirections, contentIntelligence, identityBible } = params
   const ordered = [...plan.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex)
   const entries: ManualAiPromptEntry[] = []
 
@@ -504,11 +525,29 @@ export function buildManualAiPromptPack(params: {
     }
   }
 
+  // Import resolveSceneIdentity inside if not available globally, wait, it's not imported. Let's import it at the top.
+  // Actually, wait, ManualAiSceneDirection already has `identity` which is the scene binding?
+  // Let's check: Yes! `ManualAiSceneDirection` now has an `identity` field. We can just use that as `identityBinding` OR we can resolve it on the fly.
+  // Wait, the prompt requirements say `sceneDirection` might not be present (it's optional). 
+  // Let's resolve it here if identityBible is provided.
   for (let i = 0; i < ordered.length; i++) {
     const scene = ordered[i]
     if (scene.strategy !== 'ai-still') continue
 
     const sceneDirection = directionsMap?.get(scene.sceneIndex)
+    
+    let identityBinding: SceneIdentityBinding | undefined = sceneDirection?.identity
+    if (!identityBinding && identityBible && globalContext && contentIntelligence) {
+      identityBinding = resolveSceneIdentity({
+        sceneIndex: scene.sceneIndex,
+        sceneNarration: scene.narration,
+        visualIntent: scene.visualIntent || '',
+        identityBible,
+        globalContext,
+        contentIntelligence
+      })
+    }
+
     const prompt = buildManualScenePrompt({
       scene,
       profile,
@@ -517,7 +556,10 @@ export function buildManualAiPromptPack(params: {
       nextScene: ordered[i + 1],
       outputResolution,
       visualBrief,
-      sceneDirection
+      sceneDirection,
+      contentIntelligence,
+      identityBible,
+      identityBinding
     })
 
     const qualityScore = calculatePromptQualityScore({
@@ -688,9 +730,11 @@ export function ensureManualAiPromptPack(params: {
   outputResolution: AiImageOutputResolution
   visualBrief?: ManualAiVisualBrief
   sceneDirections?: Map<number, ManualAiSceneDirection> | ManualAiSceneDirection[]
+  contentIntelligence?: ContentIntelligence
+  identityBible?: VisualIdentityBible
 }): EnsurePromptPackResult {
   const t0 = Date.now()
-  const { projectDir, plan, profile, globalContext, outputResolution, visualBrief, sceneDirections } = params
+  const { projectDir, plan, profile, globalContext, outputResolution, visualBrief, sceneDirections, contentIntelligence, identityBible } = params
 
   const fresh = buildManualAiPromptPack({
     plan,
@@ -698,7 +742,9 @@ export function ensureManualAiPromptPack(params: {
     globalContext,
     outputResolution,
     visualBrief,
-    sceneDirections
+    sceneDirections,
+    contentIntelligence,
+    identityBible
   })
   const persisted = loadManualAiPromptPack(projectDir)
 

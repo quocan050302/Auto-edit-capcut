@@ -619,6 +619,20 @@ export interface GlobalScriptCommunity {
   role: string
   visualDescription: string
   mustNotConfuseWith: string[]
+  visualIdentity?: {
+    clothing?: string[]
+    grooming?: string[]
+    accessories?: string[]
+    tools?: string[]
+    environment?: string[]
+    architecture?: string[]
+    machinery?: string[]
+    transport?: string[]
+    socialBehavior?: string[]
+    eraMarkers?: string[]
+    materialCulture?: string[]
+    forbiddenTraits?: string[]
+  }
 }
 
 export interface GlobalScriptPerson {

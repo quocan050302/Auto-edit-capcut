@@ -34,6 +34,19 @@ export interface ContentIntelligence {
     infrastructure: string[]
     machinery: string[]
     documents: string[]
+    identityAnchors?: {
+      communities: Array<{
+        name: string
+        visualDescription?: string
+        clothing?: string[]
+        mustNotConfuseWith?: string[]
+      }>
+      people: Array<{
+        role: string
+        appearance?: string
+        clothing?: string
+      }>
+    }
   }
 
   visualStyle: {

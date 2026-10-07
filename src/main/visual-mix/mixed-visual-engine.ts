@@ -221,13 +221,31 @@ export async function runMixedVisualEngine(
     }
   }
 
+  let contentIntelligence: any
+  const ciPath = path.join(projectDir, 'analysis', 'content-intelligence.json')
+  if (fs.existsSync(ciPath)) {
+    try {
+      contentIntelligence = JSON.parse(fs.readFileSync(ciPath, 'utf-8'))
+    } catch { /* ignore */ }
+  }
+
+  let identityBible: any
+  const ibPath = path.join(projectDir, 'analysis', 'visual-identity-bible.json')
+  if (fs.existsSync(ibPath)) {
+    try {
+      identityBible = JSON.parse(fs.readFileSync(ibPath, 'utf-8'))
+    } catch { /* ignore */ }
+  }
+
   // 5. Build authoritative Visual Mix Plan (USER INTENT; never rewritten after AI failures)
   const plan = VisualMixPlanner.buildPlan({
     projectDir,
     rawScenes,
     config: mix,
     profile,
-    globalContext
+    globalContext,
+    contentIntelligence,
+    identityBible
   })
 
   checkAborted(signal)
@@ -355,7 +373,9 @@ export async function runMixedVisualEngine(
       globalContext,
       outputResolution: mix.imageOutputResolution || '1080p',
       visualBrief: directorBundle?.brief,
-      sceneDirections: directorBundle?.sceneDirections
+      sceneDirections: directorBundle?.sceneDirections,
+      contentIntelligence,
+      identityBible
     })
     manualPack = ensured.pack
     promptGenerationMs = ensured.generationMs
