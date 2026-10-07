@@ -25,17 +25,20 @@ import { NewsChyronCaption } from './components/NewsChyronCaption'
 import { DataNoteCallout } from './components/DataNoteCallout'
 import { ProofVisualOverlay } from './components/ProofVisualOverlay'
 import { VisualGrammarOverlay } from './components/VisualGrammarOverlay'
+import { OpeningRetentionOverlay } from './components/OpeningRetentionOverlay'
 import { resolveCaptionAnimation } from './animations/presets'
 import type { CaptionPlan, VisualGrammarDecision } from '../../shared/types'
 import type { ProofVisual } from '../../src/main/retention/retention-types'
+import type { OpeningRetentionEvent } from '../../src/main/retention/opening-retention-types'
 
 interface Props {
   captionPlan: CaptionPlan
   proofVisuals?: ProofVisual[]  // optional — absent = caption-only (backward compat)
   visualGrammar?: Array<VisualGrammarDecision & { absoluteStartTime?: number; absoluteEndTime?: number }>
+  openingEvents?: OpeningRetentionEvent[]
 }
 
-export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, visualGrammar }) => {
+export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, visualGrammar, openingEvents }) => {
   const frame = useCurrentFrame()
   const { fps } = useVideoConfig()
   const currentTime = frame / fps
@@ -148,6 +151,11 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, vi
           />
         )
       })}
+
+      {/* 4. Opening Retention Overlay (Optional) */}
+      {openingEvents && openingEvents.length > 0 && (
+        <OpeningRetentionOverlay events={openingEvents} />
+      )}
     </AbsoluteFill>
   )
 }

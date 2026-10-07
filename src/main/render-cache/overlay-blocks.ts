@@ -105,6 +105,7 @@ export function collectProtectedIntervals(params: {
   captionPhrases?: Array<{ startTime: number; endTime: number }>
   proofVisuals?: Array<{ absoluteStartTime?: number; absoluteEndTime?: number }>
   visualGrammar?: Array<{ absoluteStartTime?: number; absoluteEndTime?: number }>
+  openingEvents?: Array<{ startTime: number; duration: number }>
 }): OverlayInterval[] {
   const out: OverlayInterval[] = []
   for (const p of params.captionPhrases ?? []) out.push({ start: p.startTime, end: p.endTime })
@@ -117,6 +118,9 @@ export function collectProtectedIntervals(params: {
     if (typeof v.absoluteStartTime === 'number' && typeof v.absoluteEndTime === 'number') {
       out.push({ start: v.absoluteStartTime, end: v.absoluteEndTime })
     }
+  }
+  for (const e of params.openingEvents ?? []) {
+    out.push({ start: e.startTime, end: e.startTime + e.duration })
   }
   return out
 }

@@ -18,6 +18,7 @@ import { renderMedia, selectComposition, makeCancelSignal } from '@remotion/rend
 import { logger } from '../logger'
 import type { CaptionPlan, VisualGrammarDecision } from '../../../shared/types'
 import type { ProofVisual } from '../retention/retention-types'
+import type { OpeningRetentionEvent } from '../retention/opening-retention-types'
 import { computeResourceLimits } from '../render-cache/render-resource-manager'
 import { loadRenderPreferences } from '../render-cache/render-preferences'
 import { bitrateForCrf } from '../render-cache/video-encoder'
@@ -56,6 +57,7 @@ export interface RemotionRenderOptions {
   captionPlan: CaptionPlan
   proofVisuals?: ProofVisual[]          // optional — absent = caption-only (backward compat)
   visualGrammar?: VisualGrammarDecision[] // optional Visual Scene Grammar
+  openingEvents?: OpeningRetentionEvent[] // optional Opening Retention Composer events
   videoDurationInSeconds: number
   outputPath: string        // vd: assets/captions/overlay.webm
   fps?: number
@@ -85,6 +87,7 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
     captionPlan,
     proofVisuals,
     visualGrammar,
+    openingEvents,
     videoDurationInSeconds,
     outputPath,
     fps = 30,
@@ -128,7 +131,8 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
   const inputProps = {
     captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
     proofVisuals: proofVisuals ?? [],
-    visualGrammar: visualGrammar ?? []
+    visualGrammar: visualGrammar ?? [],
+    openingEvents: openingEvents ?? []
   }
 
 

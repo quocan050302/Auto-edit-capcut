@@ -22,6 +22,7 @@ import { applyRetentionMotionHint } from './retention/retention-motion'
 import type { RetentionSettings, VisualBeat, ProofVisual, RetentionDecision, RetentionPlan, RetentionScenePlan } from './retention/retention-types'
 import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
 import { loadProductionSettings } from './production-intelligence/production-settings'
+import { SfxCacheManager } from './sfx/sfx-cache'
 import {
   generateVisualGrammarPlan,
   loadVisualGrammarPlan
@@ -829,6 +830,54 @@ export function prepareRenderPlan(params: {
     updateRetentionContext(retCtx, sceneInput, decision)
   }
 
+  // ── Opening Retention Composer ──────────────────────────────────────────────
+  let openingPlan: any = null
+  if (retentionPlan) {
+    try {
+      const { ensureOpeningRetentionPlan } = require('./retention/opening-retention-composer')
+      
+      let globalContext: any
+      try {
+        const gcPath = path.join(projectDir, 'analysis', 'global-script-context.json')
+        if (fs.existsSync(gcPath)) globalContext = JSON.parse(fs.readFileSync(gcPath, 'utf-8'))
+      } catch { /* ignore */ }
+
+      // Build proof visuals early for opening composer
+      let proofVisuals: any[] = []
+      if (retentionSettings.proofVisualsEnabled) {
+        // Need to require dynamically or just manually extract proof visuals from retention decisions
+        proofVisuals = []
+        for (const [idx, dec] of retentionDecisions.entries()) {
+          if (dec.proofVisual) {
+            const sc = scenes[idx]
+            proofVisuals.push({
+              type: dec.proofVisual.type,
+              primaryText: dec.proofVisual.primaryText,
+              secondaryText: dec.proofVisual.secondaryText,
+              sceneIndex: idx,
+              absoluteStartTime: sc.startTime,
+              absoluteEndTime: sc.startTime + sc.duration,
+              position: dec.proofVisual.position || 'center'
+            })
+          }
+        }
+      }
+
+      openingPlan = ensureOpeningRetentionPlan({
+        projectDir,
+        scenes,
+        retentionPlan,
+        retentionDecisions,
+        captionPlan: params.captionPlan,
+        proofVisuals,
+        visualGrammar: [],
+        globalContext
+      })
+    } catch (err) {
+      logger.warn(`[RENDER] Failed to ensure opening retention plan: ${String(err)}`)
+    }
+  }
+
   // ── Scene jobs + fingerprints ─────────────────────────────────────────────
   const { width, height } = resolution
   const base: VisualBaseSettings = { width, height, fps, encoderProfile: params.encoderKey }
@@ -855,7 +904,21 @@ export function prepareRenderPlan(params: {
           mediaPath.includes(path.join('assets', 'generated', 'general')) ||
           mediaPath.includes('/assets/generated/general/')
         )))
-    const motionPreset = isAiStill ? (visualScene?.motionPreset || visualScene?.motion || 'push-in-center') : ''
+    let motionPreset = isAiStill ? (visualScene?.motionPreset || visualScene?.motion || 'push-in-center') : ''
+    
+    // Apply Opening Composer Motion Hints
+    if (openingPlan?.motionHints) {
+      const hint = openingPlan.motionHints.find((h: any) => h.sceneIndex === scene.sceneIndex)
+      if (hint && isAiStill) {
+        switch (hint.type) {
+          case 'micro-push': motionPreset = 'push-in-center'; break;
+          case 'micro-pull': motionPreset = 'pull-out-center'; break;
+          case 'detail-crop': motionPreset = 'push-in-center'; break;
+          case 'hold': motionPreset = 'none'; break;
+        }
+      }
+    }
+
     const effectiveFilter = isAiStill ? `${scaleFilt}:motion=${typeof motionPreset === 'object' ? motionPreset.preset : motionPreset}` : scaleFilt
     const fingerprint = computeSceneFingerprint({
       sceneOrdinal: i + 1,
@@ -893,7 +956,8 @@ export function prepareRenderPlan(params: {
     captionPlan: cp ? hashJsonValue(cp) : 'none',
     audioPlan: hashFileContent(path.join(analysis, 'audio-plan.json')),
     productionSettings: hashFileContent(path.join(analysis, 'production-settings.json')),
-    visualGrammarPlan: hashFileContent(path.join(analysis, 'visual-grammar-plan.json'))
+    visualGrammarPlan: hashFileContent(path.join(analysis, 'visual-grammar-plan.json')),
+    openingPlan: openingPlan ? hashJsonValue(openingPlan) : 'none'
   }
 
   const assemblyFingerprint = computeAssemblyFingerprint({
@@ -907,6 +971,7 @@ export function prepareRenderPlan(params: {
       d: e.scene.duration
     })),
     transitionSettings: validTransitionSettings ?? null,
+    openingPlanHash: hashes.openingPlan,
     base
   })
 
@@ -947,6 +1012,7 @@ export function prepareRenderPlan(params: {
     retentionPlan,
     retentionPlanMap,
     visualPlanMap,
+    openingPlan,
     sceneJobs,
     base,
     hashes,
@@ -1407,6 +1473,7 @@ async function renderVideoV2(
             ffmpegOptions: ffmpegOpts,
             videoCodecArgs: vcodec(ctx, 20),
             maxScenesPerSegment: limits.assemblyMaxScenesPerSegment,
+            openingHints: prepared.openingPlan?.transitionHints,
             segmentRunner: async (seg, render) => {
               const segPath = workspace!.assemblySegmentPath(seg.segmentIndex)
               const segExpect: ArtifactExpectation = {
@@ -1502,6 +1569,25 @@ async function renderVideoV2(
     const audioPlan: AudioPlan | null = fs.existsSync(audioPlanPath)
       ? (JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8')) as AudioPlan)
       : null
+
+    if (audioPlan && prepared.openingPlan?.sfxEvents) {
+      for (const ev of prepared.openingPlan.sfxEvents) {
+        const cached = SfxCacheManager.getCachedSfx(projectDir, ev.type)
+        if (cached && cached.localPath) {
+          audioPlan.sfxAssignments.push({
+            sceneIndex: ev.sceneIndex,
+            startTime: ev.absoluteTime,
+            endTime: ev.absoluteTime + ev.duration,
+            sfxQuery: ev.type,
+            approved: true,
+            approvedLocalPath: cached.localPath,
+            volumeDb: ev.volumeDb,
+            fadeInSecs: 0.05,
+            fadeOutSecs: 0.15
+          })
+        }
+      }
+    }
 
     const approvedMusic = audioPlan?.sections.filter(
       (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
@@ -1786,7 +1872,7 @@ async function renderVideoV2(
       const captionPlanForOverlay = params.captionPlan ?? { enabled: true, activeRanges: [], phrases: [] }
       const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0)
       const totalFrames = Math.ceil(videoDurationSecs * fps)
-      const overlayPropsHash = fingerprintOf({ captionPlan: captionPlanForOverlay, proofVisuals, visualGrammar })
+      const overlayPropsHash = fingerprintOf({ captionPlan: captionPlanForOverlay, proofVisuals, visualGrammar, openingEvents: prepared.openingPlan?.events })
       const remotionSourceHash = computeDirectorySignature(path.join(__dirname, '../../src/remotion'))
       const hwMode = remotionHw && process.platform === 'darwin' ? 'if-possible' : 'disable'
 
@@ -1800,7 +1886,8 @@ async function renderVideoV2(
         protectedIntervals: collectProtectedIntervals({
           captionPhrases: hasCaptions ? captionPlanForOverlay.phrases : [],
           proofVisuals,
-          visualGrammar
+          visualGrammar,
+          openingEvents: prepared.openingPlan?.events
         })
       })
 
@@ -1870,6 +1957,7 @@ async function renderVideoV2(
           captionPlan: captionPlanForOverlay,
           proofVisuals,
           visualGrammar,
+          openingEvents: prepared.openingPlan?.events,
           videoDurationInSeconds: videoDurationSecs,
           outputPath: blockPartial,
           fps,

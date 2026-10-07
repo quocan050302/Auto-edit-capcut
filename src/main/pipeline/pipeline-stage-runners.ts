@@ -670,7 +670,7 @@ export async function runAudioSearchStage(
           onProgress('Repairing and resolving Health cinematic SFX...', 0.50)
           let retentionPlan: any = null
           try {
-            retentionPlan = await ensureRetentionPlan(options.projectDir)
+            retentionPlan = ensureRetentionPlan(options.projectDir)
           } catch {
             // ignore
           }
@@ -748,10 +748,12 @@ export async function runAudioSearchStage(
           onProgress('Planning and resolving Health cinematic SFX...', 0.90)
           let retentionPlan: any = null
           try {
-            retentionPlan = await ensureRetentionPlan(options.projectDir)
+            retentionPlan = ensureRetentionPlan(options.projectDir)
           } catch {
             // ignore
           }
+
+          await HealthSfxDirector.preloadStandardOpeningSfx(options.projectDir, options.openverseToken)
 
           await HealthSfxDirector.applyHealthSfxToAudioPlan(
             options.projectDir,
