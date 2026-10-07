@@ -41,6 +41,11 @@ const os__namespace = /* @__PURE__ */ _interopNamespaceDefault(os);
 const https__namespace = /* @__PURE__ */ _interopNamespaceDefault(https);
 const http__namespace = /* @__PURE__ */ _interopNamespaceDefault(http);
 function resolveContentProfileMode(options) {
+  if (options?.contentProfileOverride && options.currentSourceHash) {
+    if (options.contentProfileOverride.sourceHash === options.currentSourceHash) {
+      return options.contentProfileOverride.mode;
+    }
+  }
   if (options?.contentProfileMode) {
     return options.contentProfileMode;
   }
@@ -3129,7 +3134,7 @@ class ThumbnailOrchestrator {
     }
     const settings = await loadProjectThumbnailSettings(projectDir);
     const script = this.resolveScriptText(projectDir, params.scriptPath);
-    const scriptHash2 = computeSha256(script || "no-script");
+    const scriptHash = computeSha256(script || "no-script");
     const templateSnapshot = params.templateSnapshot || settings.templateSnapshot || "";
     const templateSnapshotHash = computeSha256(templateSnapshot);
     const renderOutputPath = params.renderOutputPath || this.resolveRenderOutputPath(projectDir);
@@ -3164,7 +3169,7 @@ class ThumbnailOrchestrator {
     const readiness = await this.runtimeManager.ensureFlowReady();
     if (!readiness.ready) {
       logger.warn(`[ThumbnailOrchestrator] startJob preflight failed: ${readiness.blockingCode} — ${readiness.message}`);
-      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash: scriptHash2, templateSnapshotHash, round, params, settings, templateSnapshot });
+      return this.markNeedsAttention(projectDir, readiness, { renderOutputPath, renderFileSize, renderMtimeMs, scriptHash, templateSnapshotHash, round, params, settings, templateSnapshot });
     }
     const abortController = new AbortController();
     const jobIdPlaceholder = `job-${Date.now()}`;
@@ -3200,7 +3205,7 @@ class ThumbnailOrchestrator {
             renderOutputPath,
             renderFileSize,
             renderMtimeMs,
-            scriptHash: scriptHash2,
+            scriptHash,
             templateSnapshotHash,
             generationRound: round,
             plan
@@ -3932,14 +3937,14 @@ class ThumbnailAutoTrigger {
       const renderFileSize = st.size;
       const renderMtimeMs = st.mtimeMs;
       const script = this.readScriptText(projectDir, params.scriptPath);
-      const scriptHash2 = computeSha256(script || "no-script");
+      const scriptHash = computeSha256(script || "no-script");
       const templateSnapshotHash = settings.templateSnapshotHash || computeSha256(settings.templateSnapshot || "");
       const round = 1;
       const jobKey = computeThumbnailJobKey({
         renderOutputPath: renderPath,
         renderFileSize,
         renderMtimeMs,
-        scriptHash: scriptHash2,
+        scriptHash,
         templateSnapshotHash,
         generationRound: round
       });
@@ -3961,7 +3966,7 @@ class ThumbnailAutoTrigger {
           renderOutputPath: renderPath,
           renderFileSize,
           renderMtimeMs,
-          scriptHash: scriptHash2,
+          scriptHash,
           templateSnapshotHash,
           generationRound: round
         });
@@ -4137,11 +4142,11 @@ function toSnapshot(state2) {
   };
 }
 function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
-  let scriptHash2;
+  let scriptHash;
   if (scriptPath && fs__namespace.existsSync(scriptPath)) {
     try {
       const content = fs__namespace.readFileSync(scriptPath);
-      scriptHash2 = crypto__namespace.createHash("md5").update(content).digest("hex");
+      scriptHash = crypto__namespace.createHash("md5").update(content).digest("hex");
     } catch {
     }
   }
@@ -4157,7 +4162,7 @@ function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
   }
   return {
     scriptPath,
-    scriptHash: scriptHash2,
+    scriptHash,
     voiceoverPath,
     voiceoverSize,
     voiceoverMtimeMs
@@ -7524,7 +7529,7 @@ function computeGlobalContextHash(ctx) {
   const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
   return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
 }
-function extractClaimsRuleBased(scenes, scriptHash2, ctxHash) {
+function extractClaimsRuleBased(scenes, scriptHash, ctxHash) {
   const claims = [];
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const statRegex = /\b\d+(\.\d+)?\s*(%|percent|percentage)\b/i;
@@ -7586,7 +7591,7 @@ function extractClaimsRuleBased(scenes, scriptHash2, ctxHash) {
   }
   const ledger = {
     projectId: "default",
-    scriptHash: scriptHash2,
+    scriptHash,
     globalContextHash: ctxHash,
     claims,
     sources: [],
@@ -7706,12 +7711,12 @@ async function extractDocumentaryClaims(params) {
   const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
   const ledgerPath = getClaimLedgerPath(projectDir);
   const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
-  const scriptHash2 = computeScriptHash$1(fullText);
+  const scriptHash = computeScriptHash$1(fullText);
   const ctxHash = computeGlobalContextHash(globalContext);
   if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
     try {
       const existing = readJsonSafe$1(ledgerPath, null);
-      if (existing && existing.claims && existing.scriptHash === scriptHash2 && existing.globalContextHash === ctxHash) {
+      if (existing && existing.claims && existing.scriptHash === scriptHash && existing.globalContextHash === ctxHash) {
         logger.info(`[ClaimLedger] Using cached Claim & Evidence Ledger (${existing.claims.length} claims)`);
         onProgress?.(`Loaded cached Claim Ledger (${existing.claims.length} claims)`, 1);
         return existing;
@@ -7724,7 +7729,7 @@ async function extractDocumentaryClaims(params) {
   if (!cleanKey) {
     logger.warn(`[ClaimLedger] No Gemini API key provided. Using rule-based claim extraction.`);
     onProgress?.(`Gemini key unavailable — using rule-based claim extraction`, 0.5);
-    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash2, ctxHash);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
     atomicWriteJson(ledgerPath, fallbackLedger);
     return fallbackLedger;
   }
@@ -7822,14 +7827,14 @@ Respond with STRICT JSON matching this schema:
   }
   if (claims.length === 0) {
     logger.warn(`[ClaimLedger] AI returned no claims, executing rule-based fallback`);
-    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash2, ctxHash);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
     atomicWriteJson(ledgerPath, fallbackLedger);
     return fallbackLedger;
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const ledger = {
     projectId: path__namespace.basename(projectDir),
-    scriptHash: scriptHash2,
+    scriptHash,
     globalContextHash: ctxHash,
     claims,
     sources: [],
@@ -15208,6 +15213,13 @@ Resume from cached scene ${completedScenes + 1}`;
     return emptyInfo();
   }
 }
+function computeSourceFingerprint(scriptText) {
+  if (!scriptText) {
+    return "empty_source_hash";
+  }
+  const normalized = scriptText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+  return crypto.createHash("sha256").update(normalized, "utf8").digest("hex");
+}
 function isTranscriptionValid(projectDir, voiceoverPath) {
   const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
   const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
@@ -15227,12 +15239,15 @@ function isTranscriptionValid(projectDir, voiceoverPath) {
     return false;
   }
 }
-function isPlanningValid(projectDir) {
+function isPlanningValid(projectDir, currentScriptHash) {
   const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) return false;
   try {
     const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
     if (!plan || !Array.isArray(plan.chapters) || plan.chapters.length === 0) {
+      return false;
+    }
+    if (currentScriptHash && plan.sourceHash && plan.sourceHash !== currentScriptHash) {
       return false;
     }
     const sceneCount = plan.chapters.reduce(
@@ -15257,13 +15272,15 @@ function isCaptionsValid(projectDir) {
     return false;
   }
 }
-function isGlobalContextValid(projectDir, scriptHash2) {
+function isGlobalContextValid(projectDir, scriptHash) {
   const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
   if (!fs__namespace.existsSync(contextPath)) return false;
   try {
     const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
     if (!ctx || !ctx.primarySubject) return false;
-    if (scriptHash2 && ctx._scriptHash && ctx._scriptHash !== scriptHash2) ;
+    if (scriptHash && ctx._scriptHash && ctx._scriptHash !== scriptHash) {
+      return false;
+    }
     return true;
   } catch {
     return false;
@@ -15426,11 +15443,15 @@ function isPreflightValid(projectDir) {
   }
 }
 function reconcileProjectArtifacts(projectDir, options) {
+  let sourceHash;
+  if (options?.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+    sourceHash = computeSourceFingerprint(fs__namespace.readFileSync(options.scriptPath, "utf-8"));
+  }
   const voPath = options?.voiceoverPath || "";
   const transcribingValid = voPath ? isTranscriptionValid(projectDir, voPath) : fs__namespace.existsSync(path__namespace.join(projectDir, "analysis", "transcript.json"));
-  const planningValid = isPlanningValid(projectDir);
+  const planningValid = isPlanningValid(projectDir, sourceHash);
   const captionsValid = isCaptionsValid(projectDir);
-  const globalContextValid = isGlobalContextValid(projectDir);
+  const globalContextValid = isGlobalContextValid(projectDir, sourceHash);
   const stockCompletion = checkStockCompletion(projectDir);
   const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic);
   const preflightValid = isPreflightValid(projectDir);
@@ -16181,9 +16202,6 @@ function validateScenePlanCoverage(transcript, scenes) {
 function getContextPath(projectDir) {
   return path.join(projectDir, "analysis", "global-script-context.json");
 }
-function scriptHash(text) {
-  return crypto.createHash("md5").update(text).digest("hex").slice(0, 16);
-}
 const SYSTEM_PROMPT$1 = `You are the Context-Aware Visual Research Engine for a long-form documentary.
 Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
 Rules:
@@ -16243,7 +16261,7 @@ async function analyzeGlobalContext(params) {
   } catch {
   }
   const contextPath = getContextPath(projectDir);
-  const hash = scriptHash(fullText);
+  const hash = computeSourceFingerprint(fullText);
   if (!forceRegenerate && fs__namespace.existsSync(contextPath)) {
     try {
       const cached = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
@@ -16609,6 +16627,480 @@ function saveGlobalContext(projectDir, ctx) {
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
   fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
 }
+const CONTENT_PROFILE_SCHEMA_VERSION = 1;
+const ANATOMICAL_ORGAN_SIGNALS = [
+  "liver",
+  "kidney",
+  "kidneys",
+  "heart",
+  "brain",
+  "gut",
+  "lung",
+  "lungs",
+  "pancreas",
+  "stomach",
+  "intestine",
+  "intestines",
+  "colon",
+  "gallbladder",
+  "spleen",
+  "artery",
+  "arteries",
+  "vein",
+  "veins",
+  "bloodstream",
+  "blood vessel",
+  "blood vessels",
+  "neuron",
+  "neurons",
+  "synapse",
+  "synapses",
+  "neurotransmitter",
+  "microbiome",
+  "microbiota",
+  "cells",
+  "cellular",
+  "mitochondria",
+  "dna",
+  "rna"
+];
+const PHYSIOLOGICAL_MECHANISM_SIGNALS = [
+  "physiology",
+  "physiological",
+  "metabolism",
+  "metabolic",
+  "insulin",
+  "glucose",
+  "blood sugar",
+  "glycogen",
+  "insulin resistance",
+  "blood pressure",
+  "hypertension",
+  "cholesterol",
+  "triglyceride",
+  "inflammation",
+  "inflammatory",
+  "oxidation",
+  "oxidative stress",
+  "hormone",
+  "hormones",
+  "endocrine",
+  "cortisol",
+  "adrenaline",
+  "melatonin",
+  "dopamine",
+  "serotonin",
+  "digestive process",
+  "digestion",
+  "nutrient absorption",
+  "circadian rhythm",
+  "rem sleep",
+  "deep sleep",
+  "sleep cycle",
+  "autophagy",
+  "apoptosis",
+  "immune system",
+  "pathogen",
+  "antibody",
+  "antibodies"
+];
+const CLINICAL_MEDICAL_SIGNALS = [
+  "cardiovascular",
+  "gastrointestinal",
+  "neurological",
+  "biomarker",
+  "clinical trial",
+  "clinical trials",
+  "pathology",
+  "pathological",
+  "symptom",
+  "symptoms",
+  "medical diagnosis",
+  "human anatomy",
+  "anatomical structure",
+  "supplements",
+  "micronutrient",
+  "micronutrients",
+  "electrolyte",
+  "electrolytes"
+];
+const FALSE_POSITIVE_TRIGGERS = [
+  /\bfinancial health\b/i,
+  /\beconomic health\b/i,
+  /\bhealth of the economy\b/i,
+  /\bcompany health\b/i,
+  /\bbusiness health\b/i,
+  /\bmarket health\b/i,
+  /\bcommunity health\b/i,
+  /\bpolitical health\b/i,
+  /\bsystem health\b/i
+];
+function getContentProfilePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "content-profile.json");
+}
+function loadContentProfileArtifact(projectDir, currentSourceHash) {
+  const filePath = getContentProfilePath(projectDir);
+  if (!fs__namespace.existsSync(filePath)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && (parsed.resolvedProfile === "health" || parsed.resolvedProfile === "general")) {
+      if (currentSourceHash && parsed.sourceHash && parsed.sourceHash !== currentSourceHash) {
+        return null;
+      }
+      return parsed;
+    }
+  } catch {
+  }
+  return null;
+}
+function saveContentProfileArtifact(projectDir, detection) {
+  const analysisDir = path__namespace.join(projectDir, "analysis");
+  if (!fs__namespace.existsSync(analysisDir)) {
+    fs__namespace.mkdirSync(analysisDir, { recursive: true });
+  }
+  const filePath = getContentProfilePath(projectDir);
+  const tempPath = `${filePath}.${Date.now()}.tmp`;
+  fs__namespace.writeFileSync(tempPath, JSON.stringify(detection, null, 2), "utf-8");
+  fs__namespace.renameSync(tempPath, filePath);
+}
+function evaluateContentProfileSemantics(params) {
+  const { scriptText = "", scenes = [], globalContext } = params;
+  const sceneTexts = scenes.map((s) => `${s.narrativeText ?? s.narration ?? ""} ${s.visualIntent ?? s.visualDescription ?? ""}`);
+  const combinedText = `${scriptText} ${sceneTexts.join(" ")}`.toLowerCase();
+  const gSubject = (globalContext?.primarySubject || "").toLowerCase();
+  const gThesis = (globalContext?.centralThesis || "").toLowerCase();
+  const gAnchors = (globalContext?.exactTopicAnchors || []).map((a) => a.toLowerCase()).join(" ");
+  const gContextCombined = `${gSubject} ${gThesis} ${gAnchors}`;
+  const foundSignals = /* @__PURE__ */ new Set();
+  const allSignalList = [
+    ...ANATOMICAL_ORGAN_SIGNALS,
+    ...PHYSIOLOGICAL_MECHANISM_SIGNALS,
+    ...CLINICAL_MEDICAL_SIGNALS
+  ];
+  let totalSignalOccurrences = 0;
+  for (const signal of allSignalList) {
+    const regex = new RegExp(`\\b${signal.replace(/\s+/g, "\\s+")}\\b`, "gi");
+    const matchesInText = combinedText.match(regex);
+    const matchesInGlobal = gContextCombined.match(regex);
+    const count = (matchesInText?.length || 0) + (matchesInGlobal?.length ? matchesInGlobal.length * 2 : 0);
+    if (count > 0) {
+      foundSignals.add(signal);
+      totalSignalOccurrences += count;
+    }
+  }
+  let falsePositiveHits = 0;
+  for (const fpRegex of FALSE_POSITIVE_TRIGGERS) {
+    if (fpRegex.test(combinedText)) {
+      falsePositiveHits++;
+    }
+  }
+  const detectedSignals = Array.from(foundSignals);
+  const reasons = [];
+  const organHits = ANATOMICAL_ORGAN_SIGNALS.filter((s) => foundSignals.has(s));
+  const mechanismHits = PHYSIOLOGICAL_MECHANISM_SIGNALS.filter((s) => foundSignals.has(s));
+  const clinicalHits = CLINICAL_MEDICAL_SIGNALS.filter((s) => foundSignals.has(s));
+  const isGlobalSubjectMedical = ANATOMICAL_ORGAN_SIGNALS.some((s) => new RegExp(`\\b${s.replace(/\\s+/g, "\\\\s+")}\\b`, "gi").test(gSubject)) || PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => new RegExp(`\\b${s.replace(/\\s+/g, "\\\\s+")}\\b`, "gi").test(gSubject));
+  const hasStrongOrganPresence = organHits.length >= 2;
+  const hasDiverseSignals = organHits.length > 0 && mechanismHits.length > 0 || detectedSignals.length >= 4;
+  const isHeavySignalDensity = totalSignalOccurrences >= 5 && detectedSignals.length >= 2;
+  const isHealth = (hasDiverseSignals || isGlobalSubjectMedical || hasStrongOrganPresence && isHeavySignalDensity) && !(falsePositiveHits > 0 && detectedSignals.length < 3);
+  if (isHealth) {
+    if (organHits.length > 0) {
+      reasons.push(`Identified biological/anatomical organs: ${organHits.slice(0, 5).join(", ")}`);
+    }
+    if (mechanismHits.length > 0) {
+      reasons.push(`Detected physiological and metabolic mechanisms: ${mechanismHits.slice(0, 5).join(", ")}`);
+    }
+    if (clinicalHits.length > 0) {
+      reasons.push(`Referenced clinical or medical context: ${clinicalHits.slice(0, 4).join(", ")}`);
+    }
+    if (isGlobalSubjectMedical) {
+      reasons.push(`Global script context primary subject (${globalContext?.primarySubject}) centers on human physiology`);
+    }
+    if (reasons.length === 0) {
+      reasons.push(`Detected ${detectedSignals.length} distinct biological/physiological signals throughout script`);
+    }
+    const confidence2 = Math.min(0.98, Math.max(0.82, 0.8 + detectedSignals.length * 0.03 + (isGlobalSubjectMedical ? 0.08 : 0)));
+    return {
+      resolvedProfile: "health",
+      confidence: Math.round(confidence2 * 100) / 100,
+      reasons,
+      detectedSignals
+    };
+  }
+  if (falsePositiveHits > 0) {
+    reasons.push("Health terminology appears in metaphorical or financial/economic context");
+  } else if (detectedSignals.length === 0) {
+    reasons.push("No anatomical organs, clinical terms or physiological mechanisms detected");
+  } else {
+    reasons.push(
+      `Isolated mentions (${detectedSignals.slice(0, 3).join(", ")}) insufficient to establish medical/physiological focus`
+    );
+  }
+  reasons.push("Script narrative aligns with general documentary style (history, society, tech, culture, nature, or lifestyle)");
+  const confidence = Math.min(0.98, Math.max(0.88, 0.98 - detectedSignals.length * 0.03));
+  return {
+    resolvedProfile: "general",
+    confidence: Math.round(confidence * 100) / 100,
+    reasons,
+    detectedSignals
+  };
+}
+async function detectOrResolveContentProfile(params) {
+  const { projectDir, forceRefresh = false } = params;
+  const mode = params.mode ?? "auto";
+  if (mode === "health" || mode === "general") {
+    const overrideDetection = {
+      schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
+      mode,
+      resolvedProfile: mode,
+      confidence: 1,
+      reasons: [`Explicit user profile mode override: ${mode}`],
+      detectedSignals: [],
+      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    let overrideScriptText = params.scriptText ?? "";
+    if (!overrideScriptText) {
+      const possibleScriptPaths = [
+        path__namespace.join(projectDir, "source", "script.txt"),
+        path__namespace.join(projectDir, "source", "script.md"),
+        path__namespace.join(projectDir, "analysis", "script.txt")
+      ];
+      for (const p of possibleScriptPaths) {
+        if (fs__namespace.existsSync(p)) {
+          try {
+            overrideScriptText = fs__namespace.readFileSync(p, "utf-8");
+            break;
+          } catch {
+          }
+        }
+      }
+    }
+    if (overrideScriptText) {
+      overrideDetection.sourceHash = computeSourceFingerprint(overrideScriptText);
+    }
+    saveContentProfileArtifact(projectDir, overrideDetection);
+    logger.info(`[ContentProfile] Explicit profile override applied: ${mode}`);
+    return overrideDetection;
+  }
+  let scriptText = params.scriptText ?? "";
+  if (!scriptText) {
+    const possibleScriptPaths = [
+      path__namespace.join(projectDir, "source", "script.txt"),
+      path__namespace.join(projectDir, "source", "script.md"),
+      path__namespace.join(projectDir, "analysis", "script.txt")
+    ];
+    for (const p of possibleScriptPaths) {
+      if (fs__namespace.existsSync(p)) {
+        try {
+          scriptText = fs__namespace.readFileSync(p, "utf-8");
+          break;
+        } catch {
+        }
+      }
+    }
+  }
+  const currentSourceHash = scriptText ? computeSourceFingerprint(scriptText) : void 0;
+  if (!forceRefresh) {
+    const cached = loadContentProfileArtifact(projectDir, currentSourceHash);
+    if (cached && cached.mode === "auto") {
+      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`);
+      return cached;
+    }
+  }
+  let rawScenes = params.rawScenes;
+  if (!rawScenes) {
+    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+    if (fs__namespace.existsSync(planPath)) {
+      try {
+        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+        const scenes = [];
+        for (const ch of plan.chapters || []) {
+          const seqs = ch.chapters_seq ?? ch.sequences ?? [];
+          for (const seq of seqs) {
+            for (const sc of seq.scenes || []) {
+              scenes.push({
+                sceneIndex: sc.sceneIndex,
+                narrativeText: sc.narrativeText ?? sc.narration ?? "",
+                visualIntent: sc.visualIntent ?? sc.visualDescription ?? ""
+              });
+            }
+          }
+        }
+        rawScenes = scenes;
+      } catch {
+      }
+    }
+  }
+  let globalContext = params.globalContext;
+  if (!globalContext) {
+    const ctxPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+    if (fs__namespace.existsSync(ctxPath)) {
+      try {
+        globalContext = JSON.parse(fs__namespace.readFileSync(ctxPath, "utf-8"));
+      } catch {
+      }
+    }
+  }
+  const evaluation = evaluateContentProfileSemantics({
+    scriptText,
+    scenes: rawScenes,
+    globalContext
+  });
+  let ci;
+  if (globalContext) {
+    ci = generateContentIntelligence({
+      projectDir,
+      scriptText,
+      globalContext
+    });
+  }
+  const detection = {
+    schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
+    mode: "auto",
+    resolvedProfile: evaluation.resolvedProfile,
+    confidence: evaluation.confidence,
+    reasons: evaluation.reasons,
+    detectedSignals: evaluation.detectedSignals,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sourceHash: currentSourceHash,
+    scriptSubject: ci?.subject?.primarySubject,
+    semanticProfile: ci ? {
+      humanMedical: ci.executionProfile.humanMedical,
+      humanMedicalConfidence: ci.executionProfile.humanMedicalConfidence,
+      primaryDomain: ci.domain.primaryDomain
+    } : void 0
+  };
+  saveContentProfileArtifact(projectDir, detection);
+  logger.info(
+    `[ContentProfile] Auto-detected profile: ${detection.resolvedProfile} (confidence=${detection.confidence}, signals=[${detection.detectedSignals.slice(0, 6).join(", ")}])`
+  );
+  return detection;
+}
+function getContentIntelligencePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "content-intelligence.json");
+}
+function loadContentIntelligence(projectDir, currentHash) {
+  const p = getContentIntelligencePath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    const data = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    if (data.sourceHash === currentHash) {
+      return data;
+    }
+  } catch {
+  }
+  return null;
+}
+function saveContentIntelligence(projectDir, ci) {
+  const p = getContentIntelligencePath(projectDir);
+  fs__namespace.mkdirSync(path__namespace.join(projectDir, "analysis"), { recursive: true });
+  fs__namespace.writeFileSync(p, JSON.stringify(ci, null, 2), "utf-8");
+}
+function generateContentIntelligence(params) {
+  const { projectDir, scriptText, globalContext } = params;
+  const sourceHash = computeSourceFingerprint(scriptText);
+  const cached = loadContentIntelligence(projectDir, sourceHash);
+  if (cached) return cached;
+  const evaluation = evaluateContentProfileSemantics({ scriptText, globalContext });
+  const primaryDomain = globalContext.targetAudience || "general documentary";
+  const ci = {
+    schemaVersion: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sourceHash,
+    subject: {
+      primarySubject: globalContext.primarySubject,
+      secondarySubjects: globalContext.secondarySubjects || [],
+      mainEntities: globalContext.exactTopicAnchors || []
+    },
+    domain: {
+      primaryDomain,
+      secondaryDomains: [],
+      confidence: evaluation.confidence
+    },
+    executionProfile: {
+      recommended: evaluation.resolvedProfile,
+      confidence: evaluation.confidence,
+      humanMedical: evaluation.resolvedProfile === "health",
+      humanMedicalConfidence: evaluation.resolvedProfile === "health" ? evaluation.confidence : 0,
+      reason: evaluation.reasons.join("; ")
+    },
+    documentaryAngle: globalContext.documentaryAngle || "",
+    visualOntology: {
+      people: globalContext.recurringPeople?.map((p) => p.role) || [],
+      places: globalContext.geography?.secondaryLocations || [],
+      environments: globalContext.visualWorld?.environment || [],
+      objects: globalContext.visualWorld?.recurringObjects || [],
+      activities: globalContext.visualWorld?.occupations || [],
+      infrastructure: globalContext.visualWorld?.architecture || [],
+      machinery: globalContext.visualWorld?.machinery || [],
+      documents: []
+    },
+    visualStyle: {
+      documentaryStyle: globalContext.visualWorld?.documentaryStyle || "",
+      lighting: globalContext.visualWorld?.colorMood || "",
+      colorMood: globalContext.visualWorld?.colorMood || "",
+      cameraLanguage: "observational"
+    },
+    forbiddenInterpretations: globalContext.forbiddenSubstitutions || [],
+    dangerousAmbiguities: [],
+    evidence: evaluation.reasons.map((r) => ({ signal: r, explanation: r })),
+    generatedBy: "deterministic-fallback"
+  };
+  saveContentIntelligence(projectDir, ci);
+  return ci;
+}
+const MEDICAL_UNSUPPORTED_DOMAINS = [
+  "kidney",
+  "liver",
+  "bladder",
+  "blood vessel",
+  "artery",
+  "organ",
+  "anatomy",
+  "physiology",
+  "biological tissue",
+  "medical",
+  "clinical",
+  "human cells",
+  "biological fluid",
+  "hormone",
+  "enzyme",
+  "filtering biological fluid",
+  "physiological activity",
+  "observable biological state",
+  "medical documentary"
+];
+function validateSemanticFidelity(textToValidate, contentIntelligence, sceneNarration) {
+  const lowerText = textToValidate.toLowerCase();
+  const lowerNarration = (sceneNarration || "").toLowerCase();
+  const unsupported = [];
+  if (contentIntelligence && !contentIntelligence.executionProfile.humanMedical) {
+    for (const term of MEDICAL_UNSUPPORTED_DOMAINS) {
+      if (lowerText.includes(term)) {
+        if (!lowerNarration.includes(term)) {
+          unsupported.push(term);
+        }
+      }
+    }
+    for (const term of contentIntelligence.forbiddenInterpretations) {
+      if (lowerText.includes(term.toLowerCase())) {
+        if (!lowerNarration.includes(term.toLowerCase())) {
+          unsupported.push(term.toLowerCase());
+        }
+      }
+    }
+  }
+  const isValid = unsupported.length === 0;
+  return {
+    valid: isValid,
+    score: isValid ? 1 : 0,
+    unsupportedConcepts: unsupported,
+    supportedConcepts: [],
+    reason: isValid ? "Passes semantic fidelity check" : `Unsupported domain introduction: ${unsupported.join(", ")}`
+  };
+}
 function extractVisualQueries(text) {
   const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
   const words = clean.split(/\s+/).filter((w) => w.length > 2);
@@ -16951,7 +17443,7 @@ function applyLocalMediaMatching(scene, localAssetSuggestion, mediaFiles) {
   scene.mediaType = "video";
   scene.localAsset = void 0;
 }
-function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
+function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced", sourceHash) {
   const skeletons = buildSceneSkeleton(transcript, pacing);
   const outline = buildAlgorithmicOutline(skeletons, transcript.duration);
   const skeletonMap = /* @__PURE__ */ new Map();
@@ -17035,7 +17527,8 @@ function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced") {
     modelUsed: "rule-based-segmenter",
     openLoops: [],
     motifRegistry: [],
-    retentionFlags: initialFlags
+    retentionFlags: initialFlags,
+    sourceHash
   };
 }
 async function buildEditPlan(params) {
@@ -17089,6 +17582,7 @@ async function buildEditPlan(params) {
   } catch (err) {
     logger.warn(`Could not load script text or project settings: ${err}`);
   }
+  const sourceHash = scriptText ? computeSourceFingerprint(scriptText) : void 0;
   progress(`Segmenting ${transcript.segments.length} transcript segments into scenes (${projectPacing} pacing)...`, 0.1);
   const skeletons = buildSceneSkeleton(transcript, projectPacing);
   progress(
@@ -17098,7 +17592,7 @@ async function buildEditPlan(params) {
   const cleanApiKey = normalizeApiKey(apiKey);
   if (!cleanApiKey) {
     logger.warn("[PLAN] No API key provided, creating algorithmic edit plan");
-    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing);
+    const fallbackPlan = buildAlgorithmicPlan(transcript, projectName, projectPacing, sourceHash);
     const planPath2 = path.join(projectDir, "analysis", "master-edit-plan.json");
     fs__namespace.writeFileSync(planPath2, JSON.stringify(fallbackPlan, null, 2), "utf-8");
     progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
@@ -17169,6 +17663,7 @@ async function buildEditPlan(params) {
     if (b === 0) primaryModelUsed = modelUsed;
   }
   progress("Assembling master edit plan...", 0.85);
+  const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null;
   const skeletonMap = /* @__PURE__ */ new Map();
   for (const skel of skeletons) {
     skeletonMap.set(skel.sceneIndex, skel);
@@ -17186,6 +17681,25 @@ async function buildEditPlan(params) {
         const aiData = allEnrichedMap.get(skel.sceneIndex);
         const rawQueries = aiData?.searchQueries && aiData.searchQueries.length >= 3 ? aiData.searchQueries : extractVisualQueries(skel.narrativeText);
         const queries = dedupeStockQueries(rawQueries.map((q) => sanitizeStockQuery(q, skel.narrativeText)));
+        let finalIntent = aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll";
+        let finalQueries = queries;
+        if (ci) {
+          const intentFid = validateSemanticFidelity(finalIntent, ci, skel.narrativeText);
+          if (!intentFid.valid) {
+            logger.warn(`[SemanticGate] Rejected visualIntent "${finalIntent}" in Scene ${skel.sceneIndex}: ${intentFid.reason}`);
+            finalIntent = "Documentary cinematic b-roll";
+          }
+          finalQueries = queries.filter((q) => {
+            const fid = validateSemanticFidelity(q, ci, skel.narrativeText);
+            if (!fid.valid) {
+              logger.warn(`[SemanticGate] Rejected query "${q}" in Scene ${skel.sceneIndex}: ${fid.reason}`);
+            }
+            return fid.valid;
+          });
+          if (finalQueries.length === 0) {
+            finalQueries.push("documentary cinematic b-roll");
+          }
+        }
         const sc = {
           sceneIndex: skel.sceneIndex,
           // will be globally normalized below
@@ -17197,9 +17711,9 @@ async function buildEditPlan(params) {
           narrativeText: skel.narrativeText,
           transcriptSegmentIds: [...skel.transcriptSegmentIds],
           transitionIn: aiData?.transitionIn ?? "cut",
-          visualNote: aiData?.visualNote ?? `Visual shot: ${queries[0]}`,
-          visualIntent: aiData?.visualIntent ?? queries[0] ?? "Documentary cinematic b-roll",
-          searchQueries: queries,
+          visualNote: aiData?.visualNote ?? `Visual shot: ${finalQueries[0]}`,
+          visualIntent: finalIntent,
+          searchQueries: finalQueries,
           energyLevel: aiData?.energyLevel ?? inferEnergyLevelFromText(skel.narrativeText),
           shotType: aiData?.shotType ?? inferShotTypeFromText(skel.narrativeText)
         };
@@ -17270,7 +17784,8 @@ async function buildEditPlan(params) {
     modelUsed: finalModelUsed,
     openLoops: [],
     motifRegistry: [],
-    retentionFlags: initialFlags
+    retentionFlags: initialFlags,
+    sourceHash
   };
   progress("Saving master edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
@@ -24079,318 +24594,6 @@ Retry failed AI visuals.`;
     }
   };
 }
-const CONTENT_PROFILE_SCHEMA_VERSION = 1;
-const ANATOMICAL_ORGAN_SIGNALS = [
-  "liver",
-  "kidney",
-  "kidneys",
-  "heart",
-  "brain",
-  "gut",
-  "lung",
-  "lungs",
-  "pancreas",
-  "stomach",
-  "intestine",
-  "intestines",
-  "colon",
-  "gallbladder",
-  "spleen",
-  "artery",
-  "arteries",
-  "vein",
-  "veins",
-  "bloodstream",
-  "blood vessel",
-  "blood vessels",
-  "neuron",
-  "neurons",
-  "synapse",
-  "synapses",
-  "neurotransmitter",
-  "microbiome",
-  "microbiota",
-  "cells",
-  "cellular",
-  "mitochondria",
-  "dna",
-  "rna"
-];
-const PHYSIOLOGICAL_MECHANISM_SIGNALS = [
-  "physiology",
-  "physiological",
-  "metabolism",
-  "metabolic",
-  "insulin",
-  "glucose",
-  "blood sugar",
-  "glycogen",
-  "insulin resistance",
-  "blood pressure",
-  "hypertension",
-  "cholesterol",
-  "triglyceride",
-  "inflammation",
-  "inflammatory",
-  "oxidation",
-  "oxidative stress",
-  "hormone",
-  "hormones",
-  "endocrine",
-  "cortisol",
-  "adrenaline",
-  "melatonin",
-  "dopamine",
-  "serotonin",
-  "digestive process",
-  "digestion",
-  "nutrient absorption",
-  "circadian rhythm",
-  "rem sleep",
-  "deep sleep",
-  "sleep cycle",
-  "autophagy",
-  "apoptosis",
-  "immune system",
-  "pathogen",
-  "antibody",
-  "antibodies"
-];
-const CLINICAL_MEDICAL_SIGNALS = [
-  "cardiovascular",
-  "gastrointestinal",
-  "neurological",
-  "biomarker",
-  "clinical trial",
-  "clinical trials",
-  "pathology",
-  "pathological",
-  "symptom",
-  "symptoms",
-  "medical diagnosis",
-  "human anatomy",
-  "anatomical structure",
-  "supplements",
-  "micronutrient",
-  "micronutrients",
-  "electrolyte",
-  "electrolytes"
-];
-const FALSE_POSITIVE_TRIGGERS = [
-  /\bfinancial health\b/i,
-  /\beconomic health\b/i,
-  /\bhealth of the economy\b/i,
-  /\bcompany health\b/i,
-  /\bbusiness health\b/i,
-  /\bmarket health\b/i,
-  /\bcommunity health\b/i,
-  /\bpolitical health\b/i,
-  /\bsystem health\b/i
-];
-function getContentProfilePath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "content-profile.json");
-}
-function loadContentProfileArtifact(projectDir) {
-  const filePath = getContentProfilePath(projectDir);
-  if (!fs__namespace.existsSync(filePath)) return null;
-  try {
-    const raw = fs__namespace.readFileSync(filePath, "utf-8");
-    const parsed = JSON.parse(raw);
-    if (parsed && (parsed.resolvedProfile === "health" || parsed.resolvedProfile === "general")) {
-      return parsed;
-    }
-  } catch {
-  }
-  return null;
-}
-function saveContentProfileArtifact(projectDir, detection) {
-  const analysisDir = path__namespace.join(projectDir, "analysis");
-  if (!fs__namespace.existsSync(analysisDir)) {
-    fs__namespace.mkdirSync(analysisDir, { recursive: true });
-  }
-  const filePath = getContentProfilePath(projectDir);
-  const tempPath = `${filePath}.${Date.now()}.tmp`;
-  fs__namespace.writeFileSync(tempPath, JSON.stringify(detection, null, 2), "utf-8");
-  fs__namespace.renameSync(tempPath, filePath);
-}
-function evaluateContentProfileSemantics(params) {
-  const { scriptText = "", scenes = [], globalContext } = params;
-  const sceneTexts = scenes.map((s) => `${s.narrativeText ?? s.narration ?? ""} ${s.visualIntent ?? s.visualDescription ?? ""}`);
-  const combinedText = `${scriptText} ${sceneTexts.join(" ")}`.toLowerCase();
-  const gSubject = (globalContext?.primarySubject || "").toLowerCase();
-  const gThesis = (globalContext?.centralThesis || "").toLowerCase();
-  const gAnchors = (globalContext?.exactTopicAnchors || []).map((a) => a.toLowerCase()).join(" ");
-  const gContextCombined = `${gSubject} ${gThesis} ${gAnchors}`;
-  const foundSignals = /* @__PURE__ */ new Set();
-  const allSignalList = [
-    ...ANATOMICAL_ORGAN_SIGNALS,
-    ...PHYSIOLOGICAL_MECHANISM_SIGNALS,
-    ...CLINICAL_MEDICAL_SIGNALS
-  ];
-  let totalSignalOccurrences = 0;
-  for (const signal of allSignalList) {
-    const regex = new RegExp(`\\b${signal.replace(/\s+/g, "\\s+")}\\b`, "gi");
-    const matchesInText = combinedText.match(regex);
-    const matchesInGlobal = gContextCombined.match(regex);
-    const count = (matchesInText?.length || 0) + (matchesInGlobal?.length ? matchesInGlobal.length * 2 : 0);
-    if (count > 0) {
-      foundSignals.add(signal);
-      totalSignalOccurrences += count;
-    }
-  }
-  let falsePositiveHits = 0;
-  for (const fpRegex of FALSE_POSITIVE_TRIGGERS) {
-    if (fpRegex.test(combinedText)) {
-      falsePositiveHits++;
-    }
-  }
-  const detectedSignals = Array.from(foundSignals);
-  const reasons = [];
-  const organHits = ANATOMICAL_ORGAN_SIGNALS.filter((s) => foundSignals.has(s));
-  const mechanismHits = PHYSIOLOGICAL_MECHANISM_SIGNALS.filter((s) => foundSignals.has(s));
-  const clinicalHits = CLINICAL_MEDICAL_SIGNALS.filter((s) => foundSignals.has(s));
-  const isGlobalSubjectMedical = ANATOMICAL_ORGAN_SIGNALS.some((s) => gSubject.includes(s)) || PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => gSubject.includes(s));
-  const hasStrongOrganPresence = organHits.length >= 2;
-  const hasDiverseSignals = organHits.length > 0 && mechanismHits.length > 0 || detectedSignals.length >= 4;
-  const isHeavySignalDensity = totalSignalOccurrences >= 5 && detectedSignals.length >= 2;
-  const isHealth = (hasDiverseSignals || isGlobalSubjectMedical || hasStrongOrganPresence && isHeavySignalDensity) && !(falsePositiveHits > 0 && detectedSignals.length < 3);
-  if (isHealth) {
-    if (organHits.length > 0) {
-      reasons.push(`Identified biological/anatomical organs: ${organHits.slice(0, 5).join(", ")}`);
-    }
-    if (mechanismHits.length > 0) {
-      reasons.push(`Detected physiological and metabolic mechanisms: ${mechanismHits.slice(0, 5).join(", ")}`);
-    }
-    if (clinicalHits.length > 0) {
-      reasons.push(`Referenced clinical or medical context: ${clinicalHits.slice(0, 4).join(", ")}`);
-    }
-    if (isGlobalSubjectMedical) {
-      reasons.push(`Global script context primary subject (${globalContext?.primarySubject}) centers on human physiology`);
-    }
-    if (reasons.length === 0) {
-      reasons.push(`Detected ${detectedSignals.length} distinct biological/physiological signals throughout script`);
-    }
-    const confidence2 = Math.min(0.98, Math.max(0.82, 0.8 + detectedSignals.length * 0.03 + (isGlobalSubjectMedical ? 0.08 : 0)));
-    return {
-      resolvedProfile: "health",
-      confidence: Math.round(confidence2 * 100) / 100,
-      reasons,
-      detectedSignals
-    };
-  }
-  if (falsePositiveHits > 0) {
-    reasons.push("Health terminology appears in metaphorical or financial/economic context");
-  } else if (detectedSignals.length === 0) {
-    reasons.push("No anatomical organs, clinical terms or physiological mechanisms detected");
-  } else {
-    reasons.push(
-      `Isolated mentions (${detectedSignals.slice(0, 3).join(", ")}) insufficient to establish medical/physiological focus`
-    );
-  }
-  reasons.push("Script narrative aligns with general documentary style (history, society, tech, culture, nature, or lifestyle)");
-  const confidence = Math.min(0.98, Math.max(0.88, 0.98 - detectedSignals.length * 0.03));
-  return {
-    resolvedProfile: "general",
-    confidence: Math.round(confidence * 100) / 100,
-    reasons,
-    detectedSignals
-  };
-}
-async function detectOrResolveContentProfile(params) {
-  const { projectDir, forceRefresh = false } = params;
-  const mode = params.mode ?? "auto";
-  if (mode === "health" || mode === "general") {
-    const overrideDetection = {
-      schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
-      mode,
-      resolvedProfile: mode,
-      confidence: 1,
-      reasons: [`Explicit user profile mode override: ${mode}`],
-      detectedSignals: [],
-      generatedAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    saveContentProfileArtifact(projectDir, overrideDetection);
-    logger.info(`[ContentProfile] Explicit profile override applied: ${mode}`);
-    return overrideDetection;
-  }
-  if (!forceRefresh) {
-    const cached = loadContentProfileArtifact(projectDir);
-    if (cached && cached.mode === "auto") {
-      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`);
-      return cached;
-    }
-  }
-  let scriptText = params.scriptText ?? "";
-  if (!scriptText) {
-    const possibleScriptPaths = [
-      path__namespace.join(projectDir, "source", "script.txt"),
-      path__namespace.join(projectDir, "source", "script.md"),
-      path__namespace.join(projectDir, "analysis", "script.txt")
-    ];
-    for (const p of possibleScriptPaths) {
-      if (fs__namespace.existsSync(p)) {
-        try {
-          scriptText = fs__namespace.readFileSync(p, "utf-8");
-          break;
-        } catch {
-        }
-      }
-    }
-  }
-  let rawScenes = params.rawScenes;
-  if (!rawScenes) {
-    const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-    if (fs__namespace.existsSync(planPath)) {
-      try {
-        const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-        const scenes = [];
-        for (const ch of plan.chapters || []) {
-          const seqs = ch.chapters_seq ?? ch.sequences ?? [];
-          for (const seq of seqs) {
-            for (const sc of seq.scenes || []) {
-              scenes.push({
-                sceneIndex: sc.sceneIndex,
-                narrativeText: sc.narrativeText ?? sc.narration ?? "",
-                visualIntent: sc.visualIntent ?? sc.visualDescription ?? ""
-              });
-            }
-          }
-        }
-        rawScenes = scenes;
-      } catch {
-      }
-    }
-  }
-  let globalContext = params.globalContext;
-  if (!globalContext) {
-    const ctxPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
-    if (fs__namespace.existsSync(ctxPath)) {
-      try {
-        globalContext = JSON.parse(fs__namespace.readFileSync(ctxPath, "utf-8"));
-      } catch {
-      }
-    }
-  }
-  const evaluation = evaluateContentProfileSemantics({
-    scriptText,
-    scenes: rawScenes,
-    globalContext
-  });
-  const detection = {
-    schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
-    mode: "auto",
-    resolvedProfile: evaluation.resolvedProfile,
-    confidence: evaluation.confidence,
-    reasons: evaluation.reasons,
-    detectedSignals: evaluation.detectedSignals,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString()
-  };
-  saveContentProfileArtifact(projectDir, detection);
-  logger.info(
-    `[ContentProfile] Auto-detected profile: ${detection.resolvedProfile} (confidence=${detection.confidence}, signals=[${detection.detectedSignals.slice(0, 6).join(", ")}])`
-  );
-  return detection;
-}
 function checkAborted(signal) {
   if (signal?.aborted) {
     throw new Error("Pipeline execution was cancelled.");
@@ -24474,7 +24677,14 @@ async function runTranscriptionStage(options, onProgress, signal) {
 async function runPlanningStage(options, onProgress, signal) {
   checkAborted(signal);
   const planPath = path__namespace.join(options.projectDir, "analysis", "master-edit-plan.json");
-  if (isPlanningValid(options.projectDir)) {
+  let sourceHash;
+  try {
+    if (options.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+      sourceHash = computeSourceFingerprint(fs__namespace.readFileSync(options.scriptPath, "utf-8"));
+    }
+  } catch {
+  }
+  if (isPlanningValid(options.projectDir, sourceHash)) {
     try {
       const cached = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
       onProgress("Using cached master edit plan", 1);
@@ -24576,7 +24786,11 @@ async function runGlobalContextStage(options, onProgress, signal) {
   }
   let ctx = null;
   let isCached = false;
-  if (isGlobalContextValid(options.projectDir)) {
+  let sourceHash;
+  if (scriptText) {
+    sourceHash = computeSourceFingerprint(scriptText);
+  }
+  if (isGlobalContextValid(options.projectDir, sourceHash)) {
     try {
       ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
       isCached = true;
@@ -24662,7 +24876,17 @@ async function runStockSearchStage(options, onProgress, signal) {
   checkAborted(signal);
   const mix = resolveVisualMixConfig(options);
   if (mix.mode === "custom-mix") {
-    const mode = options.contentProfileMode ?? resolveContentProfileMode(options);
+    let currentSourceHash;
+    try {
+      if (options.scriptPath && fs__namespace.existsSync(options.scriptPath)) {
+        currentSourceHash = computeSourceFingerprint(fs__namespace.readFileSync(options.scriptPath, "utf-8"));
+      }
+    } catch {
+    }
+    const mode = resolveContentProfileMode({
+      ...options,
+      currentSourceHash
+    });
     onProgress("Resolving content profile...", 0.02);
     const detection = await detectOrResolveContentProfile({
       projectDir: options.projectDir,

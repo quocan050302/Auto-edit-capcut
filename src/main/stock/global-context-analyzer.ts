@@ -25,9 +25,7 @@ export function getContextPath(projectDir: string): string {
   return join(projectDir, "analysis", "global-script-context.json")
 }
 
-function scriptHash(text: string): string {
-  return createHash("md5").update(text).digest("hex").slice(0, 16)
-}
+import { computeSourceFingerprint } from '../pipeline/source-fingerprint'
 
 const SYSTEM_PROMPT = `You are the Context-Aware Visual Research Engine for a long-form documentary.
 Analyze the ENTIRE script and produce a GlobalScriptContext JSON object used by every scene to generate stock-media search queries.
@@ -104,7 +102,7 @@ export async function analyzeGlobalContext(params: {
   } catch { /* ignore */ }
 
   const contextPath = getContextPath(projectDir)
-  const hash = scriptHash(fullText)
+  const hash = computeSourceFingerprint(fullText)
 
   if (!forceRegenerate && fs.existsSync(contextPath)) {
     try {

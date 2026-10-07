@@ -8,6 +8,8 @@ import type {
   GlobalScriptContext
 } from '../../../shared/types'
 import { resolveContentProfileMode } from '../../../shared/types'
+import { computeSourceFingerprint } from '../pipeline/source-fingerprint'
+import { generateContentIntelligence } from '../content-intelligence/content-intelligence-analyzer'
 
 export const CONTENT_PROFILE_SCHEMA_VERSION = 1
 
@@ -78,13 +80,16 @@ export function getContentProfilePath(projectDir: string): string {
 /**
  * Loads an existing content-profile.json artifact if present and valid.
  */
-export function loadContentProfileArtifact(projectDir: string): ContentProfileDetection | null {
+export function loadContentProfileArtifact(projectDir: string, currentSourceHash?: string): ContentProfileDetection | null {
   const filePath = getContentProfilePath(projectDir)
   if (!fs.existsSync(filePath)) return null
   try {
     const raw = fs.readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(raw) as ContentProfileDetection
     if (parsed && (parsed.resolvedProfile === 'health' || parsed.resolvedProfile === 'general')) {
+      if (currentSourceHash && parsed.sourceHash && parsed.sourceHash !== currentSourceHash) {
+        return null // Cache is stale
+      }
       return parsed
     }
   } catch {
@@ -177,8 +182,8 @@ export function evaluateContentProfileSemantics(params: {
 
   // Determine if Global Context specifically names an organ or physiology topic
   const isGlobalSubjectMedical =
-    ANATOMICAL_ORGAN_SIGNALS.some((s) => gSubject.includes(s)) ||
-    PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => gSubject.includes(s))
+    ANATOMICAL_ORGAN_SIGNALS.some((s) => new RegExp(`\\b${s.replace(/\\s+/g, '\\\\s+')}\\b`, 'gi').test(gSubject)) ||
+    PHYSIOLOGICAL_MECHANISM_SIGNALS.some((s) => new RegExp(`\\b${s.replace(/\\s+/g, '\\\\s+')}\\b`, 'gi').test(gSubject))
 
   // Health Decision Criteria (Section 19):
   // Substantially about human anatomy, physiology, organs, nutrition mechanisms, sleep physiology, blood pressure, etc.
@@ -263,18 +268,33 @@ export async function detectOrResolveContentProfile(
       detectedSignals: [],
       generatedAt: new Date().toISOString()
     }
+    
+    // Check if we can attach a sourceHash to this override
+    let overrideScriptText = params.scriptText ?? ''
+    if (!overrideScriptText) {
+      const possibleScriptPaths = [
+        path.join(projectDir, 'source', 'script.txt'),
+        path.join(projectDir, 'source', 'script.md'),
+        path.join(projectDir, 'analysis', 'script.txt')
+      ]
+      for (const p of possibleScriptPaths) {
+        if (fs.existsSync(p)) {
+          try {
+            overrideScriptText = fs.readFileSync(p, 'utf-8')
+            break
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    }
+    if (overrideScriptText) {
+      overrideDetection.sourceHash = computeSourceFingerprint(overrideScriptText)
+    }
+
     saveContentProfileArtifact(projectDir, overrideDetection)
     logger.info(`[ContentProfile] Explicit profile override applied: ${mode}`)
     return overrideDetection
-  }
-
-  // Check existing cached artifact unless forceRefresh is true (Section 21 & 22)
-  if (!forceRefresh) {
-    const cached = loadContentProfileArtifact(projectDir)
-    if (cached && cached.mode === 'auto') {
-      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`)
-      return cached
-    }
   }
 
   // Load script text from disk if not directly passed
@@ -294,6 +314,17 @@ export async function detectOrResolveContentProfile(
           /* ignore */
         }
       }
+    }
+  }
+
+  const currentSourceHash = scriptText ? computeSourceFingerprint(scriptText) : undefined
+
+  // Check existing cached artifact unless forceRefresh is true (Section 21 & 22)
+  if (!forceRefresh) {
+    const cached = loadContentProfileArtifact(projectDir, currentSourceHash)
+    if (cached && cached.mode === 'auto') {
+      logger.info(`[ContentProfile] Reusing cached profile detection: ${cached.resolvedProfile} (confidence=${cached.confidence})`)
+      return cached
     }
   }
 
@@ -343,6 +374,16 @@ export async function detectOrResolveContentProfile(
     globalContext
   })
 
+  // Ensure Content Intelligence is generated
+  let ci
+  if (globalContext) {
+    ci = generateContentIntelligence({
+      projectDir,
+      scriptText,
+      globalContext
+    })
+  }
+
   const detection: ContentProfileDetection = {
     schemaVersion: CONTENT_PROFILE_SCHEMA_VERSION,
     mode: 'auto',
@@ -350,7 +391,14 @@ export async function detectOrResolveContentProfile(
     confidence: evaluation.confidence,
     reasons: evaluation.reasons,
     detectedSignals: evaluation.detectedSignals,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    sourceHash: currentSourceHash,
+    scriptSubject: ci?.subject?.primarySubject,
+    semanticProfile: ci ? {
+      humanMedical: ci.executionProfile.humanMedical,
+      humanMedicalConfidence: ci.executionProfile.humanMedicalConfidence,
+      primaryDomain: ci.domain.primaryDomain
+    } : undefined
   }
 
   saveContentProfileArtifact(projectDir, detection)

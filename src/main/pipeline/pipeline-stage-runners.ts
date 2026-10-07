@@ -18,6 +18,7 @@ import { HealthSfxDirector, SfxDirectorSceneInput } from '../health/health-sfx-d
 import type { HealthSfxCuePlan } from '../health/health-visual-types'
 import type { ManualAiWaitInfo } from '../../../shared/types'
 import { startCoordinatedRender } from '../render-cache/render-service'
+import { computeSourceFingerprint } from './source-fingerprint'
 import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
 import { cleanupOrphanOutputPartials } from '../render-cache/render-cache-manager'
 import { ensureRetentionPlan } from '../retention/retention-director'
@@ -182,8 +183,15 @@ export async function runPlanningStage(
   checkAborted(signal)
   const planPath = path.join(options.projectDir, 'analysis', 'master-edit-plan.json')
 
+  let sourceHash: string | undefined
+  try {
+    if (options.scriptPath && fs.existsSync(options.scriptPath)) {
+      sourceHash = computeSourceFingerprint(fs.readFileSync(options.scriptPath, 'utf-8'))
+    }
+  } catch { /* ignore */ }
+
   // Check cache
-  if (isPlanningValid(options.projectDir)) {
+  if (isPlanningValid(options.projectDir, sourceHash)) {
     try {
       const cached = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
       onProgress('Using cached master edit plan', 1.0)
@@ -318,8 +326,13 @@ export async function runGlobalContextStage(
   let ctx: any = null
   let isCached = false
 
+  let sourceHash: string | undefined
+  if (scriptText) {
+    sourceHash = computeSourceFingerprint(scriptText)
+  }
+
   // Check cache
-  if (isGlobalContextValid(options.projectDir)) {
+  if (isGlobalContextValid(options.projectDir, sourceHash)) {
     try {
       ctx = JSON.parse(fs.readFileSync(contextPath, 'utf-8'))
       isCached = true
@@ -436,7 +449,17 @@ export async function runStockSearchStage(
   const mix = resolveVisualMixConfig(options)
 
   if (mix.mode === 'custom-mix') {
-    const mode = options.contentProfileMode ?? resolveContentProfileMode(options)
+    let currentSourceHash: string | undefined
+    try {
+      if (options.scriptPath && fs.existsSync(options.scriptPath)) {
+        currentSourceHash = computeSourceFingerprint(fs.readFileSync(options.scriptPath, 'utf-8'))
+      }
+    } catch { /* ignore */ }
+    
+    const mode = resolveContentProfileMode({
+      ...options,
+      currentSourceHash
+    })
     onProgress('Resolving content profile...', 0.02)
     const detection = await detectOrResolveContentProfile({
       projectDir: options.projectDir,

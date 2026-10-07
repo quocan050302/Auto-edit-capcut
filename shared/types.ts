@@ -105,12 +105,27 @@ export interface ContentProfileDetection {
   reasons: string[]
   detectedSignals: string[]
   generatedAt: string
+  sourceHash?: string
+  scriptSubject?: string
+  semanticProfile?: {
+    humanMedical: boolean
+    humanMedicalConfidence: number
+    primaryDomain?: string
+  }
 }
 
 export function resolveContentProfileMode(options?: {
   contentProfileMode?: ContentProfileMode
+  contentProfileOverride?: { mode: 'general' | 'health'; sourceHash: string }
   contentType?: ContentType
+  currentSourceHash?: string
 } | null): ContentProfileMode {
+  if (options?.contentProfileOverride && options.currentSourceHash) {
+    if (options.contentProfileOverride.sourceHash === options.currentSourceHash) {
+      return options.contentProfileOverride.mode
+    }
+  }
+  
   if (options?.contentProfileMode) {
     return options.contentProfileMode
   }
@@ -504,6 +519,11 @@ export interface ProjectInputs {
   sfxFolder: string | null
   contentType?: ContentType
   contentProfileMode?: ContentProfileMode
+  contentProfileOverride?: {
+    mode: 'general' | 'health'
+    sourceHash: string
+    confirmedAt: string
+  }
   visualSourceMode?: VisualSourceMode
   visualMixConfig?: VisualMixConfig
 }
@@ -1684,6 +1704,7 @@ export interface AutoPipelineOptions {
   autoStartOnReady?: boolean
   contentType?: ContentType
   contentProfileMode?: ContentProfileMode
+  contentProfileOverride?: { mode: 'general' | 'health'; sourceHash: string }
   visualSourceMode?: VisualSourceMode
   visualMixConfig?: VisualMixConfig
   healthVisualConfig?: HealthVisualConfig
