@@ -63,6 +63,14 @@ async function main(): Promise<void> {
       assert.strictEqual(parseSceneNumberFromFilename(name), 7, name)
     }
     assert.strictEqual(parseSceneNumberFromFilename('S0044.jpg'), 44)
+    assert.strictEqual(
+      parseSceneNumberFromFilename('177_SCENE-212-Premium-cinematic-historical-reconstruct.jpeg'),
+      212
+    )
+    assert.strictEqual(
+      parseSceneNumberFromFilename('001_SCENE-001-Premium-cinematic-historical-reconstruct.jpeg'),
+      1
+    )
     assert.strictEqual(parseSceneNumberFromFilename('image_001.png'), null)
     assert.strictEqual(parseSceneNumberFromFilename('portrait.png'), null)
     assert.strictEqual(parseSceneNumberFromFilename('S0.png'), null, 'scene 0 is invalid')

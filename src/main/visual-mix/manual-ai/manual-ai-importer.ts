@@ -36,10 +36,17 @@ import { manualAiAssetGate } from './manual-ai-gate'
  */
 export function parseSceneNumberFromFilename(fileName: string): number | null {
   const base = path.basename(fileName, path.extname(fileName)).trim()
-  const m = /^(?:scene|s)[\s_-]*0*(\d+)(?!\d)/i.exec(base)
-  if (!m) return null
-  const n = Number(m[1])
-  return Number.isFinite(n) && n > 0 ? n : null
+  const mScene = /(?:^|[\s_/-])scene[\s_-]*0*(\d+)(?!\d)/i.exec(base)
+  if (mScene) {
+    const n = Number(mScene[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  const mS = /(?:^|[\s_/-])s[\s_-]*0*(\d+)(?!\d)/i.exec(base)
+  if (mS) {
+    const n = Number(mS[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
 }
 
 export function naturalCompare(a: string, b: string): number {

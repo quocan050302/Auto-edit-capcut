@@ -3805,7 +3805,7 @@ class ThumbnailOrchestrator {
     return state2;
   }
   // ─── Private: markNeedsAttention ─────────────────────────────────────────
-  async markNeedsAttention(projectDir, readiness, ctx) {
+  async markNeedsAttention(projectDir, readiness, ctx2) {
     let state2;
     const loadedState = loadThumbnailJobState(projectDir);
     if (loadedState && loadedState.candidates.length === 5) {
@@ -3819,19 +3819,19 @@ class ThumbnailOrchestrator {
     } else {
       const plan = await thumbnailPlanner.plan({
         projectDir,
-        templateId: ctx.params.templateId || ctx.settings.selectedTemplateId,
-        templateSnapshot: ctx.templateSnapshot,
-        preferredModel: ctx.params.preferredModel,
-        generationRound: ctx.round
+        templateId: ctx2.params.templateId || ctx2.settings.selectedTemplateId,
+        templateSnapshot: ctx2.templateSnapshot,
+        preferredModel: ctx2.params.preferredModel,
+        generationRound: ctx2.round
       }).catch(() => void 0);
       state2 = createInitialThumbnailJobState({
         projectDir,
-        renderOutputPath: ctx.renderOutputPath,
-        renderFileSize: ctx.renderFileSize,
-        renderMtimeMs: ctx.renderMtimeMs,
-        scriptHash: ctx.scriptHash,
-        templateSnapshotHash: ctx.templateSnapshotHash,
-        generationRound: ctx.round,
+        renderOutputPath: ctx2.renderOutputPath,
+        renderFileSize: ctx2.renderFileSize,
+        renderMtimeMs: ctx2.renderMtimeMs,
+        scriptHash: ctx2.scriptHash,
+        templateSnapshotHash: ctx2.templateSnapshotHash,
+        generationRound: ctx2.round,
         plan
       });
     }
@@ -6064,7 +6064,7 @@ function cropToZoomFilter(crop, width, height, duration, fps) {
   const yClamp = Math.max(0, Math.min(Math.round((s - 1) * height), yExtraPixels));
   return `zoompan=z='${s.toFixed(3)}':x='${xClamp}':y='${yClamp}':d=${frames}:s=${width}x${height}:fps=${fps}`;
 }
-function resolveVisualBeats(scene, ctx, level) {
+function resolveVisualBeats(scene, ctx2, level) {
   const cfg = LEVEL_CONFIG[level];
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
   const energy = scene.energyLevel ?? "medium";
@@ -6093,7 +6093,7 @@ function resolveVisualBeats(scene, ctx, level) {
     }
   }
   targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
-  if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
+  if (ctx2.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
     targetBeats = Math.min(targetBeats, 1);
   }
   const beatDurations = computeBeatDurations(duration, targetBeats, scene.sceneIndex, cfg);
@@ -6112,7 +6112,7 @@ function resolveVisualBeats(scene, ctx, level) {
       beatPurpose = "establish";
     } else if (i === 1) {
       const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
-      if (cfg.proofVisualAllowed && hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+      if (cfg.proofVisualAllowed && hasNarrative && ctx2.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
         const maxPvDur = hint?.proofPriority === "high" ? 3.5 : 2.5;
         const pv = detectProofVisual(
           scene.narrativeText,
@@ -6137,7 +6137,7 @@ function resolveVisualBeats(scene, ctx, level) {
         }
       }
     } else {
-      const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
+      const timeSinceInterrupt = ctx2.timeSinceLastStrongEffect;
       const shouldTriggerInterrupt = (scene.isPatternInterrupt || hint?.patternInterrupt) && timeSinceInterrupt >= cfg.patternInterruptCooldown;
       if (shouldTriggerInterrupt) {
         beatType = "pattern_interrupt";
@@ -6207,23 +6207,23 @@ function createDefaultContext() {
     openLoopIds: []
   };
 }
-function resolveSceneRetention(scene, ctx, settings) {
+function resolveSceneRetention(scene, ctx2, settings) {
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
   if (!settings.enabled) {
     return makeSingleBeatDecision(sceneId, scene);
   }
   try {
-    return _resolveRetention(scene, ctx, settings);
+    return _resolveRetention(scene, ctx2, settings);
   } catch (err) {
     logger.warn(`[RetentionEngine] scene ${sceneId} fallback: ${String(err)}`);
     return makeSingleBeatDecision(sceneId, scene);
   }
 }
-function _resolveRetention(scene, ctx, settings) {
+function _resolveRetention(scene, ctx2, settings) {
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
   const level = settings.level;
   const notes = [];
-  const { beats, proofVisual } = resolveVisualBeats(scene, ctx, level);
+  const { beats, proofVisual } = resolveVisualBeats(scene, ctx2, level);
   const rawVisualLoad = computeVisualLoad({
     hasActiveCaption: scene.hasCaptionInRange ?? false,
     hasStrongCaption: scene.hasStrongCaption ?? false,
@@ -6247,10 +6247,10 @@ function _resolveRetention(scene, ctx, settings) {
   }
   const transitionType = resolveTransition(
     scene.energyLevel ?? "medium",
-    ctx.previousShotType === "wide" ? "medium" : "medium",
+    ctx2.previousShotType === "wide" ? "medium" : "medium",
     scene.isNewChapter ?? false,
     scene.isPatternInterrupt ?? false,
-    ctx.previousTransitionType
+    ctx2.previousTransitionType
   );
   const finalVisualLoad = computeVisualLoad({
     hasActiveCaption: scene.hasCaptionInRange ?? false,
@@ -6288,39 +6288,39 @@ function makeSingleBeatDecision(sceneId, scene) {
     notes: ["legacy single-beat"]
   };
 }
-function updateRetentionContext(ctx, scene, decision) {
-  ctx.sceneIndex++;
-  ctx.previousShotType = scene.shotType ?? "medium";
-  ctx.previousTransitionType = decision.transitionType ?? "cut";
-  ctx.timeSinceLastStrongEffect += scene.duration;
-  ctx.timeSinceLastProofVisual += scene.duration;
-  ctx.timeSinceLastHumanShot += scene.duration;
+function updateRetentionContext(ctx2, scene, decision) {
+  ctx2.sceneIndex++;
+  ctx2.previousShotType = scene.shotType ?? "medium";
+  ctx2.previousTransitionType = decision.transitionType ?? "cut";
+  ctx2.timeSinceLastStrongEffect += scene.duration;
+  ctx2.timeSinceLastProofVisual += scene.duration;
+  ctx2.timeSinceLastHumanShot += scene.duration;
   const hint = scene.retentionHint;
   if (hint?.role === "re-hook" || hint?.role === "hook") {
-    ctx.timeSinceLastRehook = 0;
+    ctx2.timeSinceLastRehook = 0;
   } else {
-    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration;
+    ctx2.timeSinceLastRehook = (ctx2.timeSinceLastRehook ?? 0) + scene.duration;
   }
   if (hint?.patternInterrupt || scene.isPatternInterrupt) {
-    ctx.timeSinceLastPatternInterrupt = 0;
+    ctx2.timeSinceLastPatternInterrupt = 0;
   } else {
-    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
+    ctx2.timeSinceLastPatternInterrupt = (ctx2.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
   }
   if (hint?.noveltyScore !== void 0) {
-    ctx.recentNoveltyScores = [...ctx.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
+    ctx2.recentNoveltyScores = [...ctx2.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
   }
   if (hint?.role) {
-    ctx.recentSceneRoles = [...ctx.recentSceneRoles || [], hint.role].slice(-10);
+    ctx2.recentSceneRoles = [...ctx2.recentSceneRoles || [], hint.role].slice(-10);
   }
   if (decision.proofVisual) {
-    ctx.timeSinceLastProofVisual = 0;
+    ctx2.timeSinceLastProofVisual = 0;
   }
   if (scene.isPatternInterrupt || hint?.patternInterrupt) {
-    ctx.timeSinceLastStrongEffect = 0;
-    ctx.previousPatternInterruptType = "pattern_interrupt";
+    ctx2.timeSinceLastStrongEffect = 0;
+    ctx2.previousPatternInterruptType = "pattern_interrupt";
   }
   if (decision.visualBeats.length > 2) {
-    ctx.timeSinceLastStrongEffect = 0;
+    ctx2.timeSinceLastStrongEffect = 0;
   }
 }
 const QA_CONFIG = {
@@ -7524,9 +7524,9 @@ function getClaimLedgerPath(projectDir) {
 function computeScriptHash$1(text) {
   return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
 }
-function computeGlobalContextHash(ctx) {
-  if (!ctx) return "no-ctx";
-  const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
+function computeGlobalContextHash(ctx2) {
+  if (!ctx2) return "no-ctx";
+  const summary = `${ctx2.primarySubject}:${ctx2.centralThesis}:${ctx2.exactTopicAnchors?.join(",")}`;
   return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
 }
 function extractClaimsRuleBased(scenes, scriptHash, ctxHash) {
@@ -9136,6 +9136,85 @@ function upsertManualAiRecord(projectDir, record, counts) {
 function resolveManualAiAssetPath(projectDir, localPath) {
   return path__namespace.isAbsolute(localPath) ? localPath : path__namespace.join(projectDir, localPath);
 }
+function validateIdentityFidelity(prompt, binding, identityBible) {
+  const result = {
+    valid: true,
+    score: 1,
+    missingRequiredTraits: [],
+    conflictingTraits: [],
+    genericSubstitutionRisk: [],
+    reason: "Identity fidelity is intact."
+  };
+  if (binding.strength === "none" || binding.entityIds.length === 0) {
+    return result;
+  }
+  const promptLower = prompt.toLowerCase();
+  const boundEntities = identityBible.entities.filter((e) => binding.entityIds.includes(e.id));
+  for (const entity of boundEntities) {
+    const canonicalLower = entity.canonicalName.toLowerCase();
+    if (binding.strength === "dominant" || binding.strength === "visible") {
+      if (!promptLower.includes(canonicalLower) && !entity.aliases.some((a) => promptLower.includes(a.toLowerCase()))) {
+        result.valid = false;
+        result.missingRequiredTraits.push(entity.canonicalName);
+      }
+    }
+    const genericWeakWords = ["farmer", "worker", "leader", "woman", "man", "family", "child", "people", "soldier", "resident", "businessman"];
+    for (const w of genericWeakWords) {
+      if (promptLower.includes(w)) {
+        if (!promptLower.includes(canonicalLower)) {
+          result.genericSubstitutionRisk.push(w);
+        }
+      }
+    }
+    for (const forbidden of entity.mustNotConfuseWith) {
+      if (promptLower.includes(forbidden.toLowerCase())) {
+        result.valid = false;
+        result.conflictingTraits.push(forbidden);
+      }
+    }
+  }
+  if (!result.valid) {
+    result.score = 0.5;
+    result.reason = "Missing canonical identity or contains generic/forbidden substitutions.";
+  }
+  return result;
+}
+function enrichPromptWithIdentity(params) {
+  const { basePrompt, identityBible, binding } = params;
+  if (!identityBible || !binding || binding.strength === "none" || binding.entityIds.length === 0) {
+    return { prompt: basePrompt, injectedTraits: [], identityScore: 1, repaired: false };
+  }
+  const initialValidation = validateIdentityFidelity(basePrompt, binding, identityBible);
+  if (initialValidation.valid) {
+    return { prompt: basePrompt, injectedTraits: [], identityScore: initialValidation.score, repaired: false };
+  }
+  const boundEntities = identityBible.entities.filter((e) => binding.entityIds.includes(e.id));
+  let enrichedPrompt = basePrompt;
+  const injectedTraits = [];
+  for (const entity of boundEntities) {
+    if (!enrichedPrompt.toLowerCase().includes(entity.canonicalName.toLowerCase())) {
+      const identityPrefix = `[Identity: ${entity.canonicalName}]`;
+      const traits = [];
+      if (entity.visualSignature.clothing.length > 0) {
+        traits.push(...entity.visualSignature.clothing);
+      }
+      if (entity.visualSignature.environment.length > 0) {
+        traits.push(...entity.visualSignature.environment);
+      }
+      const identitySuffix = traits.length > 0 ? ` Required features: ${traits.join(", ")}.` : "";
+      const forbiddenSuffix = entity.mustNotConfuseWith.length > 0 ? ` Do NOT include: ${entity.mustNotConfuseWith.join(", ")}.` : "";
+      enrichedPrompt = `${identityPrefix} ${enrichedPrompt}${identitySuffix}${forbiddenSuffix}`;
+      injectedTraits.push(entity.canonicalName, ...traits);
+    }
+  }
+  const finalValidation = validateIdentityFidelity(enrichedPrompt, binding, identityBible);
+  return {
+    prompt: enrichedPrompt,
+    injectedTraits,
+    identityScore: finalValidation.score,
+    repaired: true
+  };
+}
 const HISTORY_KEYWORDS = /\b(century|ancient|empire|war|battle|reign|dynasty|soldier|medieval|revolution|colony|settler|settlement|historic|historical|heritage|monarch|king|queen|emperor|castle|monastery|traditional|vintage|archive|era|treaty|conquest|founding|pioneer)\b/i;
 const FINANCE_KEYWORDS = /\b(finance|financial|money|bank|banking|stock|market|trade|trading|crypto|bitcoin|currency|inflation|economy|economic|invest|investment|investor|dollar|wealth|capital|fund|asset|ledger|real\s*estate|corporate|commerce|startup)\b/i;
 const FOOD_KEYWORDS = /\b(food|culinary|chef|cooking|recipe|dish|cuisine|kitchen|ingredient|vegetable|fruit|spice|baking|bread|pastry|flavor|restaurant|meal|dining|taste|coffee|wine|brewery|harvest)\b/i;
@@ -9184,7 +9263,16 @@ function buildGeneralImagePrompt(params) {
   if (globalContext?.primarySubject && !rawSubject.toLowerCase().includes(globalContext.primarySubject.toLowerCase())) {
     contextualAnchor = `context: ${globalContext.primarySubject.slice(0, 50)}, `;
   }
-  return `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`;
+  let prompt = `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`;
+  if (params.identityBible && params.identityBinding) {
+    const enrichment = enrichPromptWithIdentity({
+      basePrompt: prompt,
+      identityBible: params.identityBible,
+      binding: params.identityBinding
+    });
+    prompt = enrichment.prompt;
+  }
+  return prompt;
 }
 const HEART_PULSE_REGEX = /\b(heart|cardiac|pulse|pulsat|beat|rhythm|blood\s*pressure|arterial\s*pulse|systol|diastol)\b/i;
 const DOWNWARD_REGEX = /\b(down|downward|digest|digestive|stomach|gut|intestine|colon|waste|excret|sink|lower|absorb|drop)\b/i;
@@ -11476,6 +11564,50 @@ class HealthVisualPlanner {
     }
   }
 }
+function resolveSceneIdentity(params) {
+  const { sceneIndex, sceneNarration, visualIntent, identityBible } = params;
+  const binding = {
+    sceneIndex,
+    entityIds: [],
+    presenceTypes: [],
+    strength: "none",
+    requiredPromptTraits: [],
+    optionalPromptTraits: [],
+    forbiddenPromptTraits: [],
+    reason: "Default no-identity"
+  };
+  if (identityBible.identityMode === "none") {
+    return binding;
+  }
+  const narrationLower = sceneNarration.toLowerCase();
+  const intentLower = visualIntent.toLowerCase();
+  const combinedText = `${narrationLower} ${intentLower}`;
+  for (const entity of identityBible.entities) {
+    const isPrimary = entity.importance === "primary";
+    const nameLower = entity.canonicalName.toLowerCase();
+    const mentionsName = combinedText.includes(nameLower) || entity.aliases.some((a) => combinedText.includes(a.toLowerCase()));
+    if (mentionsName || isPrimary) {
+      binding.entityIds.push(entity.id);
+      if (entity.entityType === "community") {
+        binding.presenceTypes.push("community");
+      } else if (entity.entityType === "person-role") {
+        binding.presenceTypes.push("person");
+      } else if (entity.entityType === "environment") {
+        binding.presenceTypes.push("environment");
+      }
+      binding.strength = mentionsName ? "dominant" : "context";
+      binding.requiredPromptTraits.push(...entity.requiredTraits);
+      binding.requiredPromptTraits.push(...entity.visualSignature.clothing);
+      binding.requiredPromptTraits.push(...entity.visualSignature.environment);
+      binding.forbiddenPromptTraits.push(...entity.forbiddenTraits);
+      binding.forbiddenPromptTraits.push(...entity.mustNotConfuseWith);
+    }
+  }
+  if (binding.entityIds.length > 0) {
+    binding.reason = `Detected entities: ${binding.entityIds.join(", ")}`;
+  }
+  return binding;
+}
 function cleanText$1(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
@@ -11768,6 +11900,15 @@ function buildManualScenePrompt(params) {
   let prompt = compose(24, true, true);
   if (countWords(prompt) > 200) prompt = compose(20, true, false);
   if (countWords(prompt) > 200) prompt = compose(14, false, false);
+  if (params.identityBible && params.identityBinding) {
+    const enrichment = enrichPromptWithIdentity({
+      basePrompt: prompt,
+      scene: { sceneIndex: scene.sceneIndex, narration: scene.narration, intent: scene.visualIntent },
+      identityBible: params.identityBible,
+      binding: params.identityBinding
+    });
+    prompt = enrichment.prompt;
+  }
   return prompt;
 }
 function computeManualPromptHash(params) {
@@ -11792,7 +11933,7 @@ function computeInputHash(params) {
   ]);
 }
 function buildManualAiPromptPack(params) {
-  const { plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const { plan, profile, globalContext, outputResolution, sceneDirections, contentIntelligence, identityBible } = params;
   const ordered = [...plan.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   const entries = [];
   let directionsMap;
@@ -11807,6 +11948,15 @@ function buildManualAiPromptPack(params) {
     const scene = ordered[i];
     if (scene.strategy !== "ai-still") continue;
     const sceneDirection = directionsMap?.get(scene.sceneIndex);
+    let identityBinding = sceneDirection?.identity;
+    if (!identityBinding && identityBible && globalContext && contentIntelligence) {
+      identityBinding = resolveSceneIdentity({
+        sceneIndex: scene.sceneIndex,
+        sceneNarration: scene.narration,
+        visualIntent: scene.visualIntent || "",
+        identityBible
+      });
+    }
     const prompt = buildManualScenePrompt({
       scene,
       profile,
@@ -11814,7 +11964,9 @@ function buildManualAiPromptPack(params) {
       previousScene: ordered[i - 1],
       nextScene: ordered[i + 1],
       outputResolution,
-      sceneDirection
+      sceneDirection,
+      identityBible,
+      identityBinding
     });
     const qualityScore = calculatePromptQualityScore({
       prompt,
@@ -11939,13 +12091,15 @@ function readManualAiPromptText(projectDir) {
 }
 function ensureManualAiPromptPack(params) {
   const t0 = Date.now();
-  const { projectDir, plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const { projectDir, plan, profile, globalContext, outputResolution, sceneDirections, contentIntelligence, identityBible } = params;
   const fresh = buildManualAiPromptPack({
     plan,
     profile,
     globalContext,
     outputResolution,
-    sceneDirections
+    sceneDirections,
+    contentIntelligence,
+    identityBible
   });
   const persisted = loadManualAiPromptPack(projectDir);
   let merged = fresh;
@@ -13033,19 +13187,19 @@ async function runRenderPreflightCached(options, opts = {}) {
 }
 let overlayRenderer = renderCaptionsOverlay;
 let transitionAssembler = concatSceneClipsWithTransitions;
-function ffmpegRun$2(args, ctx) {
-  return ffmpegRun$4(args, ctx?.ffmpeg ?? {});
+function ffmpegRun$2(args, ctx2) {
+  return ffmpegRun$4(args, ctx2?.ffmpeg ?? {});
 }
-async function encodeRun(args, ctx) {
+async function encodeRun(args, ctx2) {
   try {
-    await ffmpegRun$4(args, ctx.ffmpeg);
+    await ffmpegRun$4(args, ctx2.ffmpeg);
   } catch (err) {
     if (isRenderCancelledError(err)) throw err;
-    throw asHardwareError(err, ctx.encoder);
+    throw asHardwareError(err, ctx2.encoder);
   }
 }
-function vcodec(ctx, crf) {
-  return ctx.encoder.videoArgs(crf, "fast");
+function vcodec(ctx2, crf) {
+  return ctx2.encoder.videoArgs(crf, "fast");
 }
 function safeUnlink(filePath) {
   if (!filePath) return;
@@ -13071,7 +13225,7 @@ function moveFile(src, dst) {
 function concatListLine(f) {
   return `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`;
 }
-async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx) {
+async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx2) {
   const concatList = path__namespace.join(tmpDir, "concat.txt");
   fs__namespace.writeFileSync(
     concatList,
@@ -13090,7 +13244,7 @@ async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx) {
     "-c",
     "copy",
     rawVideoPath
-  ], ctx);
+  ], ctx2);
   safeUnlink(concatList);
 }
 function normalizePathForFFmpeg(p) {
@@ -13217,7 +13371,7 @@ function resolveSceneMedia(scene, mediaIndex, projectDir) {
   return resolveSceneMediaWithSource(scene, mediaIndex, projectDir).mediaPath;
 }
 async function renderVisualBeatsToClip(params) {
-  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex, ctx } = params;
+  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex, ctx: ctx2 } = params;
   const beatClips = [];
   const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
   let isImage;
@@ -13238,7 +13392,7 @@ async function renderVisualBeatsToClip(params) {
   }
   try {
     for (let bi = 0; bi < beats.length; bi++) {
-      throwIfAborted(ctx.ffmpeg.signal);
+      throwIfAborted(ctx2.ffmpeg.signal);
       const beat = beats[bi];
       const beatDuration = beat.relativeEnd - beat.relativeStart;
       const beatClip = path__namespace.join(tmpDir, `beat_${String(sceneIndex).padStart(4, "0")}_${bi}.mp4`);
@@ -13256,7 +13410,7 @@ async function renderVisualBeatsToClip(params) {
           mediaPath,
           "-vf",
           vfFilter,
-          ...vcodec(ctx, 20),
+          ...vcodec(ctx2, 20),
           "-t",
           String(beatDuration),
           "-r",
@@ -13264,7 +13418,7 @@ async function renderVisualBeatsToClip(params) {
           "-pix_fmt",
           "yuv420p",
           beatClip
-        ], ctx);
+        ], ctx2);
       } else {
         const ssOffset = beat.relativeStart;
         await encodeRun([
@@ -13275,7 +13429,7 @@ async function renderVisualBeatsToClip(params) {
           mediaPath,
           "-vf",
           `${vfFilter},tpad=stop_mode=clone:stop_duration=${beatDuration},trim=duration=${beatDuration},setpts=PTS-STARTPTS`,
-          ...vcodec(ctx, 20),
+          ...vcodec(ctx2, 20),
           "-t",
           String(beatDuration),
           "-r",
@@ -13284,7 +13438,7 @@ async function renderVisualBeatsToClip(params) {
           "-pix_fmt",
           "yuv420p",
           beatClip
-        ], ctx);
+        ], ctx2);
       }
       beatClips.push(beatClip);
     }
@@ -13309,7 +13463,7 @@ async function renderVisualBeatsToClip(params) {
         "-c",
         "copy",
         outClip
-      ], ctx);
+      ], ctx2);
       for (const bc of beatClips) safeUnlink(bc);
       safeUnlink(beatConcatList);
     }
@@ -13338,7 +13492,7 @@ async function renderVisualBeatsToClip(params) {
         mediaPath,
         "-vf",
         baseFilt,
-        ...vcodec(ctx, 20),
+        ...vcodec(ctx2, 20),
         "-t",
         String(fallbackDur),
         "-r",
@@ -13346,7 +13500,7 @@ async function renderVisualBeatsToClip(params) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx);
+      ], ctx2);
     } else {
       await encodeRun([
         "-y",
@@ -13354,7 +13508,7 @@ async function renderVisualBeatsToClip(params) {
         mediaPath,
         "-vf",
         `${baseFilt},tpad=stop_mode=clone:stop_duration=${fallbackDur},trim=duration=${fallbackDur},setpts=PTS-STARTPTS`,
-        ...vcodec(ctx, 20),
+        ...vcodec(ctx2, 20),
         "-t",
         String(fallbackDur),
         "-r",
@@ -13363,7 +13517,7 @@ async function renderVisualBeatsToClip(params) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx);
+      ], ctx2);
     }
   }
 }
@@ -13681,7 +13835,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       filterThreads: limits.ffmpegFilterThreads,
       niceLevel: limits.niceLevel
     };
-    const ctx = { ffmpeg: ffmpegOpts, encoder };
+    const ctx2 = { ffmpeg: ffmpegOpts, encoder };
     logger.info(
       `[RENDER] Resource profile=${limits.profile} ffmpegThreads=${limits.ffmpegThreads} filterThreads=${limits.ffmpegFilterThreads} remotionConcurrency=${limits.remotionConcurrency} encoder=${encoder.key}`
     );
@@ -13887,7 +14041,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
         height,
         fps,
         tmpDir,
-        ctx,
+        ctx: ctx2,
         retentionSettings,
         sceneOrdinalIndex: i,
         visualPlanMap,
@@ -13965,7 +14119,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
             rawVideoPath: rawPartial,
             onProgress: (stage, pct) => setPct(stage, pct),
             ffmpegOptions: ffmpegOpts,
-            videoCodecArgs: vcodec(ctx, 20),
+            videoCodecArgs: vcodec(ctx2, 20),
             maxScenesPerSegment: limits.assemblyMaxScenesPerSegment,
             segmentRunner: async (seg, render) => {
               const segPath = workspace.assemblySegmentPath(seg.segmentIndex);
@@ -14015,7 +14169,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       if (!rawVideoCreated) {
         const method = shouldAttemptTransitions ? "legacy-fallback" : "legacy-concat";
         logger.info(`[RENDER] Scene assembly method=${method}`);
-        await concatSceneClipsLegacy(sceneClips, tmpDir, rawPartial, ctx);
+        await concatSceneClipsLegacy(sceneClips, tmpDir, rawPartial, ctx2);
         rawVideoCreated = true;
       }
       try {
@@ -14117,7 +14271,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           "1:a:0",
           "-shortest",
           workingOutputPath
-        ], ctx);
+        ], ctx2);
       } else {
         const ffArgs = ["-y", "-i", rawVideo];
         let inputIdx = 1;
@@ -14212,7 +14366,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           "192k",
           "-shortest",
           workingOutputPath
-        ], ctx);
+        ], ctx2);
       }
       try {
         audioProbe = await workspace.commitPartial(workingOutputPath, mixedVideo, mixExpect, { signal });
@@ -14438,7 +14592,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         } else {
           const listPath = path__namespace.join(tmpDir, "overlay-concat.txt");
           fs__namespace.writeFileSync(listPath, blockFiles.map(concatListLine).join("\n"), "utf-8");
-          await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx);
+          await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx2);
           safeUnlink(listPath);
         }
         await workspace.commitPartial(fullPartial, overlayFull, overlayFullExpect, { signal });
@@ -14486,11 +14640,11 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           "[outv]",
           "-map",
           "0:a?",
-          ...vcodec(ctx, 20),
+          ...vcodec(ctx2, 20),
           "-c:a",
           "copy",
           captionedPath
-        ], ctx);
+        ], ctx2);
         let captionedProbe;
         try {
           captionedProbe = await workspace.commitPartial(captionedPath, compositePath, compositeExpect, { encoder: encoder.key, signal });
@@ -14680,7 +14834,7 @@ function markInterruptedCheckpoints(m) {
   if (!m.finalOutput) m.finalOutput = emptyCheckpoint();
 }
 async function renderSceneClip(p) {
-  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p;
+  const { job, outClip, width, height, fps, tmpDir, ctx: ctx2, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p;
   const scene = job.scene;
   const i = p.sceneOrdinalIndex;
   const mediaPath = job.mediaPath;
@@ -14693,13 +14847,13 @@ async function renderSceneClip(p) {
       "lavfi",
       "-i",
       `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
-      ...vcodec(ctx, 23),
+      ...vcodec(ctx2, 23),
       "-t",
       String(scene.duration),
       "-pix_fmt",
       "yuv420p",
       outClip
-    ], ctx);
+    ], ctx2);
     return;
   }
   const mediaKind = detectMediaKind(mediaPath, scene.mediaType);
@@ -14750,7 +14904,7 @@ async function renderSceneClip(p) {
       mediaPath,
       "-vf",
       motionFilter,
-      ...vcodec(ctx, 20),
+      ...vcodec(ctx2, 20),
       "-t",
       String(scene.duration),
       "-r",
@@ -14758,7 +14912,7 @@ async function renderSceneClip(p) {
       "-pix_fmt",
       "yuv420p",
       outClip
-    ], ctx);
+    ], ctx2);
   } else if (hasMultipleBeats && retentionSettings.enabled) {
     await renderVisualBeatsToClip({
       beats,
@@ -14771,7 +14925,7 @@ async function renderSceneClip(p) {
       scaleFilt,
       tmpDir,
       sceneIndex: i,
-      ctx
+      ctx: ctx2
     });
   } else {
     const singleBeat = beats[0];
@@ -14792,7 +14946,7 @@ async function renderSceneClip(p) {
         mediaPath,
         "-vf",
         vfFilter,
-        ...vcodec(ctx, 20),
+        ...vcodec(ctx2, 20),
         "-t",
         String(scene.duration),
         "-r",
@@ -14800,7 +14954,7 @@ async function renderSceneClip(p) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx);
+      ], ctx2);
     } else {
       const durationGuard = `tpad=stop_mode=clone:stop_duration=${scene.duration},trim=duration=${scene.duration},setpts=PTS-STARTPTS`;
       const videoFilter = `${vfFilter},${durationGuard}`;
@@ -14810,7 +14964,7 @@ async function renderSceneClip(p) {
         mediaPath,
         "-vf",
         videoFilter,
-        ...vcodec(ctx, 20),
+        ...vcodec(ctx2, 20),
         "-t",
         String(scene.duration),
         "-r",
@@ -14819,7 +14973,7 @@ async function renderSceneClip(p) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx);
+      ], ctx2);
     }
   }
 }
@@ -15276,9 +15430,9 @@ function isGlobalContextValid(projectDir, scriptHash) {
   const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
   if (!fs__namespace.existsSync(contextPath)) return false;
   try {
-    const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
-    if (!ctx || !ctx.primarySubject) return false;
-    if (scriptHash && ctx._scriptHash && ctx._scriptHash !== scriptHash) {
+    const ctx2 = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    if (!ctx2 || !ctx2.primarySubject) return false;
+    if (scriptHash && ctx2._scriptHash && ctx2._scriptHash !== scriptHash) {
       return false;
     }
     return true;
@@ -16353,31 +16507,31 @@ async function analyzeGlobalContext(params) {
   } else {
     logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
   }
-  let ctx;
+  let ctx2;
   if (rawJson) {
     try {
       const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      ctx = JSON.parse(clean);
-      ctx.modelUsed = successfulModel || modelId;
+      ctx2 = JSON.parse(clean);
+      ctx2.modelUsed = successfulModel || modelId;
     } catch {
       logger.warn("[GlobalContext] JSON parse failed, using fallback context");
-      ctx = buildFallbackContext(projectId, language, fullText);
-      ctx.modelUsed = "algorithmic (JSON parse fallback)";
+      ctx2 = buildFallbackContext(projectId, language, fullText);
+      ctx2.modelUsed = "algorithmic (JSON parse fallback)";
     }
   } else {
     logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
     progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.7);
-    ctx = buildFallbackContext(projectId, language, fullText);
-    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
+    ctx2 = buildFallbackContext(projectId, language, fullText);
+    ctx2.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
   }
-  ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ctx.version = 1;
-  ctx._scriptHash = hash;
+  ctx2.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ctx2.version = 1;
+  ctx2._scriptHash = hash;
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
-  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
-  progress(`Global context ready - "${ctx.primarySubject}"`, 1);
-  return ctx;
+  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx2, null, 2), "utf-8");
+  logger.info("[GlobalContext] Saved", { subject: ctx2.primarySubject, model: ctx2.modelUsed });
+  progress(`Global context ready - "${ctx2.primarySubject}"`, 1);
+  return ctx2;
 }
 function buildFallbackContext(projectId, language, text) {
   const STOP_WORDS2 = /* @__PURE__ */ new Set([
@@ -16622,10 +16776,10 @@ function loadGlobalContext(projectDir) {
     return null;
   }
 }
-function saveGlobalContext(projectDir, ctx) {
+function saveGlobalContext(projectDir, ctx2) {
   const p = getContextPath(projectDir);
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
+  fs__namespace.writeFileSync(p, JSON.stringify(ctx2, null, 2), "utf-8");
 }
 const CONTENT_PROFILE_SCHEMA_VERSION = 1;
 const ANATOMICAL_ORGAN_SIGNALS = [
@@ -17100,6 +17254,144 @@ function validateSemanticFidelity(textToValidate, contentIntelligence, sceneNarr
     supportedConcepts: [],
     reason: isValid ? "Passes semantic fidelity check" : `Unsupported domain introduction: ${unsupported.join(", ")}`
   };
+}
+function getVisualIdentityBiblePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "visual-identity-bible.json");
+}
+function loadVisualIdentityBible(projectDir, currentSourceHash) {
+  const filePath = getVisualIdentityBiblePath(projectDir);
+  if (!fs__namespace.existsSync(filePath)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (currentSourceHash && parsed.sourceHash && parsed.sourceHash !== currentSourceHash) {
+      return null;
+    }
+    return parsed;
+  } catch (err) {
+    logger.warn(`Failed to parse ${filePath}:`, err);
+    return null;
+  }
+}
+function saveVisualIdentityBible(projectDir, bible) {
+  const filePath = getVisualIdentityBiblePath(projectDir);
+  fs__namespace.mkdirSync(path__namespace.dirname(filePath), { recursive: true });
+  fs__namespace.writeFileSync(filePath, JSON.stringify(bible, null, 2), "utf-8");
+}
+function generateVisualIdentityBible(params) {
+  const { projectDir, scriptText, globalContext, contentIntelligence } = params;
+  const sourceHash = computeSourceFingerprint(scriptText);
+  const cached = loadVisualIdentityBible(projectDir, sourceHash);
+  if (cached) {
+    return cached;
+  }
+  const entities = [];
+  let identityMode = "none";
+  if (globalContext.communities && globalContext.communities.length > 0) {
+    for (const comm of globalContext.communities) {
+      const isPrimary = globalContext.primarySubject.includes(comm.name);
+      const entity = {
+        id: `community-${comm.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        canonicalName: comm.name,
+        entityType: "community",
+        importance: isPrimary ? "primary" : "secondary",
+        aliases: [comm.name],
+        description: comm.visualDescription || comm.role,
+        visualSignature: {
+          clothing: comm.visualIdentity?.clothing || [],
+          grooming: comm.visualIdentity?.grooming || [],
+          agePresentation: [],
+          physiquePresentation: [],
+          accessories: comm.visualIdentity?.accessories || [],
+          tools: comm.visualIdentity?.tools || [],
+          behavior: comm.visualIdentity?.socialBehavior || [],
+          socialGrouping: comm.visualIdentity?.socialBehavior || [],
+          environment: comm.visualIdentity?.environment || [],
+          architecture: comm.visualIdentity?.architecture || [],
+          machinery: comm.visualIdentity?.machinery || [],
+          recurringObjects: [],
+          materialCulture: comm.visualIdentity?.materialCulture || [],
+          eraMarkers: comm.visualIdentity?.eraMarkers || [],
+          geographicMarkers: [],
+          technologyLevel: [],
+          distinctiveShapesForms: []
+        },
+        requiredTraits: [],
+        optionalTraits: [],
+        forbiddenTraits: comm.visualIdentity?.forbiddenTraits || [],
+        mustNotConfuseWith: comm.mustNotConfuseWith || [],
+        uncertainty: [],
+        evidence: [{ trait: "Derived from global context community", level: "global-context", confidence: 0.9 }],
+        confidence: 0.9
+      };
+      entities.push(entity);
+    }
+  }
+  if (globalContext.recurringPeople && globalContext.recurringPeople.length > 0) {
+    for (const person of globalContext.recurringPeople) {
+      const entity = {
+        id: `person-${person.id.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        canonicalName: person.role,
+        entityType: "person-role",
+        importance: "secondary",
+        aliases: [person.role],
+        description: person.role,
+        visualSignature: {
+          clothing: person.clothing ? [person.clothing] : [],
+          grooming: [],
+          agePresentation: person.ageRange ? [person.ageRange] : [],
+          physiquePresentation: [],
+          accessories: [],
+          tools: [],
+          behavior: [],
+          socialGrouping: [],
+          environment: [],
+          architecture: [],
+          machinery: [],
+          recurringObjects: [],
+          materialCulture: [],
+          eraMarkers: [],
+          geographicMarkers: [],
+          technologyLevel: [],
+          distinctiveShapesForms: []
+        },
+        requiredTraits: person.appearance ? [person.appearance] : [],
+        optionalTraits: [],
+        forbiddenTraits: [],
+        mustNotConfuseWith: [],
+        uncertainty: [],
+        evidence: [{ trait: "Derived from global context recurring people", level: "global-context", confidence: 0.8 }],
+        confidence: 0.8
+      };
+      entities.push(entity);
+    }
+  }
+  if (entities.some((e) => e.entityType === "community")) {
+    identityMode = "community";
+  } else if (entities.some((e) => e.entityType === "person-role")) {
+    identityMode = "mixed";
+  } else if (globalContext.visualWorld?.environment?.length > 0) {
+    identityMode = "environment";
+  }
+  const primaryIdentityId = entities.find((e) => e.importance === "primary")?.id;
+  const bible = {
+    schemaVersion: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sourceHash,
+    contentIntelligenceHash: contentIntelligence.sourceHash,
+    primaryIdentityId,
+    identityMode,
+    entities,
+    globalRules: {
+      realism: [],
+      authenticityRequirements: [],
+      forbiddenGenericSubstitutions: [],
+      forbiddenCrossIdentitySubstitutions: []
+    }
+  };
+  saveVisualIdentityBible(projectDir, bible);
+  logger.info(`[VisualIdentityBible] Generated identity bible with ${entities.length} entities`);
+  return bible;
 }
 function extractVisualQueries(text) {
   const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
@@ -17601,7 +17893,7 @@ async function buildEditPlan(params) {
   let globalContextSummary = "";
   try {
     progress("Preparing global documentary context...", 0.16);
-    const ctx = await analyzeGlobalContext({
+    const ctx2 = await analyzeGlobalContext({
       projectDir,
       apiKey: cleanApiKey,
       model: modelId,
@@ -17610,13 +17902,13 @@ async function buildEditPlan(params) {
       onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
     });
     globalContextSummary = [
-      `Primary Subject: ${ctx.primarySubject}`,
-      `Central Thesis: ${ctx.centralThesis}`,
-      ctx.geography?.primaryCountry ? `Geography: ${ctx.geography.primaryCountry} (${ctx.geography.primaryRegion ?? ""})` : "",
-      ctx.timeContext?.primaryPeriod ? `Period: ${ctx.timeContext.primaryPeriod}` : "",
-      ctx.exactTopicAnchors?.length ? `Topic Anchors: ${ctx.exactTopicAnchors.join(", ")}` : "",
-      ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(", ")}` : "",
-      ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ""
+      `Primary Subject: ${ctx2.primarySubject}`,
+      `Central Thesis: ${ctx2.centralThesis}`,
+      ctx2.geography?.primaryCountry ? `Geography: ${ctx2.geography.primaryCountry} (${ctx2.geography.primaryRegion ?? ""})` : "",
+      ctx2.timeContext?.primaryPeriod ? `Period: ${ctx2.timeContext.primaryPeriod}` : "",
+      ctx2.exactTopicAnchors?.length ? `Topic Anchors: ${ctx2.exactTopicAnchors.join(", ")}` : "",
+      ctx2.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx2.negativeKeywords.join(", ")}` : "",
+      ctx2.visualWorld?.documentaryStyle ? `Visual Style: ${ctx2.visualWorld.documentaryStyle}` : ""
     ].filter(Boolean).join("\n");
   } catch (err) {
     logger.warn(`[PLAN] Global context extraction failed: ${err}`);
@@ -17664,6 +17956,20 @@ async function buildEditPlan(params) {
   }
   progress("Assembling master edit plan...", 0.85);
   const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null;
+  let identityBible = null;
+  if (ci && ctx && scriptText && sourceHash) {
+    try {
+      identityBible = generateVisualIdentityBible({
+        projectDir,
+        scriptText,
+        globalContext: ctx,
+        contentIntelligence: ci
+      });
+      logger.info(`[PLAN] Visual Identity Bible generated. Mode: ${identityBible.identityMode}`);
+    } catch (err) {
+      logger.warn(`[PLAN] Failed to generate visual identity bible: ${err}`);
+    }
+  }
   const skeletonMap = /* @__PURE__ */ new Map();
   for (const skel of skeletons) {
     skeletonMap.set(skel.sceneIndex, skel);
@@ -19267,29 +19573,29 @@ function candidateTokens(c) {
   const tagTokens = new Set(c.tags.flatMap((t) => t.toLowerCase().split(/\s+/).filter((x) => x.length > 2)));
   return /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
 }
-function localRelevanceScore(c, ctx) {
-  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx.visualIntent), ...tokenize$3(ctx.narration)]);
+function localRelevanceScore(c, ctx2) {
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx2.visualIntent), ...tokenize$3(ctx2.narration)]);
   return overlapScore(refTokens, candidateTokens(c));
 }
-function globalSubjectScore(c, ctx) {
+function globalSubjectScore(c, ctx2) {
   const anchors = new Set([
-    ...ctx.globalContext.exactTopicAnchors,
-    ...ctx.globalContext.contextualAnchors
+    ...ctx2.globalContext.exactTopicAnchors,
+    ...ctx2.globalContext.contextualAnchors
   ].flatMap((a) => a.toLowerCase().split(/\s+/)));
   return overlapScore(anchors, candidateTokens(c));
 }
-function geographyScore(c, ctx) {
+function geographyScore(c, ctx2) {
   const geos = [
-    ctx.globalContext.geography.primaryCountry,
-    ctx.globalContext.geography.primaryRegion,
-    ...ctx.globalContext.geography.secondaryLocations
+    ctx2.globalContext.geography.primaryCountry,
+    ctx2.globalContext.geography.primaryRegion,
+    ...ctx2.globalContext.geography.secondaryLocations
   ].filter(Boolean);
   if (geos.length === 0) return 0.5;
   const geoTokens = new Set(geos.flatMap((g) => g.toLowerCase().split(/\s+/)));
   return overlapScore(geoTokens, candidateTokens(c));
 }
-function timePeriodScore(c, ctx) {
-  const period = (ctx.preferredTimePeriod ?? ctx.globalContext.timeContext.primaryPeriod).toLowerCase();
+function timePeriodScore(c, ctx2) {
+  const period = (ctx2.preferredTimePeriod ?? ctx2.globalContext.timeContext.primaryPeriod).toLowerCase();
   const tokens = candidateTokens(c);
   const historicTerms = /* @__PURE__ */ new Set(["historical", "vintage", "antique", "old", "century", "archival"]);
   const isModerrn = period === "contemporary" || period === "modern";
@@ -19298,8 +19604,8 @@ function timePeriodScore(c, ctx) {
   if (isModerrn && [...historicTerms].some((t) => tokens.has(t))) return 0.2;
   return 0.5;
 }
-function chapterPurposeScore(c, ctx) {
-  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx.chapterTitle), ...tokenize$3(ctx.chapterPurpose)]);
+function chapterPurposeScore(c, ctx2) {
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx2.chapterTitle), ...tokenize$3(ctx2.chapterPurpose)]);
   return overlapScore(refTokens, candidateTokens(c));
 }
 function technicalScore$1(c) {
@@ -19324,11 +19630,11 @@ function durationScore$1(c, sceneDuration) {
   if (clipDur >= sceneDuration) return 1;
   return Math.max(0.2, clipDur / sceneDuration);
 }
-function applyPenalties(c, ctx) {
+function applyPenalties(c, ctx2) {
   const reasons = [];
   let total = 0;
   const tokens = candidateTokens(c);
-  for (const community of ctx.globalContext.communities) {
+  for (const community of ctx2.globalContext.communities) {
     for (const wrong of community.mustNotConfuseWith) {
       const wrongTokens = tokenize$3(wrong);
       if ([...wrongTokens].some((t) => tokens.has(t))) {
@@ -19337,21 +19643,21 @@ function applyPenalties(c, ctx) {
       }
     }
   }
-  for (const forbidden of ctx.globalContext.forbiddenSubstitutions) {
+  for (const forbidden of ctx2.globalContext.forbiddenSubstitutions) {
     const fTokens = tokenize$3(forbidden);
     if ([...fTokens].filter((t) => t.length > 3).some((t) => tokens.has(t))) {
       total += 50;
       reasons.push(`Forbidden substitution: ${forbidden}`);
     }
   }
-  for (const neg of ctx.globalContext.negativeKeywords) {
+  for (const neg of ctx2.globalContext.negativeKeywords) {
     const negTokens = tokenize$3(neg);
     if ([...negTokens].some((t) => tokens.has(t))) {
       total += 30;
       reasons.push(`Negative keyword: ${neg}`);
     }
   }
-  if (ctx.usedAssetIds.has(c.assetId)) {
+  if (ctx2.usedAssetIds.has(c.assetId)) {
     total += 20;
     reasons.push("Asset already used");
   }
@@ -19364,31 +19670,31 @@ function getMatchLabel(score, penalties) {
   if (adjusted >= 50) return "ILLUSTRATIVE";
   return "REJECTED";
 }
-function getVisualTruthLabel(c, ctx, localScore, globalScore) {
+function getVisualTruthLabel(c, ctx2, localScore, globalScore) {
   const tokens = candidateTokens(c);
-  const hasExactAnchor = ctx.globalContext.exactTopicAnchors.some(
+  const hasExactAnchor = ctx2.globalContext.exactTopicAnchors.some(
     (a) => a.toLowerCase().split(/\s+/).every((t) => tokens.has(t))
   );
   if (hasExactAnchor && localScore >= 0.5) return "EXACT_SUBJECT";
   if (globalScore >= 0.3 && localScore >= 0.3) return "CONTEXTUAL_MATCH";
-  const isHistorical = ctx.globalContext.timeContext.historicalPeriods.length > 0 && (tokens.has("historical") || tokens.has("vintage") || tokens.has("archival"));
+  const isHistorical = ctx2.globalContext.timeContext.historicalPeriods.length > 0 && (tokens.has("historical") || tokens.has("vintage") || tokens.has("archival"));
   if (isHistorical) return "HISTORICAL";
   return "ILLUSTRATIVE";
 }
-function scoreContextCandidate(candidate, ctx) {
-  const local = localRelevanceScore(candidate, ctx) * 30;
-  const global = globalSubjectScore(candidate, ctx) * 25;
-  const geo = geographyScore(candidate, ctx) * 15;
-  const time = timePeriodScore(candidate, ctx) * 10;
-  const chapter = chapterPurposeScore(candidate, ctx) * 10;
-  const tech = (technicalScore$1(candidate) * 0.6 + compositionScore$1(candidate, ctx.preferredAspectRatio) * 0.4) * 5;
-  const dur = durationScore$1(candidate, ctx.sceneDurationSecs);
+function scoreContextCandidate(candidate, ctx2) {
+  const local = localRelevanceScore(candidate, ctx2) * 30;
+  const global = globalSubjectScore(candidate, ctx2) * 25;
+  const geo = geographyScore(candidate, ctx2) * 15;
+  const time = timePeriodScore(candidate, ctx2) * 10;
+  const chapter = chapterPurposeScore(candidate, ctx2) * 10;
+  const tech = (technicalScore$1(candidate) * 0.6 + compositionScore$1(candidate, ctx2.preferredAspectRatio) * 0.4) * 5;
+  const dur = durationScore$1(candidate, ctx2.sceneDurationSecs);
   const sequenceContinuity = dur * 5;
   const rawScore = local + global + geo + time + chapter + tech + sequenceContinuity;
-  const { total: penalties, reasons: penaltyReasons } = applyPenalties(candidate, ctx);
+  const { total: penalties, reasons: penaltyReasons } = applyPenalties(candidate, ctx2);
   const totalScore = Math.max(0, rawScore - penalties);
   const matchLabel = getMatchLabel(rawScore, penalties);
-  const visualTruthLabel = getVisualTruthLabel(candidate, ctx, local / 30, global / 25);
+  const visualTruthLabel = getVisualTruthLabel(candidate, ctx2, local / 30, global / 25);
   return {
     localRelevance: Math.round(local),
     globalSubjectRelevance: Math.round(global),
@@ -19404,8 +19710,8 @@ function scoreContextCandidate(candidate, ctx) {
     visualTruthLabel
   };
 }
-function rankContextCandidates(candidates, ctx) {
-  return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
+function rankContextCandidates(candidates, ctx2) {
+  return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx2) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
 }
 function normalizeUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") return "";
@@ -19719,14 +20025,14 @@ function calculateAspectRatioFit(c, preferredAspectRatio) {
   }
   return { score, reasons };
 }
-function scoreStockCandidate(c, ctx) {
-  const local = calculateLocalRelevance(c, ctx.narration, ctx.visualIntent, ctx.searchPlan);
-  const global = calculateGlobalContextFit(c, ctx.globalContext);
-  const chapter = calculateChapterContextFit(c, ctx.chapterTitle, ctx.chapterPurpose);
+function scoreStockCandidate(c, ctx2) {
+  const local = calculateLocalRelevance(c, ctx2.narration, ctx2.visualIntent, ctx2.searchPlan);
+  const global = calculateGlobalContextFit(c, ctx2.globalContext);
+  const chapter = calculateChapterContextFit(c, ctx2.chapterTitle, ctx2.chapterPurpose);
   const tech = calculateTechnicalQuality(c);
-  const motion = calculateMotionSuitability(c, ctx.sceneDurationSecs);
-  const aspect = calculateAspectRatioFit(c, ctx.preferredAspectRatio);
-  const diversity = calculateDiversityScoreAndPenalty(c, ctx.assignmentHistory, ctx.isMotif || ctx.isLocked);
+  const motion = calculateMotionSuitability(c, ctx2.sceneDurationSecs);
+  const aspect = calculateAspectRatioFit(c, ctx2.preferredAspectRatio);
+  const diversity = calculateDiversityScoreAndPenalty(c, ctx2.assignmentHistory, ctx2.isMotif || ctx2.isLocked);
   const positiveSubtotal = local.score + global.score + chapter.score + tech.score + motion.score + aspect.score + diversity.diversityScore;
   const totalScore = Math.max(0, Math.min(100, positiveSubtotal + diversity.reusePenalty));
   const allReasons = [
@@ -19760,14 +20066,14 @@ function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
   let sceneId;
   let sceneIndex;
   let candidates;
-  let ctx;
+  let ctx2;
   let maxCandidates = 3;
   if (typeof arg1 === "object") {
     sceneId = arg1.sceneId;
     sceneIndex = arg1.sceneIndex;
     candidates = arg1.searchResults || arg1.candidates || [];
     maxCandidates = arg1.maxCandidates ?? 3;
-    ctx = arg1.ctx ?? {
+    ctx2 = arg1.ctx ?? {
       narration: arg1.narration || "",
       visualIntent: arg1.visualIntent,
       sceneDurationSecs: arg1.targetDuration || 6,
@@ -19778,7 +20084,7 @@ function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
     sceneId = arg1;
     sceneIndex = arg2 ?? 0;
     candidates = arg3 || [];
-    ctx = arg4 || {
+    ctx2 = arg4 || {
       narration: "",
       sceneDurationSecs: 6,
       preferredAspectRatio: "16:9",
@@ -19788,7 +20094,7 @@ function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
   }
   const deduped = deduplicateCandidates(candidates);
   const scored = deduped.map((result) => {
-    const score = scoreStockCandidate(result, ctx);
+    const score = scoreStockCandidate(result, ctx2);
     const isRejected = score.rejectionReasons.length > 0 && score.totalScore < 30;
     return {
       candidateId: `${sceneId}_${result.provider}_${result.assetId}`,
@@ -20952,7 +21258,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
         } else {
           let ranked;
           if (hasGlobalContext) {
-            const ctx = {
+            const ctx2 = {
               globalContext,
               chapterTitle,
               chapterPurpose,
@@ -20963,7 +21269,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
               preferredAspectRatio,
               usedAssetIds
             };
-            ranked = rankContextCandidates(candidates, ctx);
+            ranked = rankContextCandidates(candidates, ctx2);
             if (ranked.length === 0) {
               ranked = candidates.map((c) => ({ ...c, contextScore: void 0 }));
             }
@@ -21057,9 +21363,9 @@ function jaccardSimilarity(a, b) {
   const union = a.size + b.size - intersection;
   return union === 0 ? 0 : intersection / union;
 }
-function semanticScore(candidate, ctx) {
-  const intentTokens = tokenize(ctx.visualIntent);
-  const narrationTokens = tokenize(ctx.narrationText);
+function semanticScore(candidate, ctx2) {
+  const intentTokens = tokenize(ctx2.visualIntent);
+  const narrationTokens = tokenize(ctx2.narrationText);
   const refTokens = /* @__PURE__ */ new Set([...intentTokens, ...narrationTokens]);
   const titleTokens = tokenize(candidate.title);
   const tagTokens = new Set(candidate.tags.flatMap((t) => t.toLowerCase().split(/\s+/)));
@@ -21088,16 +21394,16 @@ function durationScore(candidate, sceneDuration) {
   if (clipDur >= sceneDuration) return 1;
   return Math.max(0.2, clipDur / sceneDuration);
 }
-function scoreCandidate(candidate, ctx) {
-  const sem = semanticScore(candidate, ctx) * 0.5;
+function scoreCandidate(candidate, ctx2) {
+  const sem = semanticScore(candidate, ctx2) * 0.5;
   const tech = technicalScore(candidate) * 0.2;
-  const comp = compositionScore(candidate, ctx.preferredAspectRatio) * 0.15;
-  const dur = durationScore(candidate, ctx.sceneDurationSecs) * 0.15;
-  const reuse = ctx.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
+  const comp = compositionScore(candidate, ctx2.preferredAspectRatio) * 0.15;
+  const dur = durationScore(candidate, ctx2.sceneDurationSecs) * 0.15;
+  const reuse = ctx2.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
   return Math.max(0, sem + tech + comp + dur - reuse);
 }
-function rankCandidates(candidates, ctx) {
-  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx) })).sort((a, b) => b.score - a.score);
+function rankCandidates(candidates, ctx2) {
+  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx2) })).sort((a, b) => b.score - a.score);
 }
 async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
   const allCandidates = [];
@@ -21942,7 +22248,7 @@ class VisualMixPlanner {
     return HealthVisualPlanner.loadScenesFromEditPlan(projectDir);
   }
   static buildPlan(params) {
-    const { projectDir, rawScenes, config, profile, globalContext } = params;
+    const { projectDir, rawScenes, config, profile, globalContext, contentIntelligence, identityBible } = params;
     const totalScenes = rawScenes.length;
     const aiRatio = config.aiImageRatio;
     const stockRatio = config.stockFootageRatio;
@@ -22101,11 +22407,22 @@ class VisualMixPlanner {
         motionSpec = motionPlan.motionSpec;
         motionPreset = motionPlan.motionPreset;
         recentPresets.push(motionPlan.motionPreset);
+        let identityBinding;
+        if (identityBible && globalContext && contentIntelligence) {
+          identityBinding = resolveSceneIdentity({
+            sceneIndex: scene.sceneIndex,
+            sceneNarration: narration,
+            visualIntent,
+            identityBible
+          });
+        }
         imagePrompt = buildGeneralImagePrompt({
           narration,
           visualIntent,
           globalContext,
-          sceneIndex: scene.sceneIndex
+          sceneIndex: scene.sceneIndex,
+          identityBible,
+          identityBinding
         });
         generationHash = computeGenerationHash({
           sceneIndex: scene.sceneIndex,
@@ -23823,12 +24140,30 @@ async function runMixedVisualEngine(params) {
     } catch {
     }
   }
+  let contentIntelligence;
+  const ciPath = path__namespace.join(projectDir, "analysis", "content-intelligence.json");
+  if (fs__namespace.existsSync(ciPath)) {
+    try {
+      contentIntelligence = JSON.parse(fs__namespace.readFileSync(ciPath, "utf-8"));
+    } catch {
+    }
+  }
+  let identityBible;
+  const ibPath = path__namespace.join(projectDir, "analysis", "visual-identity-bible.json");
+  if (fs__namespace.existsSync(ibPath)) {
+    try {
+      identityBible = JSON.parse(fs__namespace.readFileSync(ibPath, "utf-8"));
+    } catch {
+    }
+  }
   const plan = VisualMixPlanner.buildPlan({
     projectDir,
     rawScenes,
     config: mix,
     profile,
-    globalContext
+    globalContext,
+    contentIntelligence,
+    identityBible
   });
   checkAborted$1(signal);
   const totalScenes = rawScenes.length;
@@ -23940,7 +24275,9 @@ async function runMixedVisualEngine(params) {
       globalContext,
       outputResolution: mix.imageOutputResolution || "1080p",
       visualBrief: directorBundle?.brief,
-      sceneDirections: directorBundle?.sceneDirections
+      sceneDirections: directorBundle?.sceneDirections,
+      contentIntelligence,
+      identityBible
     });
     manualPack = ensured.pack;
     promptGenerationMs = ensured.generationMs;
@@ -24784,7 +25121,7 @@ async function runGlobalContextStage(options, onProgress, signal) {
     } catch {
     }
   }
-  let ctx = null;
+  let ctx2 = null;
   let isCached = false;
   let sourceHash;
   if (scriptText) {
@@ -24792,17 +25129,17 @@ async function runGlobalContextStage(options, onProgress, signal) {
   }
   if (isGlobalContextValid(options.projectDir, sourceHash)) {
     try {
-      ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+      ctx2 = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
       isCached = true;
       onProgress("Using cached global script context", 0.5);
     } catch {
     }
   }
   const apiKey = resolveGeminiApiKey();
-  if (!ctx) {
+  if (!ctx2) {
     onProgress("Analyzing script for Global Visual Context...", 0.05);
     checkAborted(signal);
-    ctx = await analyzeGlobalContext({
+    ctx2 = await analyzeGlobalContext({
       projectDir: options.projectDir,
       apiKey,
       model: options.geminiModel,
@@ -24839,7 +25176,7 @@ async function runGlobalContextStage(options, onProgress, signal) {
           const ledger = await extractDocumentaryClaims({
             projectDir: options.projectDir,
             scriptText,
-            globalContext: ctx,
+            globalContext: ctx2,
             scenes: sceneInputs,
             apiKey,
             model: options.geminiModel,
@@ -24863,10 +25200,10 @@ async function runGlobalContextStage(options, onProgress, signal) {
     success: true,
     cached: isCached,
     artifactPath: contextPath,
-    data: ctx,
+    data: ctx2,
     stats: {
-      primarySubject: ctx?.primarySubject,
-      anchorsCount: ctx?.exactTopicAnchors?.length ?? 0,
+      primarySubject: ctx2?.primarySubject,
+      anchorsCount: ctx2?.exactTopicAnchors?.length ?? 0,
       claimsCount: claimStats?.totalClaims ?? 0,
       unsourcedClaims: claimStats?.unsourced ?? 0
     }
@@ -27194,7 +27531,7 @@ function registerStockHandlers(ipcMain) {
         if (!scriptText && !transcript) {
           return { success: false, error: "No script or transcript found. Please add a script file to the project first." };
         }
-        const ctx = await analyzeGlobalContext({
+        const ctx2 = await analyzeGlobalContext({
           projectDir: params.projectDir,
           apiKey: geminiKey,
           model: config.preferredModel ?? "gemini-3.5-flash",
@@ -27204,14 +27541,14 @@ function registerStockHandlers(ipcMain) {
           onProgress: sendProgress
         });
         let warning;
-        if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
+        if (ctx2.modelUsed.includes("fallback") || ctx2.modelUsed.includes("algorithmic")) {
           if (!geminiKey) {
             warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn.";
           } else {
             warning = "Gemini AI tạm thời quá tải hoặc không phản hồi. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
           }
         }
-        return { success: true, context: ctx, warning };
+        return { success: true, context: ctx2, warning };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: msg };
@@ -27219,8 +27556,8 @@ function registerStockHandlers(ipcMain) {
     }
   );
   ipcMain.handle(IPC_CHANNELS.STOCK_CONTEXT_GET, (_event, projectDir) => {
-    const ctx = loadGlobalContext(projectDir);
-    return ctx;
+    const ctx2 = loadGlobalContext(projectDir);
+    return ctx2;
   });
   ipcMain.handle(
     IPC_CHANNELS.STOCK_CONTEXT_SAVE,
@@ -27761,10 +28098,17 @@ function registerPipelineHandlers(ipcMain) {
 }
 function parseSceneNumberFromFilename(fileName) {
   const base = path__namespace.basename(fileName, path__namespace.extname(fileName)).trim();
-  const m = /^(?:scene|s)[\s_-]*0*(\d+)(?!\d)/i.exec(base);
-  if (!m) return null;
-  const n = Number(m[1]);
-  return Number.isFinite(n) && n > 0 ? n : null;
+  const mScene = /(?:^|[\s_/-])scene[\s_-]*0*(\d+)(?!\d)/i.exec(base);
+  if (mScene) {
+    const n = Number(mScene[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const mS = /(?:^|[\s_/-])s[\s_-]*0*(\d+)(?!\d)/i.exec(base);
+  if (mS) {
+    const n = Number(mS[1]);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
 }
 function naturalCompare(a, b) {
   return a.localeCompare(b, void 0, { numeric: true, sensitivity: "base" });
