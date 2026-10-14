@@ -18,6 +18,7 @@ import {
 import { cropToZoomFilter } from './retention/visual-beat-engine'
 import { runRetentionQA, generateRetentionSummary, saveRetentionSummary } from './retention/retention-qa'
 import { ensureRetentionPlan } from './retention/retention-director'
+import { ensureOpeningRetentionPlan } from './retention/opening-retention-composer'
 import { applyRetentionMotionHint } from './retention/retention-motion'
 import type { RetentionSettings, VisualBeat, ProofVisual, RetentionDecision, RetentionPlan, RetentionScenePlan } from './retention/retention-types'
 import { DEFAULT_RETENTION_SETTINGS } from './retention/retention-types'
@@ -834,7 +835,6 @@ export function prepareRenderPlan(params: {
   let openingPlan: any = null
   if (retentionPlan) {
     try {
-      const { ensureOpeningRetentionPlan } = require('./retention/opening-retention-composer')
       
       let globalContext: any
       try {

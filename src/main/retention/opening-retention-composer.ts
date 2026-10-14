@@ -1,9 +1,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
-import { logger } from '../../logger'
-import type { RawSceneData } from '../../../shared/types'
+import { logger } from '../logger'
+import type { RawSceneData, CaptionPlan, CaptionPhrase } from '../../../shared/types'
 import type { RetentionPlan, RetentionDecision } from './retention-types'
-import type { CaptionPlan, CaptionPhrase } from '../captions/caption-types'
 import type { ProofVisual } from './retention-types'
 import type { VisualGrammarDecision } from '../production-intelligence/visual-grammar-engine'
 import type {
@@ -14,7 +13,7 @@ import type {
   OpeningSfxEvent,
   OpeningIntensitySegment
 } from './opening-retention-types'
-import { fingerprintOf } from '../utils/fingerprint'
+import { fingerprintOf } from '../render-cache/render-fingerprint'
 
 const SCHEMA_VERSION = 1
 const OPENING_WINDOW_SECS = 60
