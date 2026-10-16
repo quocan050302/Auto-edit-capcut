@@ -5,7 +5,7 @@ import { IPC_CHANNELS } from '../../../shared/types'
 import type { ManualAiImportMapping, ManualAiStatus } from '../../../shared/types'
 import { logger } from '../logger'
 import { normalizeProjectDir } from '../pipeline/pipeline-state'
-import { MANUAL_AI_SUPPORTED_EXTENSIONS, getManualAiPromptTxtPath } from '../visual-mix/manual-ai/manual-ai-types'
+import { MANUAL_AI_SUPPORTED_EXTENSIONS, MANUAL_AI_VIDEO_EXTENSIONS, getManualAiPromptTxtPath } from '../visual-mix/manual-ai/manual-ai-types'
 import { readManualAiPromptText } from '../visual-mix/manual-ai/manual-ai-prompt-pack'
 import { commitManualAiImport, planManualAiImport } from '../visual-mix/manual-ai/manual-ai-importer'
 import { manualAiAssetGate } from '../visual-mix/manual-ai/manual-ai-gate'
@@ -21,6 +21,16 @@ function listImagesInFolder(folder: string): string[] {
     return fs
       .readdirSync(folder, { withFileTypes: true })
       .filter((d) => d.isFile() && MANUAL_AI_SUPPORTED_EXTENSIONS.includes(path.extname(d.name).toLowerCase()))
+      .map((d) => path.join(folder, d.name))
+  } catch {
+    return []
+  }
+}
+
+function listVideosInFolder(folder: string): string[] {
+  try {
+    return fs.readdirSync(folder, { withFileTypes: true })
+      .filter((d) => d.isFile() && MANUAL_AI_VIDEO_EXTENSIONS.includes(path.extname(d.name).toLowerCase()))
       .map((d) => path.join(folder, d.name))
   } catch {
     return []
@@ -119,9 +129,29 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
     }
   )
 
+  // Separate picker: leaves MANUAL_AI_SELECT_IMAGES and its original filters unchanged.
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_SELECT_VIDEOS, async (_event, params: { mode: 'files' | 'folder' }) => {
+    try {
+      const folder = params?.mode === 'folder'
+      const opts: Electron.OpenDialogOptions = folder
+        ? { title: 'Select the folder with your AI videos', properties: ['openDirectory'] }
+        : {
+            title: 'Select AI videos',
+            properties: ['openFile', 'multiSelections'],
+            filters: [{ name: 'Videos', extensions: MANUAL_AI_VIDEO_EXTENSIONS.map((e) => e.slice(1)) }]
+          }
+      const win = BrowserWindow.getFocusedWindow()
+      const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+      if (res.canceled || res.filePaths.length === 0) return { success: true, filePaths: [], canceled: true }
+      return { success: true, filePaths: folder ? listVideosInFolder(res.filePaths[0]) : res.filePaths }
+    } catch (err) {
+      return { success: false, filePaths: [], error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
   ipcMain.handle(
     IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT,
-    async (_event, params: { projectDir: string; filePaths: string[]; replaceExisting?: boolean }) => {
+    async (_event, params: { projectDir: string; filePaths: string[]; replaceExisting?: boolean; mediaType?: 'video' }) => {
       try {
         if (!params?.projectDir || !Array.isArray(params.filePaths)) {
           return { success: false, error: 'projectDir and filePaths are required.' }
@@ -130,7 +160,8 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
         const plan = planManualAiImport({
           projectDir: norm,
           filePaths: params.filePaths,
-          replaceExisting: params.replaceExisting
+          replaceExisting: params.replaceExisting,
+          mediaType: params.mediaType
         })
         return { success: true, plan }
       } catch (err) {

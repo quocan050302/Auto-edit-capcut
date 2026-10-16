@@ -91,6 +91,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   const [plan, setPlan] = useState<ManualAiImportPlan | null>(null)
   const [pendingRejections, setPendingRejections] = useState<ManualAiImportRejection[]>([])
   const [showImportMenu, setShowImportMenu] = useState(false)
+  const [showVideoImportMenu, setShowVideoImportMenu] = useState(false)
   const [showPrompts, setShowPrompts] = useState(false)
   const lastVersion = useRef<number | undefined>(undefined)
   const bridgeLoggedRef = useRef(false)
@@ -260,7 +261,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
       ])
       const n = res.result.imported.length
       setNotice(
-        `${n} image${n === 1 ? '' : 's'} imported · ${res.result.status.ready}/${res.result.status.expected} ready` +
+        `${n} asset${n === 1 ? '' : 's'} imported · ${res.result.status.ready}/${res.result.status.expected} ready` +
           (res.result.rejections.length > 0 ? ` · ${res.result.rejections.length} need attention` : '')
       )
     } finally {
@@ -268,20 +269,27 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     }
   }
 
-  async function handleSelect(mode: 'files' | 'folder'): Promise<void> {
+  async function handleSelect(mode: 'files' | 'folder', mediaType: 'image' | 'video' = 'image'): Promise<void> {
     if (!window.api?.manualAi) return
     setShowImportMenu(false)
+    setShowVideoImportMenu(false)
     setNotice(null)
-    const picked = await window.api.manualAi.selectImages(mode)
+    const picked = mediaType === 'video'
+      ? await window.api.manualAi.selectVideos(mode)
+      : await window.api.manualAi.selectImages(mode)
     if (!picked.success) {
       setNotice(picked.error || 'Could not open the file picker.')
       return
     }
     if (picked.filePaths.length === 0) {
-      if (!picked.canceled) setNotice('No supported images (PNG, JPG, JPEG, WEBP) found.')
+      if (!picked.canceled) setNotice(mediaType === 'video' ? 'No supported videos (MP4, MOV, WEBM, MKV) found.' : 'No supported images (PNG, JPG, JPEG, WEBP) found.')
       return
     }
-    const planned = await window.api.manualAi.planImport({ projectDir, filePaths: picked.filePaths })
+    const planned = await window.api.manualAi.planImport({
+      projectDir,
+      filePaths: picked.filePaths,
+      ...(mediaType === 'video' ? { mediaType: 'video' as const } : {})
+    })
     if (!planned.success || !planned.plan) {
       setNotice(planned.error || 'Could not analyse the selected files.')
       return
@@ -300,6 +308,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   const rejectionAction = (r: ManualAiImportRejection): React.ReactNode => {
     if (r.sceneIndex === undefined) return null
     const mapping: ManualAiImportMapping = {
+      ...(/\.(mp4|mov|webm|mkv)$/i.test(r.filePath) ? { mediaType: 'video' as const } : {}),
       filePath: r.filePath,
       fileName: r.fileName,
       sceneIndex: r.sceneIndex,
@@ -429,10 +438,27 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
           id="manual-ai-import"
           className="btn btn-primary btn-sm"
           disabled={!effectiveHasPromptPack || effectiveExpected === 0 || busy}
-          onClick={() => setShowImportMenu((v) => !v)}
+          onClick={() => { setShowVideoImportMenu(false); setShowImportMenu((v) => !v) }}
         >
           Import AI Images
         </button>
+        <button
+          type="button"
+          id="manual-ai-import-videos"
+          className="btn btn-secondary btn-sm"
+          disabled={!effectiveHasPromptPack || effectiveExpected === 0 || busy}
+          onClick={() => { setShowImportMenu(false); setShowVideoImportMenu((v) => !v) }}
+        >
+          Import AI Videos
+        </button>
+        {showVideoImportMenu && (
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <button type="button" id="manual-ai-import-video-files" className="btn btn-secondary btn-sm"
+              onClick={() => void handleSelect('files', 'video')}>Select Videos…</button>
+            <button type="button" id="manual-ai-import-video-folder" className="btn btn-secondary btn-sm"
+              onClick={() => void handleSelect('folder', 'video')}>Select Video Folder…</button>
+          </div>
+        )}
         {showImportMenu && (
           <div style={{ display: 'flex', gap: '8px' }}>
             <button

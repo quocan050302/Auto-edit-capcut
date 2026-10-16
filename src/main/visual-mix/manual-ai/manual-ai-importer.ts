@@ -24,7 +24,9 @@ import { upsertManualAiRecord } from './manual-ai-asset-store'
 import {
   evaluateManualAiStatus,
   isSupportedImageExtension,
-  validateImageFile
+  isSupportedVideoExtension,
+  validateImageFile,
+  validateVideoFile
 } from './manual-ai-validator'
 import { manualAiAssetGate } from './manual-ai-gate'
 
@@ -108,6 +110,8 @@ export function planManualAiImport(params: {
   projectDir: string
   filePaths: string[]
   replaceExisting?: boolean
+  /** Only set by the new video UI. Omitted retains the original image-only workflow. */
+  mediaType?: 'video'
 }): ManualAiImportPlan {
   const { projectDir } = params
   const rejections: ManualAiImportRejection[] = []
@@ -130,8 +134,10 @@ export function planManualAiImport(params: {
 
   const supported: string[] = []
   for (const f of files) {
-    if (!isSupportedImageExtension(f)) {
-      rejections.push(reject(f, 'UNSUPPORTED_TYPE', `Unsupported file type "${path.extname(f) || 'none'}". Use PNG, JPG, JPEG or WEBP.`))
+    const supportedType = params.mediaType === 'video' ? isSupportedVideoExtension(f) : isSupportedImageExtension(f)
+    if (!supportedType) {
+      const guidance = params.mediaType === 'video' ? 'Use MP4, MOV, WEBM or MKV.' : 'Use PNG, JPG, JPEG or WEBP.'
+      rejections.push(reject(f, 'UNSUPPORTED_TYPE', `Unsupported file type "${path.extname(f) || 'none'}". ${guidance}`))
     } else {
       supported.push(f)
     }
@@ -147,7 +153,7 @@ export function planManualAiImport(params: {
     const sortedFiles = [...supported].sort((a, b) => naturalCompare(path.basename(a), path.basename(b)))
     if (sortedFiles.length === missingSorted.length) {
       sortedFiles.forEach((f, i) =>
-        candidates.push({ filePath: f, fileName: path.basename(f), sceneIndex: missingSorted[i], via: 'natural-sort' })
+        candidates.push({ filePath: f, fileName: path.basename(f), sceneIndex: missingSorted[i], via: 'natural-sort', ...(params.mediaType === 'video' ? { mediaType: 'video' as const } : {}) })
       )
       needsConfirmation = true
     } else {
@@ -169,7 +175,7 @@ export function planManualAiImport(params: {
           reject(x.f, 'NO_SCENE_NUMBER', `File name has no scene number. Rename it like ${expectedFilenameForScene(missingSorted[0] ?? 1)}.`)
         )
       } else {
-        candidates.push({ filePath: x.f, fileName: path.basename(x.f), sceneIndex: x.n, via: 'filename' })
+        candidates.push({ filePath: x.f, fileName: path.basename(x.f), sceneIndex: x.n, via: 'filename', ...(params.mediaType === 'video' ? { mediaType: 'video' as const } : {}) })
       }
     }
   }
@@ -287,7 +293,8 @@ export async function commitManualAiImport(params: CommitManualAiImportParams): 
       continue
     }
 
-    const validation = validateImageFile(m.filePath, target)
+    const isVideo = m.mediaType === 'video'
+    const validation = isVideo ? await validateVideoFile(m.filePath, target) : validateImageFile(m.filePath, target)
     if (!validation.ok) {
       rejections.push(reject(m.filePath, validation.code ?? 'UNREADABLE', validation.message ?? 'Invalid image.', { sceneIndex }))
       continue
@@ -304,15 +311,23 @@ export async function commitManualAiImport(params: CommitManualAiImportParams): 
       continue
     }
 
-    const finalName = expectedFilenameForScene(sceneIndex)
+    const finalName = isVideo
+      ? `S${String(sceneIndex).padStart(4, '0')}${path.extname(m.filePath).toLowerCase()}`
+      : expectedFilenameForScene(sceneIndex)
     const finalPath = path.join(outDir, finalName)
-    const tmpPath = path.join(outDir, `.tmp_${process.pid}_${Date.now()}_${sceneIndex}.png`)
+    const tmpPath = path.join(outDir, `.tmp_${process.pid}_${Date.now()}_${sceneIndex}${isVideo ? path.extname(finalName) : '.png'}`)
 
     try {
-      await normalizer(m.filePath, tmpPath, target.width, target.height)
-      const outDims = probeImageFileDimensions(tmpPath)
-      if (!outDims || outDims.width !== target.width || outDims.height !== target.height) {
-        throw new Error(`Normalized image is ${outDims ? `${outDims.width}x${outDims.height}` : 'unreadable'}, expected ${target.width}x${target.height}`)
+      if (isVideo) {
+        // The existing renderer already supports video duration, scaling, and audio muting.
+        // Copy intact; do not run an image normalizer on video frames.
+        await fs.promises.copyFile(m.filePath, tmpPath)
+      } else {
+        await normalizer(m.filePath, tmpPath, target.width, target.height)
+        const outDims = probeImageFileDimensions(tmpPath)
+        if (!outDims || outDims.width !== target.width || outDims.height !== target.height) {
+          throw new Error(`Normalized image is ${outDims ? `${outDims.width}x${outDims.height}` : 'unreadable'}, expected ${target.width}x${target.height}`)
+        }
       }
       fs.renameSync(tmpPath, finalPath)
     } catch (err) {
@@ -336,8 +351,10 @@ export async function commitManualAiImport(params: CommitManualAiImportParams): 
       status: 'ready',
       sourcePath: m.filePath,
       localPath: finalPath,
-      width: target.width,
-      height: target.height,
+      width: isVideo ? validation.width! : target.width,
+      height: isVideo ? validation.height! : target.height,
+      mediaType: isVideo ? 'video' : undefined,
+      durationSecs: isVideo ? ('durationSecs' in validation ? validation.durationSecs : undefined) : undefined,
       sourceWidth: validation.width,
       sourceHeight: validation.height,
       importedAt: new Date().toISOString(),
@@ -351,9 +368,10 @@ export async function commitManualAiImport(params: CommitManualAiImportParams): 
       sceneIndex,
       fileName: finalName,
       localPath: finalPath,
-      width: target.width,
-      height: target.height,
-      warnings
+      width: isVideo ? validation.width! : target.width,
+      height: isVideo ? validation.height! : target.height,
+      warnings,
+      mediaType: isVideo ? 'video' : undefined
     })
   }
 
