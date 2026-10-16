@@ -367,15 +367,21 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     else setNotice('Nothing could be imported. See the messages below.')
   }
 
-  const rejectionAction = (r: ManualAiImportRejection): React.ReactNode => {
+  function createMappingFromRejection(r: ManualAiImportRejection): ManualAiImportMapping | null {
     if (r.sceneIndex === undefined) return null
-    const mapping: ManualAiImportMapping = {
-      ...(/\.(mp4|mov|webm|mkv)$/i.test(r.filePath) ? { mediaType: 'video' as const } : {}),
+    const isVideo = /\.(mp4|mov|webm|mkv)$/i.test(r.filePath)
+    return {
       filePath: r.filePath,
       fileName: r.fileName,
       sceneIndex: r.sceneIndex,
-      via: 'filename'
+      via: 'filename',
+      ...(isVideo ? { mediaType: 'video' as const } : {})
     }
+  }
+
+  const rejectionAction = (r: ManualAiImportRejection): React.ReactNode => {
+    const mapping = createMappingFromRejection(r)
+    if (!mapping) return null
     if (r.code === 'LOW_RESOLUTION') {
       return (
         <button
@@ -730,13 +736,9 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
                 disabled={busy}
                 onClick={() => {
                   const mappings = pendingRejections
-                    .filter((r) => r.code === 'LOW_RESOLUTION' && r.sceneIndex !== undefined)
-                    .map((r) => ({
-                      filePath: r.filePath,
-                      fileName: r.fileName,
-                      sceneIndex: r.sceneIndex!,
-                      via: 'filename' as const
-                    }))
+                    .filter((r) => r.code === 'LOW_RESOLUTION')
+                    .map(createMappingFromRejection)
+                    .filter((m): m is ManualAiImportMapping => m !== null)
                   if (mappings.length > 0) void commit(mappings, { allowLowResolution: true })
                 }}
               >
