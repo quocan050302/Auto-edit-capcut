@@ -455,6 +455,11 @@ const api = {
     getPromptText: (projectDir: string): Promise<{ success: boolean; text?: string; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
 
+    getVideoPromptText: (
+      projectDir: string
+    ): Promise<{ success: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir }),
+
     exportTxt: (
       projectDir: string
     ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>

@@ -1477,6 +1477,7 @@ export const IPC_CHANNELS = {
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: 'manual-ai:get-status',
   MANUAL_AI_GET_PROMPT_TEXT: 'manual-ai:get-prompt-text',
+  MANUAL_AI_GET_VIDEO_PROMPT_TEXT: 'manual-ai:get-video-prompt-text',
   MANUAL_AI_EXPORT_TXT: 'manual-ai:export-txt',
   MANUAL_AI_OPEN_PROMPT_FILE: 'manual-ai:open-prompt-file',
   MANUAL_AI_SELECT_IMAGES: 'manual-ai:select-images',

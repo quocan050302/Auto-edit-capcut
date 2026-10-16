@@ -7,7 +7,11 @@ import { logger } from '../logger'
 import { normalizeProjectDir } from '../pipeline/pipeline-state'
 import { MANUAL_AI_SUPPORTED_EXTENSIONS, MANUAL_AI_VIDEO_EXTENSIONS, getManualAiPromptTxtPath } from '../visual-mix/manual-ai/manual-ai-types'
 import { readManualAiPromptText } from '../visual-mix/manual-ai/manual-ai-prompt-pack'
-import { commitManualAiImport, planManualAiImport } from '../visual-mix/manual-ai/manual-ai-importer'
+import { commitManualAiImport, naturalCompare, planManualAiImport } from '../visual-mix/manual-ai/manual-ai-importer'
+import {
+  ensureManualAiVideoPromptPack,
+  formatManualAiVideoPromptText
+} from '../visual-mix/manual-ai/manual-ai-video-prompt-pack'
 import { manualAiAssetGate } from '../visual-mix/manual-ai/manual-ai-gate'
 import {
   getManualAiStatus,
@@ -15,6 +19,9 @@ import {
 } from '../visual-mix/manual-ai/manual-ai-broadcaster'
 
 export { getManualAiStatus, broadcastManualAiStatus }
+
+export const MAX_DISCOVERED_VIDEOS = 250
+export const MAX_VIDEO_FOLDER_DEPTH = 3
 
 function listImagesInFolder(folder: string): string[] {
   try {
@@ -27,14 +34,71 @@ function listImagesInFolder(folder: string): string[] {
   }
 }
 
-function listVideosInFolder(folder: string): string[] {
-  try {
-    return fs.readdirSync(folder, { withFileTypes: true })
-      .filter((d) => d.isFile() && MANUAL_AI_VIDEO_EXTENSIONS.includes(path.extname(d.name).toLowerCase()))
-      .map((d) => path.join(folder, d.name))
-  } catch {
-    return []
+/**
+ * Bounded recursive discovery of video files up to maxDepth.
+ * Skips symlinks and hidden directories. Sorts deterministically using naturalCompare.
+ * Implements a safety limit of MAX_DISCOVERED_VIDEOS (250).
+ */
+export function listVideosInFolder(
+  folder: string,
+  maxDepth = MAX_VIDEO_FOLDER_DEPTH,
+  warningsOut?: string[]
+): string[] {
+  if (!fs.existsSync(folder)) {
+    throw new Error(`Folder does not exist: ${folder}`)
   }
+  const rootStat = fs.statSync(folder)
+  if (!rootStat.isDirectory()) {
+    throw new Error(`Path is not a directory: ${folder}`)
+  }
+
+  const discovered: string[] = []
+  let hitLimit = false
+
+  function traverse(currentDir: string, currentDepth: number): void {
+    if (hitLimit || currentDepth > maxDepth) return
+
+    let entries: fs.Dirent[]
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true })
+    } catch (err) {
+      const msg = `Unable to read directory: ${currentDir} (${err instanceof Error ? err.message : String(err)})`
+      logger.warn(`[ManualAI:VideoFolder] ${msg}`)
+      warningsOut?.push(msg)
+      return
+    }
+
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue
+      if (entry.name.startsWith('.')) continue
+
+      const fullPath = path.join(currentDir, entry.name)
+
+      if (entry.isDirectory()) {
+        if (currentDepth < maxDepth) {
+          traverse(fullPath, currentDepth + 1)
+        }
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase()
+        if (MANUAL_AI_VIDEO_EXTENSIONS.includes(ext)) {
+          if (discovered.length >= MAX_DISCOVERED_VIDEOS) {
+            hitLimit = true
+            const limitMsg = `Discovered video files reached safety limit of ${MAX_DISCOVERED_VIDEOS}. Extra files omitted.`
+            logger.warn(`[ManualAI:VideoFolder] ${limitMsg}`)
+            warningsOut?.push(limitMsg)
+            break
+          }
+          discovered.push(fullPath)
+        }
+      }
+    }
+  }
+
+  traverse(folder, 0)
+  return discovered.sort((a, b) => {
+    const baseCmp = naturalCompare(path.basename(a), path.basename(b))
+    return baseCmp !== 0 ? baseCmp : naturalCompare(a, b)
+  })
 }
 
 export function registerManualAiHandlers(ipcMain: IpcMain): void {
@@ -59,6 +123,22 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
       return { success: true, text }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
+    }
+  })
+
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, async (_event, params: { projectDir: string }) => {
+    try {
+      if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
+      const norm = normalizeProjectDir(params.projectDir)
+      logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm}`)
+      const pack = ensureManualAiVideoPromptPack(norm)
+      const text = formatManualAiVideoPromptText(pack)
+      logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts`)
+      return { success: true, text }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`)
+      return { success: false, error: msg }
     }
   })
 
@@ -143,9 +223,30 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
       const win = BrowserWindow.getFocusedWindow()
       const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
       if (res.canceled || res.filePaths.length === 0) return { success: true, filePaths: [], canceled: true }
-      return { success: true, filePaths: folder ? listVideosInFolder(res.filePaths[0]) : res.filePaths }
+
+      if (folder) {
+        const warnings: string[] = []
+        const folderPath = res.filePaths[0]
+        const filePaths = listVideosInFolder(folderPath, MAX_VIDEO_FOLDER_DEPTH, warnings)
+        logger.info(`[ManualAI:VideoFolder] Discovered ${filePaths.length} videos in ${folderPath}`)
+        return {
+          success: true,
+          filePaths,
+          folderPath,
+          discoveredCount: filePaths.length,
+          warnings: warnings.length > 0 ? warnings : undefined
+        }
+      }
+
+      return {
+        success: true,
+        filePaths: res.filePaths,
+        discoveredCount: res.filePaths.length
+      }
     } catch (err) {
-      return { success: false, filePaths: [], error: err instanceof Error ? err.message : String(err) }
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error(`[ManualAI:VideoFolder] Select videos failed: ${msg}`)
+      return { success: false, filePaths: [], error: msg }
     }
   })
 
