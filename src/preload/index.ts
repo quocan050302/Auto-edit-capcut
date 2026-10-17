@@ -478,11 +478,25 @@ const api = {
     ): Promise<{ success: boolean; filePaths: string[]; canceled?: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_VIDEOS, { mode }),
 
+    selectMixed: (
+      mode: 'files' | 'folder'
+    ): Promise<{
+      success: boolean
+      filePaths: string[]
+      folderPath?: string
+      discoveredCount?: number
+      imageCount?: number
+      videoCount?: number
+      canceled?: boolean
+      warnings?: string[]
+      error?: string
+    }> => ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_MIXED, { mode }),
+
     planImport: (params: {
       projectDir: string
       filePaths: string[]
       replaceExisting?: boolean
-      mediaType?: 'video'
+      mediaType?: 'video' | 'mixed'
     }): Promise<{ success: boolean; plan?: ManualAiImportPlan; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT, params),
 

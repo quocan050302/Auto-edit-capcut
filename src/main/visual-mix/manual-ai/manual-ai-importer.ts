@@ -30,6 +30,8 @@ import {
 } from './manual-ai-validator'
 import { manualAiAssetGate } from './manual-ai-gate'
 
+import { detectManualImportMediaType } from './manual-ai-mixed-media'
+
 // ─── Filename parsing ────────────────────────────────────────────────────────
 
 /**
@@ -110,8 +112,12 @@ export function planManualAiImport(params: {
   projectDir: string
   filePaths: string[]
   replaceExisting?: boolean
-  /** Only set by the new video UI. Omitted retains the original image-only workflow. */
-  mediaType?: 'video'
+  /**
+   * undefined: original image-only workflow
+   * 'video': video-only workflow
+   * 'mixed': mixed media workflow (per-file image / video detection)
+   */
+  mediaType?: 'video' | 'mixed'
 }): ManualAiImportPlan {
   const { projectDir } = params
   const rejections: ManualAiImportRejection[] = []
@@ -134,13 +140,34 @@ export function planManualAiImport(params: {
 
   const supported: string[] = []
   for (const f of files) {
-    const supportedType = params.mediaType === 'video' ? isSupportedVideoExtension(f) : isSupportedImageExtension(f)
-    if (!supportedType) {
-      const guidance = params.mediaType === 'video' ? 'Use MP4, MOV, WEBM or MKV.' : 'Use PNG, JPG, JPEG or WEBP.'
-      rejections.push(reject(f, 'UNSUPPORTED_TYPE', `Unsupported file type "${path.extname(f) || 'none'}". ${guidance}`))
+    if (params.mediaType === 'mixed') {
+      const kind = detectManualImportMediaType(f)
+      if (kind === 'unsupported') {
+        rejections.push(
+          reject(
+            f,
+            'UNSUPPORTED_TYPE',
+            `Unsupported file type "${path.extname(f) || 'none'}". Use PNG, JPG, JPEG, WEBP, MP4, MOV, WEBM or MKV.`
+          )
+        )
+      } else {
+        supported.push(f)
+      }
     } else {
-      supported.push(f)
+      const supportedType = params.mediaType === 'video' ? isSupportedVideoExtension(f) : isSupportedImageExtension(f)
+      if (!supportedType) {
+        const guidance = params.mediaType === 'video' ? 'Use MP4, MOV, WEBM or MKV.' : 'Use PNG, JPG, JPEG or WEBP.'
+        rejections.push(reject(f, 'UNSUPPORTED_TYPE', `Unsupported file type "${path.extname(f) || 'none'}". ${guidance}`))
+      } else {
+        supported.push(f)
+      }
     }
+  }
+
+  const resolveCandidateMediaType = (filePath: string): { mediaType?: 'video' } => {
+    if (params.mediaType === 'video') return { mediaType: 'video' }
+    if (params.mediaType === 'mixed' && isSupportedVideoExtension(filePath)) return { mediaType: 'video' }
+    return {}
   }
 
   const numbered = supported.map((f) => ({ f, n: parseSceneNumberFromFilename(f) }))
@@ -153,7 +180,13 @@ export function planManualAiImport(params: {
     const sortedFiles = [...supported].sort((a, b) => naturalCompare(path.basename(a), path.basename(b)))
     if (sortedFiles.length === missingSorted.length) {
       sortedFiles.forEach((f, i) =>
-        candidates.push({ filePath: f, fileName: path.basename(f), sceneIndex: missingSorted[i], via: 'natural-sort', ...(params.mediaType === 'video' ? { mediaType: 'video' as const } : {}) })
+        candidates.push({
+          filePath: f,
+          fileName: path.basename(f),
+          sceneIndex: missingSorted[i],
+          via: 'natural-sort',
+          ...resolveCandidateMediaType(f)
+        })
       )
       needsConfirmation = true
     } else {
@@ -175,7 +208,13 @@ export function planManualAiImport(params: {
           reject(x.f, 'NO_SCENE_NUMBER', `File name has no scene number. Rename it like ${expectedFilenameForScene(missingSorted[0] ?? 1)}.`)
         )
       } else {
-        candidates.push({ filePath: x.f, fileName: path.basename(x.f), sceneIndex: x.n, via: 'filename', ...(params.mediaType === 'video' ? { mediaType: 'video' as const } : {}) })
+        candidates.push({
+          filePath: x.f,
+          fileName: path.basename(x.f),
+          sceneIndex: x.n,
+          via: 'filename',
+          ...resolveCandidateMediaType(x.f)
+        })
       }
     }
   }

@@ -84,6 +84,19 @@ interface VideoImportSelection {
   needsConfirmation?: boolean
 }
 
+interface MixedMediaSelection {
+  mode: 'files' | 'folder'
+  folderPath?: string
+  filePaths: string[]
+  imageCount: number
+  videoCount: number
+  mappedCount: number
+  rejectedCount: number
+  mappings: ManualAiImportMapping[]
+  rejections: ManualAiImportRejection[]
+  needsConfirmation?: boolean
+}
+
 export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPanelProps): React.ReactElement | null {
   const projectDir = project.projectDir
   const mix = resolveVisualMixConfig({
@@ -101,9 +114,11 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   const [busy, setBusy] = useState(false)
   const [plan, setPlan] = useState<ManualAiImportPlan | null>(null)
   const [videoSelection, setVideoSelection] = useState<VideoImportSelection | null>(null)
+  const [mixedSelection, setMixedSelection] = useState<MixedMediaSelection | null>(null)
   const [pendingRejections, setPendingRejections] = useState<ManualAiImportRejection[]>([])
   const [showImportMenu, setShowImportMenu] = useState(false)
   const [showVideoImportMenu, setShowVideoImportMenu] = useState(false)
+  const [showMixedImportMenu, setShowMixedImportMenu] = useState(false)
   const [showPrompts, setShowPrompts] = useState(false)
   const lastVersion = useRef<number | undefined>(undefined)
   const bridgeLoggedRef = useRef(false)
@@ -304,6 +319,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     if (!window.api?.manualAi) return
     setShowImportMenu(false)
     setShowVideoImportMenu(false)
+    setShowMixedImportMenu(false)
     setNotice(null)
     const picked = mediaType === 'video'
       ? await window.api.manualAi.selectVideos(mode)
@@ -365,6 +381,53 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     setPlan(null)
     if (planned.plan.mappings.length > 0) await commit(planned.plan.mappings)
     else setNotice('Nothing could be imported. See the messages below.')
+  }
+
+  async function handleSelectMixed(mode: 'files' | 'folder'): Promise<void> {
+    if (!window.api?.manualAi) return
+    setShowImportMenu(false)
+    setShowVideoImportMenu(false)
+    setShowMixedImportMenu(false)
+    setNotice(null)
+
+    const picked = await (window.api.manualAi as any).selectMixed(mode)
+    if (!picked.success) {
+      setNotice(picked.error || 'Could not open the file picker.')
+      return
+    }
+    if (picked.filePaths.length === 0) {
+      if (!picked.canceled) {
+        setNotice('No supported media files (Images: PNG, JPG, JPEG, WEBP / Videos: MP4, MOV, WEBM, MKV) found.')
+      }
+      return
+    }
+
+    const planned = await window.api.manualAi.planImport({
+      projectDir,
+      filePaths: picked.filePaths,
+      mediaType: 'mixed'
+    })
+    if (!planned.success || !planned.plan) {
+      setNotice(planned.error || 'Could not analyse the selected files.')
+      return
+    }
+    setPendingRejections(planned.plan.rejections)
+
+    const imgCount = picked.imageCount ?? picked.filePaths.filter((f: string) => /\.(png|jpg|jpeg|webp)$/i.test(f)).length
+    const vidCount = picked.videoCount ?? picked.filePaths.filter((f: string) => /\.(mp4|mov|webm|mkv)$/i.test(f)).length
+
+    setMixedSelection({
+      mode,
+      folderPath: picked.folderPath,
+      filePaths: picked.filePaths,
+      imageCount: imgCount,
+      videoCount: vidCount,
+      mappedCount: planned.plan.mappings.length,
+      rejectedCount: planned.plan.rejections.length,
+      mappings: planned.plan.mappings,
+      rejections: planned.plan.rejections,
+      needsConfirmation: planned.plan.needsConfirmation
+    })
   }
 
   function createMappingFromRejection(r: ManualAiImportRejection): ManualAiImportMapping | null {
@@ -517,7 +580,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
             id="manual-ai-import"
             className="btn btn-primary btn-sm"
             disabled={!effectiveHasPromptPack || effectiveExpected === 0 || busy}
-            onClick={() => { setShowVideoImportMenu(false); setShowImportMenu((v) => !v) }}
+            onClick={() => { setShowVideoImportMenu(false); setShowMixedImportMenu(false); setShowImportMenu((v) => !v) }}
           >
             Import AI Images ▾
           </button>
@@ -568,7 +631,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
             id="manual-ai-import-videos"
             className="btn btn-secondary btn-sm"
             disabled={!effectiveHasPromptPack || effectiveExpected === 0 || busy}
-            onClick={() => { setShowImportMenu(false); setShowVideoImportMenu((v) => !v) }}
+            onClick={() => { setShowImportMenu(false); setShowMixedImportMenu(false); setShowVideoImportMenu((v) => !v) }}
           >
             Import AI Videos ▾
           </button>
@@ -608,6 +671,61 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
                 onClick={() => void handleSelect('folder', 'video')}
               >
                 Select Video Folder…
+              </button>
+            </div>
+          )}
+        </div>
+
+        <div style={{ position: 'relative', display: 'inline-flex' }}>
+          <button
+            type="button"
+            id="manual-ai-import-mixed"
+            className="btn btn-secondary btn-sm"
+            disabled={!effectiveHasPromptPack || effectiveExpected === 0 || busy}
+            onClick={() => {
+              setShowImportMenu(false)
+              setShowVideoImportMenu(false)
+              setShowMixedImportMenu((v) => !v)
+            }}
+          >
+            Import Mixed Media ▾
+          </button>
+          {showMixedImportMenu && (
+            <div
+              id="manual-ai-mixed-import-menu"
+              style={{
+                position: 'absolute',
+                top: 'calc(100% + 4px)',
+                left: 0,
+                zIndex: 100,
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '4px',
+                background: 'rgba(15, 23, 42, 0.95)',
+                border: '1px solid rgba(129, 140, 248, 0.4)',
+                borderRadius: '6px',
+                padding: '6px',
+                boxShadow: '0 4px 12px rgba(0, 0, 0, 0.5)',
+                minWidth: '160px'
+              }}
+            >
+              <button
+                type="button"
+                id="manual-ai-import-mixed-files"
+                className="btn btn-secondary btn-sm"
+                style={{ textAlign: 'left', width: '100%' }}
+                onClick={() => void handleSelectMixed('files')}
+              >
+                Select Mixed Files…
+              </button>
+              <button
+                type="button"
+                id="manual-ai-import-mixed-folder"
+                className="btn btn-secondary btn-sm"
+                style={{ textAlign: 'left', width: '100%' }}
+                onClick={() => void handleSelectMixed('folder')}
+              >
+                Select Mixed Folder…
               </button>
             </div>
           )}
@@ -666,6 +784,68 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
               type="button"
               className="btn btn-secondary btn-sm"
               onClick={() => setVideoSelection(null)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {mixedSelection && (
+        <div
+          id="manual-ai-mixed-import-preview"
+          style={{
+            padding: '12px 14px',
+            borderRadius: '8px',
+            background: 'rgba(15, 23, 42, 0.4)',
+            border: '1px solid rgba(129, 140, 248, 0.4)'
+          }}
+        >
+          <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)', marginBottom: '4px' }}>
+            {mixedSelection.mode === 'folder' ? 'Mixed Media Folder Discovery Result' : 'Selected Mixed Media Files'}
+          </div>
+          {mixedSelection.folderPath && (
+            <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '6px', fontFamily: 'monospace' }}>
+              Source: {mixedSelection.folderPath}
+            </div>
+          )}
+          <div style={{ fontSize: '12px', color: '#93c5fd', marginBottom: '8px' }}>
+            {mixedSelection.filePaths.length} media file{mixedSelection.filePaths.length === 1 ? '' : 's'} discovered ·{' '}
+            {mixedSelection.imageCount} image{mixedSelection.imageCount === 1 ? '' : 's'} ·{' '}
+            {mixedSelection.videoCount} video{mixedSelection.videoCount === 1 ? '' : 's'} ·{' '}
+            {mixedSelection.mappedCount} AI scene{mixedSelection.mappedCount === 1 ? '' : 's'} matched ·{' '}
+            {mixedSelection.rejectedCount} rejected
+          </div>
+          {mixedSelection.mappings.length > 0 && (
+            <div style={{ maxHeight: '140px', overflowY: 'auto', fontSize: '12px', fontFamily: 'monospace', marginBottom: '8px' }}>
+              {mixedSelection.mappings.map((m) => (
+                <div key={m.filePath} style={{ color: 'var(--text-secondary)' }}>
+                  {m.fileName} → Scene {m.sceneIndex} [{m.mediaType === 'video' ? 'VIDEO' : 'IMAGE'}]
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: '8px' }}>
+            {mixedSelection.mappings.length > 0 && (
+              <button
+                type="button"
+                id="manual-ai-confirm-mixed-import"
+                className="btn btn-primary btn-sm"
+                disabled={busy}
+                onClick={() => {
+                  const mappings = mixedSelection.mappings
+                  setMixedSelection(null)
+                  void commit(mappings)
+                }}
+              >
+                Import {mixedSelection.mappings.length} Media File{mixedSelection.mappings.length === 1 ? '' : 's'}
+              </button>
+            )}
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              disabled={busy}
+              onClick={() => setMixedSelection(null)}
             >
               Cancel
             </button>

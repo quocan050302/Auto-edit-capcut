@@ -5,20 +5,30 @@ import { IPC_CHANNELS } from '../../../shared/types'
 import type { ManualAiImportMapping, ManualAiStatus } from '../../../shared/types'
 import { logger } from '../logger'
 import { normalizeProjectDir } from '../pipeline/pipeline-state'
-import { MANUAL_AI_SUPPORTED_EXTENSIONS, MANUAL_AI_VIDEO_EXTENSIONS, getManualAiPromptTxtPath } from '../visual-mix/manual-ai/manual-ai-types'
+import {
+  MANUAL_AI_SUPPORTED_EXTENSIONS,
+  MANUAL_AI_VIDEO_EXTENSIONS,
+  MANUAL_AI_MIXED_EXTENSIONS,
+  getManualAiPromptTxtPath
+} from '../visual-mix/manual-ai/manual-ai-types'
 import { readManualAiPromptText } from '../visual-mix/manual-ai/manual-ai-prompt-pack'
 import { commitManualAiImport, naturalCompare, planManualAiImport } from '../visual-mix/manual-ai/manual-ai-importer'
 import {
   ensureManualAiVideoPromptPack,
   formatManualAiVideoPromptText
 } from '../visual-mix/manual-ai/manual-ai-video-prompt-pack'
+import {
+  listMixedMediaInFolder,
+  countMixedMedia,
+  MAX_MIXED_FOLDER_DEPTH
+} from '../visual-mix/manual-ai/manual-ai-mixed-media'
 import { manualAiAssetGate } from '../visual-mix/manual-ai/manual-ai-gate'
 import {
   getManualAiStatus,
   broadcastManualAiStatus
 } from '../visual-mix/manual-ai/manual-ai-broadcaster'
 
-export { getManualAiStatus, broadcastManualAiStatus }
+export { getManualAiStatus, broadcastManualAiStatus, listMixedMediaInFolder }
 
 export const MAX_DISCOVERED_VIDEOS = 250
 export const MAX_VIDEO_FOLDER_DEPTH = 3
@@ -250,9 +260,56 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
     }
   })
 
+  // Mixed media picker: leaves MANUAL_AI_SELECT_IMAGES and MANUAL_AI_SELECT_VIDEOS unchanged.
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_SELECT_MIXED, async (_event, params: { mode: 'files' | 'folder' }) => {
+    try {
+      const folder = params?.mode === 'folder'
+      const opts: Electron.OpenDialogOptions = folder
+        ? { title: 'Select the folder with your AI images and videos', properties: ['openDirectory'] }
+        : {
+            title: 'Select AI images and videos',
+            properties: ['openFile', 'multiSelections'],
+            filters: [{ name: 'Media (Images & Videos)', extensions: MANUAL_AI_MIXED_EXTENSIONS.map((e) => e.slice(1)) }]
+          }
+      const win = BrowserWindow.getFocusedWindow()
+      const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts)
+      if (res.canceled || res.filePaths.length === 0) return { success: true, filePaths: [], canceled: true }
+
+      if (folder) {
+        const warnings: string[] = []
+        const folderPath = res.filePaths[0]
+        const filePaths = listMixedMediaInFolder(folderPath, MAX_MIXED_FOLDER_DEPTH, warnings)
+        const { imageCount, videoCount } = countMixedMedia(filePaths)
+        logger.info(`[ManualAI:MixedFolder] Discovered ${filePaths.length} media files (${imageCount} images, ${videoCount} videos) in ${folderPath}`)
+        return {
+          success: true,
+          filePaths,
+          folderPath,
+          discoveredCount: filePaths.length,
+          imageCount,
+          videoCount,
+          warnings: warnings.length > 0 ? warnings : undefined
+        }
+      }
+
+      const { imageCount, videoCount } = countMixedMedia(res.filePaths)
+      return {
+        success: true,
+        filePaths: res.filePaths,
+        discoveredCount: res.filePaths.length,
+        imageCount,
+        videoCount
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.error(`[ManualAI:MixedFolder] Select mixed media failed: ${msg}`)
+      return { success: false, filePaths: [], error: msg }
+    }
+  })
+
   ipcMain.handle(
     IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT,
-    async (_event, params: { projectDir: string; filePaths: string[]; replaceExisting?: boolean; mediaType?: 'video' }) => {
+    async (_event, params: { projectDir: string; filePaths: string[]; replaceExisting?: boolean; mediaType?: 'video' | 'mixed' }) => {
       try {
         if (!params?.projectDir || !Array.isArray(params.filePaths)) {
           return { success: false, error: 'projectDir and filePaths are required.' }

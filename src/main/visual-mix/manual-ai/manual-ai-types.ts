@@ -19,6 +19,11 @@ export const MANUAL_AI_MANIFEST_SCHEMA_VERSION = 1
 export const MANUAL_AI_SUPPORTED_EXTENSIONS: readonly string[] = ['.png', '.jpg', '.jpeg', '.webp']
 /** New video import path; never changes supported formats for the original image import. */
 export const MANUAL_AI_VIDEO_EXTENSIONS: readonly string[] = ['.mp4', '.mov', '.webm', '.mkv']
+/** Mixed media import path combining both supported image and video formats. */
+export const MANUAL_AI_MIXED_EXTENSIONS: readonly string[] = [
+  ...MANUAL_AI_SUPPORTED_EXTENSIONS,
+  ...MANUAL_AI_VIDEO_EXTENSIONS
+]
 
 export const MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION = 1
 

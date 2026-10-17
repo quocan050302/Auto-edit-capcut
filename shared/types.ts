@@ -1482,6 +1482,7 @@ export const IPC_CHANNELS = {
   MANUAL_AI_OPEN_PROMPT_FILE: 'manual-ai:open-prompt-file',
   MANUAL_AI_SELECT_IMAGES: 'manual-ai:select-images',
   MANUAL_AI_SELECT_VIDEOS: 'manual-ai:select-videos',
+  MANUAL_AI_SELECT_MIXED: 'manual-ai:select-mixed',
   MANUAL_AI_PLAN_IMPORT: 'manual-ai:plan-import',
   MANUAL_AI_COMMIT_IMPORT: 'manual-ai:commit-import',
   MANUAL_AI_STATUS_UPDATED: 'manual-ai:status-updated',
