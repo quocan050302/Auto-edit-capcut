@@ -364,6 +364,104 @@ async function main(): Promise<void> {
     assert.equal(p1Scene2Prompt, p2Scene2Prompt, 'Unchanged scene 2 prompt preserved')
   })
 
+  await it('Section 102: Upgrades schema version 1 cache to version 2 and regenerates stale prompts', async () => {
+    const projDir = makeProject(3)
+    const rawScenes = VisualMixPlanner.loadScenesFromEditPlan(projDir)
+    const plan = VisualMixPlanner.buildPlan({
+      projectDir: projDir,
+      rawScenes,
+      config: mixOf(100, 0, 'prompt', '1080p'),
+      profile: 'general'
+    })
+    ensureManualAiPromptPack({ projectDir: projDir, plan, profile: 'general', outputResolution: '1080p' })
+
+    // Simulate an existing obsolete schemaVersion 1 pack
+    const v1Pack = {
+      schemaVersion: 1,
+      generatedAt: '2025-01-01T00:00:00.000Z',
+      profile: 'general',
+      scenes: [
+        {
+          sceneIndex: 1,
+          sceneId: 'scene_1',
+          prompt: 'SCENE 001 | Obsolete generic prompt without subject grounding or keywords.',
+          inputHash: 'obsolete_v1_hash',
+          durationSecs: 5,
+          niche: 'documentary',
+          expectedFilename: 'S0001.mp4'
+        }
+      ]
+    }
+    const packJsonPath = path.join(projDir, 'analysis', 'manual-ai-video-prompts.json')
+    fs.writeFileSync(packJsonPath, JSON.stringify(v1Pack, null, 2))
+
+    // Run v2 generator
+    const freshPack = ensureManualAiVideoPromptPack(projDir)
+    assert.equal(freshPack.schemaVersion, 2, 'Must upgrade pack to schemaVersion 2')
+    assert.equal(freshPack.scenes.length, 3, 'Must regenerate all scenes')
+    assert.notEqual(freshPack.scenes[0].inputHash, 'obsolete_v1_hash', 'Obsolete v1 hash must be discarded')
+    assert.ok(freshPack.scenes[0].prompt.includes('Visual keywords:'), 'Prompt must now include visual keywords')
+    assert.ok(freshPack.scenes[0].prompt.includes('Avoid:'), 'Prompt must now include avoid constraints')
+
+    // Stale TXT read test (Section 85)
+    const txtContent = readManualAiVideoPromptText(projDir)
+    assert.ok(txtContent, 'Must read valid text from pack')
+    assert.ok(txtContent!.includes('Visual keywords:'), 'TXT must reflect schemaVersion 2 prompts')
+  })
+
+  await it('Section 100 & 101: Prompt includes early identity, action verbs, keywords, avoid constraints, and respects word budget', async () => {
+    const projDir = makeProject(2)
+    const rawScenes = VisualMixPlanner.loadScenesFromEditPlan(projDir)
+    const plan = VisualMixPlanner.buildPlan({
+      projectDir: projDir,
+      rawScenes,
+      config: mixOf(100, 0, 'prompt', '1080p'),
+      profile: 'general'
+    })
+    ensureManualAiPromptPack({ projectDir: projDir, plan, profile: 'general', outputResolution: '1080p' })
+
+    // Provide rich Hutterite Global Context and Identity Bible
+    const contextPath = path.join(projDir, 'analysis', 'global-script-context.json')
+    const globalContext = {
+      primarySubject: 'Hutterite communal agriculture',
+      communities: [
+        {
+          name: 'Hutterites',
+          visualIdentity: {
+            clothing: ['practical collared work shirts', 'durable work trousers'],
+            machinery: ['modern combines', 'tractors'],
+            tools: ['workshop equipment']
+          }
+        }
+      ],
+      visualWorld: {
+        environment: ['communal farmstead', 'equipment workshop'],
+        architecture: ['rural equipment workshop'],
+        machinery: ['modern agricultural equipment']
+      },
+      forbiddenSubstitutions: ['Amish stereotyping', 'horse and buggy']
+    }
+    fs.writeFileSync(contextPath, JSON.stringify(globalContext, null, 2))
+
+    const pack = ensureManualAiVideoPromptPack(projDir)
+    const prompt = pack.scenes[0].prompt
+
+    // Verify single physical line
+    assert.ok(!prompt.includes('\n'), 'Prompt must be a single physical line')
+    assert.ok(!prompt.includes('\r'), 'No CR characters in prompt')
+
+    // Verify early subject identity
+    assert.ok(prompt.includes('Hutterite'), 'Prompt must identify Hutterite subject')
+
+    // Verify keywords and avoid constraints formatting
+    assert.ok(prompt.includes('Visual keywords:'), 'Must have Visual keywords clause')
+    assert.ok(prompt.includes('Avoid:'), 'Must have Avoid clause')
+
+    // Verify word count ceiling (hard limit 320 words)
+    const wordCount = prompt.split(/\s+/).filter(Boolean).length
+    assert.ok(wordCount >= 100 && wordCount <= 320, `Word count must be between 100 and 320, got ${wordCount}`)
+  })
+
   await it('Section 81 & 83: IPC channel and preload bridge contract', async () => {
     assert.equal(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, 'manual-ai:get-video-prompt-text')
 
