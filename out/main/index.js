@@ -11769,7 +11769,7 @@ class HealthSfxDirector {
     return pathMap;
   }
   /**
-   * Preloads standard SFX types used by Opening Retention Composer so they are cached 
+   * Preloads standard SFX types used by Opening Retention Composer so they are cached
    * and available synchronously for the renderer.
    */
   static async preloadStandardOpeningSfx(projectDir, openverseToken) {
