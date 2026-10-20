@@ -26,6 +26,19 @@ import { RenderCancelledError } from '../render-cache/ffmpeg-process'
 
 // Cache bundle URL để tránh re-bundle mỗi lần render
 let cachedBundleUrl: string | null = null
+let cachedBundlePromise: Promise<string> | null = null
+
+function getRemotionEntryPoint(): string {
+  const candidates = [
+    path.join(__dirname, '../../src/remotion/index.ts'),
+    path.join(__dirname, '../../../src/remotion/index.ts'),
+    path.join(process.cwd(), 'src/remotion/index.ts')
+  ]
+  for (const c of candidates) {
+    if (fs.existsSync(c)) return c
+  }
+  return candidates[0]
+}
 
 /**
  * Lấy (hoặc tạo mới) Remotion bundle URL.
@@ -37,20 +50,35 @@ async function getBundle(onProgress?: (pct: number) => void): Promise<string> {
     return cachedBundleUrl
   }
 
+  if (cachedBundlePromise) {
+    logger.info('[RemotionRenderer] Reusing in-flight bundle compilation')
+    return cachedBundlePromise
+  }
+
   logger.info('[RemotionRenderer] Bundling Remotion composition...')
 
-  const entryPoint = path.join(__dirname, '../../src/remotion/index.ts')
+  const entryPoint = getRemotionEntryPoint()
 
-  cachedBundleUrl = await bundle({
+  cachedBundlePromise = bundle({
     entryPoint,
     onProgress: (progress) => {
       onProgress?.(progress)
       logger.debug(`[RemotionRenderer] Bundle: ${progress}%`)
     },
   })
+    .then((url) => {
+      cachedBundleUrl = url
+      cachedBundlePromise = null
+      logger.info(`[RemotionRenderer] Bundle xong: ${url}`)
+      return url
+    })
+    .catch((err) => {
+      cachedBundlePromise = null
+      cachedBundleUrl = null
+      throw err
+    })
 
-  logger.info(`[RemotionRenderer] Bundle xong: ${cachedBundleUrl}`)
-  return cachedBundleUrl
+  return cachedBundlePromise
 }
 
 export interface RemotionRenderOptions {
@@ -208,5 +236,6 @@ export async function renderCaptionsOverlay(options: RemotionRenderOptions): Pro
  */
 export function clearBundleCache(): void {
   cachedBundleUrl = null
+  cachedBundlePromise = null
   logger.info('[RemotionRenderer] Bundle cache cleared')
 }
