@@ -7725,6 +7725,11 @@ function FeatureCard({
   ] });
 }
 function resolveContentProfileMode(options) {
+  if (options?.contentProfileOverride && options.currentSourceHash) {
+    if (options.contentProfileOverride.sourceHash === options.currentSourceHash) {
+      return options.contentProfileOverride.mode;
+    }
+  }
   if (options?.contentProfileMode) {
     return options.contentProfileMode;
   }
@@ -11820,8 +11825,12 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   const [notice, setNotice] = reactExports.useState(null);
   const [busy, setBusy] = reactExports.useState(false);
   const [plan, setPlan] = reactExports.useState(null);
+  const [videoSelection, setVideoSelection] = reactExports.useState(null);
+  const [mixedSelection, setMixedSelection] = reactExports.useState(null);
   const [pendingRejections, setPendingRejections] = reactExports.useState([]);
   const [showImportMenu, setShowImportMenu] = reactExports.useState(false);
+  const [showVideoImportMenu, setShowVideoImportMenu] = reactExports.useState(false);
+  const [showMixedImportMenu, setShowMixedImportMenu] = reactExports.useState(false);
   const [showPrompts, setShowPrompts] = reactExports.useState(false);
   const lastVersion = reactExports.useRef(void 0);
   const bridgeLoggedRef = reactExports.useRef(false);
@@ -11930,6 +11939,22 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       copyToClipboard(res.text) ? `Copied ${effectiveExpected} prompts to clipboard.` : "Could not access the clipboard."
     );
   }
+  async function handleCopyAllVideoPrompts() {
+    if (!window.api?.manualAi) return;
+    try {
+      const res = await window.api.manualAi.getVideoPromptText(projectDir);
+      if (!res.success || !res.text) {
+        setNotice(res.error || "Video prompts are unavailable.");
+        return;
+      }
+      const copied = copyToClipboard(res.text);
+      setNotice(
+        copied ? `Copied ${effectiveExpected} video prompts to clipboard.` : "Could not access the clipboard."
+      );
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    }
+  }
   async function handleExport() {
     if (!window.api?.manualAi) return;
     const res = await window.api.manualAi.exportTxt(projectDir);
@@ -11957,31 +11982,63 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       ]);
       const n2 = res.result.imported.length;
       setNotice(
-        `${n2} image${n2 === 1 ? "" : "s"} imported · ${res.result.status.ready}/${res.result.status.expected} ready` + (res.result.rejections.length > 0 ? ` · ${res.result.rejections.length} need attention` : "")
+        `${n2} asset${n2 === 1 ? "" : "s"} imported · ${res.result.status.ready}/${res.result.status.expected} ready` + (res.result.rejections.length > 0 ? ` · ${res.result.rejections.length} need attention` : "")
       );
     } finally {
       setBusy(false);
     }
   }
-  async function handleSelect(mode) {
+  async function handleSelect(mode, mediaType = "image") {
     if (!window.api?.manualAi) return;
     setShowImportMenu(false);
+    setShowVideoImportMenu(false);
+    setShowMixedImportMenu(false);
     setNotice(null);
-    const picked = await window.api.manualAi.selectImages(mode);
+    const picked = mediaType === "video" ? await window.api.manualAi.selectVideos(mode) : await window.api.manualAi.selectImages(mode);
     if (!picked.success) {
       setNotice(picked.error || "Could not open the file picker.");
       return;
     }
     if (picked.filePaths.length === 0) {
-      if (!picked.canceled) setNotice("No supported images (PNG, JPG, JPEG, WEBP) found.");
+      if (!picked.canceled) {
+        setNotice(
+          mediaType === "video" ? "No supported videos (MP4, MOV, WEBM, MKV) found." : "No supported images (PNG, JPG, JPEG, WEBP) found."
+        );
+      }
       return;
     }
-    const planned = await window.api.manualAi.planImport({ projectDir, filePaths: picked.filePaths });
+    const planned = await window.api.manualAi.planImport({
+      projectDir,
+      filePaths: picked.filePaths,
+      ...mediaType === "video" ? { mediaType: "video" } : {}
+    });
     if (!planned.success || !planned.plan) {
       setNotice(planned.error || "Could not analyse the selected files.");
       return;
     }
     setPendingRejections(planned.plan.rejections);
+    if (mediaType === "video") {
+      if (mode === "folder" || planned.plan.needsConfirmation) {
+        setVideoSelection({
+          mode,
+          folderPath: picked.folderPath,
+          filePaths: picked.filePaths,
+          mappedCount: planned.plan.mappings.length,
+          rejectedCount: planned.plan.rejections.length,
+          mappings: planned.plan.mappings,
+          rejections: planned.plan.rejections,
+          needsConfirmation: planned.plan.needsConfirmation
+        });
+        return;
+      }
+      setVideoSelection(null);
+      if (planned.plan.mappings.length > 0) {
+        await commit(planned.plan.mappings);
+      } else {
+        setNotice("No videos could be mapped to AI scenes. See the messages below.");
+      }
+      return;
+    }
     if (planned.plan.needsConfirmation) {
       setPlan(planned.plan);
       return;
@@ -11990,14 +12047,62 @@ function ManualAiPromptPanel({ project, pipelineState }) {
     if (planned.plan.mappings.length > 0) await commit(planned.plan.mappings);
     else setNotice("Nothing could be imported. See the messages below.");
   }
-  const rejectionAction = (r2) => {
+  async function handleSelectMixed(mode) {
+    if (!window.api?.manualAi) return;
+    setShowImportMenu(false);
+    setShowVideoImportMenu(false);
+    setShowMixedImportMenu(false);
+    setNotice(null);
+    const picked = await window.api.manualAi.selectMixed(mode);
+    if (!picked.success) {
+      setNotice(picked.error || "Could not open the file picker.");
+      return;
+    }
+    if (picked.filePaths.length === 0) {
+      if (!picked.canceled) {
+        setNotice("No supported media files (Images: PNG, JPG, JPEG, WEBP / Videos: MP4, MOV, WEBM, MKV) found.");
+      }
+      return;
+    }
+    const planned = await window.api.manualAi.planImport({
+      projectDir,
+      filePaths: picked.filePaths,
+      mediaType: "mixed"
+    });
+    if (!planned.success || !planned.plan) {
+      setNotice(planned.error || "Could not analyse the selected files.");
+      return;
+    }
+    setPendingRejections(planned.plan.rejections);
+    const imgCount = picked.imageCount ?? picked.filePaths.filter((f2) => /\.(png|jpg|jpeg|webp)$/i.test(f2)).length;
+    const vidCount = picked.videoCount ?? picked.filePaths.filter((f2) => /\.(mp4|mov|webm|mkv)$/i.test(f2)).length;
+    setMixedSelection({
+      mode,
+      folderPath: picked.folderPath,
+      filePaths: picked.filePaths,
+      imageCount: imgCount,
+      videoCount: vidCount,
+      mappedCount: planned.plan.mappings.length,
+      rejectedCount: planned.plan.rejections.length,
+      mappings: planned.plan.mappings,
+      rejections: planned.plan.rejections,
+      needsConfirmation: planned.plan.needsConfirmation
+    });
+  }
+  function createMappingFromRejection(r2) {
     if (r2.sceneIndex === void 0) return null;
-    const mapping = {
+    const isVideo = /\.(mp4|mov|webm|mkv)$/i.test(r2.filePath);
+    return {
       filePath: r2.filePath,
       fileName: r2.fileName,
       sceneIndex: r2.sceneIndex,
-      via: "filename"
+      via: "filename",
+      ...isVideo ? { mediaType: "video" } : {}
     };
+  }
+  const rejectionAction = (r2) => {
+    const mapping = createMappingFromRejection(r2);
+    if (!mapping) return null;
     if (r2.code === "LOW_RESOLUTION") {
       return /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
@@ -12071,7 +12176,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-stock-count", style: { fontSize: "15px", fontWeight: 700 }, children: showStock ? `${stockReady} / ${stockExpected} ready${stockReady >= stockExpected && stockExpected > 0 ? " ✓" : ""}` : "—" })
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", position: "relative" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", position: "relative", alignItems: "center" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",
         {
@@ -12081,6 +12186,17 @@ function ManualAiPromptPanel({ project, pipelineState }) {
           disabled: !effectiveHasPromptPack,
           onClick: () => void handleCopyAll(),
           children: "Copy All Prompts"
+        }
+      ),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        "button",
+        {
+          type: "button",
+          id: "manual-ai-copy-all-video-prompts",
+          className: "btn btn-secondary btn-sm",
+          disabled: !effectiveHasPromptPack || busy,
+          onClick: () => void handleCopyAllVideoPrompts(),
+          children: "Copy All Video Prompts"
         }
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -12105,40 +12221,345 @@ function ManualAiPromptPanel({ project, pipelineState }) {
           children: "Open Prompt File"
         }
       ),
-      /* @__PURE__ */ jsxRuntimeExports.jsx(
-        "button",
-        {
-          type: "button",
-          id: "manual-ai-import",
-          className: "btn btn-primary btn-sm",
-          disabled: !effectiveHasPromptPack || effectiveExpected === 0 || busy,
-          onClick: () => setShowImportMenu((v2) => !v2),
-          children: "Import AI Images"
-        }
-      ),
-      showImportMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", display: "inline-flex" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
             type: "button",
-            id: "manual-ai-import-files",
-            className: "btn btn-secondary btn-sm",
-            onClick: () => void handleSelect("files"),
-            children: "Select Images…"
+            id: "manual-ai-import",
+            className: "btn btn-primary btn-sm",
+            disabled: !effectiveHasPromptPack || effectiveExpected === 0 || busy,
+            onClick: () => {
+              setShowVideoImportMenu(false);
+              setShowMixedImportMenu(false);
+              setShowImportMenu((v2) => !v2);
+            },
+            children: "Import AI Images ▾"
           }
         ),
+        showImportMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            id: "manual-ai-import-menu",
+            style: {
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              left: 0,
+              zIndex: 100,
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+              background: "rgba(15, 23, 42, 0.95)",
+              border: "1px solid rgba(129, 140, 248, 0.4)",
+              borderRadius: "6px",
+              padding: "6px",
+              boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
+              minWidth: "150px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "manual-ai-import-files",
+                  className: "btn btn-secondary btn-sm",
+                  style: { textAlign: "left", width: "100%" },
+                  onClick: () => void handleSelect("files"),
+                  children: "Select Images…"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "manual-ai-import-folder",
+                  className: "btn btn-secondary btn-sm",
+                  style: { textAlign: "left", width: "100%" },
+                  onClick: () => void handleSelect("folder"),
+                  children: "Select Folder…"
+                }
+              )
+            ]
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", display: "inline-flex" }, children: [
         /* @__PURE__ */ jsxRuntimeExports.jsx(
           "button",
           {
             type: "button",
-            id: "manual-ai-import-folder",
+            id: "manual-ai-import-videos",
             className: "btn btn-secondary btn-sm",
-            onClick: () => void handleSelect("folder"),
-            children: "Select Folder…"
+            disabled: !effectiveHasPromptPack || effectiveExpected === 0 || busy,
+            onClick: () => {
+              setShowImportMenu(false);
+              setShowMixedImportMenu(false);
+              setShowVideoImportMenu((v2) => !v2);
+            },
+            children: "Import AI Videos ▾"
+          }
+        ),
+        showVideoImportMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            id: "manual-ai-video-import-menu",
+            style: {
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              left: 0,
+              zIndex: 100,
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+              background: "rgba(15, 23, 42, 0.95)",
+              border: "1px solid rgba(129, 140, 248, 0.4)",
+              borderRadius: "6px",
+              padding: "6px",
+              boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
+              minWidth: "160px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "manual-ai-import-video-files",
+                  className: "btn btn-secondary btn-sm",
+                  style: { textAlign: "left", width: "100%" },
+                  onClick: () => void handleSelect("files", "video"),
+                  children: "Select Videos…"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "manual-ai-import-video-folder",
+                  className: "btn btn-secondary btn-sm",
+                  style: { textAlign: "left", width: "100%" },
+                  onClick: () => void handleSelect("folder", "video"),
+                  children: "Select Video Folder…"
+                }
+              )
+            ]
+          }
+        )
+      ] }),
+      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { position: "relative", display: "inline-flex" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "button",
+          {
+            type: "button",
+            id: "manual-ai-import-mixed",
+            className: "btn btn-secondary btn-sm",
+            disabled: !effectiveHasPromptPack || effectiveExpected === 0 || busy,
+            onClick: () => {
+              setShowImportMenu(false);
+              setShowVideoImportMenu(false);
+              setShowMixedImportMenu((v2) => !v2);
+            },
+            children: "Import Mixed Media ▾"
+          }
+        ),
+        showMixedImportMenu && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            id: "manual-ai-mixed-import-menu",
+            style: {
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              left: 0,
+              zIndex: 100,
+              display: "flex",
+              flexDirection: "column",
+              gap: "4px",
+              background: "rgba(15, 23, 42, 0.95)",
+              border: "1px solid rgba(129, 140, 248, 0.4)",
+              borderRadius: "6px",
+              padding: "6px",
+              boxShadow: "0 4px 12px rgba(0, 0, 0, 0.5)",
+              minWidth: "160px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "manual-ai-import-mixed-files",
+                  className: "btn btn-secondary btn-sm",
+                  style: { textAlign: "left", width: "100%" },
+                  onClick: () => void handleSelectMixed("files"),
+                  children: "Select Mixed Files…"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "manual-ai-import-mixed-folder",
+                  className: "btn btn-secondary btn-sm",
+                  style: { textAlign: "left", width: "100%" },
+                  onClick: () => void handleSelectMixed("folder"),
+                  children: "Select Mixed Folder…"
+                }
+              )
+            ]
           }
         )
       ] })
     ] }),
+    videoSelection && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        id: "manual-ai-video-import-preview",
+        style: {
+          padding: "12px 14px",
+          borderRadius: "8px",
+          background: "rgba(15, 23, 42, 0.4)",
+          border: "1px solid rgba(129, 140, 248, 0.4)"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }, children: videoSelection.mode === "folder" ? "Video Folder Discovery Result" : "Selected Video Files" }),
+          videoSelection.folderPath && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: "6px", fontFamily: "monospace" }, children: [
+            "Source: ",
+            videoSelection.folderPath
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "#93c5fd", marginBottom: "8px" }, children: [
+            videoSelection.filePaths.length,
+            " video",
+            videoSelection.filePaths.length === 1 ? "" : "s",
+            " discovered ·",
+            " ",
+            videoSelection.mappedCount,
+            " AI scene",
+            videoSelection.mappedCount === 1 ? "" : "s",
+            " matched ·",
+            " ",
+            videoSelection.rejectedCount,
+            " rejected"
+          ] }),
+          videoSelection.mappings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { maxHeight: "140px", overflowY: "auto", fontSize: "12px", fontFamily: "monospace", marginBottom: "8px" }, children: videoSelection.mappings.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "var(--text-secondary)" }, children: [
+            m2.fileName,
+            " → Scene ",
+            m2.sceneIndex
+          ] }, m2.filePath)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+            videoSelection.mappings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                type: "button",
+                id: "manual-ai-confirm-video-import",
+                className: "btn btn-primary btn-sm",
+                disabled: busy,
+                onClick: () => {
+                  const mappings = videoSelection.mappings;
+                  setVideoSelection(null);
+                  void commit(mappings);
+                },
+                children: [
+                  "Import ",
+                  videoSelection.mappings.length,
+                  " Video",
+                  videoSelection.mappings.length === 1 ? "" : "s"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-secondary btn-sm",
+                onClick: () => setVideoSelection(null),
+                children: "Cancel"
+              }
+            )
+          ] })
+        ]
+      }
+    ),
+    mixedSelection && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        id: "manual-ai-mixed-import-preview",
+        style: {
+          padding: "12px 14px",
+          borderRadius: "8px",
+          background: "rgba(15, 23, 42, 0.4)",
+          border: "1px solid rgba(129, 140, 248, 0.4)"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)", marginBottom: "4px" }, children: mixedSelection.mode === "folder" ? "Mixed Media Folder Discovery Result" : "Selected Mixed Media Files" }),
+          mixedSelection.folderPath && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginBottom: "6px", fontFamily: "monospace" }, children: [
+            "Source: ",
+            mixedSelection.folderPath
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "#93c5fd", marginBottom: "8px" }, children: [
+            mixedSelection.filePaths.length,
+            " media file",
+            mixedSelection.filePaths.length === 1 ? "" : "s",
+            " discovered ·",
+            " ",
+            mixedSelection.imageCount,
+            " image",
+            mixedSelection.imageCount === 1 ? "" : "s",
+            " ·",
+            " ",
+            mixedSelection.videoCount,
+            " video",
+            mixedSelection.videoCount === 1 ? "" : "s",
+            " ·",
+            " ",
+            mixedSelection.mappedCount,
+            " AI scene",
+            mixedSelection.mappedCount === 1 ? "" : "s",
+            " matched ·",
+            " ",
+            mixedSelection.rejectedCount,
+            " rejected"
+          ] }),
+          mixedSelection.mappings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { maxHeight: "140px", overflowY: "auto", fontSize: "12px", fontFamily: "monospace", marginBottom: "8px" }, children: mixedSelection.mappings.map((m2) => /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { color: "var(--text-secondary)" }, children: [
+            m2.fileName,
+            " → Scene ",
+            m2.sceneIndex,
+            " [",
+            m2.mediaType === "video" ? "VIDEO" : "IMAGE",
+            "]"
+          ] }, m2.filePath)) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px" }, children: [
+            mixedSelection.mappings.length > 0 && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "button",
+              {
+                type: "button",
+                id: "manual-ai-confirm-mixed-import",
+                className: "btn btn-primary btn-sm",
+                disabled: busy,
+                onClick: () => {
+                  const mappings = mixedSelection.mappings;
+                  setMixedSelection(null);
+                  void commit(mappings);
+                },
+                children: [
+                  "Import ",
+                  mixedSelection.mappings.length,
+                  " Media File",
+                  mixedSelection.mappings.length === 1 ? "" : "s"
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                className: "btn btn-secondary btn-sm",
+                disabled: busy,
+                onClick: () => setMixedSelection(null),
+                children: "Cancel"
+              }
+            )
+          ] })
+        ]
+      }
+    ),
     notice && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-notice", style: { fontSize: "12px", color: "#93c5fd" }, children: notice }),
     plan && plan.needsConfirmation && /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
@@ -12196,12 +12617,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
             style: { fontSize: "11px", padding: "2px 8px" },
             disabled: busy,
             onClick: () => {
-              const mappings = pendingRejections.filter((r2) => r2.code === "LOW_RESOLUTION" && r2.sceneIndex !== void 0).map((r2) => ({
-                filePath: r2.filePath,
-                fileName: r2.fileName,
-                sceneIndex: r2.sceneIndex,
-                via: "filename"
-              }));
+              const mappings = pendingRejections.filter((r2) => r2.code === "LOW_RESOLUTION").map(createMappingFromRejection).filter((m2) => m2 !== null);
               if (mappings.length > 0) void commit(mappings, { allowLowResolution: true });
             },
             children: "Accept All"

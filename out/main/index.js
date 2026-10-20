@@ -586,7 +586,17 @@ function recordModelSuccess(model) {
   state2.consecutiveFailures = 0;
 }
 function recordModelFailure(model, kind, retryAfterMs) {
-  if (kind === "RATE_LIMIT") {
+  if (kind === "CANCELLED") {
+    return;
+  } else if (kind === "TIMEOUT") {
+    const state2 = getOrCreateState(model);
+    state2.consecutiveFailures++;
+    state2.lastErrorKind = "TIMEOUT";
+    state2.lastErrorTime = Date.now();
+    if (state2.consecutiveFailures >= 2) {
+      recordModelUnavailable(model, 3e4, "TIMEOUT");
+    }
+  } else if (kind === "RATE_LIMIT") {
     recordModelRateLimit(model);
   } else if (kind === "SERVICE_UNAVAILABLE") {
     recordModelUnavailable(model, 3e4, "SERVICE_UNAVAILABLE");
@@ -619,6 +629,12 @@ function classifyGeminiErrorKind(err) {
   const statusText = typeof anyErr.statusText === "string" ? anyErr.statusText : "";
   const msg = err instanceof Error ? err.message : String(err);
   const combined = `${status ?? ""} ${statusText} ${msg}`.toLowerCase();
+  if (anyErr.isCancelled === true || anyErr.name === "PlanningCancelledError" || combined.includes("cancelled by user") || combined.includes("abort") && combined.includes("cancel")) {
+    return { kind: "CANCELLED", message: msg };
+  }
+  if (anyErr.isTimeout === true || anyErr.name === "PlanningTimeoutError" || combined.includes("deadline exceeded") || combined.includes("timed out") || combined.includes("timeout")) {
+    return { kind: "TIMEOUT", message: msg };
+  }
   if (status === 404 || statusText === "NOT_FOUND" || combined.includes("404") || combined.includes("not_found") || combined.includes("model not found") || combined.includes("model is not found") || combined.includes("is no longer available") || combined.includes("no longer available") || combined.includes("is not supported for this api version") || combined.includes("is not found for api version")) {
     return { kind: "MODEL_NOT_FOUND", message: msg };
   }
@@ -3808,7 +3824,7 @@ class ThumbnailOrchestrator {
     return state2;
   }
   // ─── Private: markNeedsAttention ─────────────────────────────────────────
-  async markNeedsAttention(projectDir, readiness, ctx2) {
+  async markNeedsAttention(projectDir, readiness, ctx) {
     let state2;
     const loadedState = loadThumbnailJobState(projectDir);
     if (loadedState && loadedState.candidates.length === 5) {
@@ -3822,19 +3838,19 @@ class ThumbnailOrchestrator {
     } else {
       const plan = await thumbnailPlanner.plan({
         projectDir,
-        templateId: ctx2.params.templateId || ctx2.settings.selectedTemplateId,
-        templateSnapshot: ctx2.templateSnapshot,
-        preferredModel: ctx2.params.preferredModel,
-        generationRound: ctx2.round
+        templateId: ctx.params.templateId || ctx.settings.selectedTemplateId,
+        templateSnapshot: ctx.templateSnapshot,
+        preferredModel: ctx.params.preferredModel,
+        generationRound: ctx.round
       }).catch(() => void 0);
       state2 = createInitialThumbnailJobState({
         projectDir,
-        renderOutputPath: ctx2.renderOutputPath,
-        renderFileSize: ctx2.renderFileSize,
-        renderMtimeMs: ctx2.renderMtimeMs,
-        scriptHash: ctx2.scriptHash,
-        templateSnapshotHash: ctx2.templateSnapshotHash,
-        generationRound: ctx2.round,
+        renderOutputPath: ctx.renderOutputPath,
+        renderFileSize: ctx.renderFileSize,
+        renderMtimeMs: ctx.renderMtimeMs,
+        scriptHash: ctx.scriptHash,
+        templateSnapshotHash: ctx.templateSnapshotHash,
+        generationRound: ctx.round,
         plan
       });
     }
@@ -6114,7 +6130,7 @@ function cropToZoomFilter(crop, width, height, duration, fps) {
   const yClamp = Math.max(0, Math.min(Math.round((s - 1) * height), yExtraPixels));
   return `zoompan=z='${s.toFixed(3)}':x='${xClamp}':y='${yClamp}':d=${frames}:s=${width}x${height}:fps=${fps}`;
 }
-function resolveVisualBeats(scene, ctx2, level) {
+function resolveVisualBeats(scene, ctx, level) {
   const cfg = LEVEL_CONFIG[level];
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
   const energy = scene.energyLevel ?? "medium";
@@ -6143,7 +6159,7 @@ function resolveVisualBeats(scene, ctx2, level) {
     }
   }
   targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
-  if (ctx2.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
+  if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
     targetBeats = Math.min(targetBeats, 1);
   }
   const beatDurations = computeBeatDurations(duration, targetBeats, scene.sceneIndex, cfg);
@@ -6162,7 +6178,7 @@ function resolveVisualBeats(scene, ctx2, level) {
       beatPurpose = "establish";
     } else if (i === 1) {
       const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
-      if (cfg.proofVisualAllowed && hasNarrative && ctx2.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+      if (cfg.proofVisualAllowed && hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
         const maxPvDur = hint?.proofPriority === "high" ? 3.5 : 2.5;
         const pv = detectProofVisual(
           scene.narrativeText,
@@ -6187,7 +6203,7 @@ function resolveVisualBeats(scene, ctx2, level) {
         }
       }
     } else {
-      const timeSinceInterrupt = ctx2.timeSinceLastStrongEffect;
+      const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
       const shouldTriggerInterrupt = (scene.isPatternInterrupt || hint?.patternInterrupt) && timeSinceInterrupt >= cfg.patternInterruptCooldown;
       if (shouldTriggerInterrupt) {
         beatType = "pattern_interrupt";
@@ -6257,23 +6273,23 @@ function createDefaultContext() {
     openLoopIds: []
   };
 }
-function resolveSceneRetention(scene, ctx2, settings) {
+function resolveSceneRetention(scene, ctx, settings) {
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
   if (!settings.enabled) {
     return makeSingleBeatDecision(sceneId, scene);
   }
   try {
-    return _resolveRetention(scene, ctx2, settings);
+    return _resolveRetention(scene, ctx, settings);
   } catch (err) {
     logger.warn(`[RetentionEngine] scene ${sceneId} fallback: ${String(err)}`);
     return makeSingleBeatDecision(sceneId, scene);
   }
 }
-function _resolveRetention(scene, ctx2, settings) {
+function _resolveRetention(scene, ctx, settings) {
   const sceneId = scene.sceneId ?? String(scene.sceneIndex);
   const level = settings.level;
   const notes = [];
-  const { beats, proofVisual } = resolveVisualBeats(scene, ctx2, level);
+  const { beats, proofVisual } = resolveVisualBeats(scene, ctx, level);
   const rawVisualLoad = computeVisualLoad({
     hasActiveCaption: scene.hasCaptionInRange ?? false,
     hasStrongCaption: scene.hasStrongCaption ?? false,
@@ -6297,10 +6313,10 @@ function _resolveRetention(scene, ctx2, settings) {
   }
   const transitionType = resolveTransition(
     scene.energyLevel ?? "medium",
-    ctx2.previousShotType === "wide" ? "medium" : "medium",
+    ctx.previousShotType === "wide" ? "medium" : "medium",
     scene.isNewChapter ?? false,
     scene.isPatternInterrupt ?? false,
-    ctx2.previousTransitionType
+    ctx.previousTransitionType
   );
   const finalVisualLoad = computeVisualLoad({
     hasActiveCaption: scene.hasCaptionInRange ?? false,
@@ -6338,39 +6354,39 @@ function makeSingleBeatDecision(sceneId, scene) {
     notes: ["legacy single-beat"]
   };
 }
-function updateRetentionContext(ctx2, scene, decision) {
-  ctx2.sceneIndex++;
-  ctx2.previousShotType = scene.shotType ?? "medium";
-  ctx2.previousTransitionType = decision.transitionType ?? "cut";
-  ctx2.timeSinceLastStrongEffect += scene.duration;
-  ctx2.timeSinceLastProofVisual += scene.duration;
-  ctx2.timeSinceLastHumanShot += scene.duration;
+function updateRetentionContext(ctx, scene, decision) {
+  ctx.sceneIndex++;
+  ctx.previousShotType = scene.shotType ?? "medium";
+  ctx.previousTransitionType = decision.transitionType ?? "cut";
+  ctx.timeSinceLastStrongEffect += scene.duration;
+  ctx.timeSinceLastProofVisual += scene.duration;
+  ctx.timeSinceLastHumanShot += scene.duration;
   const hint = scene.retentionHint;
   if (hint?.role === "re-hook" || hint?.role === "hook") {
-    ctx2.timeSinceLastRehook = 0;
+    ctx.timeSinceLastRehook = 0;
   } else {
-    ctx2.timeSinceLastRehook = (ctx2.timeSinceLastRehook ?? 0) + scene.duration;
+    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration;
   }
   if (hint?.patternInterrupt || scene.isPatternInterrupt) {
-    ctx2.timeSinceLastPatternInterrupt = 0;
+    ctx.timeSinceLastPatternInterrupt = 0;
   } else {
-    ctx2.timeSinceLastPatternInterrupt = (ctx2.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
+    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
   }
   if (hint?.noveltyScore !== void 0) {
-    ctx2.recentNoveltyScores = [...ctx2.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
+    ctx.recentNoveltyScores = [...ctx.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
   }
   if (hint?.role) {
-    ctx2.recentSceneRoles = [...ctx2.recentSceneRoles || [], hint.role].slice(-10);
+    ctx.recentSceneRoles = [...ctx.recentSceneRoles || [], hint.role].slice(-10);
   }
   if (decision.proofVisual) {
-    ctx2.timeSinceLastProofVisual = 0;
+    ctx.timeSinceLastProofVisual = 0;
   }
   if (scene.isPatternInterrupt || hint?.patternInterrupt) {
-    ctx2.timeSinceLastStrongEffect = 0;
-    ctx2.previousPatternInterruptType = "pattern_interrupt";
+    ctx.timeSinceLastStrongEffect = 0;
+    ctx.previousPatternInterruptType = "pattern_interrupt";
   }
   if (decision.visualBeats.length > 2) {
-    ctx2.timeSinceLastStrongEffect = 0;
+    ctx.timeSinceLastStrongEffect = 0;
   }
 }
 const QA_CONFIG = {
@@ -8001,9 +8017,9 @@ function getClaimLedgerPath(projectDir) {
 function computeScriptHash$1(text) {
   return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
 }
-function computeGlobalContextHash(ctx2) {
-  if (!ctx2) return "no-ctx";
-  const summary = `${ctx2.primarySubject}:${ctx2.centralThesis}:${ctx2.exactTopicAnchors?.join(",")}`;
+function computeGlobalContextHash(ctx) {
+  if (!ctx) return "no-ctx";
+  const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
   return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
 }
 function extractClaimsRuleBased(scenes, scriptHash, ctxHash) {
@@ -13873,19 +13889,19 @@ async function runRenderPreflightCached(options, opts = {}) {
 }
 let overlayRenderer = renderCaptionsOverlay;
 let transitionAssembler = concatSceneClipsWithTransitions;
-function ffmpegRun$2(args, ctx2) {
-  return ffmpegRun$4(args, ctx2?.ffmpeg ?? {});
+function ffmpegRun$2(args, ctx) {
+  return ffmpegRun$4(args, ctx?.ffmpeg ?? {});
 }
-async function encodeRun(args, ctx2) {
+async function encodeRun(args, ctx) {
   try {
-    await ffmpegRun$4(args, ctx2.ffmpeg);
+    await ffmpegRun$4(args, ctx.ffmpeg);
   } catch (err) {
     if (isRenderCancelledError(err)) throw err;
-    throw asHardwareError(err, ctx2.encoder);
+    throw asHardwareError(err, ctx.encoder);
   }
 }
-function vcodec(ctx2, crf) {
-  return ctx2.encoder.videoArgs(crf, "fast");
+function vcodec(ctx, crf) {
+  return ctx.encoder.videoArgs(crf, "fast");
 }
 function safeUnlink(filePath) {
   if (!filePath) return;
@@ -13911,7 +13927,7 @@ function moveFile(src, dst) {
 function concatListLine(f) {
   return `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f}'`;
 }
-async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx2) {
+async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx) {
   const concatList = path__namespace.join(tmpDir, "concat.txt");
   fs__namespace.writeFileSync(
     concatList,
@@ -13930,7 +13946,7 @@ async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx2) {
     "-c",
     "copy",
     rawVideoPath
-  ], ctx2);
+  ], ctx);
   safeUnlink(concatList);
 }
 function normalizePathForFFmpeg(p) {
@@ -14057,7 +14073,7 @@ function resolveSceneMedia(scene, mediaIndex, projectDir) {
   return resolveSceneMediaWithSource(scene, mediaIndex, projectDir).mediaPath;
 }
 async function renderVisualBeatsToClip(params) {
-  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex, ctx: ctx2 } = params;
+  const { beats, mediaPath, outClip, width, height, fps, scaleFilt, tmpDir, sceneIndex, ctx } = params;
   const beatClips = [];
   const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
   let isImage;
@@ -14078,7 +14094,7 @@ async function renderVisualBeatsToClip(params) {
   }
   try {
     for (let bi = 0; bi < beats.length; bi++) {
-      throwIfAborted(ctx2.ffmpeg.signal);
+      throwIfAborted(ctx.ffmpeg.signal);
       const beat = beats[bi];
       const beatDuration = beat.relativeEnd - beat.relativeStart;
       const beatClip = path__namespace.join(tmpDir, `beat_${String(sceneIndex).padStart(4, "0")}_${bi}.mp4`);
@@ -14096,7 +14112,7 @@ async function renderVisualBeatsToClip(params) {
           mediaPath,
           "-vf",
           vfFilter,
-          ...vcodec(ctx2, 20),
+          ...vcodec(ctx, 20),
           "-t",
           String(beatDuration),
           "-r",
@@ -14104,7 +14120,7 @@ async function renderVisualBeatsToClip(params) {
           "-pix_fmt",
           "yuv420p",
           beatClip
-        ], ctx2);
+        ], ctx);
       } else {
         const ssOffset = beat.relativeStart;
         await encodeRun([
@@ -14115,7 +14131,7 @@ async function renderVisualBeatsToClip(params) {
           mediaPath,
           "-vf",
           `${vfFilter},tpad=stop_mode=clone:stop_duration=${beatDuration},trim=duration=${beatDuration},setpts=PTS-STARTPTS`,
-          ...vcodec(ctx2, 20),
+          ...vcodec(ctx, 20),
           "-t",
           String(beatDuration),
           "-r",
@@ -14124,7 +14140,7 @@ async function renderVisualBeatsToClip(params) {
           "-pix_fmt",
           "yuv420p",
           beatClip
-        ], ctx2);
+        ], ctx);
       }
       beatClips.push(beatClip);
     }
@@ -14149,7 +14165,7 @@ async function renderVisualBeatsToClip(params) {
         "-c",
         "copy",
         outClip
-      ], ctx2);
+      ], ctx);
       for (const bc of beatClips) safeUnlink(bc);
       safeUnlink(beatConcatList);
     }
@@ -14178,7 +14194,7 @@ async function renderVisualBeatsToClip(params) {
         mediaPath,
         "-vf",
         baseFilt,
-        ...vcodec(ctx2, 20),
+        ...vcodec(ctx, 20),
         "-t",
         String(fallbackDur),
         "-r",
@@ -14186,7 +14202,7 @@ async function renderVisualBeatsToClip(params) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx2);
+      ], ctx);
     } else {
       await encodeRun([
         "-y",
@@ -14194,7 +14210,7 @@ async function renderVisualBeatsToClip(params) {
         mediaPath,
         "-vf",
         `${baseFilt},tpad=stop_mode=clone:stop_duration=${fallbackDur},trim=duration=${fallbackDur},setpts=PTS-STARTPTS`,
-        ...vcodec(ctx2, 20),
+        ...vcodec(ctx, 20),
         "-t",
         String(fallbackDur),
         "-r",
@@ -14203,7 +14219,7 @@ async function renderVisualBeatsToClip(params) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx2);
+      ], ctx);
     }
   }
 }
@@ -14584,7 +14600,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       filterThreads: limits.ffmpegFilterThreads,
       niceLevel: limits.niceLevel
     };
-    const ctx2 = { ffmpeg: ffmpegOpts, encoder };
+    const ctx = { ffmpeg: ffmpegOpts, encoder };
     logger.info(
       `[RENDER] Resource profile=${limits.profile} ffmpegThreads=${limits.ffmpegThreads} filterThreads=${limits.ffmpegFilterThreads} remotionConcurrency=${limits.remotionConcurrency} encoder=${encoder.key}`
     );
@@ -14799,7 +14815,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
         height,
         fps,
         tmpDir,
-        ctx: ctx2,
+        ctx,
         retentionSettings,
         sceneOrdinalIndex: i,
         visualPlanMap,
@@ -14877,7 +14893,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
             rawVideoPath: rawPartial,
             onProgress: (stage, pct) => setPct(stage, pct),
             ffmpegOptions: ffmpegOpts,
-            videoCodecArgs: vcodec(ctx2, 20),
+            videoCodecArgs: vcodec(ctx, 20),
             maxScenesPerSegment: limits.assemblyMaxScenesPerSegment,
             openingHints: prepared.openingPlan?.transitionHints,
             segmentRunner: async (seg, render) => {
@@ -14928,7 +14944,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       if (!rawVideoCreated) {
         const method = shouldAttemptTransitions ? "legacy-fallback" : "legacy-concat";
         logger.info(`[RENDER] Scene assembly method=${method}`);
-        await concatSceneClipsLegacy(sceneClips, tmpDir, rawPartial, ctx2);
+        await concatSceneClipsLegacy(sceneClips, tmpDir, rawPartial, ctx);
         rawVideoCreated = true;
       }
       try {
@@ -15048,7 +15064,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           "1:a:0",
           "-shortest",
           workingOutputPath
-        ], ctx2);
+        ], ctx);
       } else {
         const ffArgs = ["-y", "-i", rawVideo];
         let inputIdx = 1;
@@ -15143,7 +15159,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           "192k",
           "-shortest",
           workingOutputPath
-        ], ctx2);
+        ], ctx);
       }
       try {
         audioProbe = await workspace.commitPartial(workingOutputPath, mixedVideo, mixExpect, { signal });
@@ -15409,7 +15425,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         } else {
           const listPath = path__namespace.join(tmpDir, "overlay-concat.txt");
           fs__namespace.writeFileSync(listPath, blockFiles.map(concatListLine).join("\n"), "utf-8");
-          await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx2);
+          await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx);
           safeUnlink(listPath);
         }
         await workspace.commitPartial(fullPartial, overlayFull, overlayFullExpect, { signal });
@@ -15457,11 +15473,11 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
           "[outv]",
           "-map",
           "0:a?",
-          ...vcodec(ctx2, 20),
+          ...vcodec(ctx, 20),
           "-c:a",
           "copy",
           captionedPath
-        ], ctx2);
+        ], ctx);
         let captionedProbe;
         try {
           captionedProbe = await workspace.commitPartial(captionedPath, compositePath, compositeExpect, { encoder: encoder.key, signal });
@@ -15651,7 +15667,7 @@ function markInterruptedCheckpoints(m) {
   if (!m.finalOutput) m.finalOutput = emptyCheckpoint();
 }
 async function renderSceneClip(p) {
-  const { job, outClip, width, height, fps, tmpDir, ctx: ctx2, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p;
+  const { job, outClip, width, height, fps, tmpDir, ctx, retentionSettings, visualPlanMap, retentionPlanMap, recentAiMotionPresets } = p;
   const scene = job.scene;
   const i = p.sceneOrdinalIndex;
   const mediaPath = job.mediaPath;
@@ -15664,13 +15680,13 @@ async function renderSceneClip(p) {
       "lavfi",
       "-i",
       `color=c=black:s=${width}x${height}:d=${scene.duration}:r=${fps}`,
-      ...vcodec(ctx2, 23),
+      ...vcodec(ctx, 23),
       "-t",
       String(scene.duration),
       "-pix_fmt",
       "yuv420p",
       outClip
-    ], ctx2);
+    ], ctx);
     return;
   }
   const mediaKind = detectMediaKind(mediaPath, scene.mediaType);
@@ -15721,7 +15737,7 @@ async function renderSceneClip(p) {
       mediaPath,
       "-vf",
       motionFilter,
-      ...vcodec(ctx2, 20),
+      ...vcodec(ctx, 20),
       "-t",
       String(scene.duration),
       "-r",
@@ -15729,7 +15745,7 @@ async function renderSceneClip(p) {
       "-pix_fmt",
       "yuv420p",
       outClip
-    ], ctx2);
+    ], ctx);
   } else if (hasMultipleBeats && retentionSettings.enabled) {
     await renderVisualBeatsToClip({
       beats,
@@ -15742,7 +15758,7 @@ async function renderSceneClip(p) {
       scaleFilt,
       tmpDir,
       sceneIndex: i,
-      ctx: ctx2
+      ctx
     });
   } else {
     const singleBeat = beats[0];
@@ -15763,7 +15779,7 @@ async function renderSceneClip(p) {
         mediaPath,
         "-vf",
         vfFilter,
-        ...vcodec(ctx2, 20),
+        ...vcodec(ctx, 20),
         "-t",
         String(scene.duration),
         "-r",
@@ -15771,7 +15787,7 @@ async function renderSceneClip(p) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx2);
+      ], ctx);
     } else {
       const durationGuard = `tpad=stop_mode=clone:stop_duration=${scene.duration},trim=duration=${scene.duration},setpts=PTS-STARTPTS`;
       const videoFilter = `${vfFilter},${durationGuard}`;
@@ -15781,7 +15797,7 @@ async function renderSceneClip(p) {
         mediaPath,
         "-vf",
         videoFilter,
-        ...vcodec(ctx2, 20),
+        ...vcodec(ctx, 20),
         "-t",
         String(scene.duration),
         "-r",
@@ -15790,7 +15806,7 @@ async function renderSceneClip(p) {
         "-pix_fmt",
         "yuv420p",
         outClip
-      ], ctx2);
+      ], ctx);
     }
   }
 }
@@ -16247,9 +16263,9 @@ function isGlobalContextValid(projectDir, scriptHash) {
   const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
   if (!fs__namespace.existsSync(contextPath)) return false;
   try {
-    const ctx2 = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
-    if (!ctx2 || !ctx2.primarySubject) return false;
-    if (scriptHash && ctx2._scriptHash && ctx2._scriptHash !== scriptHash) {
+    const ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    if (!ctx || !ctx.primarySubject) return false;
+    if (scriptHash && ctx._scriptHash && ctx._scriptHash !== scriptHash) {
       return false;
     }
     return true;
@@ -16688,6 +16704,80 @@ function dedupeStockQueries(queries, fallback) {
     }
   }
   return result;
+}
+class PlanningTimeoutError extends Error {
+  isTimeout = true;
+  task;
+  timeoutMs;
+  constructor(task, timeoutMs) {
+    super(`[PlanningTimeout] Task "${task}" exceeded deadline of ${Math.round(timeoutMs / 1e3)}s`);
+    this.name = "PlanningTimeoutError";
+    this.task = task;
+    this.timeoutMs = timeoutMs;
+  }
+}
+class PlanningCancelledError extends Error {
+  isCancelled = true;
+  task;
+  constructor(task) {
+    super(`[PlanningCancelled] Task "${task}" was cancelled by user`);
+    this.name = "PlanningCancelledError";
+    this.task = task;
+  }
+}
+async function executePlanningRequest(options) {
+  const { task, timeoutMs, signal, execute } = options;
+  if (signal?.aborted) {
+    throw new PlanningCancelledError(task);
+  }
+  const controller = new AbortController();
+  let timer = null;
+  let didTimeout = false;
+  const onUserAbort = () => {
+    controller.abort(new PlanningCancelledError(task));
+  };
+  if (signal) {
+    signal.addEventListener("abort", onUserAbort, { once: true });
+  }
+  timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort(new PlanningTimeoutError(task, timeoutMs));
+  }, timeoutMs);
+  const t0 = Date.now();
+  try {
+    const result = await execute(controller.signal);
+    const elapsed = Date.now() - t0;
+    logger.debug(`[PlanningRequest] Task "${task}" succeeded in ${elapsed}ms`);
+    return result;
+  } catch (err) {
+    const elapsed = Date.now() - t0;
+    if (signal?.aborted) {
+      logger.info(`[PlanningRequest] Task "${task}" cancelled by user after ${elapsed}ms`);
+      throw new PlanningCancelledError(task);
+    }
+    if (didTimeout || err instanceof Error && err.name === "AbortError" && didTimeout) {
+      logger.warn(`[PlanningRequest] Task "${task}" timed out after ${elapsed}ms (limit: ${timeoutMs}ms)`);
+      throw new PlanningTimeoutError(task, timeoutMs);
+    }
+    throw err;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (signal) {
+      signal.removeEventListener("abort", onUserAbort);
+    }
+  }
+}
+function computeBatchTimeoutMs(sceneCount) {
+  if (sceneCount <= 2) return 35e3;
+  if (sceneCount <= 5) return 45e3;
+  if (sceneCount <= 10) return 6e4;
+  return Math.min(85e3, 5e4 + sceneCount * 1500);
+}
+function computeOutputTokenBudget(sceneCount) {
+  return Math.min(8192, Math.max(1024, sceneCount * 350));
 }
 const DEFAULT_CONFIG = {
   maxMonotoneEnergySeconds: 150,
@@ -17217,7 +17307,10 @@ Return ONLY valid JSON matching this schema:
 }`;
 }
 async function analyzeGlobalContext(params) {
-  const { projectDir, apiKey, forceRegenerate = false } = params;
+  const { projectDir, apiKey, forceRegenerate = false, signal } = params;
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("analyzeGlobalContext");
+  }
   const progress = params.onProgress ?? (() => {
   });
   const modelId = params.model ?? "gemini-3.5-flash";
@@ -17260,19 +17353,33 @@ async function analyzeGlobalContext(params) {
       }
       const fallbackModels = getAvailableModelsForTask("global_context", rawModel);
       for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+        if (signal?.aborted) throw new PlanningCancelledError("analyzeGlobalContext");
         const currentModel = fallbackModels[mIdx];
         let retryCount = 0;
         const maxRetries = 1;
         while (retryCount <= maxRetries) {
+          if (signal?.aborted) throw new PlanningCancelledError("analyzeGlobalContext");
           try {
             progress(
               retryCount === 0 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
               0.05 + mIdx * 0.15 + retryCount * 0.05
             );
-            const response = await ai.models.generateContent({
-              model: currentModel,
-              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
-              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+            const timeoutMs = 45e3;
+            const response = await executePlanningRequest({
+              task: `Global Context (${currentModel})`,
+              timeoutMs,
+              signal,
+              execute: (reqSignal) => ai.models.generateContent({
+                model: currentModel,
+                contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
+                config: {
+                  responseMimeType: "application/json",
+                  temperature: 0.2,
+                  maxOutputTokens: 8192,
+                  abortSignal: reqSignal,
+                  httpOptions: { timeout: timeoutMs }
+                }
+              })
             });
             rawJson = response.text ?? "";
             if (rawJson) {
@@ -17281,6 +17388,9 @@ async function analyzeGlobalContext(params) {
               break;
             }
           } catch (err) {
+            if (signal?.aborted || err instanceof PlanningCancelledError) {
+              throw err;
+            }
             const { kind, message } = classifyGeminiErrorKind(err);
             recordModelFailure(currentModel, kind);
             aiError = message;
@@ -17296,6 +17406,11 @@ async function analyzeGlobalContext(params) {
             }
             if (kind === "BAD_REQUEST") {
               logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`);
+              break;
+            }
+            if (kind === "TIMEOUT") {
+              const nextModel = fallbackModels[mIdx + 1];
+              logger.warn(`[GlobalContext] Gemini ${currentModel} timed out. Switching immediately to ${nextModel ?? "fallback"}...`);
               break;
             }
             if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
@@ -17318,37 +17433,40 @@ async function analyzeGlobalContext(params) {
         if (rawJson) break;
       }
     } catch (outerErr) {
+      if (signal?.aborted || outerErr instanceof PlanningCancelledError) {
+        throw outerErr;
+      }
       aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
       logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
     }
   } else {
     logger.info("[GlobalContext] No Gemini API key provided, generating algorithmic script context");
   }
-  let ctx2;
+  let ctx;
   if (rawJson) {
     try {
       const clean = rawJson.replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
-      ctx2 = JSON.parse(clean);
-      ctx2.modelUsed = successfulModel || modelId;
+      ctx = JSON.parse(clean);
+      ctx.modelUsed = successfulModel || modelId;
     } catch {
       logger.warn("[GlobalContext] JSON parse failed, using fallback context");
-      ctx2 = buildFallbackContext(projectId, language, fullText);
-      ctx2.modelUsed = "algorithmic (JSON parse fallback)";
+      ctx = buildFallbackContext(projectId, language, fullText);
+      ctx.modelUsed = "algorithmic (JSON parse fallback)";
     }
   } else {
     logger.warn(`[GlobalContext] AI analysis unavailable (${aiError ?? "No API Key"}), generating algorithmic script context`);
     progress("Gemini AI unavailable or key error. Automatically generating context from script...", 0.7);
-    ctx2 = buildFallbackContext(projectId, language, fullText);
-    ctx2.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
+    ctx = buildFallbackContext(projectId, language, fullText);
+    ctx.modelUsed = aiError ? "algorithmic (rule-based fallback)" : "algorithmic";
   }
-  ctx2.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ctx2.version = 1;
-  ctx2._scriptHash = hash;
+  ctx.generatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ctx.version = 1;
+  ctx._scriptHash = hash;
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx2, null, 2), "utf-8");
-  logger.info("[GlobalContext] Saved", { subject: ctx2.primarySubject, model: ctx2.modelUsed });
-  progress(`Global context ready - "${ctx2.primarySubject}"`, 1);
-  return ctx2;
+  fs__namespace.writeFileSync(contextPath, JSON.stringify(ctx, null, 2), "utf-8");
+  logger.info("[GlobalContext] Saved", { subject: ctx.primarySubject, model: ctx.modelUsed });
+  progress(`Global context ready - "${ctx.primarySubject}"`, 1);
+  return ctx;
 }
 function buildFallbackContext(projectId, language, text) {
   const STOP_WORDS2 = /* @__PURE__ */ new Set([
@@ -17593,10 +17711,10 @@ function loadGlobalContext(projectDir) {
     return null;
   }
 }
-function saveGlobalContext(projectDir, ctx2) {
+function saveGlobalContext(projectDir, ctx) {
   const p = getContextPath(projectDir);
   fs__namespace.mkdirSync(path.join(projectDir, "analysis"), { recursive: true });
-  fs__namespace.writeFileSync(p, JSON.stringify(ctx2, null, 2), "utf-8");
+  fs__namespace.writeFileSync(p, JSON.stringify(ctx, null, 2), "utf-8");
 }
 const CONTENT_PROFILE_SCHEMA_VERSION = 1;
 const ANATOMICAL_ORGAN_SIGNALS = [
@@ -18239,24 +18357,92 @@ function inferShotTypeFromText(text) {
   if (lower.includes("abstract") || lower.includes("symbol") || lower.includes("silhouette")) return "abstract";
   return "medium";
 }
-function buildAlgorithmicOutline(skeletons, totalDuration) {
-  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)));
-  const scenesPerChapter = Math.ceil(skeletons.length / numChapters);
+function buildAlgorithmicOutline(skeletons, totalDuration, globalContextSummary) {
+  if (skeletons.length === 0) return [];
+  if (skeletons.length === 1) {
+    const s = skeletons[0];
+    return [
+      {
+        chapterIndex: 1,
+        title: "Chapter 1: Story Arc",
+        purpose: "Narrative presentation",
+        startSceneIndex: s.sceneIndex,
+        endSceneIndex: s.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: "Sequence 1: Visual Presentation",
+            startSceneIndex: s.sceneIndex,
+            endSceneIndex: s.sceneIndex
+          }
+        ]
+      }
+    ];
+  }
+  if (skeletons.length === 2) {
+    const s1 = skeletons[0];
+    const s2 = skeletons[1];
+    return [
+      {
+        chapterIndex: 1,
+        title: "Chapter 1: Introduction & Premise",
+        purpose: "Introduction and subject establishment",
+        startSceneIndex: s1.sceneIndex,
+        endSceneIndex: s1.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: "Sequence 1: Opening Shot",
+            startSceneIndex: s1.sceneIndex,
+            endSceneIndex: s1.sceneIndex
+          }
+        ]
+      },
+      {
+        chapterIndex: 2,
+        title: "Chapter 2: Development & Conclusion",
+        purpose: "Narrative payoff",
+        startSceneIndex: s2.sceneIndex,
+        endSceneIndex: s2.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: "Sequence 1: Conclusion",
+            startSceneIndex: s2.sceneIndex,
+            endSceneIndex: s2.sceneIndex
+          }
+        ]
+      }
+    ];
+  }
+  const maxPossibleChapters = Math.min(skeletons.length, 6);
+  const minPossibleChapters = Math.min(skeletons.length, skeletons.length >= 6 ? 3 : 2);
+  const durationBasedChapters = Math.round(totalDuration / 180);
+  const numChapters = Math.max(
+    minPossibleChapters,
+    Math.min(maxPossibleChapters, durationBasedChapters || minPossibleChapters)
+  );
   const chapters = [];
-  for (let chIdx = 0; chIdx < numChapters; chIdx++) {
-    const chStartIdx = chIdx * scenesPerChapter;
-    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length);
-    const chScenes = skeletons.slice(chStartIdx, chEndIdx);
+  let currentScenePointer = 0;
+  for (let chIdx = 0; chIdx < numChapters && currentScenePointer < skeletons.length; chIdx++) {
+    const remainingChapters = numChapters - chIdx;
+    const remainingScenes = skeletons.length - currentScenePointer;
+    const countForThisChapter = chIdx === numChapters - 1 ? remainingScenes : Math.min(remainingScenes, Math.max(1, Math.ceil(remainingScenes / remainingChapters)));
+    const chScenes = skeletons.slice(currentScenePointer, currentScenePointer + countForThisChapter);
+    currentScenePointer += countForThisChapter;
     if (chScenes.length === 0) continue;
     const startSceneIndex = chScenes[0].sceneIndex;
     const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex;
-    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)));
-    const scenesPerSeq = Math.ceil(chScenes.length / numSequences);
+    const maxSequences = Math.min(chScenes.length, 4);
+    const numSequences = Math.max(1, Math.min(maxSequences, Math.round(chScenes.length / 8) || 1));
     const sequences = [];
-    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
-      const seqStartIdx = seqIdx * scenesPerSeq;
-      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length);
-      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx);
+    let seqPointer = 0;
+    for (let seqIdx = 0; seqIdx < numSequences && seqPointer < chScenes.length; seqIdx++) {
+      const remainingSeqs = numSequences - seqIdx;
+      const remainingSeqScenes = chScenes.length - seqPointer;
+      const countForThisSeq = seqIdx === numSequences - 1 ? remainingSeqScenes : Math.min(remainingSeqScenes, Math.max(1, Math.ceil(remainingSeqScenes / remainingSeqs)));
+      const seqScenes = chScenes.slice(seqPointer, seqPointer + countForThisSeq);
+      seqPointer += countForThisSeq;
       if (seqScenes.length === 0) continue;
       sequences.push({
         sequenceIndex: seqIdx + 1,
@@ -18276,11 +18462,23 @@ function buildAlgorithmicOutline(skeletons, totalDuration) {
   }
   return chapters;
 }
-async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, onProgress) {
+async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, signal, onProgress) {
+  if (skeletons.length === 0) return [];
+  if (skeletons.length <= 2) {
+    logger.info(`[PLAN] Short script with ${skeletons.length} scenes: using deterministic chapter outline`);
+    return buildAlgorithmicOutline(skeletons, totalDuration);
+  }
+  if (!modelChain || modelChain.length === 0) {
+    logger.warn("[PLAN] No models available for outline. Using algorithmic outline.");
+    return buildAlgorithmicOutline(skeletons, totalDuration);
+  }
   const firstIndex = skeletons[0].sceneIndex;
   const lastIndex = skeletons[skeletons.length - 1].sceneIndex;
   const step = Math.max(1, Math.floor(skeletons.length / 10));
   const sampleScenes = skeletons.filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0).map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`).join("\n");
+  const isShortScript = skeletons.length <= 5;
+  const chapterPromptGoal = isShortScript ? `Divide the ${skeletons.length} scenes into 1 to 2 chapters, each with 1 to 2 sequences.` : `Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.`;
+  const minRequiredChapters = isShortScript ? 1 : 2;
   const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
 Video Duration: ${totalDuration.toFixed(0)}s
 Total Scenes: ${skeletons.length} (Scene ${firstIndex} to Scene ${lastIndex})
@@ -18292,7 +18490,7 @@ ${globalContextSummary}
 ${sampleScenes}
 
 ## YOUR TASK
-Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
+${chapterPromptGoal}
 Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
 Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
 
@@ -18304,34 +18502,46 @@ Return ONLY valid JSON matching this schema:
       "title": "Meaningful Chapter Title",
       "purpose": "Narrative purpose",
       "startSceneIndex": 1,
-      "endSceneIndex": 25,
+      "endSceneIndex": ${skeletons.length},
       "sequences": [
         {
           "sequenceIndex": 1,
           "title": "Sequence title",
           "startSceneIndex": 1,
-          "endSceneIndex": 12
+          "endSceneIndex": ${skeletons.length}
         }
       ]
     }
   ]
 }`;
-  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
+  const outlineTimeoutMs = isShortScript ? 35e3 : 5e4;
+  const maxAttempts = Math.min(2, modelChain.length);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError("generateChapterOutlineWithGemini");
+    }
     const model = modelChain[attempt];
     try {
       onProgress?.(`Generating story arc outline (${model})...`, 0.2);
-      const res = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 4096
-        }
+      const res = await executePlanningRequest({
+        task: `Chapter outline (${model})`,
+        timeoutMs: outlineTimeoutMs,
+        signal,
+        execute: (reqSignal) => ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.2,
+            maxOutputTokens: 4096,
+            abortSignal: reqSignal,
+            httpOptions: { timeout: outlineTimeoutMs }
+          }
+        })
       });
       const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
       const data = JSON.parse(clean);
-      if (data.chapters && data.chapters.length >= 2) {
+      if (data.chapters && data.chapters.length >= minRequiredChapters) {
         const covered = /* @__PURE__ */ new Set();
         let valid = true;
         for (const ch of data.chapters) {
@@ -18360,14 +18570,15 @@ Return ONLY valid JSON matching this schema:
         }
       }
     } catch (err) {
+      if (signal?.aborted || err instanceof PlanningCancelledError) {
+        throw err;
+      }
       const { kind } = classifyGeminiErrorKind(err);
       recordModelFailure(model, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = modelChain[attempt + 1];
-        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic outline fallback"}.`);
-      } else {
-        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
+      if (kind === "AUTH_ERROR") {
+        break;
       }
+      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
     }
   }
   logger.info("[PLAN] Using algorithmic chapter outline fallback");
@@ -18442,65 +18653,115 @@ Return ONLY valid JSON array matching this exact schema:
   }
 ]`;
 }
-async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, onProgress) {
-  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
+async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, signal, onProgress) {
   const enrichedMap = /* @__PURE__ */ new Map();
+  if (!modelChain || modelChain.length === 0) {
+    logger.warn(`[PLAN] No available models in planning route for batch ${batchIndex + 1}. Using algorithmic fallback.`);
+    for (const skel of batchScenes) {
+      const queries = extractVisualQueries(skel.narrativeText);
+      enrichedMap.set(skel.sceneIndex, {
+        sceneIndex: skel.sceneIndex,
+        visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+        visualNote: `Visual shot: ${queries[0]}`,
+        searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
+        mediaType: "video",
+        transitionIn: "cut",
+        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+        shotType: inferShotTypeFromText(skel.narrativeText)
+      });
+    }
+    return { enrichedMap, modelUsed: "algorithmic-fallback", usedFallback: true };
+  }
+  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
+  const timeoutMs = computeBatchTimeoutMs(batchScenes.length);
+  const outputTokenBudget = computeOutputTokenBudget(batchScenes.length);
+  const validBatchIndices = new Set(batchScenes.map((s) => s.sceneIndex));
   let activeModelIndex = 0;
   let lastError = "";
   let successModel = modelChain[0];
   let usedFallback = false;
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  const maxAttempts = Math.min(2, Math.max(1, modelChain.length));
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError("enrichScenesBatchWithGemini");
+    }
     const currentModel = modelChain[activeModelIndex];
+    if (!currentModel) break;
+    const requestStartTime = Date.now();
     try {
       onProgress?.(
-        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
-        0.25 + batchIndex / totalBatches * 0.55
+        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${batchScenes.length} scenes, attempt ${attempt}/${maxAttempts}: ${currentModel})...`,
+        0.25 + batchIndex / totalBatches * 0.55 + (attempt - 1) * 0.02
       );
-      const res = await ai.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.3,
-          maxOutputTokens: 8192
-        }
+      const res = await executePlanningRequest({
+        task: `Planning batch ${batchIndex + 1}/${totalBatches} (${currentModel})`,
+        timeoutMs,
+        signal,
+        execute: (reqSignal) => ai.models.generateContent({
+          model: currentModel,
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.3,
+            maxOutputTokens: outputTokenBudget,
+            abortSignal: reqSignal,
+            httpOptions: { timeout: timeoutMs }
+          }
+        })
       });
       const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
       const items = JSON.parse(clean);
       if (Array.isArray(items)) {
+        let acceptedCount = 0;
         for (const item of items) {
-          if (typeof item.sceneIndex === "number") {
-            enrichedMap.set(item.sceneIndex, item);
+          if (typeof item.sceneIndex === "number" && validBatchIndices.has(item.sceneIndex)) {
+            if (!enrichedMap.has(item.sceneIndex)) {
+              const validatedItem = {
+                sceneIndex: item.sceneIndex,
+                visualIntent: typeof item.visualIntent === "string" && item.visualIntent.trim() ? item.visualIntent.trim() : void 0,
+                visualNote: typeof item.visualNote === "string" ? item.visualNote.trim() : void 0,
+                searchQueries: Array.isArray(item.searchQueries) && item.searchQueries.length > 0 ? item.searchQueries.filter((q) => typeof q === "string" && q.trim()) : void 0,
+                mediaType: item.mediaType === "image" || item.mediaType === "video" ? item.mediaType : "video",
+                transitionIn: item.transitionIn === "fade" || item.transitionIn === "dissolve" || item.transitionIn === "wipe" ? item.transitionIn : "cut",
+                energyLevel: item.energyLevel === "low" || item.energyLevel === "high" ? item.energyLevel : "medium",
+                shotType: item.shotType === "wide" || item.shotType === "close-up" || item.shotType === "abstract" ? item.shotType : "medium",
+                localAsset: typeof item.localAsset === "string" ? item.localAsset.trim() : null
+              };
+              enrichedMap.set(item.sceneIndex, validatedItem);
+              acceptedCount++;
+            }
           }
         }
-        recordModelSuccess(currentModel);
-        successModel = currentModel;
-        break;
+        if (acceptedCount > 0) {
+          recordModelSuccess(currentModel);
+          successModel = currentModel;
+          const elapsed = Date.now() - requestStartTime;
+          logger.info(
+            `[PLAN] Batch ${batchIndex + 1}/${totalBatches} enriched ${acceptedCount}/${batchScenes.length} scenes with ${currentModel} in ${elapsed}ms`
+          );
+          break;
+        }
       }
     } catch (err) {
+      if (signal?.aborted || err instanceof PlanningCancelledError) {
+        throw err;
+      }
+      const elapsed = Date.now() - requestStartTime;
       const msg = err instanceof Error ? err.message : String(err);
       lastError = msg;
       const { kind } = classifyGeminiErrorKind(err);
       recordModelFailure(currentModel, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = modelChain[activeModelIndex + 1];
-        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic fallback"}.`);
-        if (activeModelIndex + 1 < modelChain.length) {
-          activeModelIndex++;
-          continue;
-        } else {
-          break;
-        }
+      logger.warn(
+        `[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed after ${elapsed}ms (${kind}): ${msg}`
+      );
+      if (kind === "AUTH_ERROR") {
+        logger.error(`[PLAN] Authentication error encountered. Stopping AI attempts for batch.`);
+        break;
       }
-      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`);
-      const isOverloaded = kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE" || msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
-      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
+      if (activeModelIndex + 1 < modelChain.length) {
         activeModelIndex++;
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      if (attempt < 4) {
-        await new Promise((r) => setTimeout(r, 2e3));
+        const nextModel = modelChain[activeModelIndex];
+        logger.info(`[PLAN] Switching to fallback model: ${nextModel}`);
       }
     }
   }
@@ -18641,7 +18902,10 @@ function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced", sour
   };
 }
 async function buildEditPlan(params) {
-  const { projectDir, apiKey, onProgress } = params;
+  const { projectDir, apiKey, onProgress, signal } = params;
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("buildEditPlan");
+  }
   const modelId = params.model ?? "gemini-3.8-flash";
   const progress = (msg, pct) => {
     logger.info(`[PLAN] ${msg}`);
@@ -18707,27 +18971,32 @@ async function buildEditPlan(params) {
     progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
     return fallbackPlan;
   }
+  let ctx = null;
   let globalContextSummary = "";
   try {
     progress("Preparing global documentary context...", 0.16);
-    const ctx2 = await analyzeGlobalContext({
+    ctx = await analyzeGlobalContext({
       projectDir,
       apiKey: cleanApiKey,
       model: modelId,
       scriptText,
       transcript,
+      signal,
       onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
     });
     globalContextSummary = [
-      `Primary Subject: ${ctx2.primarySubject}`,
-      `Central Thesis: ${ctx2.centralThesis}`,
-      ctx2.geography?.primaryCountry ? `Geography: ${ctx2.geography.primaryCountry} (${ctx2.geography.primaryRegion ?? ""})` : "",
-      ctx2.timeContext?.primaryPeriod ? `Period: ${ctx2.timeContext.primaryPeriod}` : "",
-      ctx2.exactTopicAnchors?.length ? `Topic Anchors: ${ctx2.exactTopicAnchors.join(", ")}` : "",
-      ctx2.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx2.negativeKeywords.join(", ")}` : "",
-      ctx2.visualWorld?.documentaryStyle ? `Visual Style: ${ctx2.visualWorld.documentaryStyle}` : ""
+      `Primary Subject: ${ctx.primarySubject}`,
+      `Central Thesis: ${ctx.centralThesis}`,
+      ctx.geography?.primaryCountry ? `Geography: ${ctx.geography.primaryCountry} (${ctx.geography.primaryRegion ?? ""})` : "",
+      ctx.timeContext?.primaryPeriod ? `Period: ${ctx.timeContext.primaryPeriod}` : "",
+      ctx.exactTopicAnchors?.length ? `Topic Anchors: ${ctx.exactTopicAnchors.join(", ")}` : "",
+      ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(", ")}` : "",
+      ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ""
     ].filter(Boolean).join("\n");
   } catch (err) {
+    if (signal?.aborted || err instanceof PlanningCancelledError) {
+      throw err;
+    }
     logger.warn(`[PLAN] Global context extraction failed: ${err}`);
   }
   const ai = new genai.GoogleGenAI({
@@ -18746,15 +19015,37 @@ async function buildEditPlan(params) {
     skeletons,
     globalContextSummary,
     transcript.duration,
+    signal,
     (m, p) => progress(m, p)
   );
   const BATCH_SIZE = 20;
   const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE);
   const allEnrichedMap = /* @__PURE__ */ new Map();
   let hadAnyBatchFallback = false;
-  let primaryModelUsed = fallbackModelChain[0];
+  let primaryModelUsed = fallbackModelChain[0] ?? "gemini-3.8-flash";
+  const checkpointPath = path.join(projectDir, "analysis", ".planning-checkpoint.json");
+  if (sourceHash && fs__namespace.existsSync(checkpointPath)) {
+    try {
+      const ckpt = JSON.parse(fs__namespace.readFileSync(checkpointPath, "utf-8"));
+      if (ckpt && ckpt.sourceHash === sourceHash && ckpt.totalScenes === skeletons.length && ckpt.scenes) {
+        for (const [idxStr, sc] of Object.entries(ckpt.scenes)) {
+          allEnrichedMap.set(Number(idxStr), sc);
+        }
+        logger.info(`[PLAN] Reused ${allEnrichedMap.size}/${skeletons.length} enriched scenes from checkpoint`);
+      }
+    } catch {
+    }
+  }
   for (let b = 0; b < totalBatches; b++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError("buildEditPlan");
+    }
     const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+    const isBatchAlreadyComplete = batchScenes.every((s) => allEnrichedMap.has(s.sceneIndex));
+    if (isBatchAlreadyComplete) {
+      logger.info(`[PLAN] Batch ${b + 1}/${totalBatches} fully present in checkpoint. Skipping Gemini request.`);
+      continue;
+    }
     const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
       ai,
       fallbackModelChain,
@@ -18763,6 +19054,7 @@ async function buildEditPlan(params) {
       mediaFiles,
       b,
       totalBatches,
+      signal,
       progress
     );
     for (const [idx, data] of enrichedMap.entries()) {
@@ -18770,6 +19062,20 @@ async function buildEditPlan(params) {
     }
     if (usedFallback) hadAnyBatchFallback = true;
     if (b === 0) primaryModelUsed = modelUsed;
+    if (sourceHash) {
+      try {
+        const scenesObj = {};
+        for (const [idx, sc] of allEnrichedMap.entries()) {
+          scenesObj[idx] = sc;
+        }
+        fs__namespace.writeFileSync(
+          checkpointPath,
+          JSON.stringify({ sourceHash, totalScenes: skeletons.length, scenes: scenesObj }),
+          "utf-8"
+        );
+      } catch {
+      }
+    }
   }
   progress("Assembling master edit plan...", 0.85);
   const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null;
@@ -18910,9 +19216,18 @@ async function buildEditPlan(params) {
     retentionFlags: initialFlags,
     sourceHash
   };
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("buildEditPlan");
+  }
   progress("Saving master edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  try {
+    if (fs__namespace.existsSync(checkpointPath)) {
+      fs__namespace.unlinkSync(checkpointPath);
+    }
+  } catch {
+  }
   logger.info("Edit plan saved", {
     chapters: plan.chapters.length,
     scenes: plan.totalScenes,
@@ -20390,29 +20705,29 @@ function candidateTokens(c) {
   const tagTokens = new Set(c.tags.flatMap((t) => t.toLowerCase().split(/\s+/).filter((x) => x.length > 2)));
   return /* @__PURE__ */ new Set([...titleTokens, ...tagTokens]);
 }
-function localRelevanceScore(c, ctx2) {
-  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx2.visualIntent), ...tokenize$3(ctx2.narration)]);
+function localRelevanceScore(c, ctx) {
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx.visualIntent), ...tokenize$3(ctx.narration)]);
   return overlapScore(refTokens, candidateTokens(c));
 }
-function globalSubjectScore(c, ctx2) {
+function globalSubjectScore(c, ctx) {
   const anchors = new Set([
-    ...ctx2.globalContext.exactTopicAnchors,
-    ...ctx2.globalContext.contextualAnchors
+    ...ctx.globalContext.exactTopicAnchors,
+    ...ctx.globalContext.contextualAnchors
   ].flatMap((a) => a.toLowerCase().split(/\s+/)));
   return overlapScore(anchors, candidateTokens(c));
 }
-function geographyScore(c, ctx2) {
+function geographyScore(c, ctx) {
   const geos = [
-    ctx2.globalContext.geography.primaryCountry,
-    ctx2.globalContext.geography.primaryRegion,
-    ...ctx2.globalContext.geography.secondaryLocations
+    ctx.globalContext.geography.primaryCountry,
+    ctx.globalContext.geography.primaryRegion,
+    ...ctx.globalContext.geography.secondaryLocations
   ].filter(Boolean);
   if (geos.length === 0) return 0.5;
   const geoTokens = new Set(geos.flatMap((g) => g.toLowerCase().split(/\s+/)));
   return overlapScore(geoTokens, candidateTokens(c));
 }
-function timePeriodScore(c, ctx2) {
-  const period = (ctx2.preferredTimePeriod ?? ctx2.globalContext.timeContext.primaryPeriod).toLowerCase();
+function timePeriodScore(c, ctx) {
+  const period = (ctx.preferredTimePeriod ?? ctx.globalContext.timeContext.primaryPeriod).toLowerCase();
   const tokens = candidateTokens(c);
   const historicTerms = /* @__PURE__ */ new Set(["historical", "vintage", "antique", "old", "century", "archival"]);
   const isModerrn = period === "contemporary" || period === "modern";
@@ -20421,8 +20736,8 @@ function timePeriodScore(c, ctx2) {
   if (isModerrn && [...historicTerms].some((t) => tokens.has(t))) return 0.2;
   return 0.5;
 }
-function chapterPurposeScore(c, ctx2) {
-  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx2.chapterTitle), ...tokenize$3(ctx2.chapterPurpose)]);
+function chapterPurposeScore(c, ctx) {
+  const refTokens = /* @__PURE__ */ new Set([...tokenize$3(ctx.chapterTitle), ...tokenize$3(ctx.chapterPurpose)]);
   return overlapScore(refTokens, candidateTokens(c));
 }
 function technicalScore$1(c) {
@@ -20447,11 +20762,11 @@ function durationScore$1(c, sceneDuration) {
   if (clipDur >= sceneDuration) return 1;
   return Math.max(0.2, clipDur / sceneDuration);
 }
-function applyPenalties(c, ctx2) {
+function applyPenalties(c, ctx) {
   const reasons = [];
   let total = 0;
   const tokens = candidateTokens(c);
-  for (const community of ctx2.globalContext.communities) {
+  for (const community of ctx.globalContext.communities) {
     for (const wrong of community.mustNotConfuseWith) {
       const wrongTokens = tokenize$3(wrong);
       if ([...wrongTokens].some((t) => tokens.has(t))) {
@@ -20460,21 +20775,21 @@ function applyPenalties(c, ctx2) {
       }
     }
   }
-  for (const forbidden of ctx2.globalContext.forbiddenSubstitutions) {
+  for (const forbidden of ctx.globalContext.forbiddenSubstitutions) {
     const fTokens = tokenize$3(forbidden);
     if ([...fTokens].filter((t) => t.length > 3).some((t) => tokens.has(t))) {
       total += 50;
       reasons.push(`Forbidden substitution: ${forbidden}`);
     }
   }
-  for (const neg of ctx2.globalContext.negativeKeywords) {
+  for (const neg of ctx.globalContext.negativeKeywords) {
     const negTokens = tokenize$3(neg);
     if ([...negTokens].some((t) => tokens.has(t))) {
       total += 30;
       reasons.push(`Negative keyword: ${neg}`);
     }
   }
-  if (ctx2.usedAssetIds.has(c.assetId)) {
+  if (ctx.usedAssetIds.has(c.assetId)) {
     total += 20;
     reasons.push("Asset already used");
   }
@@ -20487,31 +20802,31 @@ function getMatchLabel(score, penalties) {
   if (adjusted >= 50) return "ILLUSTRATIVE";
   return "REJECTED";
 }
-function getVisualTruthLabel(c, ctx2, localScore, globalScore) {
+function getVisualTruthLabel(c, ctx, localScore, globalScore) {
   const tokens = candidateTokens(c);
-  const hasExactAnchor = ctx2.globalContext.exactTopicAnchors.some(
+  const hasExactAnchor = ctx.globalContext.exactTopicAnchors.some(
     (a) => a.toLowerCase().split(/\s+/).every((t) => tokens.has(t))
   );
   if (hasExactAnchor && localScore >= 0.5) return "EXACT_SUBJECT";
   if (globalScore >= 0.3 && localScore >= 0.3) return "CONTEXTUAL_MATCH";
-  const isHistorical = ctx2.globalContext.timeContext.historicalPeriods.length > 0 && (tokens.has("historical") || tokens.has("vintage") || tokens.has("archival"));
+  const isHistorical = ctx.globalContext.timeContext.historicalPeriods.length > 0 && (tokens.has("historical") || tokens.has("vintage") || tokens.has("archival"));
   if (isHistorical) return "HISTORICAL";
   return "ILLUSTRATIVE";
 }
-function scoreContextCandidate(candidate, ctx2) {
-  const local = localRelevanceScore(candidate, ctx2) * 30;
-  const global = globalSubjectScore(candidate, ctx2) * 25;
-  const geo = geographyScore(candidate, ctx2) * 15;
-  const time = timePeriodScore(candidate, ctx2) * 10;
-  const chapter = chapterPurposeScore(candidate, ctx2) * 10;
-  const tech = (technicalScore$1(candidate) * 0.6 + compositionScore$1(candidate, ctx2.preferredAspectRatio) * 0.4) * 5;
-  const dur = durationScore$1(candidate, ctx2.sceneDurationSecs);
+function scoreContextCandidate(candidate, ctx) {
+  const local = localRelevanceScore(candidate, ctx) * 30;
+  const global = globalSubjectScore(candidate, ctx) * 25;
+  const geo = geographyScore(candidate, ctx) * 15;
+  const time = timePeriodScore(candidate, ctx) * 10;
+  const chapter = chapterPurposeScore(candidate, ctx) * 10;
+  const tech = (technicalScore$1(candidate) * 0.6 + compositionScore$1(candidate, ctx.preferredAspectRatio) * 0.4) * 5;
+  const dur = durationScore$1(candidate, ctx.sceneDurationSecs);
   const sequenceContinuity = dur * 5;
   const rawScore = local + global + geo + time + chapter + tech + sequenceContinuity;
-  const { total: penalties, reasons: penaltyReasons } = applyPenalties(candidate, ctx2);
+  const { total: penalties, reasons: penaltyReasons } = applyPenalties(candidate, ctx);
   const totalScore = Math.max(0, rawScore - penalties);
   const matchLabel = getMatchLabel(rawScore, penalties);
-  const visualTruthLabel = getVisualTruthLabel(candidate, ctx2, local / 30, global / 25);
+  const visualTruthLabel = getVisualTruthLabel(candidate, ctx, local / 30, global / 25);
   return {
     localRelevance: Math.round(local),
     globalSubjectRelevance: Math.round(global),
@@ -20527,8 +20842,8 @@ function scoreContextCandidate(candidate, ctx2) {
     visualTruthLabel
   };
 }
-function rankContextCandidates(candidates, ctx2) {
-  return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx2) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
+function rankContextCandidates(candidates, ctx) {
+  return candidates.map((c) => ({ ...c, contextScore: scoreContextCandidate(c, ctx) })).filter((c) => c.contextScore.matchLabel !== "REJECTED").sort((a, b) => b.contextScore.totalScore - a.contextScore.totalScore);
 }
 function normalizeUrl(rawUrl) {
   if (!rawUrl || typeof rawUrl !== "string") return "";
@@ -20842,14 +21157,14 @@ function calculateAspectRatioFit(c, preferredAspectRatio) {
   }
   return { score, reasons };
 }
-function scoreStockCandidate(c, ctx2) {
-  const local = calculateLocalRelevance(c, ctx2.narration, ctx2.visualIntent, ctx2.searchPlan);
-  const global = calculateGlobalContextFit(c, ctx2.globalContext);
-  const chapter = calculateChapterContextFit(c, ctx2.chapterTitle, ctx2.chapterPurpose);
+function scoreStockCandidate(c, ctx) {
+  const local = calculateLocalRelevance(c, ctx.narration, ctx.visualIntent, ctx.searchPlan);
+  const global = calculateGlobalContextFit(c, ctx.globalContext);
+  const chapter = calculateChapterContextFit(c, ctx.chapterTitle, ctx.chapterPurpose);
   const tech = calculateTechnicalQuality(c);
-  const motion = calculateMotionSuitability(c, ctx2.sceneDurationSecs);
-  const aspect = calculateAspectRatioFit(c, ctx2.preferredAspectRatio);
-  const diversity = calculateDiversityScoreAndPenalty(c, ctx2.assignmentHistory, ctx2.isMotif || ctx2.isLocked);
+  const motion = calculateMotionSuitability(c, ctx.sceneDurationSecs);
+  const aspect = calculateAspectRatioFit(c, ctx.preferredAspectRatio);
+  const diversity = calculateDiversityScoreAndPenalty(c, ctx.assignmentHistory, ctx.isMotif || ctx.isLocked);
   const positiveSubtotal = local.score + global.score + chapter.score + tech.score + motion.score + aspect.score + diversity.diversityScore;
   const totalScore = Math.max(0, Math.min(100, positiveSubtotal + diversity.reusePenalty));
   const allReasons = [
@@ -20883,14 +21198,14 @@ function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
   let sceneId;
   let sceneIndex;
   let candidates;
-  let ctx2;
+  let ctx;
   let maxCandidates = 3;
   if (typeof arg1 === "object") {
     sceneId = arg1.sceneId;
     sceneIndex = arg1.sceneIndex;
     candidates = arg1.searchResults || arg1.candidates || [];
     maxCandidates = arg1.maxCandidates ?? 3;
-    ctx2 = arg1.ctx ?? {
+    ctx = arg1.ctx ?? {
       narration: arg1.narration || "",
       visualIntent: arg1.visualIntent,
       sceneDurationSecs: arg1.targetDuration || 6,
@@ -20901,7 +21216,7 @@ function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
     sceneId = arg1;
     sceneIndex = arg2 ?? 0;
     candidates = arg3 || [];
-    ctx2 = arg4 || {
+    ctx = arg4 || {
       narration: "",
       sceneDurationSecs: 6,
       preferredAspectRatio: "16:9",
@@ -20911,7 +21226,7 @@ function rankCandidatesForScene(arg1, arg2, arg3, arg4, arg5) {
   }
   const deduped = deduplicateCandidates(candidates);
   const scored = deduped.map((result) => {
-    const score = scoreStockCandidate(result, ctx2);
+    const score = scoreStockCandidate(result, ctx);
     const isRejected = score.rejectionReasons.length > 0 && score.totalScore < 30;
     return {
       candidateId: `${sceneId}_${result.provider}_${result.assetId}`,
@@ -22079,7 +22394,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
           } else {
             let ranked;
             if (hasGlobalContext) {
-              const ctx2 = {
+              const ctx = {
                 globalContext,
                 chapterTitle,
                 chapterPurpose,
@@ -22090,7 +22405,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
                 preferredAspectRatio,
                 usedAssetIds
               };
-              ranked = rankContextCandidates(candidates, ctx2);
+              ranked = rankContextCandidates(candidates, ctx);
               if (ranked.length === 0) {
                 ranked = candidates.map((c) => ({ ...c, contextScore: void 0 }));
               }
@@ -22193,9 +22508,9 @@ function jaccardSimilarity(a, b) {
   const union = a.size + b.size - intersection;
   return union === 0 ? 0 : intersection / union;
 }
-function semanticScore(candidate, ctx2) {
-  const intentTokens = tokenize(ctx2.visualIntent);
-  const narrationTokens = tokenize(ctx2.narrationText);
+function semanticScore(candidate, ctx) {
+  const intentTokens = tokenize(ctx.visualIntent);
+  const narrationTokens = tokenize(ctx.narrationText);
   const refTokens = /* @__PURE__ */ new Set([...intentTokens, ...narrationTokens]);
   const titleTokens = tokenize(candidate.title);
   const tagTokens = new Set(candidate.tags.flatMap((t) => t.toLowerCase().split(/\s+/)));
@@ -22224,16 +22539,16 @@ function durationScore(candidate, sceneDuration) {
   if (clipDur >= sceneDuration) return 1;
   return Math.max(0.2, clipDur / sceneDuration);
 }
-function scoreCandidate(candidate, ctx2) {
-  const sem = semanticScore(candidate, ctx2) * 0.5;
+function scoreCandidate(candidate, ctx) {
+  const sem = semanticScore(candidate, ctx) * 0.5;
   const tech = technicalScore(candidate) * 0.2;
-  const comp = compositionScore(candidate, ctx2.preferredAspectRatio) * 0.15;
-  const dur = durationScore(candidate, ctx2.sceneDurationSecs) * 0.15;
-  const reuse = ctx2.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
+  const comp = compositionScore(candidate, ctx.preferredAspectRatio) * 0.15;
+  const dur = durationScore(candidate, ctx.sceneDurationSecs) * 0.15;
+  const reuse = ctx.usedAssetIds.has(candidate.assetId) ? 0.3 : 0;
   return Math.max(0, sem + tech + comp + dur - reuse);
 }
-function rankCandidates(candidates, ctx2) {
-  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx2) })).sort((a, b) => b.score - a.score);
+function rankCandidates(candidates, ctx) {
+  return candidates.map((c) => ({ ...c, score: scoreCandidate(c, ctx) })).sort((a, b) => b.score - a.score);
 }
 async function searchForScene(queries, pexelsApiKey, pixabayApiKey, preferredOrientation, cache) {
   const allCandidates = [];
@@ -25872,6 +26187,7 @@ async function runPlanningStage(options, onProgress, signal) {
     projectDir: options.projectDir,
     apiKey,
     model: options.geminiModel,
+    signal,
     onProgress: (msg, prog) => {
       checkAborted(signal);
       onProgress(msg, prog);
@@ -25951,7 +26267,7 @@ async function runGlobalContextStage(options, onProgress, signal) {
     } catch {
     }
   }
-  let ctx2 = null;
+  let ctx = null;
   let isCached = false;
   let sourceHash;
   if (scriptText) {
@@ -25959,17 +26275,17 @@ async function runGlobalContextStage(options, onProgress, signal) {
   }
   if (isGlobalContextValid(options.projectDir, sourceHash)) {
     try {
-      ctx2 = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+      ctx = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
       isCached = true;
       onProgress("Using cached global script context", 0.5);
     } catch {
     }
   }
   const apiKey = resolveGeminiApiKey();
-  if (!ctx2) {
+  if (!ctx) {
     onProgress("Analyzing script for Global Visual Context...", 0.05);
     checkAborted(signal);
-    ctx2 = await analyzeGlobalContext({
+    ctx = await analyzeGlobalContext({
       projectDir: options.projectDir,
       apiKey,
       model: options.geminiModel,
@@ -26006,7 +26322,7 @@ async function runGlobalContextStage(options, onProgress, signal) {
           const ledger = await extractDocumentaryClaims({
             projectDir: options.projectDir,
             scriptText,
-            globalContext: ctx2,
+            globalContext: ctx,
             scenes: sceneInputs,
             apiKey,
             model: options.geminiModel,
@@ -26030,10 +26346,10 @@ async function runGlobalContextStage(options, onProgress, signal) {
     success: true,
     cached: isCached,
     artifactPath: contextPath,
-    data: ctx2,
+    data: ctx,
     stats: {
-      primarySubject: ctx2?.primarySubject,
-      anchorsCount: ctx2?.exactTopicAnchors?.length ?? 0,
+      primarySubject: ctx?.primarySubject,
+      anchorsCount: ctx?.exactTopicAnchors?.length ?? 0,
       claimsCount: claimStats?.totalClaims ?? 0,
       unsourcedClaims: claimStats?.unsourced ?? 0
     }
@@ -28472,7 +28788,7 @@ function registerStockHandlers(ipcMain) {
         if (!scriptText && !transcript) {
           return { success: false, error: "No script or transcript found. Please add a script file to the project first." };
         }
-        const ctx2 = await analyzeGlobalContext({
+        const ctx = await analyzeGlobalContext({
           projectDir: params.projectDir,
           apiKey: geminiKey,
           model: config.preferredModel ?? "gemini-3.5-flash",
@@ -28482,14 +28798,14 @@ function registerStockHandlers(ipcMain) {
           onProgress: sendProgress
         });
         let warning;
-        if (ctx2.modelUsed.includes("fallback") || ctx2.modelUsed.includes("algorithmic")) {
+        if (ctx.modelUsed.includes("fallback") || ctx.modelUsed.includes("algorithmic")) {
           if (!geminiKey) {
             warning = "Đã phân tích bối cảnh theo thuật toán kịch bản. Thêm Gemini API key trong Cài đặt để có phân tích AI chi tiết hơn.";
           } else {
             warning = "Gemini AI tạm thời quá tải hoặc không phản hồi. Đã tự động tạo bối cảnh từ kịch bản để bạn tiếp tục làm việc.";
           }
         }
-        return { success: true, context: ctx2, warning };
+        return { success: true, context: ctx, warning };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: msg };
@@ -28497,8 +28813,8 @@ function registerStockHandlers(ipcMain) {
     }
   );
   ipcMain.handle(IPC_CHANNELS.STOCK_CONTEXT_GET, (_event, projectDir) => {
-    const ctx2 = loadGlobalContext(projectDir);
-    return ctx2;
+    const ctx = loadGlobalContext(projectDir);
+    return ctx;
   });
   ipcMain.handle(
     IPC_CHANNELS.STOCK_CONTEXT_SAVE,

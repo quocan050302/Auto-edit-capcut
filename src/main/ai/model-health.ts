@@ -103,7 +103,18 @@ export function recordModelFailure(
   kind: GeminiErrorKind | string,
   retryAfterMs?: number
 ): void {
-  if (kind === "RATE_LIMIT") {
+  if (kind === "CANCELLED") {
+    // User cancellation is not a model failure; do not poison model health
+    return
+  } else if (kind === "TIMEOUT") {
+    const state = getOrCreateState(model)
+    state.consecutiveFailures++
+    state.lastErrorKind = "TIMEOUT"
+    state.lastErrorTime = Date.now()
+    if (state.consecutiveFailures >= 2) {
+      recordModelUnavailable(model, 30_000, "TIMEOUT")
+    }
+  } else if (kind === "RATE_LIMIT") {
     recordModelRateLimit(model, retryAfterMs)
   } else if (kind === "SERVICE_UNAVAILABLE") {
     recordModelUnavailable(model, 30_000, "SERVICE_UNAVAILABLE")

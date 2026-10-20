@@ -34,6 +34,8 @@ export type GeminiErrorKind =
   | "SERVICE_UNAVAILABLE"
   | "AUTH_ERROR"
   | "BAD_REQUEST"
+  | "TIMEOUT"
+  | "CANCELLED"
   | "UNKNOWN"
 
 export function classifyGeminiErrorKind(err: unknown): { kind: GeminiErrorKind; message: string } {
@@ -43,6 +45,27 @@ export function classifyGeminiErrorKind(err: unknown): { kind: GeminiErrorKind; 
   const statusText = typeof anyErr.statusText === "string" ? anyErr.statusText : ""
   const msg = err instanceof Error ? err.message : String(err)
   const combined = `${status ?? ""} ${statusText} ${msg}`.toLowerCase()
+
+  // CANCELLED: user abort / planning cancellation
+  if (
+    anyErr.isCancelled === true ||
+    anyErr.name === "PlanningCancelledError" ||
+    combined.includes("cancelled by user") ||
+    (combined.includes("abort") && combined.includes("cancel"))
+  ) {
+    return { kind: "CANCELLED", message: msg }
+  }
+
+  // TIMEOUT: planning timeout / request deadline exceeded
+  if (
+    anyErr.isTimeout === true ||
+    anyErr.name === "PlanningTimeoutError" ||
+    combined.includes("deadline exceeded") ||
+    combined.includes("timed out") ||
+    combined.includes("timeout")
+  ) {
+    return { kind: "TIMEOUT", message: msg }
+  }
 
   // MODEL_NOT_FOUND: 404, NOT_FOUND, model is no longer available, model not found, is not supported
   if (
