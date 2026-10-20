@@ -1625,6 +1625,8 @@ export interface CaptionPhrase {
   animationIntensity?: 'subtle' | 'medium' | 'strong'
   keywordAnimation?: 'none' | 'spring' | 'impact' | 'highlight'
   wordStaggerFrames?: number
+  // ── Block-local index tracking (V1 performance) ───────────────────────────
+  originalIndex?: number
 }
 
 /** Khoảng thời gian caption được BẬT */
