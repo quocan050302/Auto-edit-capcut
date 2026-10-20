@@ -430,6 +430,8 @@ export interface ManualAiSceneRow {
   width?: number
   height?: number
   importedAt?: string
+  /** Optional: old image records omit this; video assets explicitly set 'video'. */
+  mediaType?: 'video'
 }
 
 export interface ManualAiStatus {
@@ -475,6 +477,8 @@ export interface ManualAiImportMapping {
   fileName: string
   sceneIndex: number
   via: 'filename' | 'natural-sort'
+  /** Optional to preserve existing image-import IPC callers. */
+  mediaType?: 'video'
 }
 
 export interface ManualAiImportRejection {
@@ -502,6 +506,7 @@ export interface ManualAiImportedItem {
   width: number
   height: number
   warnings: string[]
+  mediaType?: 'video'
 }
 
 export interface ManualAiImportResult {
@@ -1472,9 +1477,12 @@ export const IPC_CHANNELS = {
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: 'manual-ai:get-status',
   MANUAL_AI_GET_PROMPT_TEXT: 'manual-ai:get-prompt-text',
+  MANUAL_AI_GET_VIDEO_PROMPT_TEXT: 'manual-ai:get-video-prompt-text',
   MANUAL_AI_EXPORT_TXT: 'manual-ai:export-txt',
   MANUAL_AI_OPEN_PROMPT_FILE: 'manual-ai:open-prompt-file',
   MANUAL_AI_SELECT_IMAGES: 'manual-ai:select-images',
+  MANUAL_AI_SELECT_VIDEOS: 'manual-ai:select-videos',
+  MANUAL_AI_SELECT_MIXED: 'manual-ai:select-mixed',
   MANUAL_AI_PLAN_IMPORT: 'manual-ai:plan-import',
   MANUAL_AI_COMMIT_IMPORT: 'manual-ai:commit-import',
   MANUAL_AI_STATUS_UPDATED: 'manual-ai:status-updated',

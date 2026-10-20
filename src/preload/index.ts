@@ -455,6 +455,11 @@ const api = {
     getPromptText: (projectDir: string): Promise<{ success: boolean; text?: string; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
 
+    getVideoPromptText: (
+      projectDir: string
+    ): Promise<{ success: boolean; text?: string; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir }),
+
     exportTxt: (
       projectDir: string
     ): Promise<{ success: boolean; filePath?: string; canceled?: boolean; error?: string }> =>
@@ -468,10 +473,30 @@ const api = {
     ): Promise<{ success: boolean; filePaths: string[]; canceled?: boolean; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES, { mode }),
 
+    selectVideos: (
+      mode: 'files' | 'folder'
+    ): Promise<{ success: boolean; filePaths: string[]; canceled?: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_VIDEOS, { mode }),
+
+    selectMixed: (
+      mode: 'files' | 'folder'
+    ): Promise<{
+      success: boolean
+      filePaths: string[]
+      folderPath?: string
+      discoveredCount?: number
+      imageCount?: number
+      videoCount?: number
+      canceled?: boolean
+      warnings?: string[]
+      error?: string
+    }> => ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_MIXED, { mode }),
+
     planImport: (params: {
       projectDir: string
       filePaths: string[]
       replaceExisting?: boolean
+      mediaType?: 'video' | 'mixed'
     }): Promise<{ success: boolean; plan?: ManualAiImportPlan; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT, params),
 

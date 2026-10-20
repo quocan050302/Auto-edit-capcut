@@ -236,6 +236,28 @@ export class HealthSfxDirector {
   }
 
   /**
+   * Preloads standard SFX types used by Opening Retention Composer so they are cached 
+   * and available synchronously for the renderer.
+   */
+  public static async preloadStandardOpeningSfx(projectDir: string, openverseToken?: string): Promise<void> {
+    const standardTypes: HealthSfxType[] = [
+      'soft-whoosh',
+      'reverse-whoosh',
+      'air-swish',
+      'digital-scan',
+      'soft-pulse',
+      'soft-impact',
+      'clock-tick',
+      'subtle-riser'
+    ]
+    try {
+      await SfxResolver.resolveUniqueTypes(projectDir, standardTypes, { openverseToken })
+    } catch (err) {
+      logger.warn(`[HealthSFX] Failed to preload standard opening SFX: ${String(err)}`)
+    }
+  }
+
+  /**
    * Applies planned Health SFX cues to the project's audio plan,
    * augmenting with RetentionPlan if available,
    * setting approved: true and approvedLocalPath for Auto Production.

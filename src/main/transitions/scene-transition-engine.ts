@@ -167,7 +167,8 @@ export function validateTransitionSettings(
  */
 export function resolveAllTransitions(
   sceneEntries: RenderSceneEntry[],
-  settings: RenderTransitionSettings
+  settings: RenderTransitionSettings,
+  openingHints?: { fromSceneIndex: number; toSceneIndex: number; type: VideoTransitionType; duration?: number; reason: string }[]
 ): ResolvedSceneTransition[] {
   const count = sceneEntries.length
   if (count <= 1) return []
@@ -198,7 +199,15 @@ export function resolveAllTransitions(
       }
     } else {
       // Smart mode
-      if (toScene.transitionIn) {
+      const openingHint = openingHints?.find(
+        (h) => h.fromSceneIndex === fromScene.sceneIndex && h.toSceneIndex === toScene.sceneIndex
+      )
+
+      if (openingHint) {
+        type = openingHint.type
+        duration = openingHint.duration ?? (type === 'cut' ? 0 : settings.defaultDuration)
+        reason = `opening composer hint: ${openingHint.reason}`
+      } else if (toScene.transitionIn) {
         type = normalizeTransitionType(toScene.transitionIn)
         if (type === 'cut') {
           duration = 0
@@ -546,6 +555,7 @@ export async function concatSceneClipsWithTransitions(params: {
   videoCodecArgs?: string[]
   maxScenesPerSegment?: number
   segmentRunner?: SegmentRunner
+  openingHints?: { fromSceneIndex: number; toSceneIndex: number; type: VideoTransitionType; duration?: number; reason: string }[]
 }): Promise<boolean> {
   const {
     sceneEntries,
@@ -553,7 +563,8 @@ export async function concatSceneClipsWithTransitions(params: {
     settings,
     fps,
     rawVideoPath,
-    onProgress
+    onProgress,
+    openingHints
   } = params
 
   if (sceneEntries.length <= 1 || sceneClips.length <= 1) {
@@ -561,7 +572,7 @@ export async function concatSceneClipsWithTransitions(params: {
   }
 
   // 1. Resolve transitions
-  const transitions = resolveAllTransitions(sceneEntries, settings)
+  const transitions = resolveAllTransitions(sceneEntries, settings, openingHints)
   const cutCount = transitions.filter((t) => t.type === 'cut').length
   const fadeCount = transitions.filter((t) => t.type === 'fade').length
   const dissolveCount = transitions.filter((t) => t.type === 'dissolve').length

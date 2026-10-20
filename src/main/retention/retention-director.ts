@@ -688,14 +688,14 @@ export function saveRetentionPlan(projectDir: string, plan: RetentionPlan): void
  * 3. Otherwise computes fresh plan and persists it atomically.
  * 4. Fails open: returns null on unexpected error.
  */
-export async function ensureRetentionPlan(
+export function ensureRetentionPlan(
   projectDir: string,
   options?: {
     scenes?: RawSceneData[]
     level?: RetentionLevel
     force?: boolean
   }
-): Promise<RetentionPlan | null> {
+): RetentionPlan | null {
   try {
     let scenes = options?.scenes
 

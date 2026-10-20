@@ -1,6 +1,8 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { probeImageFileDimensions } from '../../thumbnail/utils/image-probe'
+import { probeMedia } from '../../render-cache/ffmpeg-process'
+import { recoverVideoDuration } from './manual-ai-video-duration'
 import type {
   AiImageMode,
   ManualAiSceneRow,
@@ -10,6 +12,7 @@ import type {
 import { resolveAiImageMode } from '../../../../shared/types'
 import {
   MANUAL_AI_SUPPORTED_EXTENSIONS,
+  MANUAL_AI_VIDEO_EXTENSIONS,
   getManualAiPromptTxtPath,
   getVisualMixPlanFilePath,
   type ManualAiAssetsManifest,
@@ -32,6 +35,68 @@ export interface ImageValidation {
 
 export function isSupportedImageExtension(filePath: string): boolean {
   return MANUAL_AI_SUPPORTED_EXTENSIONS.includes(path.extname(filePath).toLowerCase())
+}
+
+/** Separate allowlist so the existing image-only import never begins accepting videos. */
+export function isSupportedVideoExtension(filePath: string): boolean {
+  return MANUAL_AI_VIDEO_EXTENSIONS.includes(path.extname(filePath).toLowerCase())
+}
+
+/** Validate an actual video stream before it can unblock a Prompt-mode scene. */
+export async function validateVideoFile(filePath: string, target: TargetDims): Promise<ImageValidation & { durationSecs?: number }> {
+  const base: ImageValidation = { ok: false, lowResolution: false, warnings: [] }
+  if (!isSupportedVideoExtension(filePath)) {
+    return { ...base, code: 'UNSUPPORTED_TYPE', message: 'Use MP4, MOV, WEBM or MKV for video import.' }
+  }
+  try {
+    const stat = fs.statSync(filePath)
+    if (!stat.isFile() || stat.size <= 0) {
+      return { ...base, code: 'UNREADABLE', message: 'Video file is empty or not a regular file.' }
+    }
+  } catch {
+    return { ...base, code: 'UNREADABLE', message: 'Video file does not exist or cannot be read.' }
+  }
+
+  const media = await probeMedia(filePath)
+  if (!media) {
+    return { ...base, code: 'UNREADABLE', message: 'FFprobe could not inspect the video.' }
+  }
+  if (!media.hasVideo) {
+    return { ...base, code: 'UNREADABLE', message: 'The selected file contains no readable video stream.' }
+  }
+  if (!(media.width > 0) || !(media.height > 0)) {
+    return { ...base, code: 'UNREADABLE', message: 'Video dimensions are invalid or unavailable.' }
+  }
+
+  let durationSecs = media.duration
+  let durationRecovered = false
+  if (!Number.isFinite(durationSecs) || durationSecs <= 0) {
+    const recovery = await recoverVideoDuration(filePath)
+    if (!recovery.ok) {
+      return {
+        ...base,
+        code: 'UNREADABLE',
+        message: `Unable to determine video duration: ${recovery.message}`
+      }
+    }
+    durationSecs = recovery.durationSecs
+    durationRecovered = true
+  }
+
+  const warnings: string[] = []
+  if (durationRecovered) {
+    warnings.push('DURATION_RECOVERED_FROM_PACKET_TIMESTAMPS')
+  }
+  const ratio = media.width / media.height
+  if (Math.abs(ratio - 16 / 9) / (16 / 9) > 0.02) warnings.push('ASPECT_RATIO_NOT_16_9')
+  return {
+    ok: true,
+    width: media.width,
+    height: media.height,
+    durationSecs,
+    lowResolution: media.width < target.width || media.height < target.height,
+    warnings
+  }
 }
 
 /**
@@ -149,7 +214,8 @@ export function evaluateManualAiStatus(params: {
       localPath: record && fileOk ? localPath : undefined,
       width: record?.width,
       height: record?.height,
-      importedAt: record?.importedAt
+      importedAt: record?.importedAt,
+      mediaType: record?.mediaType === 'video' ? 'video' : undefined
     })
   }
 

@@ -35,7 +35,8 @@ function fileHasContent(p: string | undefined): boolean {
 export function buildManualAiAssignment(
   scene: VisualMixScenePlan,
   localPath: string,
-  isHealth: boolean
+  isHealth: boolean,
+  mediaType: 'photo' | 'video' = 'photo'
 ): StockSceneAssignment {
   let size = 0
   try {
@@ -46,11 +47,11 @@ export function buildManualAiAssignment(
   const asset: StockAsset = {
     assetId: `manual_ai_${scene.sceneIndex}`,
     provider: 'manual-ai',
-    mediaType: 'photo',
+    mediaType,
     localPath,
     thumbnailUrl: `file://${localPath}`,
     downloadUrl: '',
-    creator: 'Manual AI Image',
+    creator: mediaType === 'video' ? 'Manual AI Video' : 'Manual AI Image',
     searchQuery: scene.imagePrompt || '',
     downloadedAt: new Date().toISOString(),
     fileSizeBytes: size
@@ -63,7 +64,7 @@ export function buildManualAiAssignment(
     endTime: scene.endTime,
     visualIntent: scene.visualIntent,
     searchQueries: [],
-    usedQuery: isHealth ? 'AI Medical Still (Manual Import)' : 'AI Still (Manual Import)',
+    usedQuery: mediaType === 'video' ? 'AI Video (Manual Import)' : isHealth ? 'AI Medical Still (Manual Import)' : 'AI Still (Manual Import)',
     score: 95,
     locked: true,
     manualOverride: false,
@@ -98,9 +99,10 @@ export async function syncManualAiAssignments(params: {
         existing?.status === 'assigned' &&
         existing.asset?.provider === 'manual-ai' &&
         existing.asset.localPath === row.localPath &&
+        existing.asset.mediaType === (row.mediaType === 'video' ? 'video' : 'photo') &&
         normWs(existing.narrationText) === normWs(scene.narration)
       if (!same) {
-        store.set(row.sceneIndex, buildManualAiAssignment(scene, row.localPath, isHealth))
+        store.set(row.sceneIndex, buildManualAiAssignment(scene, row.localPath, isHealth, row.mediaType === 'video' ? 'video' : 'photo'))
         changed = true
       }
     } else if (existing?.asset?.provider === 'manual-ai') {

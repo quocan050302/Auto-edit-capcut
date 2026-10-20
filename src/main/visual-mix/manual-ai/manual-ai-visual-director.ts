@@ -437,8 +437,8 @@ function buildFallbackSceneDirection(
       subject: subject.slice(0, 60),
       action,
       change: 'visible dynamic transition and movement',
-      cause: 'physiological biological activity',
-      consequence: 'observable biological state'
+      cause: isHealth ? 'physiological biological activity' : 'grounded contextual factors',
+      consequence: isHealth ? 'observable biological state' : 'observable real-world development'
     },
     composition: {
       shotType: isHealth ? 'close three-quarter cutaway' : 'medium documentary framing',
