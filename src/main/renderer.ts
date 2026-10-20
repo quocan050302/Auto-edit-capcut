@@ -49,6 +49,7 @@ import {
   computeAssemblyFingerprint,
   computeAudioFingerprint,
   computeOverlayBlockFingerprint,
+  computeBlockLocalOverlayFingerprint,
   computeCompositeFingerprint,
   computeRenderFingerprint,
   computeDirectorySignature,
@@ -92,6 +93,8 @@ import {
   type EncoderProfile
 } from './render-cache/video-encoder'
 import { planOverlayBlocks, collectProtectedIntervals } from './render-cache/overlay-blocks'
+import { selectOverlayPropsForBlock } from './render-cache/overlay-block-input'
+import { isBlockOverlayEmpty, isEmptyOverlayOptimizationEnabled, renderEmptyOverlayBlock } from './render-cache/empty-overlay-block'
 import { runRenderPreflightCached } from './render-cache/preflight-cache'
 import { APP_INSTANCE_ID } from './pipeline/pipeline-state'
 
@@ -1230,6 +1233,7 @@ async function renderVideoV2(
     const stale = workspace.cleanupStalePartials()
     const previousActive = readActiveRender(projectDir)
     const existing = workspace.loadManifest()
+    const previousOverlayBlocks: OverlayBlockCheckpoint[] = [...(existing?.overlayBlocks ?? [])]
     const resuming = !!existing && existing.status !== 'completed'
     manifest = existing ?? createManifest({
       renderFingerprint: prepared.renderFingerprint,
@@ -1891,10 +1895,25 @@ async function renderVideoV2(
         })
       })
 
-      const prevBlocks = new Map((existing?.overlayBlocks ?? []).map((b) => [b.blockIndex, b]))
+      const prevBlocks = new Map(previousOverlayBlocks.map((b) => [b.blockIndex, b]))
       manifest.overlayBlocks = blocks.map((b): OverlayBlockCheckpoint => {
-        const fp = computeOverlayBlockFingerprint({
-          overlayPropsHash,
+        const blockProps = selectOverlayPropsForBlock({
+          captionPlan: captionPlanForOverlay,
+          proofVisuals,
+          visualGrammar,
+          openingEvents: prepared.openingPlan?.events,
+          startFrame: b.startFrame,
+          endFrameExclusive: b.endFrameExclusive,
+          fps
+        })
+        const blockOverlayPropsHash = fingerprintOf({
+          captionPlan: blockProps.captionPlan,
+          proofVisuals: blockProps.proofVisuals,
+          visualGrammar: blockProps.visualGrammar,
+          openingEvents: blockProps.openingEvents
+        })
+        const fp = computeBlockLocalOverlayFingerprint({
+          blockOverlayPropsHash,
           startFrame: b.startFrame,
           endFrameExclusive: b.endFrameExclusive,
           totalFrames,
@@ -1953,29 +1972,54 @@ async function renderVideoV2(
         const blockPartial = blockPath.replace(/\.mp4$/, '.partial.mp4')
         safeUnlink(blockPartial)
         const t0 = Date.now()
-        const { hardwareFallback } = await overlayRenderer({
+
+        const blockProps = selectOverlayPropsForBlock({
           captionPlan: captionPlanForOverlay,
           proofVisuals,
           visualGrammar,
           openingEvents: prepared.openingPlan?.events,
-          videoDurationInSeconds: videoDurationSecs,
-          outputPath: blockPartial,
-          fps,
-          resolution,
-          frameRange: [blk.startFrame, blk.endFrameExclusive - 1],
-          concurrency,
-          offthreadVideoThreads: limits.offthreadVideoThreads,
-          mediaCacheSizeInBytes: limits.mediaCacheSizeInBytes,
-          offthreadVideoCacheSizeInBytes: limits.offthreadVideoCacheSizeInBytes,
-          hardwareAcceleration: hwMode,
-          signal,
-          onBundleProgress: (pct) => {
-            progress(`Bundling Remotion composition... ${Math.round(pct)}%`, basePct)
-          },
-          onRenderProgress: (pct) => {
-            progress(`Rendering overlay block ${bi + 1}/${manifest!.overlayBlocks.length}... ${Math.round(pct * 100)}%`, basePct + (pct * 0.02) / manifest!.overlayBlocks.length)
-          },
+          startFrame: blk.startFrame,
+          endFrameExclusive: blk.endFrameExclusive,
+          fps
         })
+        let hardwareFallback = false
+
+        if (isEmptyOverlayOptimizationEnabled() && isBlockOverlayEmpty(blockProps)) {
+          logger.info(`[RENDER] Overlay block ${bi + 1}/${manifest.overlayBlocks.length} has 0 overlays — using fast empty block generator`)
+          await renderEmptyOverlayBlock({
+            outputPath: blockPartial,
+            width,
+            height,
+            fps,
+            frames,
+            signal
+          })
+        } else {
+          const res = await overlayRenderer({
+            captionPlan: blockProps.captionPlan,
+            proofVisuals: blockProps.proofVisuals,
+            visualGrammar: blockProps.visualGrammar,
+            openingEvents: blockProps.openingEvents,
+            videoDurationInSeconds: videoDurationSecs,
+            outputPath: blockPartial,
+            fps,
+            resolution,
+            frameRange: [blk.startFrame, blk.endFrameExclusive - 1],
+            concurrency,
+            offthreadVideoThreads: limits.offthreadVideoThreads,
+            mediaCacheSizeInBytes: limits.mediaCacheSizeInBytes,
+            offthreadVideoCacheSizeInBytes: limits.offthreadVideoCacheSizeInBytes,
+            hardwareAcceleration: hwMode,
+            signal,
+            onBundleProgress: (pct) => {
+              progress(`Bundling Remotion composition... ${Math.round(pct)}%`, basePct)
+            },
+            onRenderProgress: (pct) => {
+              progress(`Rendering overlay block ${bi + 1}/${manifest!.overlayBlocks.length}... ${Math.round(pct * 100)}%`, basePct + (pct * 0.02) / manifest!.overlayBlocks.length)
+            },
+          })
+          hardwareFallback = res.hardwareFallback
+        }
         if (hardwareFallback && !manifest.warnings.includes('Remotion hardware acceleration failed; overlay rendered in software.')) {
           manifest.warnings.push('Remotion hardware acceleration failed; overlay rendered in software.')
         }

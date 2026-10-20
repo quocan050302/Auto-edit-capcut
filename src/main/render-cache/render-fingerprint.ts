@@ -191,6 +191,28 @@ export function computeOverlayBlockFingerprint(input: OverlayFingerprintInput): 
   return fingerprintOf({ v: OVERLAY_RENDERER_VERSION, kind: 'overlay-block', ...input })
 }
 
+export interface BlockLocalOverlayFingerprintInput {
+  blockOverlayPropsHash: string
+  startFrame: number
+  endFrameExclusive: number
+  totalFrames: number
+  base: VisualBaseSettings
+  remotionSourceHash: string
+  hardwareAcceleration: string
+}
+
+export function computeBlockLocalOverlayFingerprint(input: BlockLocalOverlayFingerprintInput): string {
+  return computeOverlayBlockFingerprint({
+    overlayPropsHash: input.blockOverlayPropsHash,
+    startFrame: input.startFrame,
+    endFrameExclusive: input.endFrameExclusive,
+    totalFrames: input.totalFrames,
+    base: input.base,
+    remotionSourceHash: input.remotionSourceHash,
+    hardwareAcceleration: input.hardwareAcceleration
+  })
+}
+
 export function computeCompositeFingerprint(input: {
   audioFingerprint: string
   overlayBlockFingerprints: string[] | null
