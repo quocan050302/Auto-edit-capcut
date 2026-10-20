@@ -11,12 +11,13 @@ import {
   MANUAL_AI_MIXED_EXTENSIONS,
   getManualAiPromptTxtPath
 } from '../visual-mix/manual-ai/manual-ai-types'
-import { readManualAiPromptText } from '../visual-mix/manual-ai/manual-ai-prompt-pack'
+import { readManualAiPromptText, loadManualAiPromptPack } from '../visual-mix/manual-ai/manual-ai-prompt-pack'
 import { commitManualAiImport, naturalCompare, planManualAiImport } from '../visual-mix/manual-ai/manual-ai-importer'
 import {
   ensureManualAiVideoPromptPack,
   formatManualAiVideoPromptText
 } from '../visual-mix/manual-ai/manual-ai-video-prompt-pack'
+import { buildOpeningEnhancedCopyText } from '../visual-mix/manual-ai/manual-ai-opening-hook-copy'
 import {
   listMixedMediaInFolder,
   countMixedMedia,
@@ -130,7 +131,19 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
       const norm = normalizeProjectDir(params.projectDir)
       const text = readManualAiPromptText(norm)
       if (text === null) return { success: false, error: 'No prompt pack exists yet.' }
-      return { success: true, text }
+
+      const pack = loadManualAiPromptPack(norm)
+      if (!pack || !pack.scenes || pack.scenes.length === 0) {
+        return { success: true, text }
+      }
+
+      const enhancedText = buildOpeningEnhancedCopyText({
+        mode: 'image',
+        projectDir: norm,
+        baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt }))
+      })
+
+      return { success: true, text: enhancedText }
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) }
     }
@@ -142,9 +155,15 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
       const norm = normalizeProjectDir(params.projectDir)
       logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm}`)
       const pack = ensureManualAiVideoPromptPack(norm)
-      const text = formatManualAiVideoPromptText(pack)
-      logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts`)
-      return { success: true, text }
+
+      const enhancedText = buildOpeningEnhancedCopyText({
+        mode: 'video',
+        projectDir: norm,
+        baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt }))
+      })
+
+      logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts with opening visual hooks`)
+      return { success: true, text: enhancedText }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`)
