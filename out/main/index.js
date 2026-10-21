@@ -388,9 +388,12 @@ const IPC_CHANNELS = {
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: "manual-ai:get-status",
   MANUAL_AI_GET_PROMPT_TEXT: "manual-ai:get-prompt-text",
+  MANUAL_AI_GET_VIDEO_PROMPT_TEXT: "manual-ai:get-video-prompt-text",
   MANUAL_AI_EXPORT_TXT: "manual-ai:export-txt",
   MANUAL_AI_OPEN_PROMPT_FILE: "manual-ai:open-prompt-file",
   MANUAL_AI_SELECT_IMAGES: "manual-ai:select-images",
+  MANUAL_AI_SELECT_VIDEOS: "manual-ai:select-videos",
+  MANUAL_AI_SELECT_MIXED: "manual-ai:select-mixed",
   MANUAL_AI_PLAN_IMPORT: "manual-ai:plan-import",
   MANUAL_AI_COMMIT_IMPORT: "manual-ai:commit-import",
   MANUAL_AI_STATUS_UPDATED: "manual-ai:status-updated",
@@ -583,7 +586,17 @@ function recordModelSuccess(model) {
   state2.consecutiveFailures = 0;
 }
 function recordModelFailure(model, kind, retryAfterMs) {
-  if (kind === "RATE_LIMIT") {
+  if (kind === "CANCELLED") {
+    return;
+  } else if (kind === "TIMEOUT") {
+    const state2 = getOrCreateState(model);
+    state2.consecutiveFailures++;
+    state2.lastErrorKind = "TIMEOUT";
+    state2.lastErrorTime = Date.now();
+    if (state2.consecutiveFailures >= 2) {
+      recordModelUnavailable(model, 3e4, "TIMEOUT");
+    }
+  } else if (kind === "RATE_LIMIT") {
     recordModelRateLimit(model);
   } else if (kind === "SERVICE_UNAVAILABLE") {
     recordModelUnavailable(model, 3e4, "SERVICE_UNAVAILABLE");
@@ -616,6 +629,12 @@ function classifyGeminiErrorKind(err) {
   const statusText = typeof anyErr.statusText === "string" ? anyErr.statusText : "";
   const msg = err instanceof Error ? err.message : String(err);
   const combined = `${status ?? ""} ${statusText} ${msg}`.toLowerCase();
+  if (anyErr.isCancelled === true || anyErr.name === "PlanningCancelledError" || combined.includes("cancelled by user") || combined.includes("abort") && combined.includes("cancel")) {
+    return { kind: "CANCELLED", message: msg };
+  }
+  if (anyErr.isTimeout === true || anyErr.name === "PlanningTimeoutError" || combined.includes("deadline exceeded") || combined.includes("timed out") || combined.includes("timeout")) {
+    return { kind: "TIMEOUT", message: msg };
+  }
   if (status === 404 || statusText === "NOT_FOUND" || combined.includes("404") || combined.includes("not_found") || combined.includes("model not found") || combined.includes("model is not found") || combined.includes("is no longer available") || combined.includes("no longer available") || combined.includes("is not supported for this api version") || combined.includes("is not found for api version")) {
     return { kind: "MODEL_NOT_FOUND", message: msg };
   }
@@ -4690,9 +4709,20 @@ function parseRate(rate) {
   const v = n / d;
   return Number.isFinite(v) ? v : 0;
 }
-function probeMedia$1(filePath, opts = {}) {
+const mediaProbeCache = /* @__PURE__ */ new Map();
+async function probeMedia$1(filePath, opts = {}) {
   const ffprobe = getFfprobeBinary();
   if (!ffprobe || !filePath || !fs__namespace.existsSync(filePath)) return Promise.resolve(null);
+  let stat;
+  try {
+    stat = fs__namespace.statSync(filePath);
+  } catch {
+    return Promise.resolve(null);
+  }
+  const cached = mediaProbeCache.get(filePath);
+  if (cached && cached.statTimeMs === stat.mtimeMs && cached.size === stat.size) {
+    return cached.probe;
+  }
   return new Promise((resolve) => {
     const proc = cp.spawn(
       ffprobe,
@@ -4747,7 +4777,7 @@ function probeMedia$1(filePath, opts = {}) {
         const a = streams.find((s) => s.codec_type === "audio");
         const duration = parseFloat(String(data.format?.duration ?? "")) || parseFloat(String(v?.duration ?? "")) || 0;
         const nb = v?.nb_frames !== void 0 ? Number(v.nb_frames) : NaN;
-        finish({
+        const resultProbe = {
           hasVideo: !!v,
           hasAudio: !!a,
           width: Number(v?.width) || 0,
@@ -4755,7 +4785,9 @@ function probeMedia$1(filePath, opts = {}) {
           duration,
           fps: parseRate(String(v?.avg_frame_rate ?? "")) || parseRate(String(v?.r_frame_rate ?? "")),
           frames: Number.isFinite(nb) && nb > 0 ? nb : null
-        });
+        };
+        mediaProbeCache.set(filePath, { probe: resultProbe, statTimeMs: stat.mtimeMs, size: stat.size });
+        finish(resultProbe);
       } catch {
         finish(null);
       }
@@ -5220,28 +5252,53 @@ function asHardwareError(err, profile) {
   return err;
 }
 let cachedBundleUrl = null;
+let cachedBundlePromise = null;
+function getRemotionEntryPoint() {
+  const candidates = [
+    path__namespace.join(__dirname, "../../src/remotion/index.ts"),
+    path__namespace.join(__dirname, "../../../src/remotion/index.ts"),
+    path__namespace.join(process.cwd(), "src/remotion/index.ts")
+  ];
+  for (const c of candidates) {
+    if (fs__namespace.existsSync(c)) return c;
+  }
+  return candidates[0];
+}
 async function getBundle(onProgress) {
   if (cachedBundleUrl) {
     logger.info("[RemotionRenderer] Using bundle cache");
     return cachedBundleUrl;
   }
+  if (cachedBundlePromise) {
+    logger.info("[RemotionRenderer] Reusing in-flight bundle compilation");
+    return cachedBundlePromise;
+  }
   logger.info("[RemotionRenderer] Bundling Remotion composition...");
-  const entryPoint = path__namespace.join(__dirname, "../../src/remotion/index.ts");
-  cachedBundleUrl = await bundler.bundle({
+  const entryPoint = getRemotionEntryPoint();
+  cachedBundlePromise = bundler.bundle({
     entryPoint,
     onProgress: (progress) => {
       onProgress?.(progress);
       logger.debug(`[RemotionRenderer] Bundle: ${progress}%`);
     }
+  }).then((url2) => {
+    cachedBundleUrl = url2;
+    cachedBundlePromise = null;
+    logger.info(`[RemotionRenderer] Bundle xong: ${url2}`);
+    return url2;
+  }).catch((err) => {
+    cachedBundlePromise = null;
+    cachedBundleUrl = null;
+    throw err;
   });
-  logger.info(`[RemotionRenderer] Bundle xong: ${cachedBundleUrl}`);
-  return cachedBundleUrl;
+  return cachedBundlePromise;
 }
 async function renderCaptionsOverlay(options) {
   const {
     captionPlan,
     proofVisuals,
     visualGrammar,
+    openingEvents,
     videoDurationInSeconds,
     outputPath,
     fps = 30,
@@ -5270,7 +5327,8 @@ async function renderCaptionsOverlay(options) {
   const inputProps = {
     captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
     proofVisuals: proofVisuals ?? [],
-    visualGrammar: visualGrammar ?? []
+    visualGrammar: visualGrammar ?? [],
+    openingEvents: openingEvents ?? []
   };
   const composition = await renderer.selectComposition({
     serveUrl: bundleUrl,
@@ -5407,7 +5465,7 @@ function validateTransitionSettings(raw) {
     chapterDuration: Math.round(chapterDuration * 1e3) / 1e3
   };
 }
-function resolveAllTransitions(sceneEntries, settings) {
+function resolveAllTransitions(sceneEntries, settings, openingHints) {
   const count = sceneEntries.length;
   if (count <= 1) return [];
   const result = [];
@@ -5432,7 +5490,14 @@ function resolveAllTransitions(sceneEntries, settings) {
         reason = "single mode normal boundary";
       }
     } else {
-      if (toScene.transitionIn) {
+      const openingHint = openingHints?.find(
+        (h) => h.fromSceneIndex === fromScene.sceneIndex && h.toSceneIndex === toScene.sceneIndex
+      );
+      if (openingHint) {
+        type = openingHint.type;
+        duration = openingHint.duration ?? (type === "cut" ? 0 : settings.defaultDuration);
+        reason = `opening composer hint: ${openingHint.reason}`;
+      } else if (toScene.transitionIn) {
         type = normalizeTransitionType(toScene.transitionIn);
         if (type === "cut") {
           duration = 0;
@@ -5663,12 +5728,13 @@ async function concatSceneClipsWithTransitions(params) {
     settings,
     fps,
     rawVideoPath,
-    onProgress
+    onProgress,
+    openingHints
   } = params;
   if (sceneEntries.length <= 1 || sceneClips.length <= 1) {
     return false;
   }
-  const transitions = resolveAllTransitions(sceneEntries, settings);
+  const transitions = resolveAllTransitions(sceneEntries, settings, openingHints);
   const cutCount = transitions.filter((t) => t.type === "cut").length;
   const fadeCount = transitions.filter((t) => t.type === "fade").length;
   const dissolveCount = transitions.filter((t) => t.type === "dissolve").length;
@@ -6800,10 +6866,10 @@ function isLowNoveltyStreak(noveltyScores, minStreakOrThreshold = 3, thresholdOr
   return lastN.every((s) => s < threshold);
 }
 const RETENTION_PLAN_SCHEMA_VERSION = 1;
-function sha256$3(text) {
+function sha256$4(text) {
   return crypto__namespace.createHash("sha256").update(text).digest("hex");
 }
-function writeFileAtomic$2(filePath, content) {
+function writeFileAtomic$3(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -7182,7 +7248,7 @@ function analyzeRetentionPlan(rawScenes, options = {}) {
       sh: s.shotType
     }))
   });
-  const inputHash = sha256$3(hashPayload);
+  const inputHash = sha256$4(hashPayload);
   return {
     schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
     generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -7224,12 +7290,12 @@ function loadRetentionPlan(projectDir) {
 }
 function saveRetentionPlan(projectDir, plan) {
   const p = getRetentionPlanPath(projectDir);
-  writeFileAtomic$2(p, JSON.stringify(plan, null, 2));
+  writeFileAtomic$3(p, JSON.stringify(plan, null, 2));
   logger.info(
     `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
   );
 }
-async function ensureRetentionPlan(projectDir, options) {
+function ensureRetentionPlan(projectDir, options) {
   try {
     let scenes = options?.scenes;
     if (!scenes || scenes.length === 0) {
@@ -7270,6 +7336,325 @@ async function ensureRetentionPlan(projectDir, options) {
     logger.warn(`[RetentionDirector] Failed to ensure retention plan (falling open): ${String(err)}`);
     return null;
   }
+}
+const SCENE_RENDERER_VERSION = "scene-v2.0";
+const RENDERER_SCHEMA_VERSION = "render-v2.0";
+const OVERLAY_RENDERER_VERSION = "overlay-v2.0";
+function normalizeForCanonical(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return String(value);
+    return Math.round(value * 1e6) / 1e6;
+  }
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(normalizeForCanonical);
+  if (typeof value === "object") {
+    const out = {};
+    for (const key2 of Object.keys(value).sort()) {
+      const v = value[key2];
+      if (v === void 0 || typeof v === "function") continue;
+      out[key2] = normalizeForCanonical(v);
+    }
+    return out;
+  }
+  return String(value);
+}
+function canonicalJson(value) {
+  return JSON.stringify(normalizeForCanonical(value));
+}
+function sha256$3(input) {
+  return crypto__namespace.createHash("sha256").update(input).digest("hex");
+}
+function fingerprintOf(value) {
+  return sha256$3(canonicalJson(value));
+}
+function normalizeSignaturePath(p) {
+  return path__namespace.normalize(path__namespace.resolve(p));
+}
+function fileSignature(filePath) {
+  if (!filePath) return null;
+  const normalizedPath = normalizeSignaturePath(filePath);
+  try {
+    const st = fs__namespace.statSync(normalizedPath);
+    return { normalizedPath, size: st.size, mtimeMs: Math.floor(st.mtimeMs) };
+  } catch {
+    return { normalizedPath, size: 0, mtimeMs: 0, missing: true };
+  }
+}
+const SMALL_JSON_LIMIT = 8 * 1024 * 1024;
+function hashFileContent(filePath) {
+  try {
+    const st = fs__namespace.statSync(filePath);
+    if (st.size <= SMALL_JSON_LIMIT) {
+      return sha256$3(fs__namespace.readFileSync(filePath));
+    }
+    return fingerprintOf(fileSignature(filePath));
+  } catch {
+    return "absent";
+  }
+}
+function hashJsonValue(value) {
+  return value === void 0 || value === null ? "none" : fingerprintOf(value);
+}
+function computeSceneFingerprint(input) {
+  return fingerprintOf({
+    v: SCENE_RENDERER_VERSION,
+    // NOTE: sceneOrdinal is intentionally excluded — clip pixels do not depend on
+    // render position, so inserting a scene elsewhere must not invalidate this clip.
+    sceneIndex: input.sceneIndex,
+    duration: input.duration,
+    startTime: input.startTime,
+    mediaType: input.mediaType,
+    media: input.mediaSignature,
+    beats: input.visualBeats ?? null,
+    filter: input.filterChain,
+    multiBeat: input.multiBeat,
+    semanticCrop: input.semanticCrop,
+    base: input.base
+  });
+}
+function computeAssemblyFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "assembly", ...input });
+}
+function computeAudioFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "audio", ...input });
+}
+function computeOverlayBlockFingerprint(input) {
+  return fingerprintOf({ v: OVERLAY_RENDERER_VERSION, kind: "overlay-block", ...input });
+}
+function computeBlockLocalOverlayFingerprint(input) {
+  return computeOverlayBlockFingerprint({
+    overlayPropsHash: input.blockOverlayPropsHash,
+    startFrame: input.startFrame,
+    endFrameExclusive: input.endFrameExclusive,
+    totalFrames: input.totalFrames,
+    base: input.base,
+    remotionSourceHash: input.remotionSourceHash,
+    hardwareAcceleration: input.hardwareAcceleration
+  });
+}
+function computeCompositeFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "composite", ...input });
+}
+function computeRenderFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "render", ...input });
+}
+function shortFingerprint(fp, len = 16) {
+  return fp.replace(/[^a-f0-9]/gi, "").slice(0, len);
+}
+function computeDirectorySignature(dir, maxEntries = 2e3) {
+  const entries = [];
+  const walk = (d) => {
+    if (entries.length >= maxEntries) return;
+    let list;
+    try {
+      list = fs__namespace.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of list) {
+      if (entries.length >= maxEntries) return;
+      if (ent.name === "node_modules" || ent.name.startsWith(".")) continue;
+      const full = path__namespace.join(d, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else {
+        try {
+          const st = fs__namespace.statSync(full);
+          entries.push([path__namespace.relative(dir, full), st.size, Math.floor(st.mtimeMs)]);
+        } catch {
+        }
+      }
+    }
+  };
+  walk(dir);
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  return entries.length ? fingerprintOf(entries) : "absent";
+}
+const SCHEMA_VERSION = 1;
+const OPENING_WINDOW_SECS = 60;
+function getOpeningPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "opening-retention-plan.json");
+}
+function ensureOpeningRetentionPlan(inputs) {
+  try {
+    const { projectDir, scenes, retentionPlan, captionPlan, proofVisuals, visualGrammar, globalContext } = inputs;
+    const p = getOpeningPlanPath(projectDir);
+    const openingScenes = scenes.filter((s) => s.startTime < OPENING_WINDOW_SECS);
+    const inputHash = fingerprintOf({
+      v: SCHEMA_VERSION,
+      scenes: openingScenes.map((s) => ({ i: s.sceneIndex, s: s.startTime, d: s.duration, v: s.visualIntent })),
+      retention: openingScenes.map((s) => retentionPlan.scenes[s.sceneIndex]),
+      proofVisuals: proofVisuals.filter((pv) => pv.absoluteStartTime < OPENING_WINDOW_SECS),
+      visualGrammar: visualGrammar.filter((vg) => vg.sceneIndex < openingScenes.length),
+      captionPlan: captionPlan?.enabled ? captionPlan.phrases.filter((p2) => p2.start < OPENING_WINDOW_SECS) : null,
+      globalContext
+    });
+    if (fs__namespace.existsSync(p)) {
+      try {
+        const cached = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+        if (cached.schemaVersion === SCHEMA_VERSION && cached.inputHash === inputHash) {
+          return cached;
+        }
+      } catch {
+      }
+    }
+    const plan = buildOpeningPlan(inputs, inputHash);
+    fs__namespace.writeFileSync(p, JSON.stringify(plan, null, 2), "utf-8");
+    logger.info(
+      `[OpeningRetention] window=${plan.windowSecs}s events=${plan.events.length} transitions=${plan.transitionHints.length} sfx=${plan.sfxEvents.length}`
+    );
+    return plan;
+  } catch (err) {
+    logger.warn(`[OpeningRetention] Failed to generate plan (falling open): ${String(err)}`);
+    return null;
+  }
+}
+function buildOpeningPlan(inputs, inputHash) {
+  const { scenes, retentionPlan, captionPlan, proofVisuals } = inputs;
+  const events = [];
+  const transitionHints = [];
+  const motionHints = [];
+  const sfxEvents = [];
+  const intensityCurve = [
+    { startTime: 0, endTime: 5, intensity: 1 },
+    { startTime: 5, endTime: 15, intensity: 0.9 },
+    { startTime: 15, endTime: 30, intensity: 0.75 },
+    { startTime: 30, endTime: 45, intensity: 0.6 },
+    { startTime: 45, endTime: 60, intensity: 0.4 }
+  ];
+  const activeIntervals = [];
+  if (captionPlan?.enabled) {
+    captionPlan.phrases.filter((p) => p.start < OPENING_WINDOW_SECS).forEach((p) => {
+      activeIntervals.push({ start: p.start, end: p.end, type: "caption" });
+    });
+  }
+  proofVisuals.filter((pv) => pv.absoluteStartTime < OPENING_WINDOW_SECS).forEach((pv) => {
+    activeIntervals.push({ start: pv.absoluteStartTime, end: pv.absoluteEndTime, type: "proof" });
+  });
+  function hasCollision(start, end) {
+    return activeIntervals.some((iv) => start < iv.end && end > iv.start);
+  }
+  let lastStrongEventTime = -999;
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    if (scene.startTime >= OPENING_WINDOW_SECS) break;
+    const role = retentionPlan.scenes[i];
+    if (i > 0) {
+      const prevScene = scenes[i - 1];
+      const boundaryTime = scene.startTime;
+      if (boundaryTime < OPENING_WINDOW_SECS) {
+        if (boundaryTime < 15) {
+          transitionHints.push({
+            fromSceneIndex: prevScene.sceneIndex,
+            toSceneIndex: scene.sceneIndex,
+            boundaryTime,
+            type: role.role === "setup" ? "cut" : role.role === "payoff" ? "zoomin" : "cut",
+            strength: "normal",
+            reason: "opening-documentary-cut"
+          });
+        } else if (boundaryTime < 30) {
+          if (role.role === "payoff" || role.role === "re-hook") {
+            transitionHints.push({
+              fromSceneIndex: prevScene.sceneIndex,
+              toSceneIndex: scene.sceneIndex,
+              boundaryTime,
+              type: "wipeleft",
+              strength: "normal",
+              reason: "opening-reveal"
+            });
+          }
+        }
+      }
+    }
+    if (scene.startTime < 5 && scene.duration > 2) {
+      motionHints.push({
+        sceneIndex: scene.sceneIndex,
+        startTime: scene.startTime,
+        type: "micro-push",
+        intensity: "subtle",
+        reason: "0-5s-engagement"
+      });
+    }
+    const sceneEnd = Math.min(scene.startTime + scene.duration, OPENING_WINDOW_SECS);
+    if (role.role === "hook" && scene.startTime < 15) {
+      const phrase = captionPlan?.phrases.find((p) => p.start >= scene.startTime && p.end <= sceneEnd && p.words.length <= 5);
+      if (phrase && !hasCollision(phrase.start, phrase.start + 1.5)) {
+        if (phrase.start - lastStrongEventTime > 2) {
+          const headlineText = phrase.words.map((w) => w.text).join(" ").toUpperCase().replace(/[^A-Z0-9$!? ]/g, "");
+          events.push({
+            id: `hook-headline-${i}`,
+            sourceSceneIndex: scene.sceneIndex,
+            startTime: phrase.start,
+            duration: 1.5,
+            type: "hook-headline",
+            priority: "critical",
+            primaryText: headlineText,
+            animationPreset: "hook-punch",
+            sourceEvidence: "caption",
+            confidence: 0.95
+          });
+          sfxEvents.push({
+            id: `sfx-hook-${i}`,
+            sceneIndex: scene.sceneIndex,
+            absoluteTime: phrase.start,
+            type: "soft-impact",
+            volumeDb: 0,
+            duration: 2,
+            priority: "critical",
+            reason: "headline-impact"
+          });
+          activeIntervals.push({ start: phrase.start, end: phrase.start + 1.5, type: "hook" });
+          lastStrongEventTime = phrase.start;
+        }
+      }
+    }
+    if (role.openLoopStart && scene.startTime < 30) {
+      const qPhrase = captionPlan?.phrases.find((p) => p.start >= scene.startTime && p.end <= sceneEnd && p.words.some((w) => w.text.includes("?")));
+      if (qPhrase && !hasCollision(qPhrase.start, qPhrase.start + 1.5) && qPhrase.start - lastStrongEventTime > 3) {
+        events.push({
+          id: `question-${i}`,
+          sourceSceneIndex: scene.sceneIndex,
+          startTime: qPhrase.start,
+          duration: 1.5,
+          type: "question-card",
+          priority: "high",
+          primaryText: qPhrase.words.map((w) => w.text).join(" ").toUpperCase(),
+          sourceEvidence: "caption",
+          confidence: 0.9
+        });
+        sfxEvents.push({
+          id: `sfx-q-${i}`,
+          sceneIndex: scene.sceneIndex,
+          absoluteTime: qPhrase.start,
+          type: "reverse-whoosh",
+          volumeDb: 0,
+          duration: 1,
+          priority: "high",
+          reason: "question-reversal"
+        });
+        activeIntervals.push({ start: qPhrase.start, end: qPhrase.start + 1.5, type: "question" });
+        lastStrongEventTime = qPhrase.start;
+      }
+    }
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    inputHash,
+    windowSecs: OPENING_WINDOW_SECS,
+    enabled: true,
+    intensityCurve,
+    events,
+    transitionHints,
+    motionHints,
+    sfxEvents,
+    summary: {
+      overlays: events.length,
+      transitions: transitionHints.length,
+      motionAccents: motionHints.length,
+      sfxCues: sfxEvents.length
+    }
+  };
 }
 const SAFE_PRESET_VARIATIONS = {
   "push-in-center": ["slow-push-in", "push-in-left", "pan-left", "micro-drift"],
@@ -7473,6 +7858,114 @@ function saveProductionSettings(settings, projectDir) {
     logger.warn(`[ProductionSettings] Failed saving to global config: ${String(err)}`);
   }
   return updated;
+}
+class SfxCacheManager {
+  static getCachePath(projectDir) {
+    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
+  }
+  static getAudioDir(projectDir) {
+    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
+  }
+  /**
+   * Loads the cache manifest with full backward compatibility for schema v1.
+   * If entries lack provider/metadata fields from earlier versions, they still load cleanly.
+   */
+  static loadCacheManifest(projectDir) {
+    const p = this.getCachePath(projectDir);
+    if (fs__namespace.existsSync(p)) {
+      try {
+        const raw = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+        return {
+          schemaVersion: raw.schemaVersion || 1,
+          updatedAt: raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          entries: raw.entries || {}
+        };
+      } catch (err) {
+        logger.warn(`[SfxCache] Corrupted cache at ${p}, recreating: ${err}`);
+      }
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      entries: {}
+    };
+  }
+  /**
+   * Atomically saves cache manifest using a temporary file.
+   */
+  static saveCacheManifest(projectDir, manifest) {
+    const p = this.getCachePath(projectDir);
+    const dir = path__namespace.dirname(p);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const tmp = `${p}.tmp.${Date.now()}`;
+    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
+    fs__namespace.renameSync(tmp, p);
+  }
+  /**
+   * Retrieves a cached SFX if the file exists and is valid.
+   * Cleans up broken cache entries on miss.
+   */
+  static getCachedSfx(projectDir, type) {
+    if (type === "none") return null;
+    const manifest = this.loadCacheManifest(projectDir);
+    const entry = manifest.entries[type];
+    if (!entry) return null;
+    if (!entry.localPath || !fs__namespace.existsSync(entry.localPath)) {
+      logger.debug(`[SfxCache] Missing file for cached type=${type} at ${entry.localPath}`);
+      delete manifest.entries[type];
+      this.saveCacheManifest(projectDir, manifest);
+      return null;
+    }
+    try {
+      const stat = fs__namespace.statSync(entry.localPath);
+      if (stat.size < 512) {
+        logger.debug(`[SfxCache] Cached file too small (${stat.size} bytes) for type=${type}`);
+        delete manifest.entries[type];
+        this.saveCacheManifest(projectDir, manifest);
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    const provider = entry.provider || (entry.generated ? "procedural" : "openverse");
+    return {
+      type,
+      provider: "cache",
+      localPath: entry.localPath,
+      durationSecs: entry.durationSecs || 1,
+      sourceId: entry.assetId,
+      sourceLabel: entry.sourceLabel || `Cached (${provider})`,
+      creator: entry.creator || (provider === "procedural" ? "Local Procedural SFX" : "Cached SFX"),
+      license: entry.license || "Project Cache",
+      sourceUrl: entry.pageUrl || entry.sourceUrl,
+      generated: entry.generated ?? provider === "procedural"
+    };
+  }
+  /**
+   * Stores a successfully resolved SFX into the project cache manifest.
+   */
+  static recordCachedSfx(projectDir, resolved) {
+    const manifest = this.loadCacheManifest(projectDir);
+    const entry = {
+      assetId: resolved.sourceId || `${resolved.provider}-${resolved.type}`,
+      sfxType: resolved.type,
+      query: resolved.type,
+      localPath: resolved.localPath,
+      license: resolved.license || "Internal Asset",
+      creator: resolved.creator || resolved.sourceLabel || "SFX Engine",
+      pageUrl: resolved.sourceUrl || "",
+      downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      provider: resolved.provider,
+      sourceLabel: resolved.sourceLabel,
+      sourceUrl: resolved.sourceUrl,
+      durationSecs: resolved.durationSecs,
+      generated: resolved.generated
+    };
+    manifest.entries[resolved.type] = entry;
+    this.saveCacheManifest(projectDir, manifest);
+    logger.debug(`[SfxCache] Saved cache entry for type=${resolved.type} provider=${resolved.provider}`);
+  }
 }
 function flattenEditPlanScenes(plan) {
   const result = [];
@@ -9037,9 +9530,262 @@ function resolvePresetDefaults(preset, duration) {
       };
   }
 }
+const VIDEO_DURATION_PROBE_TIMEOUT_MS = 45e3;
+function parsePacketTimingLine(line) {
+  if (!line || typeof line !== "string") return null;
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const ptsMatch = /(?:^|[|\s])pts_time=([^\s|]+)/.exec(trimmed);
+  const durMatch = /(?:^|[|\s])duration_time=([^\s|]+)/.exec(trimmed);
+  if (!ptsMatch && !durMatch) return null;
+  let ptsTime;
+  let durationTime;
+  if (ptsMatch) {
+    const raw = ptsMatch[1].trim();
+    if (raw !== "N/A" && raw !== "") {
+      const v = parseFloat(raw);
+      if (Number.isFinite(v)) {
+        ptsTime = v;
+      }
+    }
+  }
+  if (durMatch) {
+    let raw = durMatch[1].trim();
+    const sideIdx = raw.indexOf("side_data");
+    if (sideIdx !== -1) {
+      raw = raw.slice(0, sideIdx).trim();
+    }
+    if (raw !== "N/A" && raw !== "") {
+      const v = parseFloat(raw);
+      if (Number.isFinite(v) && v >= 0) {
+        durationTime = v;
+      }
+    }
+  }
+  if (ptsTime === void 0 && durationTime === void 0) {
+    return null;
+  }
+  return { ptsTime, durationTime };
+}
+async function recoverVideoDuration(filePath, options = {}) {
+  const timeoutMs = options.timeoutMs ?? VIDEO_DURATION_PROBE_TIMEOUT_MS;
+  const signal = options.signal;
+  if (signal?.aborted) {
+    return {
+      ok: false,
+      reason: "CANCELLED",
+      message: "Video duration recovery was cancelled before execution."
+    };
+  }
+  const ffprobe = options.ffprobeBinaryOverride ?? getFfprobeBinary();
+  if (!ffprobe) {
+    logger.warn(`[ManualAI:DurationRecovery] FFprobe binary not available for ${filePath}`);
+    return {
+      ok: false,
+      reason: "FFPROBE_UNAVAILABLE",
+      message: "FFprobe executable is not available on this system."
+    };
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    let packetCount = 0;
+    let minPts = Infinity;
+    let maxPts = -Infinity;
+    let maxPacketEnd = -Infinity;
+    let prevPts = null;
+    const intervals = [];
+    let partial = "";
+    let stderrBuffer = "";
+    const MAX_STDERR_BYTES = 16 * 1024;
+    let proc;
+    try {
+      proc = cp.spawn(
+        ffprobe,
+        [
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_packets",
+          "-show_entries",
+          "packet=pts_time,duration_time",
+          "-of",
+          "compact=p=0:nk=0",
+          filePath
+        ],
+        { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+      );
+    } catch (spawnErr) {
+      return resolve({
+        ok: false,
+        reason: "FFPROBE_EXECUTION_FAILED",
+        message: `Failed to spawn FFprobe: ${spawnErr instanceof Error ? spawnErr.message : String(spawnErr)}`
+      });
+    }
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      if (signal && onAbort) {
+        signal.removeEventListener("abort", onAbort);
+      }
+      if (result.ok) {
+        logger.info(
+          `[ManualAI:DurationRecovery] file="${filePath}" method=packet-timestamps packets=${result.packetCount} duration=${result.durationSecs.toFixed(3)}s`
+        );
+      } else {
+        logger.warn(
+          `[ManualAI:DurationRecovery] file="${filePath}" failed reason=${result.reason}: ${result.message}`
+        );
+      }
+      resolve(result);
+    };
+    const onAbort = () => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+      finish({
+        ok: false,
+        reason: "CANCELLED",
+        message: "Video duration recovery was aborted."
+      });
+    };
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+    timer = setTimeout(() => {
+      try {
+        proc.kill("SIGKILL");
+      } catch {
+      }
+      finish({
+        ok: false,
+        reason: "TIMEOUT",
+        message: `FFprobe packet scan timed out after ${timeoutMs}ms.`
+      });
+    }, timeoutMs);
+    proc.stdout?.on("data", (chunk) => {
+      const text = partial + chunk.toString();
+      const lines = text.split(/\r?\n/);
+      partial = lines.pop() ?? "";
+      for (const line of lines) {
+        const parsed = parsePacketTimingLine(line);
+        if (!parsed) continue;
+        const { ptsTime, durationTime } = parsed;
+        if (ptsTime !== void 0) {
+          packetCount++;
+          if (ptsTime < minPts) minPts = ptsTime;
+          if (ptsTime > maxPts) maxPts = ptsTime;
+          if (durationTime !== void 0 && durationTime > 0) {
+            const end = ptsTime + durationTime;
+            if (end > maxPacketEnd) maxPacketEnd = end;
+          }
+          if (prevPts !== null) {
+            const diff = ptsTime - prevPts;
+            if (diff > 0 && diff < 10) {
+              intervals.push(diff);
+              if (intervals.length > 500) intervals.shift();
+            }
+          }
+          prevPts = ptsTime;
+        }
+      }
+    });
+    proc.stderr?.on("data", (chunk) => {
+      if (stderrBuffer.length < MAX_STDERR_BYTES) {
+        stderrBuffer += chunk.toString();
+      }
+    });
+    proc.on("error", (err) => {
+      finish({
+        ok: false,
+        reason: "FFPROBE_EXECUTION_FAILED",
+        message: `Failed to execute FFprobe: ${err.message}`
+      });
+    });
+    proc.on("close", (code, signalStr) => {
+      if (partial.trim()) {
+        const parsed = parsePacketTimingLine(partial);
+        if (parsed?.ptsTime !== void 0) {
+          const { ptsTime, durationTime } = parsed;
+          packetCount++;
+          if (ptsTime < minPts) minPts = ptsTime;
+          if (ptsTime > maxPts) maxPts = ptsTime;
+          if (durationTime !== void 0 && durationTime > 0) {
+            const end = ptsTime + durationTime;
+            if (end > maxPacketEnd) maxPacketEnd = end;
+          }
+        }
+      }
+      if (code !== 0) {
+        const errDetail = stderrBuffer.trim() ? `: ${stderrBuffer.trim().slice(0, 300)}` : "";
+        return finish({
+          ok: false,
+          reason: "FFPROBE_EXECUTION_FAILED",
+          message: `FFprobe exited with code ${code ?? signalStr ?? "unknown"}${errDetail}`
+        });
+      }
+      if (/file ended prematurely|invalid data found|corrupt input/i.test(stderrBuffer)) {
+        return finish({
+          ok: false,
+          reason: "NO_VALID_TIMESTAMPS",
+          message: `Media stream is truncated or corrupt: ${stderrBuffer.trim().slice(0, 200)}`
+        });
+      }
+      if (packetCount < 2 || !Number.isFinite(minPts) || !Number.isFinite(maxPts) || maxPts < minPts) {
+        return finish({
+          ok: false,
+          reason: "NO_VALID_TIMESTAMPS",
+          message: `Insufficient packet timestamp evidence (packetCount=${packetCount}).`
+        });
+      }
+      let durationSecs = 0;
+      if (Number.isFinite(maxPacketEnd) && maxPacketEnd > minPts) {
+        durationSecs = maxPacketEnd - minPts;
+      } else {
+        let medianInterval = 0;
+        if (intervals.length > 0) {
+          const sorted = [...intervals].sort((a, b) => a - b);
+          medianInterval = sorted[Math.floor(sorted.length / 2)];
+        } else {
+          return finish({
+            ok: false,
+            reason: "NO_VALID_TIMESTAMPS",
+            message: "Could not determine frame intervals from presentation timestamps."
+          });
+        }
+        durationSecs = maxPts - minPts + medianInterval;
+      }
+      if (!Number.isFinite(durationSecs) || durationSecs <= 0 || durationSecs > 86400) {
+        return finish({
+          ok: false,
+          reason: "NO_VALID_TIMESTAMPS",
+          message: `Derived duration is invalid (${durationSecs}).`
+        });
+      }
+      const cleanDuration = Math.round(durationSecs * 1e3) / 1e3;
+      finish({
+        ok: true,
+        durationSecs: cleanDuration,
+        source: "packet-timestamps",
+        packetCount
+      });
+    });
+  });
+}
 const MANUAL_AI_PROMPT_SCHEMA_VERSION = 1;
 const MANUAL_AI_MANIFEST_SCHEMA_VERSION = 1;
 const MANUAL_AI_SUPPORTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp"];
+const MANUAL_AI_VIDEO_EXTENSIONS = [".mp4", ".mov", ".webm", ".mkv"];
+const MANUAL_AI_MIXED_EXTENSIONS = [
+  ...MANUAL_AI_SUPPORTED_EXTENSIONS,
+  ...MANUAL_AI_VIDEO_EXTENSIONS
+];
 const MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION = 1;
 function resolutionDims(res) {
   if (res === "4k") return { width: 3840, height: 2160 };
@@ -9136,6 +9882,85 @@ function upsertManualAiRecord(projectDir, record, counts) {
 function resolveManualAiAssetPath(projectDir, localPath) {
   return path__namespace.isAbsolute(localPath) ? localPath : path__namespace.join(projectDir, localPath);
 }
+function validateIdentityFidelity(prompt, binding, identityBible) {
+  const result = {
+    valid: true,
+    score: 1,
+    missingRequiredTraits: [],
+    conflictingTraits: [],
+    genericSubstitutionRisk: [],
+    reason: "Identity fidelity is intact."
+  };
+  if (binding.strength === "none" || binding.entityIds.length === 0) {
+    return result;
+  }
+  const promptLower = prompt.toLowerCase();
+  const boundEntities = identityBible.entities.filter((e) => binding.entityIds.includes(e.id));
+  for (const entity of boundEntities) {
+    const canonicalLower = entity.canonicalName.toLowerCase();
+    if (binding.strength === "dominant" || binding.strength === "visible") {
+      if (!promptLower.includes(canonicalLower) && !entity.aliases.some((a) => promptLower.includes(a.toLowerCase()))) {
+        result.valid = false;
+        result.missingRequiredTraits.push(entity.canonicalName);
+      }
+    }
+    const genericWeakWords = ["farmer", "worker", "leader", "woman", "man", "family", "child", "people", "soldier", "resident", "businessman"];
+    for (const w of genericWeakWords) {
+      if (promptLower.includes(w)) {
+        if (!promptLower.includes(canonicalLower)) {
+          result.genericSubstitutionRisk.push(w);
+        }
+      }
+    }
+    for (const forbidden of entity.mustNotConfuseWith) {
+      if (promptLower.includes(forbidden.toLowerCase())) {
+        result.valid = false;
+        result.conflictingTraits.push(forbidden);
+      }
+    }
+  }
+  if (!result.valid) {
+    result.score = 0.5;
+    result.reason = "Missing canonical identity or contains generic/forbidden substitutions.";
+  }
+  return result;
+}
+function enrichPromptWithIdentity(params) {
+  const { basePrompt, identityBible, binding } = params;
+  if (!identityBible || !binding || binding.strength === "none" || binding.entityIds.length === 0) {
+    return { prompt: basePrompt, injectedTraits: [], identityScore: 1, repaired: false };
+  }
+  const initialValidation = validateIdentityFidelity(basePrompt, binding, identityBible);
+  if (initialValidation.valid) {
+    return { prompt: basePrompt, injectedTraits: [], identityScore: initialValidation.score, repaired: false };
+  }
+  const boundEntities = identityBible.entities.filter((e) => binding.entityIds.includes(e.id));
+  let enrichedPrompt = basePrompt;
+  const injectedTraits = [];
+  for (const entity of boundEntities) {
+    if (!enrichedPrompt.toLowerCase().includes(entity.canonicalName.toLowerCase())) {
+      const identityPrefix = `[Identity: ${entity.canonicalName}]`;
+      const traits = [];
+      if (entity.visualSignature.clothing.length > 0) {
+        traits.push(...entity.visualSignature.clothing);
+      }
+      if (entity.visualSignature.environment.length > 0) {
+        traits.push(...entity.visualSignature.environment);
+      }
+      const identitySuffix = traits.length > 0 ? ` Required features: ${traits.join(", ")}.` : "";
+      const forbiddenSuffix = entity.mustNotConfuseWith.length > 0 ? ` Do NOT include: ${entity.mustNotConfuseWith.join(", ")}.` : "";
+      enrichedPrompt = `${identityPrefix} ${enrichedPrompt}${identitySuffix}${forbiddenSuffix}`;
+      injectedTraits.push(entity.canonicalName, ...traits);
+    }
+  }
+  const finalValidation = validateIdentityFidelity(enrichedPrompt, binding, identityBible);
+  return {
+    prompt: enrichedPrompt,
+    injectedTraits,
+    identityScore: finalValidation.score,
+    repaired: true
+  };
+}
 const HISTORY_KEYWORDS = /\b(century|ancient|empire|war|battle|reign|dynasty|soldier|medieval|revolution|colony|settler|settlement|historic|historical|heritage|monarch|king|queen|emperor|castle|monastery|traditional|vintage|archive|era|treaty|conquest|founding|pioneer)\b/i;
 const FINANCE_KEYWORDS = /\b(finance|financial|money|bank|banking|stock|market|trade|trading|crypto|bitcoin|currency|inflation|economy|economic|invest|investment|investor|dollar|wealth|capital|fund|asset|ledger|real\s*estate|corporate|commerce|startup)\b/i;
 const FOOD_KEYWORDS = /\b(food|culinary|chef|cooking|recipe|dish|cuisine|kitchen|ingredient|vegetable|fruit|spice|baking|bread|pastry|flavor|restaurant|meal|dining|taste|coffee|wine|brewery|harvest)\b/i;
@@ -9184,7 +10009,16 @@ function buildGeneralImagePrompt(params) {
   if (globalContext?.primarySubject && !rawSubject.toLowerCase().includes(globalContext.primarySubject.toLowerCase())) {
     contextualAnchor = `context: ${globalContext.primarySubject.slice(0, 50)}, `;
   }
-  return `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`;
+  let prompt = `${rawSubject}, ${contextualAnchor}${styleDirective}, ${UNIVERSAL_NEGATIVE_CONSTRAINTS}`;
+  if (params.identityBible && params.identityBinding) {
+    const enrichment = enrichPromptWithIdentity({
+      basePrompt: prompt,
+      identityBible: params.identityBible,
+      binding: params.identityBinding
+    });
+    prompt = enrichment.prompt;
+  }
+  return prompt;
 }
 const HEART_PULSE_REGEX = /\b(heart|cardiac|pulse|pulsat|beat|rhythm|blood\s*pressure|arterial\s*pulse|systol|diastol)\b/i;
 const DOWNWARD_REGEX = /\b(down|downward|digest|digestive|stomach|gut|intestine|colon|waste|excret|sink|lower|absorb|drop)\b/i;
@@ -9307,114 +10141,6 @@ class HealthMotionDirector {
       return notLast1[0];
     }
     return searchPool[sceneIndex % searchPool.length] || "push-in-center";
-  }
-}
-class SfxCacheManager {
-  static getCachePath(projectDir) {
-    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
-  }
-  static getAudioDir(projectDir) {
-    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
-  }
-  /**
-   * Loads the cache manifest with full backward compatibility for schema v1.
-   * If entries lack provider/metadata fields from earlier versions, they still load cleanly.
-   */
-  static loadCacheManifest(projectDir) {
-    const p = this.getCachePath(projectDir);
-    if (fs__namespace.existsSync(p)) {
-      try {
-        const raw = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
-        return {
-          schemaVersion: raw.schemaVersion || 1,
-          updatedAt: raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-          entries: raw.entries || {}
-        };
-      } catch (err) {
-        logger.warn(`[SfxCache] Corrupted cache at ${p}, recreating: ${err}`);
-      }
-    }
-    return {
-      schemaVersion: 1,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      entries: {}
-    };
-  }
-  /**
-   * Atomically saves cache manifest using a temporary file.
-   */
-  static saveCacheManifest(projectDir, manifest) {
-    const p = this.getCachePath(projectDir);
-    const dir = path__namespace.dirname(p);
-    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
-    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const tmp = `${p}.tmp.${Date.now()}`;
-    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
-    fs__namespace.renameSync(tmp, p);
-  }
-  /**
-   * Retrieves a cached SFX if the file exists and is valid.
-   * Cleans up broken cache entries on miss.
-   */
-  static getCachedSfx(projectDir, type) {
-    if (type === "none") return null;
-    const manifest = this.loadCacheManifest(projectDir);
-    const entry = manifest.entries[type];
-    if (!entry) return null;
-    if (!entry.localPath || !fs__namespace.existsSync(entry.localPath)) {
-      logger.debug(`[SfxCache] Missing file for cached type=${type} at ${entry.localPath}`);
-      delete manifest.entries[type];
-      this.saveCacheManifest(projectDir, manifest);
-      return null;
-    }
-    try {
-      const stat = fs__namespace.statSync(entry.localPath);
-      if (stat.size < 512) {
-        logger.debug(`[SfxCache] Cached file too small (${stat.size} bytes) for type=${type}`);
-        delete manifest.entries[type];
-        this.saveCacheManifest(projectDir, manifest);
-        return null;
-      }
-    } catch {
-      return null;
-    }
-    const provider = entry.provider || (entry.generated ? "procedural" : "openverse");
-    return {
-      type,
-      provider: "cache",
-      localPath: entry.localPath,
-      durationSecs: entry.durationSecs || 1,
-      sourceId: entry.assetId,
-      sourceLabel: entry.sourceLabel || `Cached (${provider})`,
-      creator: entry.creator || (provider === "procedural" ? "Local Procedural SFX" : "Cached SFX"),
-      license: entry.license || "Project Cache",
-      sourceUrl: entry.pageUrl || entry.sourceUrl,
-      generated: entry.generated ?? provider === "procedural"
-    };
-  }
-  /**
-   * Stores a successfully resolved SFX into the project cache manifest.
-   */
-  static recordCachedSfx(projectDir, resolved) {
-    const manifest = this.loadCacheManifest(projectDir);
-    const entry = {
-      assetId: resolved.sourceId || `${resolved.provider}-${resolved.type}`,
-      sfxType: resolved.type,
-      query: resolved.type,
-      localPath: resolved.localPath,
-      license: resolved.license || "Internal Asset",
-      creator: resolved.creator || resolved.sourceLabel || "SFX Engine",
-      pageUrl: resolved.sourceUrl || "",
-      downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      provider: resolved.provider,
-      sourceLabel: resolved.sourceLabel,
-      sourceUrl: resolved.sourceUrl,
-      durationSecs: resolved.durationSecs,
-      generated: resolved.generated
-    };
-    manifest.entries[resolved.type] = entry;
-    this.saveCacheManifest(projectDir, manifest);
-    logger.debug(`[SfxCache] Saved cache entry for type=${resolved.type} provider=${resolved.provider}`);
   }
 }
 let cachedCapability = null;
@@ -11059,6 +11785,27 @@ class HealthSfxDirector {
     return pathMap;
   }
   /**
+   * Preloads standard SFX types used by Opening Retention Composer so they are cached
+   * and available synchronously for the renderer.
+   */
+  static async preloadStandardOpeningSfx(projectDir, openverseToken) {
+    const standardTypes = [
+      "soft-whoosh",
+      "reverse-whoosh",
+      "air-swish",
+      "digital-scan",
+      "soft-pulse",
+      "soft-impact",
+      "clock-tick",
+      "subtle-riser"
+    ];
+    try {
+      await SfxResolver.resolveUniqueTypes(projectDir, standardTypes, { openverseToken });
+    } catch (err) {
+      logger.warn(`[HealthSFX] Failed to preload standard opening SFX: ${String(err)}`);
+    }
+  }
+  /**
    * Applies planned Health SFX cues to the project's audio plan,
    * augmenting with RetentionPlan if available,
    * setting approved: true and approvedLocalPath for Auto Production.
@@ -11476,16 +12223,60 @@ class HealthVisualPlanner {
     }
   }
 }
-function cleanText$1(text) {
+function resolveSceneIdentity(params) {
+  const { sceneIndex, sceneNarration, visualIntent, identityBible } = params;
+  const binding = {
+    sceneIndex,
+    entityIds: [],
+    presenceTypes: [],
+    strength: "none",
+    requiredPromptTraits: [],
+    optionalPromptTraits: [],
+    forbiddenPromptTraits: [],
+    reason: "Default no-identity"
+  };
+  if (identityBible.identityMode === "none") {
+    return binding;
+  }
+  const narrationLower = sceneNarration.toLowerCase();
+  const intentLower = visualIntent.toLowerCase();
+  const combinedText = `${narrationLower} ${intentLower}`;
+  for (const entity of identityBible.entities) {
+    const isPrimary = entity.importance === "primary";
+    const nameLower = entity.canonicalName.toLowerCase();
+    const mentionsName = combinedText.includes(nameLower) || entity.aliases.some((a) => combinedText.includes(a.toLowerCase()));
+    if (mentionsName || isPrimary) {
+      binding.entityIds.push(entity.id);
+      if (entity.entityType === "community") {
+        binding.presenceTypes.push("community");
+      } else if (entity.entityType === "person-role") {
+        binding.presenceTypes.push("person");
+      } else if (entity.entityType === "environment") {
+        binding.presenceTypes.push("environment");
+      }
+      binding.strength = mentionsName ? "dominant" : "context";
+      binding.requiredPromptTraits.push(...entity.requiredTraits);
+      binding.requiredPromptTraits.push(...entity.visualSignature.clothing);
+      binding.requiredPromptTraits.push(...entity.visualSignature.environment);
+      binding.forbiddenPromptTraits.push(...entity.forbiddenTraits);
+      binding.forbiddenPromptTraits.push(...entity.mustNotConfuseWith);
+    }
+  }
+  if (binding.entityIds.length > 0) {
+    binding.reason = `Detected entities: ${binding.entityIds.join(", ")}`;
+  }
+  return binding;
+}
+function cleanText$5(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
-function truncateWords(text, maxWords) {
+function truncateWords$2(text, maxWords) {
   const words = text.split(/\s+/).filter(Boolean);
   if (words.length <= maxWords) return words.join(" ");
   return words.slice(0, maxWords).join(" ").replace(/[,.;:\-]+$/, "");
 }
-function countWords(text) {
+function countWords$2(text) {
   return text.split(/\s+/).filter(Boolean).length;
 }
 function normWs$1(text) {
@@ -11588,7 +12379,7 @@ function pickMood(text) {
 const HEALTH_SAFETY = "Scientifically plausible anatomy with correct organ relationships, medical documentary quality, no fake diagnostic results, no exact molecular structures, no citations, no medical text inside the image.";
 function shortIdea(scene) {
   if (!scene) return "";
-  return truncateWords(cleanText$1(scene.visualIntent || scene.narration), 6);
+  return truncateWords$2(cleanText$5(scene.visualIntent || scene.narration), 6);
 }
 function calculatePromptQualityScore(params) {
   const p = params.prompt.toLowerCase();
@@ -11643,8 +12434,8 @@ function buildManualScenePrompt(params) {
   const { scene, profile, globalContext, previousScene, nextScene, outputResolution, sceneDirection } = params;
   const isHealth = profile === "health";
   const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
-  const narration = cleanText$1(scene.narration);
-  const intent = cleanText$1(scene.visualIntent);
+  const narration = cleanText$5(scene.narration);
+  const intent = cleanText$5(scene.visualIntent);
   const groundingText = `${narration} ${intent}`;
   const niche = detectVisualNiche(groundingText, globalContext);
   if (sceneDirection) {
@@ -11652,9 +12443,9 @@ function buildManualScenePrompt(params) {
     const hook = sceneDirection.hookLevel;
     const isMechanism = ["mechanism", "cause-effect", "consequence", "reveal"].includes(role);
     const isHighHook = hook === "high";
-    let subject2 = cleanText$1(sceneDirection.visualEvent?.subject || intent || narration);
-    subject2 = truncateWords(subject2, 24);
-    let action = cleanText$1(sceneDirection.visualEvent?.action);
+    let subject2 = cleanText$5(sceneDirection.visualEvent?.subject || intent || narration);
+    subject2 = truncateWords$2(subject2, 24);
+    let action = cleanText$5(sceneDirection.visualEvent?.action);
     if (!action && isHealth) {
       action = "actively filtering and transporting biological fluid";
     } else if (!action) {
@@ -11667,23 +12458,23 @@ function buildManualScenePrompt(params) {
     } else {
       opening2 = `${NICHE_OPENING[niche]} ${subject2}, ${action}`;
     }
-    const changeClause = sceneDirection.visualEvent?.change ? `with ${cleanText$1(sceneDirection.visualEvent.change)}` : "";
-    const causeClause = sceneDirection.visualEvent?.cause ? `visibly triggered by ${cleanText$1(sceneDirection.visualEvent.cause)}` : "";
-    const consequenceClause = sceneDirection.visualEvent?.consequence ? `resulting in ${cleanText$1(sceneDirection.visualEvent.consequence)}` : "";
+    const changeClause = sceneDirection.visualEvent?.change ? `with ${cleanText$5(sceneDirection.visualEvent.change)}` : "";
+    const causeClause = sceneDirection.visualEvent?.cause ? `visibly triggered by ${cleanText$5(sceneDirection.visualEvent.cause)}` : "";
+    const consequenceClause = sceneDirection.visualEvent?.consequence ? `resulting in ${cleanText$5(sceneDirection.visualEvent.consequence)}` : "";
     const dynamics = [changeClause, causeClause, consequenceClause].filter(Boolean).join(", ");
-    const viewerNotice = cleanText$1(sceneDirection.viewerShouldNotice || narration);
-    const comprehensionClause = viewerNotice ? `The viewer should immediately understand that ${truncateWords(viewerNotice, 16)}.` : "";
+    const viewerNotice = cleanText$5(sceneDirection.viewerShouldNotice || narration);
+    const comprehensionClause = viewerNotice ? `The viewer should immediately understand that ${truncateWords$2(viewerNotice, 16)}.` : "";
     const comp = sceneDirection.composition;
     const subjectFraming = isMechanism ? "with the main subject occupying roughly 60-70% of the useful frame" : "with strong central presence";
     const compositionClause = `Composition: ${comp.shotType || "close three-quarter view"}, ${subjectFraming}, ${comp.cameraAngle || "eye level"}, ${comp.lensFeel || (isHealth ? "85mm medical-documentary lens" : "50mm prime lens")}, ${comp.focalPriority || "precise focal priority"}.`;
-    const fg = cleanText$1(comp.foreground) || "dominant active subject";
-    const bg = cleanText$1(comp.background) || (isHealth ? "controlled dark navy background with gentle biological volumetric depth" : NICHE_BACKGROUND[niche]);
+    const fg = cleanText$5(comp.foreground) || "dominant active subject";
+    const bg = cleanText$5(comp.background) || (isHealth ? "controlled dark navy background with gentle biological volumetric depth" : NICHE_BACKGROUND[niche]);
     const depthClause = `Foreground: ${fg}. Background: ${bg}.`;
-    const lighting2 = cleanText$1(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche]);
-    const color = cleanText$1(sceneDirection.colorStrategy) || (isHealth ? "deep navy blue with warm tissue highlights" : "authentic documentary grade");
+    const lighting2 = cleanText$5(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche]);
+    const color = cleanText$5(sceneDirection.colorStrategy) || (isHealth ? "deep navy blue with warm tissue highlights" : "authentic documentary grade");
     const lightClause = `Lighting and palette: ${lighting2}, ${color}.`;
     const realismClause = isHealth ? "Realistic internal tissue, plausible organ and vessel relationships, directional biological visual flow, medical documentary realism, no gore, no fake diagnostic results, no anatomical labels." : "High-end cinematic documentary realism, natural candid behavior, believable real-world environment, balanced cinematic grade.";
-    const continuityNote = cleanText$1(sceneDirection.continuityNote);
+    const continuityNote = cleanText$5(sceneDirection.continuityNote);
     const continuityClause2 = continuityNote ? `Continuity: ${continuityNote}.` : "";
     let negativeSpaceClause = "";
     let overlayDirective = "";
@@ -11696,7 +12487,7 @@ function buildManualScenePrompt(params) {
       overlayConstraint = isHealth ? `Only the exact specified editorial overlay text is permitted. No other text, no captions, no anatomical labels, no UI, no watermark, no logo.` : `Only the exact specified editorial overlay text is permitted. No other text, no captions, no UI, no watermark, no logo.`;
     } else {
       if (comp.negativeSpace) {
-        negativeSpaceClause = `Composition balance: ${cleanText$1(comp.negativeSpace)}.`;
+        negativeSpaceClause = `Composition balance: ${cleanText$5(comp.negativeSpace)}.`;
       }
       overlayConstraint = isHealth ? `No text overlay, no subtitles, no anatomical labels, no UI, no watermark, no logo.` : `No text overlay, no subtitles, no UI, no watermark, no logo.`;
     }
@@ -11718,29 +12509,29 @@ function buildManualScenePrompt(params) {
       return sanitizePromptLine(parts.filter(Boolean).join(" "));
     };
     let prompt2 = composeWithTarget(true, true, true);
-    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(true, true, false);
-    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(false, true, false);
-    if (countWords(prompt2) > 250) prompt2 = composeWithTarget(false, false, false);
+    if (countWords$2(prompt2) > 250) prompt2 = composeWithTarget(true, true, false);
+    if (countWords$2(prompt2) > 250) prompt2 = composeWithTarget(false, true, false);
+    if (countWords$2(prompt2) > 250) prompt2 = composeWithTarget(false, false, false);
     return prompt2;
   }
   const opening = isHealth ? "Premium cinematic medical documentary still of" : NICHE_OPENING[niche];
-  let subject = truncateWords(intent || narration, 28);
-  const narrationIdea = truncateWords(narration || intent, 24);
+  let subject = truncateWords$2(intent || narration, 28);
+  const narrationIdea = truncateWords$2(narration || intent, 24);
   const shot = pickShot(groundingText, scene.sceneIndex);
   const timeOfDay = pickTimeOfDay(groundingText);
   const mood = pickMood(groundingText);
   const lighting = isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche];
   const worldEnv = globalContext?.visualWorld?.environment?.[0];
-  const colorMood = cleanText$1(globalContext?.visualWorld?.colorMood);
-  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText$1(worldEnv) || NICHE_BACKGROUND[niche]}`;
+  const colorMood = cleanText$5(globalContext?.visualWorld?.colorMood);
+  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText$5(worldEnv) || NICHE_BACKGROUND[niche]}`;
   if (isHealth && !/\b(filter|flow|fill|contract|narrow|expand|release|absorb|accumulat|separat|slow|accelerat|signal|respond|circulat|pump)\b/i.test(subject)) {
     subject = `${subject}, actively demonstrating physiological biological processes`;
   }
   const styleCore = isHealth ? `${getHealthCategoryDetails(scene.category || "conceptual")}. ${HEALTH_SAFETY}` : `${NICHE_STYLE_DIRECTIVES[niche]}.`;
-  const anchorSubject = cleanText$1(globalContext?.primarySubject);
+  const anchorSubject = cleanText$5(globalContext?.primarySubject);
   const worldParts = [
-    anchorSubject ? `topic ${truncateWords(anchorSubject, 6)}` : "",
-    colorMood ? `colour mood ${truncateWords(colorMood, 4)}` : ""
+    anchorSubject ? `topic ${truncateWords$2(anchorSubject, 6)}` : "",
+    colorMood ? `colour mood ${truncateWords$2(colorMood, 4)}` : ""
   ].filter(Boolean);
   const worldClause = worldParts.length > 0 ? `Consistent visual world: ${worldParts.join(", ")}.` : "";
   const prevIdea = shortIdea(previousScene);
@@ -11754,7 +12545,7 @@ function buildManualScenePrompt(params) {
   const compose = (narrationWords, withWorld, withContinuity) => {
     const parts = [
       `${opening} ${subject}.`,
-      narrationIdea ? `It visualizes the narration idea: ${truncateWords(narrationIdea, narrationWords)}.` : "",
+      narrationIdea ? `It visualizes the narration idea: ${truncateWords$2(narrationIdea, narrationWords)}.` : "",
       `Composition: ${shot.composition}, ${shot.camera}.`,
       `Foreground and background: ${background}.`,
       `Lighting and mood: ${lighting}${timeOfDay ? `, ${timeOfDay}` : ""}, ${mood}.`,
@@ -11766,8 +12557,17 @@ function buildManualScenePrompt(params) {
     return sanitizePromptLine(parts.filter(Boolean).join(" "));
   };
   let prompt = compose(24, true, true);
-  if (countWords(prompt) > 200) prompt = compose(20, true, false);
-  if (countWords(prompt) > 200) prompt = compose(14, false, false);
+  if (countWords$2(prompt) > 200) prompt = compose(20, true, false);
+  if (countWords$2(prompt) > 200) prompt = compose(14, false, false);
+  if (params.identityBible && params.identityBinding) {
+    const enrichment = enrichPromptWithIdentity({
+      basePrompt: prompt,
+      scene: { sceneIndex: scene.sceneIndex, narration: scene.narration, intent: scene.visualIntent },
+      identityBible: params.identityBible,
+      binding: params.identityBinding
+    });
+    prompt = enrichment.prompt;
+  }
   return prompt;
 }
 function computeManualPromptHash(params) {
@@ -11792,7 +12592,7 @@ function computeInputHash(params) {
   ]);
 }
 function buildManualAiPromptPack(params) {
-  const { plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const { plan, profile, globalContext, outputResolution, sceneDirections, contentIntelligence, identityBible } = params;
   const ordered = [...plan.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   const entries = [];
   let directionsMap;
@@ -11807,6 +12607,15 @@ function buildManualAiPromptPack(params) {
     const scene = ordered[i];
     if (scene.strategy !== "ai-still") continue;
     const sceneDirection = directionsMap?.get(scene.sceneIndex);
+    let identityBinding = sceneDirection?.identity;
+    if (!identityBinding && identityBible && globalContext && contentIntelligence) {
+      identityBinding = resolveSceneIdentity({
+        sceneIndex: scene.sceneIndex,
+        sceneNarration: scene.narration,
+        visualIntent: scene.visualIntent || "",
+        identityBible
+      });
+    }
     const prompt = buildManualScenePrompt({
       scene,
       profile,
@@ -11814,7 +12623,9 @@ function buildManualAiPromptPack(params) {
       previousScene: ordered[i - 1],
       nextScene: ordered[i + 1],
       outputResolution,
-      sceneDirection
+      sceneDirection,
+      identityBible,
+      identityBinding
     });
     const qualityScore = calculatePromptQualityScore({
       prompt,
@@ -11868,7 +12679,7 @@ function buildManualAiPromptPack(params) {
   }
   entries.sort((a, b) => a.sceneIndex - b.sceneIndex);
   const totalPrompts = entries.length;
-  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords(e.prompt), 0) / totalPrompts) : 0;
+  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords$2(e.prompt), 0) / totalPrompts) : 0;
   const highHook = entries.filter((e) => e.hookLevel === "high").length;
   const mediumHook = entries.filter((e) => e.hookLevel === "medium").length;
   const lowHook = entries.filter((e) => e.hookLevel === "low").length;
@@ -11909,7 +12720,7 @@ function formatManualAiPromptText(pack) {
   const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   return sorted.map((e) => `${formatSceneLabel(e.sceneIndex)} | ${sanitizePromptLine(e.prompt)}`).join("\n\n");
 }
-function writeFileAtomic$1(filePath, content) {
+function writeFileAtomic$2(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -11929,8 +12740,8 @@ function loadManualAiPromptPack(projectDir) {
   }
 }
 function saveManualAiPromptPackFiles(projectDir, pack) {
-  writeFileAtomic$1(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic$1(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
+  writeFileAtomic$2(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$2(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
 }
 function readManualAiPromptText(projectDir) {
   const pack = loadManualAiPromptPack(projectDir);
@@ -11939,13 +12750,15 @@ function readManualAiPromptText(projectDir) {
 }
 function ensureManualAiPromptPack(params) {
   const t0 = Date.now();
-  const { projectDir, plan, profile, globalContext, outputResolution, sceneDirections } = params;
+  const { projectDir, plan, profile, globalContext, outputResolution, sceneDirections, contentIntelligence, identityBible } = params;
   const fresh = buildManualAiPromptPack({
     plan,
     profile,
     globalContext,
     outputResolution,
-    sceneDirections
+    sceneDirections,
+    contentIntelligence,
+    identityBible
   });
   const persisted = loadManualAiPromptPack(projectDir);
   let merged = fresh;
@@ -11968,6 +12781,61 @@ function ensureManualAiPromptPack(params) {
 }
 function isSupportedImageExtension(filePath) {
   return MANUAL_AI_SUPPORTED_EXTENSIONS.includes(path__namespace.extname(filePath).toLowerCase());
+}
+function isSupportedVideoExtension(filePath) {
+  return MANUAL_AI_VIDEO_EXTENSIONS.includes(path__namespace.extname(filePath).toLowerCase());
+}
+async function validateVideoFile(filePath, target) {
+  const base = { ok: false, lowResolution: false, warnings: [] };
+  if (!isSupportedVideoExtension(filePath)) {
+    return { ...base, code: "UNSUPPORTED_TYPE", message: "Use MP4, MOV, WEBM or MKV for video import." };
+  }
+  try {
+    const stat = fs__namespace.statSync(filePath);
+    if (!stat.isFile() || stat.size <= 0) {
+      return { ...base, code: "UNREADABLE", message: "Video file is empty or not a regular file." };
+    }
+  } catch {
+    return { ...base, code: "UNREADABLE", message: "Video file does not exist or cannot be read." };
+  }
+  const media = await probeMedia$1(filePath);
+  if (!media) {
+    return { ...base, code: "UNREADABLE", message: "FFprobe could not inspect the video." };
+  }
+  if (!media.hasVideo) {
+    return { ...base, code: "UNREADABLE", message: "The selected file contains no readable video stream." };
+  }
+  if (!(media.width > 0) || !(media.height > 0)) {
+    return { ...base, code: "UNREADABLE", message: "Video dimensions are invalid or unavailable." };
+  }
+  let durationSecs = media.duration;
+  let durationRecovered = false;
+  if (!Number.isFinite(durationSecs) || durationSecs <= 0) {
+    const recovery = await recoverVideoDuration(filePath);
+    if (!recovery.ok) {
+      return {
+        ...base,
+        code: "UNREADABLE",
+        message: `Unable to determine video duration: ${recovery.message}`
+      };
+    }
+    durationSecs = recovery.durationSecs;
+    durationRecovered = true;
+  }
+  const warnings = [];
+  if (durationRecovered) {
+    warnings.push("DURATION_RECOVERED_FROM_PACKET_TIMESTAMPS");
+  }
+  const ratio = media.width / media.height;
+  if (Math.abs(ratio - 16 / 9) / (16 / 9) > 0.02) warnings.push("ASPECT_RATIO_NOT_16_9");
+  return {
+    ok: true,
+    width: media.width,
+    height: media.height,
+    durationSecs,
+    lowResolution: media.width < target.width || media.height < target.height,
+    warnings
+  };
 }
 function validateImageFile(filePath, target) {
   const base = { ok: false, lowResolution: false, warnings: [] };
@@ -12058,7 +12926,8 @@ function evaluateManualAiStatus(params) {
       localPath: record && fileOk ? localPath : void 0,
       width: record?.width,
       height: record?.height,
-      importedAt: record?.importedAt
+      importedAt: record?.importedAt,
+      mediaType: record?.mediaType === "video" ? "video" : void 0
     });
   }
   const expected = sorted.length;
@@ -12119,128 +12988,6 @@ function findMissingManualAiScenes(projectDir) {
     if (!ok) missing.push(idx);
   }
   return missing;
-}
-const SCENE_RENDERER_VERSION = "scene-v2.0";
-const RENDERER_SCHEMA_VERSION = "render-v2.0";
-const OVERLAY_RENDERER_VERSION = "overlay-v2.0";
-function normalizeForCanonical(value) {
-  if (value === null || value === void 0) return null;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return String(value);
-    return Math.round(value * 1e6) / 1e6;
-  }
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map(normalizeForCanonical);
-  if (typeof value === "object") {
-    const out = {};
-    for (const key2 of Object.keys(value).sort()) {
-      const v = value[key2];
-      if (v === void 0 || typeof v === "function") continue;
-      out[key2] = normalizeForCanonical(v);
-    }
-    return out;
-  }
-  return String(value);
-}
-function canonicalJson(value) {
-  return JSON.stringify(normalizeForCanonical(value));
-}
-function sha256$1(input) {
-  return crypto__namespace.createHash("sha256").update(input).digest("hex");
-}
-function fingerprintOf(value) {
-  return sha256$1(canonicalJson(value));
-}
-function normalizeSignaturePath(p) {
-  return path__namespace.normalize(path__namespace.resolve(p));
-}
-function fileSignature(filePath) {
-  if (!filePath) return null;
-  const normalizedPath = normalizeSignaturePath(filePath);
-  try {
-    const st = fs__namespace.statSync(normalizedPath);
-    return { normalizedPath, size: st.size, mtimeMs: Math.floor(st.mtimeMs) };
-  } catch {
-    return { normalizedPath, size: 0, mtimeMs: 0, missing: true };
-  }
-}
-const SMALL_JSON_LIMIT = 8 * 1024 * 1024;
-function hashFileContent(filePath) {
-  try {
-    const st = fs__namespace.statSync(filePath);
-    if (st.size <= SMALL_JSON_LIMIT) {
-      return sha256$1(fs__namespace.readFileSync(filePath));
-    }
-    return fingerprintOf(fileSignature(filePath));
-  } catch {
-    return "absent";
-  }
-}
-function hashJsonValue(value) {
-  return value === void 0 || value === null ? "none" : fingerprintOf(value);
-}
-function computeSceneFingerprint(input) {
-  return fingerprintOf({
-    v: SCENE_RENDERER_VERSION,
-    // NOTE: sceneOrdinal is intentionally excluded — clip pixels do not depend on
-    // render position, so inserting a scene elsewhere must not invalidate this clip.
-    sceneIndex: input.sceneIndex,
-    duration: input.duration,
-    startTime: input.startTime,
-    mediaType: input.mediaType,
-    media: input.mediaSignature,
-    beats: input.visualBeats ?? null,
-    filter: input.filterChain,
-    multiBeat: input.multiBeat,
-    semanticCrop: input.semanticCrop,
-    base: input.base
-  });
-}
-function computeAssemblyFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "assembly", ...input });
-}
-function computeAudioFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "audio", ...input });
-}
-function computeOverlayBlockFingerprint(input) {
-  return fingerprintOf({ v: OVERLAY_RENDERER_VERSION, kind: "overlay-block", ...input });
-}
-function computeCompositeFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "composite", ...input });
-}
-function computeRenderFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "render", ...input });
-}
-function shortFingerprint(fp, len = 16) {
-  return fp.replace(/[^a-f0-9]/gi, "").slice(0, len);
-}
-function computeDirectorySignature(dir, maxEntries = 2e3) {
-  const entries = [];
-  const walk = (d) => {
-    if (entries.length >= maxEntries) return;
-    let list;
-    try {
-      list = fs__namespace.readdirSync(d, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const ent of list) {
-      if (entries.length >= maxEntries) return;
-      if (ent.name === "node_modules" || ent.name.startsWith(".")) continue;
-      const full = path__namespace.join(d, ent.name);
-      if (ent.isDirectory()) walk(full);
-      else {
-        try {
-          const st = fs__namespace.statSync(full);
-          entries.push([path__namespace.relative(dir, full), st.size, Math.floor(st.mtimeMs)]);
-        } catch {
-        }
-      }
-    }
-  };
-  walk(dir);
-  entries.sort((a, b) => a[0].localeCompare(b[0]));
-  return entries.length ? fingerprintOf(entries) : "absent";
 }
 const RENDER_CACHE_RELATIVE = path__namespace.join(".cache", "render-v2");
 function getRenderCacheRoot(projectDir) {
@@ -12791,7 +13538,116 @@ function collectProtectedIntervals(params) {
       out.push({ start: v.absoluteStartTime, end: v.absoluteEndTime });
     }
   }
+  for (const e of params.openingEvents ?? []) {
+    out.push({ start: e.startTime, end: e.startTime + e.duration });
+  }
   return out;
+}
+function selectOverlayPropsForBlock(params) {
+  const { captionPlan, proofVisuals, visualGrammar, openingEvents, startFrame, endFrameExclusive, fps } = params;
+  if (endFrameExclusive <= startFrame || fps <= 0) {
+    return {
+      captionPlan: { ...captionPlan, phrases: [] },
+      proofVisuals: [],
+      visualGrammar: [],
+      openingEvents: [],
+      totalItemsCount: 0
+    };
+  }
+  const lastRenderedFrame = endFrameExclusive - 1;
+  const blockStartTime = startFrame / fps;
+  const blockEndTime = lastRenderedFrame / fps;
+  const EPS = 1e-5;
+  const blockPhrases = [];
+  const allPhrases = captionPlan?.phrases ?? [];
+  for (let i = 0; i < allPhrases.length; i++) {
+    const p = allPhrases[i];
+    if (p.startTime <= blockEndTime + EPS && p.endTime >= blockStartTime - EPS) {
+      blockPhrases.push({
+        ...p,
+        originalIndex: p.originalIndex ?? i
+      });
+    }
+  }
+  const blockCaptionPlan = {
+    ...captionPlan,
+    phrases: blockPhrases
+  };
+  const blockProofVisuals = [];
+  const allProofs = proofVisuals ?? [];
+  for (let i = 0; i < allProofs.length; i++) {
+    const pv = allProofs[i];
+    if (pv.absoluteStartTime == null || pv.absoluteEndTime == null) continue;
+    const startSec = pv.absoluteStartTime;
+    const endSec = pv.absoluteEndTime;
+    if (startSec <= blockEndTime + EPS && endSec >= blockStartTime - EPS) {
+      blockProofVisuals.push({
+        ...pv,
+        ...{ originalIndex: pv.originalIndex ?? i }
+      });
+    }
+  }
+  const blockVisualGrammar = [];
+  const allGrammar = visualGrammar ?? [];
+  for (let i = 0; i < allGrammar.length; i++) {
+    const vg = allGrammar[i];
+    if (!vg.enabled) continue;
+    const startSec = vg.absoluteStartTime ?? 0;
+    const endSec = vg.absoluteEndTime ?? startSec + (vg.duration ?? 0);
+    if (startSec <= blockEndTime + EPS && endSec >= blockStartTime - EPS) {
+      blockVisualGrammar.push({
+        ...vg,
+        ...{ originalIndex: vg.originalIndex ?? i }
+      });
+    }
+  }
+  const blockOpeningEvents = [];
+  const allOpening = openingEvents ?? [];
+  for (let i = 0; i < allOpening.length; i++) {
+    const ev = allOpening[i];
+    const startSec = ev.startTime;
+    const endSec = ev.startTime + ev.duration;
+    if (startSec <= blockEndTime + EPS && endSec >= blockStartTime - EPS) {
+      blockOpeningEvents.push({
+        ...ev,
+        ...{ originalIndex: ev.originalIndex ?? i }
+      });
+    }
+  }
+  const totalItemsCount = blockPhrases.length + blockProofVisuals.length + blockVisualGrammar.length + blockOpeningEvents.length;
+  return {
+    captionPlan: blockCaptionPlan,
+    proofVisuals: blockProofVisuals,
+    visualGrammar: blockVisualGrammar,
+    openingEvents: blockOpeningEvents,
+    totalItemsCount
+  };
+}
+function isBlockOverlayEmpty(props) {
+  return props.captionPlan.phrases.length === 0 && props.proofVisuals.length === 0 && props.visualGrammar.length === 0 && props.openingEvents.length === 0;
+}
+function isEmptyOverlayOptimizationEnabled() {
+  return process.env.ENABLE_EMPTY_OVERLAY_OPTIMIZATION === "1" || process.env.ENABLE_EMPTY_OVERLAY_OPTIMIZATION === "true";
+}
+async function renderEmptyOverlayBlock(options) {
+  const { outputPath, width, height, fps, frames, signal } = options;
+  const durationSecs = frames / fps;
+  const args = [
+    "-f",
+    "lavfi",
+    "-i",
+    `color=c=#00FF00:s=${width}x${height}:r=${fps}:d=${durationSecs.toFixed(6)}`,
+    "-frames:v",
+    String(frames),
+    "-c:v",
+    "libx264",
+    "-pix_fmt",
+    "yuv420p",
+    "-preset",
+    "ultrafast",
+    outputPath
+  ];
+  await ffmpegRun$4(args, { signal });
 }
 async function runRenderPreflight(options) {
   const {
@@ -13508,6 +14364,47 @@ function prepareRenderPlan(params) {
     retentionDecisions.set(i, decision);
     updateRetentionContext(retCtx, sceneInput, decision);
   }
+  let openingPlan = null;
+  if (retentionPlan) {
+    try {
+      let globalContext;
+      try {
+        const gcPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+        if (fs__namespace.existsSync(gcPath)) globalContext = JSON.parse(fs__namespace.readFileSync(gcPath, "utf-8"));
+      } catch {
+      }
+      let proofVisuals = [];
+      if (retentionSettings.proofVisualsEnabled) {
+        proofVisuals = [];
+        for (const [idx, dec] of retentionDecisions.entries()) {
+          if (dec.proofVisual) {
+            const sc = scenes[idx];
+            proofVisuals.push({
+              type: dec.proofVisual.type,
+              primaryText: dec.proofVisual.primaryText,
+              secondaryText: dec.proofVisual.secondaryText,
+              sceneIndex: idx,
+              absoluteStartTime: sc.startTime,
+              absoluteEndTime: sc.startTime + sc.duration,
+              position: dec.proofVisual.position || "center"
+            });
+          }
+        }
+      }
+      openingPlan = ensureOpeningRetentionPlan({
+        projectDir,
+        scenes,
+        retentionPlan,
+        retentionDecisions,
+        captionPlan: params.captionPlan,
+        proofVisuals,
+        visualGrammar: [],
+        globalContext
+      });
+    } catch (err) {
+      logger.warn(`[RENDER] Failed to ensure opening retention plan: ${String(err)}`);
+    }
+  }
   const { width, height } = resolution;
   const base = { width, height, fps, encoderProfile: params.encoderKey };
   const scaleFilt = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
@@ -13520,7 +14417,26 @@ function prepareRenderPlan(params) {
     const useBeats = hasMedia && beats.length > 1 && retentionSettings.enabled;
     const visualScene = visualPlanMap.get(scene.sceneIndex);
     const isAiStill = mediaKind === "image" && (visualScene?.strategy === "ai-still" || mediaPath && (mediaPath.includes(path__namespace.join("assets", "generated", "health")) || mediaPath.includes("/assets/generated/health/") || mediaPath.includes(path__namespace.join("assets", "generated", "general")) || mediaPath.includes("/assets/generated/general/")));
-    const motionPreset = isAiStill ? visualScene?.motionPreset || visualScene?.motion || "push-in-center" : "";
+    let motionPreset = isAiStill ? visualScene?.motionPreset || visualScene?.motion || "push-in-center" : "";
+    if (openingPlan?.motionHints) {
+      const hint = openingPlan.motionHints.find((h) => h.sceneIndex === scene.sceneIndex);
+      if (hint && isAiStill) {
+        switch (hint.type) {
+          case "micro-push":
+            motionPreset = "push-in-center";
+            break;
+          case "micro-pull":
+            motionPreset = "pull-out-center";
+            break;
+          case "detail-crop":
+            motionPreset = "push-in-center";
+            break;
+          case "hold":
+            motionPreset = "none";
+            break;
+        }
+      }
+    }
     const effectiveFilter = isAiStill ? `${scaleFilt}:motion=${typeof motionPreset === "object" ? motionPreset.preset : motionPreset}` : scaleFilt;
     const fingerprint = computeSceneFingerprint({
       sceneIndex: scene.sceneIndex,
@@ -13556,7 +14472,8 @@ function prepareRenderPlan(params) {
     captionPlan: cp2 ? hashJsonValue(cp2) : "none",
     audioPlan: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
     productionSettings: hashFileContent(path__namespace.join(analysis, "production-settings.json")),
-    visualGrammarPlan: hashFileContent(path__namespace.join(analysis, "visual-grammar-plan.json"))
+    visualGrammarPlan: hashFileContent(path__namespace.join(analysis, "visual-grammar-plan.json")),
+    openingPlan: openingPlan ? hashJsonValue(openingPlan) : "none"
   };
   const assemblyFingerprint = computeAssemblyFingerprint({
     sceneFingerprints: sceneJobs.map((j) => j.fingerprint),
@@ -13569,6 +14486,7 @@ function prepareRenderPlan(params) {
       d: e.scene.duration
     })),
     transitionSettings: validTransitionSettings ?? null,
+    openingPlanHash: hashes.openingPlan,
     base
   });
   const renderFingerprint = computeRenderFingerprint({
@@ -13607,6 +14525,7 @@ function prepareRenderPlan(params) {
     retentionPlan,
     retentionPlanMap,
     visualPlanMap,
+    openingPlan,
     sceneJobs,
     base,
     hashes,
@@ -13754,11 +14673,12 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
     } catch (err) {
       logger.warn(`[RENDER] Retention QA failed (non-blocking): ${String(err)}`);
     }
-    workspace = new RenderWorkspace(projectDir, prepared.renderFingerprint);
+    workspace = new RenderWorkspace(projectDir, prepared.assemblyFingerprint);
     workspace.ensure();
     const stale = workspace.cleanupStalePartials();
     const previousActive = readActiveRender(projectDir);
     const existing = workspace.loadManifest();
+    const previousOverlayBlocks = [...existing?.overlayBlocks ?? []];
     const resuming = !!existing && existing.status !== "completed";
     manifest = existing ?? createManifest({
       renderFingerprint: prepared.renderFingerprint,
@@ -13772,6 +14692,14 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
         encoderMode: encoder.mode
       }
     });
+    if (existing && manifest.renderFingerprint !== prepared.renderFingerprint) {
+      manifest.renderFingerprint = prepared.renderFingerprint;
+      manifest.audioMix = { status: "pending", fingerprint: "" };
+      manifest.composite = { status: "pending", fingerprint: "" };
+      manifest.compositeRemotion = void 0;
+      manifest.overlayBlocks = [];
+      manifest.finalOutput = void 0;
+    }
     manifest.outputName = outputName;
     manifest.settings.resourceProfile = limits.profile;
     manifest.settings.encoderMode = encoder.mode;
@@ -13967,6 +14895,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
             ffmpegOptions: ffmpegOpts,
             videoCodecArgs: vcodec(ctx, 20),
             maxScenesPerSegment: limits.assemblyMaxScenesPerSegment,
+            openingHints: prepared.openingPlan?.transitionHints,
             segmentRunner: async (seg, render) => {
               const segPath = workspace.assemblySegmentPath(seg.segmentIndex);
               const segExpect = {
@@ -14057,6 +14986,24 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     setPct("Loading audio plan…", 0.86);
     const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
     const audioPlan = fs__namespace.existsSync(audioPlanPath) ? JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8")) : null;
+    if (audioPlan && prepared.openingPlan?.sfxEvents) {
+      for (const ev of prepared.openingPlan.sfxEvents) {
+        const cached = SfxCacheManager.getCachedSfx(projectDir, ev.type);
+        if (cached && cached.localPath) {
+          audioPlan.sfxAssignments.push({
+            sceneIndex: ev.sceneIndex,
+            startTime: ev.absoluteTime,
+            endTime: ev.absoluteTime + ev.duration,
+            sfxQuery: ev.type,
+            approved: true,
+            approvedLocalPath: cached.localPath,
+            volumeDb: ev.volumeDb,
+            fadeInSecs: 0.05,
+            fadeOutSecs: 0.15
+          });
+        }
+      }
+    }
     const approvedMusic = audioPlan?.sections.filter(
       (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
     ) ?? [];
@@ -14301,7 +15248,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       const captionPlanForOverlay = params.captionPlan ?? { enabled: true, activeRanges: [], phrases: [] };
       const videoDurationSecs = scenes.reduce((a, s) => a + s.duration, 0);
       const totalFrames = Math.ceil(videoDurationSecs * fps);
-      const overlayPropsHash = fingerprintOf({ captionPlan: captionPlanForOverlay, proofVisuals, visualGrammar });
+      const overlayPropsHash = fingerprintOf({ captionPlan: captionPlanForOverlay, proofVisuals, visualGrammar, openingEvents: prepared.openingPlan?.events });
       const remotionSourceHash = computeDirectorySignature(path__namespace.join(__dirname, "../../src/remotion"));
       const hwMode = remotionHw && process.platform === "darwin" ? "if-possible" : "disable";
       const sceneBoundaries = [];
@@ -14317,13 +15264,29 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         protectedIntervals: collectProtectedIntervals({
           captionPhrases: hasCaptions ? captionPlanForOverlay.phrases : [],
           proofVisuals,
-          visualGrammar
+          visualGrammar,
+          openingEvents: prepared.openingPlan?.events
         })
       });
-      const prevBlocks = new Map((existing?.overlayBlocks ?? []).map((b) => [b.blockIndex, b]));
+      const prevBlocks = new Map(previousOverlayBlocks.map((b) => [b.blockIndex, b]));
       manifest.overlayBlocks = blocks.map((b) => {
-        const fp = computeOverlayBlockFingerprint({
-          overlayPropsHash,
+        const blockProps = selectOverlayPropsForBlock({
+          captionPlan: captionPlanForOverlay,
+          proofVisuals,
+          visualGrammar,
+          openingEvents: prepared.openingPlan?.events,
+          startFrame: b.startFrame,
+          endFrameExclusive: b.endFrameExclusive,
+          fps
+        });
+        const blockOverlayPropsHash = fingerprintOf({
+          captionPlan: blockProps.captionPlan,
+          proofVisuals: blockProps.proofVisuals,
+          visualGrammar: blockProps.visualGrammar,
+          openingEvents: blockProps.openingEvents
+        });
+        const fp = computeBlockLocalOverlayFingerprint({
+          blockOverlayPropsHash,
           startFrame: b.startFrame,
           endFrameExclusive: b.endFrameExclusive,
           totalFrames,
@@ -14380,28 +15343,52 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         const blockPartial = blockPath.replace(/\.mp4$/, ".partial.mp4");
         safeUnlink(blockPartial);
         const t0 = Date.now();
-        const { hardwareFallback } = await overlayRenderer({
+        const blockProps = selectOverlayPropsForBlock({
           captionPlan: captionPlanForOverlay,
           proofVisuals,
           visualGrammar,
-          videoDurationInSeconds: videoDurationSecs,
-          outputPath: blockPartial,
-          fps,
-          resolution,
-          frameRange: [blk.startFrame, blk.endFrameExclusive - 1],
-          concurrency,
-          offthreadVideoThreads: limits.offthreadVideoThreads,
-          mediaCacheSizeInBytes: limits.mediaCacheSizeInBytes,
-          offthreadVideoCacheSizeInBytes: limits.offthreadVideoCacheSizeInBytes,
-          hardwareAcceleration: hwMode,
-          signal,
-          onBundleProgress: (pct) => {
-            progress(`Bundling Remotion composition... ${Math.round(pct)}%`, basePct);
-          },
-          onRenderProgress: (pct) => {
-            progress(`Rendering overlay block ${bi + 1}/${manifest.overlayBlocks.length}... ${Math.round(pct * 100)}%`, basePct + pct * 0.02 / manifest.overlayBlocks.length);
-          }
+          openingEvents: prepared.openingPlan?.events,
+          startFrame: blk.startFrame,
+          endFrameExclusive: blk.endFrameExclusive,
+          fps
         });
+        let hardwareFallback = false;
+        if (isEmptyOverlayOptimizationEnabled() && isBlockOverlayEmpty(blockProps)) {
+          logger.info(`[RENDER] Overlay block ${bi + 1}/${manifest.overlayBlocks.length} has 0 overlays — using fast empty block generator`);
+          await renderEmptyOverlayBlock({
+            outputPath: blockPartial,
+            width,
+            height,
+            fps,
+            frames,
+            signal
+          });
+        } else {
+          const res = await overlayRenderer({
+            captionPlan: blockProps.captionPlan,
+            proofVisuals: blockProps.proofVisuals,
+            visualGrammar: blockProps.visualGrammar,
+            openingEvents: blockProps.openingEvents,
+            videoDurationInSeconds: videoDurationSecs,
+            outputPath: blockPartial,
+            fps,
+            resolution,
+            frameRange: [blk.startFrame, blk.endFrameExclusive - 1],
+            concurrency,
+            offthreadVideoThreads: limits.offthreadVideoThreads,
+            mediaCacheSizeInBytes: limits.mediaCacheSizeInBytes,
+            offthreadVideoCacheSizeInBytes: limits.offthreadVideoCacheSizeInBytes,
+            hardwareAcceleration: hwMode,
+            signal,
+            onBundleProgress: (pct) => {
+              progress(`Bundling Remotion composition... ${Math.round(pct)}%`, basePct);
+            },
+            onRenderProgress: (pct) => {
+              progress(`Rendering overlay block ${bi + 1}/${manifest.overlayBlocks.length}... ${Math.round(pct * 100)}%`, basePct + pct * 0.02 / manifest.overlayBlocks.length);
+            }
+          });
+          hardwareFallback = res.hardwareFallback;
+        }
         if (hardwareFallback && !manifest.warnings.includes("Remotion hardware acceleration failed; overlay rendered in software.")) {
           manifest.warnings.push("Remotion hardware acceleration failed; overlay rendered in software.");
         }
@@ -15718,6 +16705,80 @@ function dedupeStockQueries(queries, fallback) {
   }
   return result;
 }
+class PlanningTimeoutError extends Error {
+  isTimeout = true;
+  task;
+  timeoutMs;
+  constructor(task, timeoutMs) {
+    super(`[PlanningTimeout] Task "${task}" exceeded deadline of ${Math.round(timeoutMs / 1e3)}s`);
+    this.name = "PlanningTimeoutError";
+    this.task = task;
+    this.timeoutMs = timeoutMs;
+  }
+}
+class PlanningCancelledError extends Error {
+  isCancelled = true;
+  task;
+  constructor(task) {
+    super(`[PlanningCancelled] Task "${task}" was cancelled by user`);
+    this.name = "PlanningCancelledError";
+    this.task = task;
+  }
+}
+async function executePlanningRequest(options) {
+  const { task, timeoutMs, signal, execute } = options;
+  if (signal?.aborted) {
+    throw new PlanningCancelledError(task);
+  }
+  const controller = new AbortController();
+  let timer = null;
+  let didTimeout = false;
+  const onUserAbort = () => {
+    controller.abort(new PlanningCancelledError(task));
+  };
+  if (signal) {
+    signal.addEventListener("abort", onUserAbort, { once: true });
+  }
+  timer = setTimeout(() => {
+    didTimeout = true;
+    controller.abort(new PlanningTimeoutError(task, timeoutMs));
+  }, timeoutMs);
+  const t0 = Date.now();
+  try {
+    const result = await execute(controller.signal);
+    const elapsed = Date.now() - t0;
+    logger.debug(`[PlanningRequest] Task "${task}" succeeded in ${elapsed}ms`);
+    return result;
+  } catch (err) {
+    const elapsed = Date.now() - t0;
+    if (signal?.aborted) {
+      logger.info(`[PlanningRequest] Task "${task}" cancelled by user after ${elapsed}ms`);
+      throw new PlanningCancelledError(task);
+    }
+    if (didTimeout || err instanceof Error && err.name === "AbortError" && didTimeout) {
+      logger.warn(`[PlanningRequest] Task "${task}" timed out after ${elapsed}ms (limit: ${timeoutMs}ms)`);
+      throw new PlanningTimeoutError(task, timeoutMs);
+    }
+    throw err;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
+    if (signal) {
+      signal.removeEventListener("abort", onUserAbort);
+    }
+  }
+}
+function computeBatchTimeoutMs(sceneCount) {
+  if (sceneCount <= 2) return 35e3;
+  if (sceneCount <= 5) return 45e3;
+  if (sceneCount <= 10) return 6e4;
+  return Math.min(85e3, 5e4 + sceneCount * 1500);
+}
+function computeOutputTokenBudget(sceneCount) {
+  return Math.min(8192, Math.max(1024, sceneCount * 350));
+}
 const DEFAULT_CONFIG = {
   maxMonotoneEnergySeconds: 150,
   // 2.5 minutes — documentary standard
@@ -16246,7 +17307,10 @@ Return ONLY valid JSON matching this schema:
 }`;
 }
 async function analyzeGlobalContext(params) {
-  const { projectDir, apiKey, forceRegenerate = false } = params;
+  const { projectDir, apiKey, forceRegenerate = false, signal } = params;
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("analyzeGlobalContext");
+  }
   const progress = params.onProgress ?? (() => {
   });
   const modelId = params.model ?? "gemini-3.5-flash";
@@ -16289,19 +17353,33 @@ async function analyzeGlobalContext(params) {
       }
       const fallbackModels = getAvailableModelsForTask("global_context", rawModel);
       for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+        if (signal?.aborted) throw new PlanningCancelledError("analyzeGlobalContext");
         const currentModel = fallbackModels[mIdx];
         let retryCount = 0;
         const maxRetries = 1;
         while (retryCount <= maxRetries) {
+          if (signal?.aborted) throw new PlanningCancelledError("analyzeGlobalContext");
           try {
             progress(
               retryCount === 0 ? `Sending full script to Gemini (${currentModel}) for global analysis...` : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
               0.05 + mIdx * 0.15 + retryCount * 0.05
             );
-            const response = await ai.models.generateContent({
-              model: currentModel,
-              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
-              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+            const timeoutMs = 45e3;
+            const response = await executePlanningRequest({
+              task: `Global Context (${currentModel})`,
+              timeoutMs,
+              signal,
+              execute: (reqSignal) => ai.models.generateContent({
+                model: currentModel,
+                contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT$1 + "\n\n" + prompt }] }],
+                config: {
+                  responseMimeType: "application/json",
+                  temperature: 0.2,
+                  maxOutputTokens: 8192,
+                  abortSignal: reqSignal,
+                  httpOptions: { timeout: timeoutMs }
+                }
+              })
             });
             rawJson = response.text ?? "";
             if (rawJson) {
@@ -16310,6 +17388,9 @@ async function analyzeGlobalContext(params) {
               break;
             }
           } catch (err) {
+            if (signal?.aborted || err instanceof PlanningCancelledError) {
+              throw err;
+            }
             const { kind, message } = classifyGeminiErrorKind(err);
             recordModelFailure(currentModel, kind);
             aiError = message;
@@ -16325,6 +17406,11 @@ async function analyzeGlobalContext(params) {
             }
             if (kind === "BAD_REQUEST") {
               logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`);
+              break;
+            }
+            if (kind === "TIMEOUT") {
+              const nextModel = fallbackModels[mIdx + 1];
+              logger.warn(`[GlobalContext] Gemini ${currentModel} timed out. Switching immediately to ${nextModel ?? "fallback"}...`);
               break;
             }
             if (kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE") {
@@ -16347,6 +17433,9 @@ async function analyzeGlobalContext(params) {
         if (rawJson) break;
       }
     } catch (outerErr) {
+      if (signal?.aborted || outerErr instanceof PlanningCancelledError) {
+        throw outerErr;
+      }
       aiError = outerErr instanceof Error ? outerErr.message : String(outerErr);
       logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`);
     }
@@ -17101,6 +18190,144 @@ function validateSemanticFidelity(textToValidate, contentIntelligence, sceneNarr
     reason: isValid ? "Passes semantic fidelity check" : `Unsupported domain introduction: ${unsupported.join(", ")}`
   };
 }
+function getVisualIdentityBiblePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "visual-identity-bible.json");
+}
+function loadVisualIdentityBible(projectDir, currentSourceHash) {
+  const filePath = getVisualIdentityBiblePath(projectDir);
+  if (!fs__namespace.existsSync(filePath)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (currentSourceHash && parsed.sourceHash && parsed.sourceHash !== currentSourceHash) {
+      return null;
+    }
+    return parsed;
+  } catch (err) {
+    logger.warn(`Failed to parse ${filePath}:`, err);
+    return null;
+  }
+}
+function saveVisualIdentityBible(projectDir, bible) {
+  const filePath = getVisualIdentityBiblePath(projectDir);
+  fs__namespace.mkdirSync(path__namespace.dirname(filePath), { recursive: true });
+  fs__namespace.writeFileSync(filePath, JSON.stringify(bible, null, 2), "utf-8");
+}
+function generateVisualIdentityBible(params) {
+  const { projectDir, scriptText, globalContext, contentIntelligence } = params;
+  const sourceHash = computeSourceFingerprint(scriptText);
+  const cached = loadVisualIdentityBible(projectDir, sourceHash);
+  if (cached) {
+    return cached;
+  }
+  const entities = [];
+  let identityMode = "none";
+  if (globalContext.communities && globalContext.communities.length > 0) {
+    for (const comm of globalContext.communities) {
+      const isPrimary = globalContext.primarySubject.includes(comm.name);
+      const entity = {
+        id: `community-${comm.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        canonicalName: comm.name,
+        entityType: "community",
+        importance: isPrimary ? "primary" : "secondary",
+        aliases: [comm.name],
+        description: comm.visualDescription || comm.role,
+        visualSignature: {
+          clothing: comm.visualIdentity?.clothing || [],
+          grooming: comm.visualIdentity?.grooming || [],
+          agePresentation: [],
+          physiquePresentation: [],
+          accessories: comm.visualIdentity?.accessories || [],
+          tools: comm.visualIdentity?.tools || [],
+          behavior: comm.visualIdentity?.socialBehavior || [],
+          socialGrouping: comm.visualIdentity?.socialBehavior || [],
+          environment: comm.visualIdentity?.environment || [],
+          architecture: comm.visualIdentity?.architecture || [],
+          machinery: comm.visualIdentity?.machinery || [],
+          recurringObjects: [],
+          materialCulture: comm.visualIdentity?.materialCulture || [],
+          eraMarkers: comm.visualIdentity?.eraMarkers || [],
+          geographicMarkers: [],
+          technologyLevel: [],
+          distinctiveShapesForms: []
+        },
+        requiredTraits: [],
+        optionalTraits: [],
+        forbiddenTraits: comm.visualIdentity?.forbiddenTraits || [],
+        mustNotConfuseWith: comm.mustNotConfuseWith || [],
+        uncertainty: [],
+        evidence: [{ trait: "Derived from global context community", level: "global-context", confidence: 0.9 }],
+        confidence: 0.9
+      };
+      entities.push(entity);
+    }
+  }
+  if (globalContext.recurringPeople && globalContext.recurringPeople.length > 0) {
+    for (const person of globalContext.recurringPeople) {
+      const entity = {
+        id: `person-${person.id.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`,
+        canonicalName: person.role,
+        entityType: "person-role",
+        importance: "secondary",
+        aliases: [person.role],
+        description: person.role,
+        visualSignature: {
+          clothing: person.clothing ? [person.clothing] : [],
+          grooming: [],
+          agePresentation: person.ageRange ? [person.ageRange] : [],
+          physiquePresentation: [],
+          accessories: [],
+          tools: [],
+          behavior: [],
+          socialGrouping: [],
+          environment: [],
+          architecture: [],
+          machinery: [],
+          recurringObjects: [],
+          materialCulture: [],
+          eraMarkers: [],
+          geographicMarkers: [],
+          technologyLevel: [],
+          distinctiveShapesForms: []
+        },
+        requiredTraits: person.appearance ? [person.appearance] : [],
+        optionalTraits: [],
+        forbiddenTraits: [],
+        mustNotConfuseWith: [],
+        uncertainty: [],
+        evidence: [{ trait: "Derived from global context recurring people", level: "global-context", confidence: 0.8 }],
+        confidence: 0.8
+      };
+      entities.push(entity);
+    }
+  }
+  if (entities.some((e) => e.entityType === "community")) {
+    identityMode = "community";
+  } else if (entities.some((e) => e.entityType === "person-role")) {
+    identityMode = "mixed";
+  } else if (globalContext.visualWorld?.environment?.length > 0) {
+    identityMode = "environment";
+  }
+  const primaryIdentityId = entities.find((e) => e.importance === "primary")?.id;
+  const bible = {
+    schemaVersion: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    sourceHash,
+    contentIntelligenceHash: contentIntelligence.sourceHash,
+    primaryIdentityId,
+    identityMode,
+    entities,
+    globalRules: {
+      realism: [],
+      authenticityRequirements: [],
+      forbiddenGenericSubstitutions: [],
+      forbiddenCrossIdentitySubstitutions: []
+    }
+  };
+  saveVisualIdentityBible(projectDir, bible);
+  logger.info(`[VisualIdentityBible] Generated identity bible with ${entities.length} entities`);
+  return bible;
+}
 function extractVisualQueries(text) {
   const clean = text.replace(/[.,/#!$%^&*;:{}=\-_`~()?"'0-9]/g, " ").trim();
   const words = clean.split(/\s+/).filter((w) => w.length > 2);
@@ -17130,24 +18357,92 @@ function inferShotTypeFromText(text) {
   if (lower.includes("abstract") || lower.includes("symbol") || lower.includes("silhouette")) return "abstract";
   return "medium";
 }
-function buildAlgorithmicOutline(skeletons, totalDuration) {
-  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)));
-  const scenesPerChapter = Math.ceil(skeletons.length / numChapters);
+function buildAlgorithmicOutline(skeletons, totalDuration, globalContextSummary) {
+  if (skeletons.length === 0) return [];
+  if (skeletons.length === 1) {
+    const s = skeletons[0];
+    return [
+      {
+        chapterIndex: 1,
+        title: "Chapter 1: Story Arc",
+        purpose: "Narrative presentation",
+        startSceneIndex: s.sceneIndex,
+        endSceneIndex: s.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: "Sequence 1: Visual Presentation",
+            startSceneIndex: s.sceneIndex,
+            endSceneIndex: s.sceneIndex
+          }
+        ]
+      }
+    ];
+  }
+  if (skeletons.length === 2) {
+    const s1 = skeletons[0];
+    const s2 = skeletons[1];
+    return [
+      {
+        chapterIndex: 1,
+        title: "Chapter 1: Introduction & Premise",
+        purpose: "Introduction and subject establishment",
+        startSceneIndex: s1.sceneIndex,
+        endSceneIndex: s1.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: "Sequence 1: Opening Shot",
+            startSceneIndex: s1.sceneIndex,
+            endSceneIndex: s1.sceneIndex
+          }
+        ]
+      },
+      {
+        chapterIndex: 2,
+        title: "Chapter 2: Development & Conclusion",
+        purpose: "Narrative payoff",
+        startSceneIndex: s2.sceneIndex,
+        endSceneIndex: s2.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: "Sequence 1: Conclusion",
+            startSceneIndex: s2.sceneIndex,
+            endSceneIndex: s2.sceneIndex
+          }
+        ]
+      }
+    ];
+  }
+  const maxPossibleChapters = Math.min(skeletons.length, 6);
+  const minPossibleChapters = Math.min(skeletons.length, skeletons.length >= 6 ? 3 : 2);
+  const durationBasedChapters = Math.round(totalDuration / 180);
+  const numChapters = Math.max(
+    minPossibleChapters,
+    Math.min(maxPossibleChapters, durationBasedChapters || minPossibleChapters)
+  );
   const chapters = [];
-  for (let chIdx = 0; chIdx < numChapters; chIdx++) {
-    const chStartIdx = chIdx * scenesPerChapter;
-    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length);
-    const chScenes = skeletons.slice(chStartIdx, chEndIdx);
+  let currentScenePointer = 0;
+  for (let chIdx = 0; chIdx < numChapters && currentScenePointer < skeletons.length; chIdx++) {
+    const remainingChapters = numChapters - chIdx;
+    const remainingScenes = skeletons.length - currentScenePointer;
+    const countForThisChapter = chIdx === numChapters - 1 ? remainingScenes : Math.min(remainingScenes, Math.max(1, Math.ceil(remainingScenes / remainingChapters)));
+    const chScenes = skeletons.slice(currentScenePointer, currentScenePointer + countForThisChapter);
+    currentScenePointer += countForThisChapter;
     if (chScenes.length === 0) continue;
     const startSceneIndex = chScenes[0].sceneIndex;
     const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex;
-    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)));
-    const scenesPerSeq = Math.ceil(chScenes.length / numSequences);
+    const maxSequences = Math.min(chScenes.length, 4);
+    const numSequences = Math.max(1, Math.min(maxSequences, Math.round(chScenes.length / 8) || 1));
     const sequences = [];
-    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
-      const seqStartIdx = seqIdx * scenesPerSeq;
-      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length);
-      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx);
+    let seqPointer = 0;
+    for (let seqIdx = 0; seqIdx < numSequences && seqPointer < chScenes.length; seqIdx++) {
+      const remainingSeqs = numSequences - seqIdx;
+      const remainingSeqScenes = chScenes.length - seqPointer;
+      const countForThisSeq = seqIdx === numSequences - 1 ? remainingSeqScenes : Math.min(remainingSeqScenes, Math.max(1, Math.ceil(remainingSeqScenes / remainingSeqs)));
+      const seqScenes = chScenes.slice(seqPointer, seqPointer + countForThisSeq);
+      seqPointer += countForThisSeq;
       if (seqScenes.length === 0) continue;
       sequences.push({
         sequenceIndex: seqIdx + 1,
@@ -17167,11 +18462,23 @@ function buildAlgorithmicOutline(skeletons, totalDuration) {
   }
   return chapters;
 }
-async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, onProgress) {
+async function generateChapterOutlineWithGemini(ai, modelChain, skeletons, globalContextSummary, totalDuration, signal, onProgress) {
+  if (skeletons.length === 0) return [];
+  if (skeletons.length <= 2) {
+    logger.info(`[PLAN] Short script with ${skeletons.length} scenes: using deterministic chapter outline`);
+    return buildAlgorithmicOutline(skeletons, totalDuration);
+  }
+  if (!modelChain || modelChain.length === 0) {
+    logger.warn("[PLAN] No models available for outline. Using algorithmic outline.");
+    return buildAlgorithmicOutline(skeletons, totalDuration);
+  }
   const firstIndex = skeletons[0].sceneIndex;
   const lastIndex = skeletons[skeletons.length - 1].sceneIndex;
   const step = Math.max(1, Math.floor(skeletons.length / 10));
   const sampleScenes = skeletons.filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0).map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`).join("\n");
+  const isShortScript = skeletons.length <= 5;
+  const chapterPromptGoal = isShortScript ? `Divide the ${skeletons.length} scenes into 1 to 2 chapters, each with 1 to 2 sequences.` : `Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.`;
+  const minRequiredChapters = isShortScript ? 1 : 2;
   const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
 Video Duration: ${totalDuration.toFixed(0)}s
 Total Scenes: ${skeletons.length} (Scene ${firstIndex} to Scene ${lastIndex})
@@ -17183,7 +18490,7 @@ ${globalContextSummary}
 ${sampleScenes}
 
 ## YOUR TASK
-Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
+${chapterPromptGoal}
 Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
 Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
 
@@ -17195,34 +18502,46 @@ Return ONLY valid JSON matching this schema:
       "title": "Meaningful Chapter Title",
       "purpose": "Narrative purpose",
       "startSceneIndex": 1,
-      "endSceneIndex": 25,
+      "endSceneIndex": ${skeletons.length},
       "sequences": [
         {
           "sequenceIndex": 1,
           "title": "Sequence title",
           "startSceneIndex": 1,
-          "endSceneIndex": 12
+          "endSceneIndex": ${skeletons.length}
         }
       ]
     }
   ]
 }`;
-  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
+  const outlineTimeoutMs = isShortScript ? 35e3 : 5e4;
+  const maxAttempts = Math.min(2, modelChain.length);
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError("generateChapterOutlineWithGemini");
+    }
     const model = modelChain[attempt];
     try {
       onProgress?.(`Generating story arc outline (${model})...`, 0.2);
-      const res = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.2,
-          maxOutputTokens: 4096
-        }
+      const res = await executePlanningRequest({
+        task: `Chapter outline (${model})`,
+        timeoutMs: outlineTimeoutMs,
+        signal,
+        execute: (reqSignal) => ai.models.generateContent({
+          model,
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.2,
+            maxOutputTokens: 4096,
+            abortSignal: reqSignal,
+            httpOptions: { timeout: outlineTimeoutMs }
+          }
+        })
       });
       const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
       const data = JSON.parse(clean);
-      if (data.chapters && data.chapters.length >= 2) {
+      if (data.chapters && data.chapters.length >= minRequiredChapters) {
         const covered = /* @__PURE__ */ new Set();
         let valid = true;
         for (const ch of data.chapters) {
@@ -17251,14 +18570,15 @@ Return ONLY valid JSON matching this schema:
         }
       }
     } catch (err) {
+      if (signal?.aborted || err instanceof PlanningCancelledError) {
+        throw err;
+      }
       const { kind } = classifyGeminiErrorKind(err);
       recordModelFailure(model, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = modelChain[attempt + 1];
-        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic outline fallback"}.`);
-      } else {
-        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
+      if (kind === "AUTH_ERROR") {
+        break;
       }
+      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`);
     }
   }
   logger.info("[PLAN] Using algorithmic chapter outline fallback");
@@ -17333,65 +18653,115 @@ Return ONLY valid JSON array matching this exact schema:
   }
 ]`;
 }
-async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, onProgress) {
-  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
+async function enrichScenesBatchWithGemini(ai, modelChain, batchScenes, globalContextSummary, mediaFiles, batchIndex, totalBatches, signal, onProgress) {
   const enrichedMap = /* @__PURE__ */ new Map();
+  if (!modelChain || modelChain.length === 0) {
+    logger.warn(`[PLAN] No available models in planning route for batch ${batchIndex + 1}. Using algorithmic fallback.`);
+    for (const skel of batchScenes) {
+      const queries = extractVisualQueries(skel.narrativeText);
+      enrichedMap.set(skel.sceneIndex, {
+        sceneIndex: skel.sceneIndex,
+        visualIntent: queries[0] ?? "Documentary cinematic b-roll",
+        visualNote: `Visual shot: ${queries[0]}`,
+        searchQueries: queries.length >= 3 ? queries : [...queries, "documentary archive footage", "historical b-roll cinematic"].slice(0, 3),
+        mediaType: "video",
+        transitionIn: "cut",
+        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+        shotType: inferShotTypeFromText(skel.narrativeText)
+      });
+    }
+    return { enrichedMap, modelUsed: "algorithmic-fallback", usedFallback: true };
+  }
+  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles);
+  const timeoutMs = computeBatchTimeoutMs(batchScenes.length);
+  const outputTokenBudget = computeOutputTokenBudget(batchScenes.length);
+  const validBatchIndices = new Set(batchScenes.map((s) => s.sceneIndex));
   let activeModelIndex = 0;
   let lastError = "";
   let successModel = modelChain[0];
   let usedFallback = false;
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  const maxAttempts = Math.min(2, Math.max(1, modelChain.length));
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError("enrichScenesBatchWithGemini");
+    }
     const currentModel = modelChain[activeModelIndex];
+    if (!currentModel) break;
+    const requestStartTime = Date.now();
     try {
       onProgress?.(
-        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
-        0.25 + batchIndex / totalBatches * 0.55
+        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${batchScenes.length} scenes, attempt ${attempt}/${maxAttempts}: ${currentModel})...`,
+        0.25 + batchIndex / totalBatches * 0.55 + (attempt - 1) * 0.02
       );
-      const res = await ai.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.3,
-          maxOutputTokens: 8192
-        }
+      const res = await executePlanningRequest({
+        task: `Planning batch ${batchIndex + 1}/${totalBatches} (${currentModel})`,
+        timeoutMs,
+        signal,
+        execute: (reqSignal) => ai.models.generateContent({
+          model: currentModel,
+          contents: prompt,
+          config: {
+            responseMimeType: "application/json",
+            temperature: 0.3,
+            maxOutputTokens: outputTokenBudget,
+            abortSignal: reqSignal,
+            httpOptions: { timeout: timeoutMs }
+          }
+        })
       });
       const clean = (res.text ?? "").replace(/^```json\s*/i, "").replace(/```\s*$/i, "").trim();
       const items = JSON.parse(clean);
       if (Array.isArray(items)) {
+        let acceptedCount = 0;
         for (const item of items) {
-          if (typeof item.sceneIndex === "number") {
-            enrichedMap.set(item.sceneIndex, item);
+          if (typeof item.sceneIndex === "number" && validBatchIndices.has(item.sceneIndex)) {
+            if (!enrichedMap.has(item.sceneIndex)) {
+              const validatedItem = {
+                sceneIndex: item.sceneIndex,
+                visualIntent: typeof item.visualIntent === "string" && item.visualIntent.trim() ? item.visualIntent.trim() : void 0,
+                visualNote: typeof item.visualNote === "string" ? item.visualNote.trim() : void 0,
+                searchQueries: Array.isArray(item.searchQueries) && item.searchQueries.length > 0 ? item.searchQueries.filter((q) => typeof q === "string" && q.trim()) : void 0,
+                mediaType: item.mediaType === "image" || item.mediaType === "video" ? item.mediaType : "video",
+                transitionIn: item.transitionIn === "fade" || item.transitionIn === "dissolve" || item.transitionIn === "wipe" ? item.transitionIn : "cut",
+                energyLevel: item.energyLevel === "low" || item.energyLevel === "high" ? item.energyLevel : "medium",
+                shotType: item.shotType === "wide" || item.shotType === "close-up" || item.shotType === "abstract" ? item.shotType : "medium",
+                localAsset: typeof item.localAsset === "string" ? item.localAsset.trim() : null
+              };
+              enrichedMap.set(item.sceneIndex, validatedItem);
+              acceptedCount++;
+            }
           }
         }
-        recordModelSuccess(currentModel);
-        successModel = currentModel;
-        break;
+        if (acceptedCount > 0) {
+          recordModelSuccess(currentModel);
+          successModel = currentModel;
+          const elapsed = Date.now() - requestStartTime;
+          logger.info(
+            `[PLAN] Batch ${batchIndex + 1}/${totalBatches} enriched ${acceptedCount}/${batchScenes.length} scenes with ${currentModel} in ${elapsed}ms`
+          );
+          break;
+        }
       }
     } catch (err) {
+      if (signal?.aborted || err instanceof PlanningCancelledError) {
+        throw err;
+      }
+      const elapsed = Date.now() - requestStartTime;
       const msg = err instanceof Error ? err.message : String(err);
       lastError = msg;
       const { kind } = classifyGeminiErrorKind(err);
       recordModelFailure(currentModel, kind);
-      if (kind === "MODEL_NOT_FOUND") {
-        const nextModel = modelChain[activeModelIndex + 1];
-        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? "algorithmic fallback"}.`);
-        if (activeModelIndex + 1 < modelChain.length) {
-          activeModelIndex++;
-          continue;
-        } else {
-          break;
-        }
+      logger.warn(
+        `[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed after ${elapsed}ms (${kind}): ${msg}`
+      );
+      if (kind === "AUTH_ERROR") {
+        logger.error(`[PLAN] Authentication error encountered. Stopping AI attempts for batch.`);
+        break;
       }
-      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`);
-      const isOverloaded = kind === "RATE_LIMIT" || kind === "SERVICE_UNAVAILABLE" || msg.includes("503") || msg.includes("429") || msg.includes("UNAVAILABLE") || msg.includes("high demand");
-      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
+      if (activeModelIndex + 1 < modelChain.length) {
         activeModelIndex++;
-        await new Promise((r) => setTimeout(r, 1500));
-        continue;
-      }
-      if (attempt < 4) {
-        await new Promise((r) => setTimeout(r, 2e3));
+        const nextModel = modelChain[activeModelIndex];
+        logger.info(`[PLAN] Switching to fallback model: ${nextModel}`);
       }
     }
   }
@@ -17532,7 +18902,10 @@ function buildAlgorithmicPlan(transcript, projectName, pacing = "balanced", sour
   };
 }
 async function buildEditPlan(params) {
-  const { projectDir, apiKey, onProgress } = params;
+  const { projectDir, apiKey, onProgress, signal } = params;
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("buildEditPlan");
+  }
   const modelId = params.model ?? "gemini-3.8-flash";
   const progress = (msg, pct) => {
     logger.info(`[PLAN] ${msg}`);
@@ -17598,15 +18971,17 @@ async function buildEditPlan(params) {
     progress(`Done — algorithmic plan created (${fallbackPlan.totalScenes} scenes)`, 1);
     return fallbackPlan;
   }
+  let ctx = null;
   let globalContextSummary = "";
   try {
     progress("Preparing global documentary context...", 0.16);
-    const ctx = await analyzeGlobalContext({
+    ctx = await analyzeGlobalContext({
       projectDir,
       apiKey: cleanApiKey,
       model: modelId,
       scriptText,
       transcript,
+      signal,
       onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
     });
     globalContextSummary = [
@@ -17619,6 +18994,9 @@ async function buildEditPlan(params) {
       ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ""
     ].filter(Boolean).join("\n");
   } catch (err) {
+    if (signal?.aborted || err instanceof PlanningCancelledError) {
+      throw err;
+    }
     logger.warn(`[PLAN] Global context extraction failed: ${err}`);
   }
   const ai = new genai.GoogleGenAI({
@@ -17637,15 +19015,37 @@ async function buildEditPlan(params) {
     skeletons,
     globalContextSummary,
     transcript.duration,
+    signal,
     (m, p) => progress(m, p)
   );
   const BATCH_SIZE = 20;
   const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE);
   const allEnrichedMap = /* @__PURE__ */ new Map();
   let hadAnyBatchFallback = false;
-  let primaryModelUsed = fallbackModelChain[0];
+  let primaryModelUsed = fallbackModelChain[0] ?? "gemini-3.8-flash";
+  const checkpointPath = path.join(projectDir, "analysis", ".planning-checkpoint.json");
+  if (sourceHash && fs__namespace.existsSync(checkpointPath)) {
+    try {
+      const ckpt = JSON.parse(fs__namespace.readFileSync(checkpointPath, "utf-8"));
+      if (ckpt && ckpt.sourceHash === sourceHash && ckpt.totalScenes === skeletons.length && ckpt.scenes) {
+        for (const [idxStr, sc] of Object.entries(ckpt.scenes)) {
+          allEnrichedMap.set(Number(idxStr), sc);
+        }
+        logger.info(`[PLAN] Reused ${allEnrichedMap.size}/${skeletons.length} enriched scenes from checkpoint`);
+      }
+    } catch {
+    }
+  }
   for (let b = 0; b < totalBatches; b++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError("buildEditPlan");
+    }
     const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE);
+    const isBatchAlreadyComplete = batchScenes.every((s) => allEnrichedMap.has(s.sceneIndex));
+    if (isBatchAlreadyComplete) {
+      logger.info(`[PLAN] Batch ${b + 1}/${totalBatches} fully present in checkpoint. Skipping Gemini request.`);
+      continue;
+    }
     const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
       ai,
       fallbackModelChain,
@@ -17654,6 +19054,7 @@ async function buildEditPlan(params) {
       mediaFiles,
       b,
       totalBatches,
+      signal,
       progress
     );
     for (const [idx, data] of enrichedMap.entries()) {
@@ -17661,9 +19062,37 @@ async function buildEditPlan(params) {
     }
     if (usedFallback) hadAnyBatchFallback = true;
     if (b === 0) primaryModelUsed = modelUsed;
+    if (sourceHash) {
+      try {
+        const scenesObj = {};
+        for (const [idx, sc] of allEnrichedMap.entries()) {
+          scenesObj[idx] = sc;
+        }
+        fs__namespace.writeFileSync(
+          checkpointPath,
+          JSON.stringify({ sourceHash, totalScenes: skeletons.length, scenes: scenesObj }),
+          "utf-8"
+        );
+      } catch {
+      }
+    }
   }
   progress("Assembling master edit plan...", 0.85);
   const ci = sourceHash ? loadContentIntelligence(projectDir, sourceHash) : null;
+  let identityBible = null;
+  if (ci && ctx && scriptText && sourceHash) {
+    try {
+      identityBible = generateVisualIdentityBible({
+        projectDir,
+        scriptText,
+        globalContext: ctx,
+        contentIntelligence: ci
+      });
+      logger.info(`[PLAN] Visual Identity Bible generated. Mode: ${identityBible.identityMode}`);
+    } catch (err) {
+      logger.warn(`[PLAN] Failed to generate visual identity bible: ${err}`);
+    }
+  }
   const skeletonMap = /* @__PURE__ */ new Map();
   for (const skel of skeletons) {
     skeletonMap.set(skel.sceneIndex, skel);
@@ -17787,9 +19216,18 @@ async function buildEditPlan(params) {
     retentionFlags: initialFlags,
     sourceHash
   };
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("buildEditPlan");
+  }
   progress("Saving master edit plan...", 0.95);
   const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
   fs__namespace.writeFileSync(planPath, JSON.stringify(plan, null, 2), "utf-8");
+  try {
+    if (fs__namespace.existsSync(checkpointPath)) {
+      fs__namespace.unlinkSync(checkpointPath);
+    }
+  } catch {
+  }
   logger.info("Edit plan saved", {
     chapters: plan.chapters.length,
     scenes: plan.totalScenes,
@@ -20730,229 +22168,103 @@ async function runContextAwareStockEngine(params, onProgress = () => {
       logger.warn(`[StockEngine] Batch search plan generation failed (${msg}), falling back to per-scene generation`);
     }
   }
-  for (let i = 0; i < scenesToProcess.length; i++) {
-    const entry = scenesToProcess[i];
-    const { scene, sceneId, chapterTitle, chapterPurpose } = entry;
-    const pct = 0.2 + i / scenesToProcess.length * 0.75;
-    const narration = scene.narrativeText ?? "";
-    const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
-    onProgress(`[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - candidate search...`, pct);
-    const prevEntry = i > 0 ? scenesToProcess[i - 1] : null;
-    const nextEntry = i < scenesToProcess.length - 1 ? scenesToProcess[i + 1] : null;
-    const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : "";
-    const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : "";
-    let searchPlan = preGeneratedPlans.get(sceneId) ?? null;
-    let tierUsed = "D";
-    if (!searchPlan && hasGlobalContext && apiKey) {
-      const packet = {
-        globalContext: {
-          primarySubject: globalContext.primarySubject,
-          centralThesis: globalContext.centralThesis,
-          geography: [
-            globalContext.geography.primaryCountry,
-            globalContext.geography.primaryRegion,
-            ...globalContext.geography.secondaryLocations
-          ].filter(Boolean),
-          timePeriod: [globalContext.timeContext.primaryPeriod, ...globalContext.timeContext.historicalPeriods],
-          exactTopicAnchors: globalContext.exactTopicAnchors,
-          contextualAnchors: globalContext.contextualAnchors,
-          forbiddenSubstitutions: globalContext.forbiddenSubstitutions,
-          negativeKeywords: globalContext.negativeKeywords
-        },
-        chapterContext: { chapterId: `CH${entry.chapterIndex}`, chapterTitle, chapterPurpose },
-        localContext: {
-          narration,
-          scenePurpose: scene.visualIntent ?? "",
-          visibleSubject: scene.visualIntent ?? globalContext.primarySubject,
-          visibleAction: scene.visualIntent ?? "community activity",
-          preferredLocation: globalContext.geography.primaryRegion ?? globalContext.geography.primaryCountry ?? "",
-          preferredTimePeriod: globalContext.timeContext.primaryPeriod
-        },
-        neighboringContext: { previousScene: previousSceneSummary, nextScene: nextSceneSummary }
+  let nextIndex = 0;
+  let completedScenes = 0;
+  const worker = async () => {
+    while (nextIndex < scenesToProcess.length) {
+      const i = nextIndex++;
+      const entry = scenesToProcess[i];
+      const { scene, sceneId, chapterTitle, chapterPurpose } = entry;
+      const pct = 0.2 + i / scenesToProcess.length * 0.75;
+      const narration = scene.narrativeText ?? "";
+      const sceneDuration = scene.duration ?? scene.endTime - scene.startTime;
+      onProgress(`[${i + 1}/${scenesToProcess.length}] Scene ${scene.sceneIndex} - candidate search...`, pct);
+      const prevEntry = i > 0 ? scenesToProcess[i - 1] : null;
+      const nextEntry = i < scenesToProcess.length - 1 ? scenesToProcess[i + 1] : null;
+      const previousSceneSummary = prevEntry ? (prevEntry.scene.narrativeText ?? "").slice(0, 100) : "";
+      const nextSceneSummary = nextEntry ? (nextEntry.scene.narrativeText ?? "").slice(0, 100) : "";
+      let searchPlan = preGeneratedPlans.get(sceneId) ?? null;
+      let tierUsed = "D";
+      if (!searchPlan && hasGlobalContext && apiKey) {
+        const packet = {
+          globalContext: {
+            primarySubject: globalContext.primarySubject,
+            centralThesis: globalContext.centralThesis,
+            geography: [
+              globalContext.geography.primaryCountry,
+              globalContext.geography.primaryRegion,
+              ...globalContext.geography.secondaryLocations
+            ].filter(Boolean),
+            timePeriod: [globalContext.timeContext.primaryPeriod, ...globalContext.timeContext.historicalPeriods],
+            exactTopicAnchors: globalContext.exactTopicAnchors,
+            contextualAnchors: globalContext.contextualAnchors,
+            forbiddenSubstitutions: globalContext.forbiddenSubstitutions,
+            negativeKeywords: globalContext.negativeKeywords
+          },
+          chapterContext: { chapterId: `CH${entry.chapterIndex}`, chapterTitle, chapterPurpose },
+          localContext: {
+            narration,
+            scenePurpose: scene.visualIntent ?? "",
+            visibleSubject: scene.visualIntent ?? globalContext.primarySubject,
+            visibleAction: scene.visualIntent ?? "community activity",
+            preferredLocation: globalContext.geography.primaryRegion ?? globalContext.geography.primaryCountry ?? "",
+            preferredTimePeriod: globalContext.timeContext.primaryPeriod
+          },
+          neighboringContext: { previousScene: previousSceneSummary, nextScene: nextSceneSummary }
+        };
+        try {
+          searchPlan = await generateContextAwareSearchPlan({
+            projectDir,
+            apiKey,
+            model,
+            packet,
+            globalContext,
+            sceneId,
+            useCache: true
+          });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          logger.warn(`[StockEngine] QueryGen failed for scene ${scene.sceneIndex}: ${msg}`);
+        }
+      }
+      const legacyQueries = scene.searchQueries?.length ? scene.searchQueries : [scene.visualIntent ?? narration ?? "documentary b-roll"].slice(0, 3);
+      const planToUse = searchPlan ?? {
+        visualIntent: scene.visualIntent ?? "",
+        exactQueries: legacyQueries.slice(0, 2),
+        subjectQueries: legacyQueries.slice(0, 2),
+        contextualQueries: legacyQueries,
+        fallbackQueries: legacyQueries,
+        requiredTerms: [],
+        preferredTerms: [],
+        negativeTerms: [],
+        targetMediaType: "video",
+        desiredShotTypes: ["wide shot"],
+        desiredOrientation: "landscape"
+      };
+      const assignment = {
+        sceneId,
+        sceneIndex: scene.sceneIndex,
+        narrationText: narration,
+        startTime: scene.startTime,
+        endTime: scene.endTime,
+        visualIntent: planToUse.visualIntent || (scene.visualIntent ?? ""),
+        searchQueries: [...planToUse.exactQueries, ...planToUse.subjectQueries, ...planToUse.contextualQueries],
+        usedQuery: planToUse.exactQueries[0] ?? legacyQueries[0] ?? "",
+        asset: null,
+        score: 0,
+        locked: false,
+        manualOverride: false,
+        status: "searching",
+        chapterId: `CH${entry.chapterIndex}`,
+        chapterTitle,
+        scenePurpose: scene.visualIntent ?? "",
+        searchPlan: planToUse
       };
       try {
-        searchPlan = await generateContextAwareSearchPlan({
-          projectDir,
-          apiKey,
-          model,
-          packet,
-          globalContext,
-          sceneId,
-          useCache: true
-        });
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logger.warn(`[StockEngine] QueryGen failed for scene ${scene.sceneIndex}: ${msg}`);
-      }
-    }
-    const legacyQueries = scene.searchQueries?.length ? scene.searchQueries : [scene.visualIntent ?? narration ?? "documentary b-roll"].slice(0, 3);
-    const planToUse = searchPlan ?? {
-      visualIntent: scene.visualIntent ?? "",
-      exactQueries: legacyQueries.slice(0, 2),
-      subjectQueries: legacyQueries.slice(0, 2),
-      contextualQueries: legacyQueries,
-      fallbackQueries: legacyQueries,
-      requiredTerms: [],
-      preferredTerms: [],
-      negativeTerms: [],
-      targetMediaType: "video",
-      desiredShotTypes: ["wide shot"],
-      desiredOrientation: "landscape"
-    };
-    const assignment = {
-      sceneId,
-      sceneIndex: scene.sceneIndex,
-      narrationText: narration,
-      startTime: scene.startTime,
-      endTime: scene.endTime,
-      visualIntent: planToUse.visualIntent || (scene.visualIntent ?? ""),
-      searchQueries: [...planToUse.exactQueries, ...planToUse.subjectQueries, ...planToUse.contextualQueries],
-      usedQuery: planToUse.exactQueries[0] ?? legacyQueries[0] ?? "",
-      asset: null,
-      score: 0,
-      locked: false,
-      manualOverride: false,
-      status: "searching",
-      chapterId: `CH${entry.chapterIndex}`,
-      chapterTitle,
-      scenePurpose: scene.visualIntent ?? "",
-      searchPlan: planToUse
-    };
-    try {
-      const scoreEvaluator = (candidatesToScore) => {
-        if (!candidatesToScore.length) return 0;
-        if (hasGlobalContext && globalContext) {
-          const evalCtx = {
-            globalContext,
-            chapterTitle,
-            chapterPurpose,
-            narration,
-            visualIntent: planToUse.visualIntent,
-            scenePurpose: scene.visualIntent ?? "",
-            sceneDurationSecs: sceneDuration,
-            preferredAspectRatio,
-            usedAssetIds
-          };
-          const ranked = rankContextCandidates(candidatesToScore, evalCtx);
-          return ranked[0]?.contextScore.totalScore ?? 0;
-        }
-        return 60;
-      };
-      const { candidates, tierUsed: tu } = await searchWithTieredPlan(
-        planToUse,
-        pexelsApiKey,
-        pixabayApiKey,
-        orientation,
-        cache,
-        (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct),
-        scoreEvaluator
-      );
-      tierUsed = tu;
-      if (candidates.length === 0) {
-        assignment.status = "failed";
-        assignment.errorMessage = "No candidates found from any provider or tier";
-        failedCount++;
-      } else {
-        const assignmentHistory = assignments.map((a) => ({
-          sceneIndex: a.sceneIndex,
-          provider: a.asset?.provider,
-          assetId: a.asset?.assetId,
-          creator: a.asset?.creator,
-          title: a.asset?.searchQuery,
-          downloadUrl: a.asset?.downloadUrl,
-          thumbnailUrl: a.asset?.thumbnailUrl,
-          isLocked: a.locked
-        }));
-        if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
-          const scoringCtx = {
-            narration,
-            visualIntent: planToUse.visualIntent,
-            searchPlan: planToUse,
-            globalContext,
-            chapterTitle,
-            chapterPurpose,
-            sceneDurationSecs: sceneDuration,
-            preferredAspectRatio,
-            assignmentHistory,
-            isLocked: scene.locked
-          };
-          const shortlistCount = Math.max(
-            prodSettings.candidatesPerScene || 3,
-            prodSettings.visualTruthShortlistSize || 6
-          );
-          let topCandidates = rankCandidatesForScene(
-            sceneId,
-            scene.sceneIndex,
-            candidates,
-            scoringCtx,
-            shortlistCount
-          );
-          let winner = topCandidates.find((c) => c.selected) || topCandidates[0];
-          const isVisualTruthEnabled = prodSettings.visualTruthEnabled ?? prodSettings.productionIntelligence?.visualTruthEnabled ?? true;
-          if (isVisualTruthEnabled && apiKey) {
-            try {
-              const claimLedgerPath = getClaimLedgerPath(projectDir);
-              const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe$1(claimLedgerPath, null) : null;
-              const rerankResult = await rerankShortlistedCandidates({
-                projectDir,
-                sceneId,
-                sceneIndex: scene.sceneIndex,
-                narration,
-                visualIntent: planToUse.visualIntent,
-                candidates: topCandidates,
-                globalContext,
-                chapterTitle,
-                chapterPurpose,
-                claimLedger,
-                settings: prodSettings,
-                apiKey,
-                onProgress: (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct)
-              });
-              topCandidates = rerankResult.candidates;
-              winner = rerankResult.winner;
-            } catch (vtErr) {
-              logger.warn(
-                `[VisualTruth] Reranker error for scene ${sceneId}: ${String(vtErr)}, falling back to metadata ranking`
-              );
-            }
-          }
-          stockCandidatesStore[sceneId] = topCandidates;
-          const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
-          const downloadedAsset = await downloadAsset(
-            winner.result,
-            scene.sceneIndex,
-            usedQuery,
-            stockDir,
-            manifest
-          );
-          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
-          manifest.push(downloadedAsset);
-          usedAssetIds.add(downloadedAsset.assetId);
-          scene.localPath = downloadedAsset.localPath;
-          scene.mediaFile = path.basename(downloadedAsset.localPath);
-          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
-          const finalScore = winner.finalScore ?? winner.score.totalScore;
-          assignment.asset = downloadedAsset;
-          assignment.score = finalScore;
-          assignment.usedQuery = usedQuery;
-          assignment.status = "assigned";
-          assignment.tierUsed = tierUsed;
-          assignment.matchLabel = finalScore >= 80 ? "STRONG_MATCH" : finalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE";
-          assignment.visualTruthLabel = winner.visualTruth?.truthLabel ?? (winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH");
-          assignment.scoreBreakdown = winner.score;
-          assignment.candidates = topCandidates;
-          assignment.selectedCandidateId = winner.candidateId;
-          assignment.approvalStatus = "auto_selected";
-          assignment.rejectedCandidates = topCandidates.slice(1).map((c) => ({
-            title: c.result.title,
-            score: c.finalScore ?? c.score.totalScore,
-            reason: c.visualTruth?.contradictionReasons?.[0] || c.visualTruth?.negativeReasons?.[0] || c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
-          }));
-          assignedCount++;
-        } else {
-          let ranked;
-          if (hasGlobalContext) {
-            const ctx = {
+        const scoreEvaluator = (candidatesToScore) => {
+          if (!candidatesToScore.length) return 0;
+          if (hasGlobalContext && globalContext) {
+            const evalCtx = {
               globalContext,
               chapterTitle,
               chapterPurpose,
@@ -20963,50 +22275,189 @@ async function runContextAwareStockEngine(params, onProgress = () => {
               preferredAspectRatio,
               usedAssetIds
             };
-            ranked = rankContextCandidates(candidates, ctx);
-            if (ranked.length === 0) {
-              ranked = candidates.map((c) => ({ ...c, contextScore: void 0 }));
-            }
-          } else {
-            ranked = candidates;
+            const ranked = rankContextCandidates(candidatesToScore, evalCtx);
+            return ranked[0]?.contextScore.totalScore ?? 0;
           }
-          const winner = ranked[0];
-          const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
-          const downloadedAsset = await downloadAsset(winner, scene.sceneIndex, usedQuery, stockDir, manifest);
-          manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
-          manifest.push(downloadedAsset);
-          usedAssetIds.add(downloadedAsset.assetId);
-          scene.localPath = downloadedAsset.localPath;
-          scene.mediaFile = path.basename(downloadedAsset.localPath);
-          scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
-          const contextScore = winner.contextScore;
-          assignment.asset = downloadedAsset;
-          assignment.score = contextScore?.totalScore ?? 75;
-          assignment.usedQuery = usedQuery;
-          assignment.status = "assigned";
-          assignment.tierUsed = tierUsed;
-          assignment.matchLabel = contextScore?.matchLabel;
-          assignment.visualTruthLabel = contextScore?.visualTruthLabel;
-          assignment.scoreBreakdown = contextScore;
-          assignment.rejectedCandidates = ranked.slice(1, 4).map((c) => ({
-            title: c.title,
-            score: c.contextScore?.totalScore ?? 0,
-            reason: c.contextScore?.penaltyReasons?.[0] ?? "lower score"
+          return 60;
+        };
+        const { candidates, tierUsed: tu } = await searchWithTieredPlan(
+          planToUse,
+          pexelsApiKey,
+          pixabayApiKey,
+          orientation,
+          cache,
+          (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct),
+          scoreEvaluator
+        );
+        tierUsed = tu;
+        if (candidates.length === 0) {
+          assignment.status = "failed";
+          assignment.errorMessage = "No candidates found from any provider or tier";
+          failedCount++;
+        } else {
+          const assignmentHistory = assignments.map((a) => ({
+            sceneIndex: a.sceneIndex,
+            provider: a.asset?.provider,
+            assetId: a.asset?.assetId,
+            creator: a.asset?.creator,
+            title: a.asset?.searchQuery,
+            downloadUrl: a.asset?.downloadUrl,
+            thumbnailUrl: a.asset?.thumbnailUrl,
+            isLocked: a.locked
           }));
-          assignedCount++;
+          if (prodSettings.enabled && prodSettings.candidateRankingEnabled) {
+            const scoringCtx = {
+              narration,
+              visualIntent: planToUse.visualIntent,
+              searchPlan: planToUse,
+              globalContext,
+              chapterTitle,
+              chapterPurpose,
+              sceneDurationSecs: sceneDuration,
+              preferredAspectRatio,
+              assignmentHistory,
+              isLocked: scene.locked
+            };
+            const shortlistCount = Math.max(
+              prodSettings.candidatesPerScene || 3,
+              prodSettings.visualTruthShortlistSize || 6
+            );
+            let topCandidates = rankCandidatesForScene(
+              sceneId,
+              scene.sceneIndex,
+              candidates,
+              scoringCtx,
+              shortlistCount
+            );
+            let winner = topCandidates.find((c) => c.selected) || topCandidates[0];
+            const isVisualTruthEnabled = prodSettings.visualTruthEnabled ?? prodSettings.productionIntelligence?.visualTruthEnabled ?? true;
+            if (isVisualTruthEnabled && apiKey) {
+              try {
+                const claimLedgerPath = getClaimLedgerPath(projectDir);
+                const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe$1(claimLedgerPath, null) : null;
+                const rerankResult = await rerankShortlistedCandidates({
+                  projectDir,
+                  sceneId,
+                  sceneIndex: scene.sceneIndex,
+                  narration,
+                  visualIntent: planToUse.visualIntent,
+                  candidates: topCandidates,
+                  globalContext,
+                  chapterTitle,
+                  chapterPurpose,
+                  claimLedger,
+                  settings: prodSettings,
+                  apiKey,
+                  onProgress: (msg) => onProgress(`[Scene ${scene.sceneIndex}] ${msg}`, pct)
+                });
+                topCandidates = rerankResult.candidates;
+                winner = rerankResult.winner;
+              } catch (vtErr) {
+                logger.warn(
+                  `[VisualTruth] Reranker error for scene ${sceneId}: ${String(vtErr)}, falling back to metadata ranking`
+                );
+              }
+            }
+            stockCandidatesStore[sceneId] = topCandidates;
+            const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
+            const downloadedAsset = await downloadAsset(
+              winner.result,
+              scene.sceneIndex,
+              usedQuery,
+              stockDir,
+              manifest
+            );
+            manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+            manifest.push(downloadedAsset);
+            usedAssetIds.add(downloadedAsset.assetId);
+            scene.localPath = downloadedAsset.localPath;
+            scene.mediaFile = path.basename(downloadedAsset.localPath);
+            scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+            const finalScore = winner.finalScore ?? winner.score.totalScore;
+            assignment.asset = downloadedAsset;
+            assignment.score = finalScore;
+            assignment.usedQuery = usedQuery;
+            assignment.status = "assigned";
+            assignment.tierUsed = tierUsed;
+            assignment.matchLabel = finalScore >= 80 ? "STRONG_MATCH" : finalScore >= 60 ? "ACCEPTABLE" : "ILLUSTRATIVE";
+            assignment.visualTruthLabel = winner.visualTruth?.truthLabel ?? (winner.score.globalContextFit >= 15 ? "EXACT_SUBJECT" : "CONTEXTUAL_MATCH");
+            assignment.scoreBreakdown = winner.score;
+            assignment.candidates = topCandidates;
+            assignment.selectedCandidateId = winner.candidateId;
+            assignment.approvalStatus = "auto_selected";
+            assignment.rejectedCandidates = topCandidates.slice(1).map((c) => ({
+              title: c.result.title,
+              score: c.finalScore ?? c.score.totalScore,
+              reason: c.visualTruth?.contradictionReasons?.[0] || c.visualTruth?.negativeReasons?.[0] || c.score.rejectionReasons[0] || c.score.reasons[0] || "Lower rank"
+            }));
+            assignedCount++;
+          } else {
+            let ranked;
+            if (hasGlobalContext) {
+              const ctx = {
+                globalContext,
+                chapterTitle,
+                chapterPurpose,
+                narration,
+                visualIntent: planToUse.visualIntent,
+                scenePurpose: scene.visualIntent ?? "",
+                sceneDurationSecs: sceneDuration,
+                preferredAspectRatio,
+                usedAssetIds
+              };
+              ranked = rankContextCandidates(candidates, ctx);
+              if (ranked.length === 0) {
+                ranked = candidates.map((c) => ({ ...c, contextScore: void 0 }));
+              }
+            } else {
+              ranked = candidates;
+            }
+            const winner = ranked[0];
+            const usedQuery = planToUse.exactQueries[0] ?? legacyQueries[0];
+            const downloadedAsset = await downloadAsset(winner, scene.sceneIndex, usedQuery, stockDir, manifest);
+            manifest = manifest.filter((a) => a.assetId !== downloadedAsset.assetId);
+            manifest.push(downloadedAsset);
+            usedAssetIds.add(downloadedAsset.assetId);
+            scene.localPath = downloadedAsset.localPath;
+            scene.mediaFile = path.basename(downloadedAsset.localPath);
+            scene.mediaType = downloadedAsset.mediaType === "photo" ? "image" : "video";
+            const contextScore = winner.contextScore;
+            assignment.asset = downloadedAsset;
+            assignment.score = contextScore?.totalScore ?? 75;
+            assignment.usedQuery = usedQuery;
+            assignment.status = "assigned";
+            assignment.tierUsed = tierUsed;
+            assignment.matchLabel = contextScore?.matchLabel;
+            assignment.visualTruthLabel = contextScore?.visualTruthLabel;
+            assignment.scoreBreakdown = contextScore;
+            assignment.rejectedCandidates = ranked.slice(1, 4).map((c) => ({
+              title: c.title,
+              score: c.contextScore?.totalScore ?? 0,
+              reason: c.contextScore?.penaltyReasons?.[0] ?? "lower score"
+            }));
+            assignedCount++;
+          }
         }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[StockEngine] Scene ${scene.sceneIndex} failed: ${msg}`);
+        assignment.status = "failed";
+        assignment.errorMessage = msg;
+        failedCount++;
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[StockEngine] Scene ${scene.sceneIndex} failed: ${msg}`);
-      assignment.status = "failed";
-      assignment.errorMessage = msg;
-      failedCount++;
+      assignments.push(assignment);
+      completedScenes++;
+      if (completedScenes % 5 === 0 || completedScenes === scenesToProcess.length) {
+        cache.save();
+        saveAssetsManifest(stockDir, manifest);
+      }
     }
-    assignments.push(assignment);
-    cache.save();
-    saveAssetsManifest(stockDir, manifest);
+  };
+  const workers = [];
+  for (let w = 0; w < 3; w++) {
+    workers.push(worker());
   }
+  await Promise.all(workers);
   assignments.sort((a, b) => a.sceneIndex - b.sceneIndex);
   assertSceneIdentityPreserved(
     flattenedEntries.map((e) => ({
@@ -21942,7 +23393,7 @@ class VisualMixPlanner {
     return HealthVisualPlanner.loadScenesFromEditPlan(projectDir);
   }
   static buildPlan(params) {
-    const { projectDir, rawScenes, config, profile, globalContext } = params;
+    const { projectDir, rawScenes, config, profile, globalContext, contentIntelligence, identityBible } = params;
     const totalScenes = rawScenes.length;
     const aiRatio = config.aiImageRatio;
     const stockRatio = config.stockFootageRatio;
@@ -22101,11 +23552,22 @@ class VisualMixPlanner {
         motionSpec = motionPlan.motionSpec;
         motionPreset = motionPlan.motionPreset;
         recentPresets.push(motionPlan.motionPreset);
+        let identityBinding;
+        if (identityBible && globalContext && contentIntelligence) {
+          identityBinding = resolveSceneIdentity({
+            sceneIndex: scene.sceneIndex,
+            sceneNarration: narration,
+            visualIntent,
+            identityBible
+          });
+        }
         imagePrompt = buildGeneralImagePrompt({
           narration,
           visualIntent,
           globalContext,
-          sceneIndex: scene.sceneIndex
+          sceneIndex: scene.sceneIndex,
+          identityBible,
+          identityBinding
         });
         generationHash = computeGenerationHash({
           sceneIndex: scene.sceneIndex,
@@ -22832,7 +24294,7 @@ function fileHasContent(p) {
     return false;
   }
 }
-function buildManualAiAssignment(scene, localPath, isHealth) {
+function buildManualAiAssignment(scene, localPath, isHealth, mediaType = "photo") {
   let size = 0;
   try {
     size = fs__namespace.statSync(localPath).size;
@@ -22841,11 +24303,11 @@ function buildManualAiAssignment(scene, localPath, isHealth) {
   const asset = {
     assetId: `manual_ai_${scene.sceneIndex}`,
     provider: "manual-ai",
-    mediaType: "photo",
+    mediaType,
     localPath,
     thumbnailUrl: `file://${localPath}`,
     downloadUrl: "",
-    creator: "Manual AI Image",
+    creator: mediaType === "video" ? "Manual AI Video" : "Manual AI Image",
     searchQuery: scene.imagePrompt || "",
     downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
     fileSizeBytes: size
@@ -22858,7 +24320,7 @@ function buildManualAiAssignment(scene, localPath, isHealth) {
     endTime: scene.endTime,
     visualIntent: scene.visualIntent,
     searchQueries: [],
-    usedQuery: isHealth ? "AI Medical Still (Manual Import)" : "AI Still (Manual Import)",
+    usedQuery: mediaType === "video" ? "AI Video (Manual Import)" : isHealth ? "AI Medical Still (Manual Import)" : "AI Still (Manual Import)",
     score: 95,
     locked: true,
     manualOverride: false,
@@ -22876,9 +24338,9 @@ async function syncManualAiAssignments(params) {
     if (!scene) continue;
     const existing = store.get(row.sceneIndex);
     if (row.status === "ready" && row.localPath) {
-      const same = existing?.status === "assigned" && existing.asset?.provider === "manual-ai" && existing.asset.localPath === row.localPath && normWs(existing.narrationText) === normWs(scene.narration);
+      const same = existing?.status === "assigned" && existing.asset?.provider === "manual-ai" && existing.asset.localPath === row.localPath && existing.asset.mediaType === (row.mediaType === "video" ? "video" : "photo") && normWs(existing.narrationText) === normWs(scene.narration);
       if (!same) {
-        store.set(row.sceneIndex, buildManualAiAssignment(scene, row.localPath, isHealth));
+        store.set(row.sceneIndex, buildManualAiAssignment(scene, row.localPath, isHealth, row.mediaType === "video" ? "video" : "photo"));
         changed = true;
       }
     } else if (existing?.asset?.provider === "manual-ai") {
@@ -22953,10 +24415,10 @@ function broadcastManualAiStatus(projectDir, status) {
   }
   return s;
 }
-function sha256(parts) {
+function sha256$1(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
-function cleanText(text) {
+function cleanText$4(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
@@ -22964,7 +24426,7 @@ function extractNumbers(text) {
   const matches = text.match(/\b\d+(?:[.,]\d+)?%?\b/g);
   return matches ? matches.map((m) => m.replace(/,/g, "")) : [];
 }
-function writeFileAtomic(filePath, content) {
+function writeFileAtomic$1(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -22981,13 +24443,13 @@ function computeScriptHash(scriptText, profile, globalContext) {
     globalContext?.visualWorld?.colorMood || "",
     String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)
   ];
-  return sha256(semanticParts);
+  return sha256$1(semanticParts);
 }
 function computeSceneDirectionsHash(briefHash, aiScenes) {
   const sceneTokens = aiScenes.map(
-    (s) => `${s.sceneIndex}:${cleanText(s.narration)}:${cleanText(s.visualIntent)}`
+    (s) => `${s.sceneIndex}:${cleanText$4(s.narration)}:${cleanText$4(s.visualIntent)}`
   );
-  return sha256([briefHash, ...sceneTokens, String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)]);
+  return sha256$1([briefHash, ...sceneTokens, String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)]);
 }
 function buildFallbackVisualBrief(scriptHashVal, profile, globalContext, sampleNarration) {
   const isHealth = profile === "health";
@@ -23232,8 +24694,8 @@ function extractActionVerb(text, isHealth) {
 }
 function buildFallbackSceneDirection(scene, profile, isOpening) {
   const isHealth = profile === "health";
-  const narration = cleanText(scene.narration);
-  const intent = cleanText(scene.visualIntent);
+  const narration = cleanText$4(scene.narration);
+  const intent = cleanText$4(scene.visualIntent);
   const combined = `${narration} ${intent}`;
   const role = inferFallbackSceneRole(combined, isOpening);
   const hook = inferFallbackHookLevel(role, isOpening);
@@ -23262,8 +24724,8 @@ function buildFallbackSceneDirection(scene, profile, isOpening) {
       subject: subject.slice(0, 60),
       action,
       change: "visible dynamic transition and movement",
-      cause: "physiological biological activity",
-      consequence: "observable biological state"
+      cause: isHealth ? "physiological biological activity" : "grounded contextual factors",
+      consequence: isHealth ? "observable biological state" : "observable real-world development"
     },
     composition: {
       shotType: isHealth ? "close three-quarter cutaway" : "medium documentary framing",
@@ -23297,11 +24759,11 @@ async function analyzeSceneBatchWithGemini(params) {
   const candidateModels = getAvailableModelsForTask("manual_ai_visual_director", preferredModel);
   const scenesPayload = batchScenes.map((s) => ({
     sceneIndex: s.sceneIndex,
-    narration: cleanText(s.narration),
-    visualIntent: cleanText(s.visualIntent)
+    narration: cleanText$4(s.narration),
+    visualIntent: cleanText$4(s.visualIntent)
   }));
-  const prevText = prevContext ? `SCENE ${prevContext.sceneIndex}: ${cleanText(prevContext.narration)}` : "None (start of video)";
-  const nextText = nextContext ? `SCENE ${nextContext.sceneIndex}: ${cleanText(nextContext.narration)}` : "None (end of video)";
+  const prevText = prevContext ? `SCENE ${prevContext.sceneIndex}: ${cleanText$4(prevContext.narration)}` : "None (start of video)";
+  const nextText = nextContext ? `SCENE ${nextContext.sceneIndex}: ${cleanText$4(nextContext.narration)}` : "None (end of video)";
   const prompt = `You are the Lead Visual Director for a cinematic documentary (${profile}).
 GLOBAL VISUAL BRIEF:
 - Storytelling Mode: ${brief.storytellingMode}
@@ -23361,11 +24823,11 @@ Return ONLY a valid JSON array of ${scenesPayload.length} objects matching the s
             sceneIndex: s.sceneIndex,
             sceneRole: raw.sceneRole || inferFallbackSceneRole(s.narration, s.sceneIndex === 1),
             hookLevel: raw.hookLevel || "medium",
-            coreMeaning: raw.coreMeaning || cleanText(s.narration).slice(0, 100),
+            coreMeaning: raw.coreMeaning || cleanText$4(s.narration).slice(0, 100),
             viewerShouldNotice: raw.viewerShouldNotice || "The visible action of the subject",
             curiosityGap: raw.curiosityGap,
             visualEvent: {
-              subject: raw.visualEvent.subject || cleanText(s.visualIntent || s.narration),
+              subject: raw.visualEvent.subject || cleanText$4(s.visualIntent || s.narration),
               action: raw.visualEvent.action || extractActionVerb(s.narration, profile === "health"),
               change: raw.visualEvent.change,
               cause: raw.visualEvent.cause,
@@ -23544,7 +25006,7 @@ async function prepareManualAiVisualDirection(params) {
       }
     };
   }
-  const fullScriptText = params.scriptText || plan.scenes.map((s) => cleanText(s.narration)).join(" ");
+  const fullScriptText = params.scriptText || plan.scenes.map((s) => cleanText$4(s.narration)).join(" ");
   const scriptHashVal = computeScriptHash(fullScriptText, profile, globalContext);
   const briefPath = getManualAiVisualBriefPath(projectDir);
   const directionsPath = getManualAiSceneDirectionsPath(projectDir);
@@ -23563,7 +25025,7 @@ async function prepareManualAiVisualDirection(params) {
     }
   }
   if (!brief) {
-    const scenesSummary = plan.scenes.map((s) => `Scene ${s.sceneIndex}: ${cleanText(s.narration).slice(0, 120)} | Intent: ${cleanText(s.visualIntent).slice(0, 80)}`).join("\n");
+    const scenesSummary = plan.scenes.map((s) => `Scene ${s.sceneIndex}: ${cleanText$4(s.narration).slice(0, 120)} | Intent: ${cleanText$4(s.visualIntent).slice(0, 80)}`).join("\n");
     try {
       if (params.apiKey) {
         brief = await generateGlobalVisualBriefWithGemini({
@@ -23588,10 +25050,10 @@ async function prepareManualAiVisualDirection(params) {
         aiScenes[0]?.narration
       );
     }
-    writeFileAtomic(briefPath, JSON.stringify(brief, null, 2));
+    writeFileAtomic$1(briefPath, JSON.stringify(brief, null, 2));
   }
   const globalMs = Date.now() - globalT0;
-  const briefHash = sha256([
+  const briefHash = sha256$1([
     brief.storytellingMode,
     brief.corePromise,
     brief.centralQuestion,
@@ -23685,7 +25147,7 @@ async function prepareManualAiVisualDirection(params) {
       overlayCount: overlayCount2,
       directions: sceneDirectionsList
     };
-    writeFileAtomic(directionsPath, JSON.stringify(artifact, null, 2));
+    writeFileAtomic$1(directionsPath, JSON.stringify(artifact, null, 2));
   } else {
     enrichedCount = sceneDirectionsList.filter((d) => d.confidence > 0.8).length;
     fallbackCount = sceneDirectionsList.length - enrichedCount;
@@ -23823,12 +25285,30 @@ async function runMixedVisualEngine(params) {
     } catch {
     }
   }
+  let contentIntelligence;
+  const ciPath = path__namespace.join(projectDir, "analysis", "content-intelligence.json");
+  if (fs__namespace.existsSync(ciPath)) {
+    try {
+      contentIntelligence = JSON.parse(fs__namespace.readFileSync(ciPath, "utf-8"));
+    } catch {
+    }
+  }
+  let identityBible;
+  const ibPath = path__namespace.join(projectDir, "analysis", "visual-identity-bible.json");
+  if (fs__namespace.existsSync(ibPath)) {
+    try {
+      identityBible = JSON.parse(fs__namespace.readFileSync(ibPath, "utf-8"));
+    } catch {
+    }
+  }
   const plan = VisualMixPlanner.buildPlan({
     projectDir,
     rawScenes,
     config: mix,
     profile,
-    globalContext
+    globalContext,
+    contentIntelligence,
+    identityBible
   });
   checkAborted$1(signal);
   const totalScenes = rawScenes.length;
@@ -23940,7 +25420,9 @@ async function runMixedVisualEngine(params) {
       globalContext,
       outputResolution: mix.imageOutputResolution || "1080p",
       visualBrief: directorBundle?.brief,
-      sceneDirections: directorBundle?.sceneDirections
+      sceneDirections: directorBundle?.sceneDirections,
+      contentIntelligence,
+      identityBible
     });
     manualPack = ensured.pack;
     promptGenerationMs = ensured.generationMs;
@@ -24705,6 +26187,7 @@ async function runPlanningStage(options, onProgress, signal) {
     projectDir: options.projectDir,
     apiKey,
     model: options.geminiModel,
+    signal,
     onProgress: (msg, prog) => {
       checkAborted(signal);
       onProgress(msg, prog);
@@ -25059,7 +26542,7 @@ async function runAudioSearchStage(options, onProgress, signal) {
           onProgress("Repairing and resolving Health cinematic SFX...", 0.5);
           let retentionPlan = null;
           try {
-            retentionPlan = await ensureRetentionPlan(options.projectDir);
+            retentionPlan = ensureRetentionPlan(options.projectDir);
           } catch {
           }
           await HealthSfxDirector.repairMissingHealthSfx(
@@ -25129,9 +26612,10 @@ async function runAudioSearchStage(options, onProgress, signal) {
           onProgress("Planning and resolving Health cinematic SFX...", 0.9);
           let retentionPlan = null;
           try {
-            retentionPlan = await ensureRetentionPlan(options.projectDir);
+            retentionPlan = ensureRetentionPlan(options.projectDir);
           } catch {
           }
+          await HealthSfxDirector.preloadStandardOpeningSfx(options.projectDir, options.openverseToken);
           await HealthSfxDirector.applyHealthSfxToAudioPlan(
             options.projectDir,
             sfxCues,
@@ -25364,6 +26848,108 @@ async function runPostflightStage(options, renderResult, onProgress, signal) {
     }
   };
 }
+class PipelineProfiler {
+  report = null;
+  projectDir = "";
+  startTimes = /* @__PURE__ */ new Map();
+  operationStartTimes = /* @__PURE__ */ new Map();
+  startRun(projectDir, runId) {
+    this.projectDir = projectDir;
+    this.report = {
+      schemaVersion: 1,
+      runId,
+      startedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      totalMs: 0,
+      stages: {},
+      operations: [],
+      cache: { hits: 0, misses: 0 },
+      apiCalls: { gemini: 0, pexels: 0, pixabay: 0, openverse: 0 },
+      render: { reusedScenes: 0, renderedScenes: 0, reusedOverlayBlocks: 0 }
+    };
+    this.startTimes.set("overall", performance.now());
+  }
+  endRun() {
+    if (!this.report) return;
+    const overallStart = this.startTimes.get("overall");
+    if (overallStart !== void 0) {
+      this.report.totalMs = performance.now() - overallStart;
+    }
+    this.report.completedAt = (/* @__PURE__ */ new Date()).toISOString();
+    this.flush();
+  }
+  startStage(stageName) {
+    this.startTimes.set(`stage_${stageName}`, performance.now());
+  }
+  endStage(stageName, cacheHit = false) {
+    if (!this.report) return;
+    const start = this.startTimes.get(`stage_${stageName}`);
+    if (start !== void 0) {
+      this.report.stages[stageName] = {
+        wallMs: performance.now() - start,
+        cacheHit
+      };
+    }
+  }
+  startOperation(stageName, opName) {
+    this.operationStartTimes.set(`${stageName}_${opName}`, performance.now());
+  }
+  endOperation(stageName, opName) {
+    if (!this.report) return;
+    const key2 = `${stageName}_${opName}`;
+    const start = this.operationStartTimes.get(key2);
+    if (start !== void 0) {
+      this.report.operations.push({
+        stage: stageName,
+        operation: opName,
+        durationMs: performance.now() - start
+      });
+      this.operationStartTimes.delete(key2);
+    }
+  }
+  trackCache(type) {
+    if (!this.report) return;
+    if (type === "hit") this.report.cache.hits++;
+    else this.report.cache.misses++;
+  }
+  trackApi(provider, count = 1) {
+    if (!this.report) return;
+    this.report.apiCalls[provider] += count;
+  }
+  trackRender(type, count = 1) {
+    if (!this.report) return;
+    this.report.render[type] += count;
+  }
+  flush() {
+    if (!this.report || !this.projectDir) return;
+    try {
+      const analysisDir = path__namespace.join(this.projectDir, "analysis");
+      if (!fs__namespace.existsSync(analysisDir)) {
+        fs__namespace.mkdirSync(analysisDir, { recursive: true });
+      }
+      fs__namespace.writeFileSync(
+        path__namespace.join(analysisDir, "performance-report.json"),
+        JSON.stringify(this.report, null, 2),
+        "utf-8"
+      );
+      const summary = `
+================ PERFORMANCE SUMMARY ================
+Run ID: ${this.report.runId}
+Total Time: ${(this.report.totalMs / 1e3).toFixed(2)}s
+Cache: ${this.report.cache.hits} hits / ${this.report.cache.misses} misses
+API Calls: Gemini (${this.report.apiCalls.gemini}), Pexels (${this.report.apiCalls.pexels}), Pixabay (${this.report.apiCalls.pixabay})
+Render: ${this.report.render.reusedScenes} scenes reused, ${this.report.render.renderedScenes} rendered
+=====================================================
+`;
+      fs__namespace.writeFileSync(path__namespace.join(analysisDir, "performance-summary.txt"), summary.trim(), "utf-8");
+    } catch (err) {
+      logger.warn(`[PipelineProfiler] Failed to write performance report: ${err}`);
+    }
+  }
+  getReport() {
+    return this.report;
+  }
+}
+const pipelineProfiler = new PipelineProfiler();
 function applyRenderRecoveryToState(state2, recon) {
   const rr = recon.renderRecovery;
   if (recon.renderValid || !rr || !rr.resumable || !state2.stages.rendering) return;
@@ -25553,6 +27139,7 @@ class PipelineOrchestrator {
       this.broadcastProgress(state2);
       const abortController = new AbortController();
       this.startHeartbeat(norm2, runId);
+      pipelineProfiler.startRun(norm2, runId);
       const instance = {
         runId,
         projectDir: norm2,
@@ -25625,6 +27212,7 @@ class PipelineOrchestrator {
       this.broadcastProgress(state2);
       const abortController = new AbortController();
       this.startHeartbeat(norm2, runId);
+      pipelineProfiler.startRun(norm2, runId);
       const instance = {
         runId,
         projectDir: norm2,
@@ -26002,6 +27590,7 @@ class PipelineOrchestrator {
           this.broadcastProgress(state2);
         };
         let stageResult;
+        pipelineProfiler.startStage(stage);
         try {
           switch (stage) {
             case "validating":
@@ -26046,6 +27635,7 @@ class PipelineOrchestrator {
             state2.overallStatus = "cancelled";
             state2.stages[stage].status = "cancelled";
             state2.stages[stage].message = "Cancelled by user";
+            pipelineProfiler.endStage(stage, false);
             break;
           }
           const msg = err instanceof Error ? err.message : String(err);
@@ -26055,6 +27645,7 @@ class PipelineOrchestrator {
             error: msg
           };
         }
+        pipelineProfiler.endStage(stage, stageResult.cached);
         if (state2.stages[stage]) delete state2.stages[stage].manualAiWait;
         if (stageResult.needsAttention) {
           logger.warn(`[Pipeline] Stage ${stage} requires user attention: ${stageResult.error}`);
@@ -26068,6 +27659,7 @@ class PipelineOrchestrator {
           releaseLease(state2);
           savePipelineStateAtomic(norm2, state2);
           this.broadcastProgress(state2);
+          pipelineProfiler.endRun();
           return state2;
         }
         if (!stageResult.success) {
@@ -26083,6 +27675,7 @@ class PipelineOrchestrator {
           releaseLease(state2);
           savePipelineStateAtomic(norm2, state2);
           this.broadcastProgress(state2);
+          pipelineProfiler.endRun();
           return state2;
         }
         await this.completeStage(state2, stage, stageResult, stageStartTime);
@@ -26104,6 +27697,7 @@ class PipelineOrchestrator {
         });
       }
     } finally {
+      pipelineProfiler.endRun();
       this.stopHeartbeat(norm2);
       this.activeInstances.delete(norm2);
     }
@@ -27759,6 +29353,78 @@ function registerPipelineHandlers(ipcMain) {
     }
   );
 }
+const MAX_DISCOVERED_MIXED_MEDIA = 250;
+const MAX_MIXED_FOLDER_DEPTH = 3;
+function detectManualImportMediaType(filePath) {
+  const ext = path__namespace.extname(filePath).toLowerCase();
+  if (MANUAL_AI_SUPPORTED_EXTENSIONS.includes(ext)) {
+    return "image";
+  }
+  if (MANUAL_AI_VIDEO_EXTENSIONS.includes(ext)) {
+    return "video";
+  }
+  return "unsupported";
+}
+function countMixedMedia(filePaths) {
+  let imageCount = 0;
+  let videoCount = 0;
+  for (const f of filePaths) {
+    const kind = detectManualImportMediaType(f);
+    if (kind === "image") imageCount++;
+    else if (kind === "video") videoCount++;
+  }
+  return { imageCount, videoCount };
+}
+function listMixedMediaInFolder(folder, maxDepth = MAX_MIXED_FOLDER_DEPTH, warningsOut) {
+  if (!fs__namespace.existsSync(folder)) {
+    throw new Error(`Folder does not exist: ${folder}`);
+  }
+  const rootStat = fs__namespace.statSync(folder);
+  if (!rootStat.isDirectory()) {
+    throw new Error(`Path is not a directory: ${folder}`);
+  }
+  const discovered = [];
+  let hitLimit = false;
+  function traverse(currentDir, currentDepth) {
+    if (hitLimit || currentDepth > maxDepth) return;
+    let entries;
+    try {
+      entries = fs__namespace.readdirSync(currentDir, { withFileTypes: true });
+    } catch (err) {
+      const msg = `Unable to read directory: ${currentDir} (${err instanceof Error ? err.message : String(err)})`;
+      logger.warn(`[ManualAI:MixedFolder] ${msg}`);
+      warningsOut?.push(msg);
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(".")) continue;
+      const fullPath = path__namespace.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        if (currentDepth < maxDepth) {
+          traverse(fullPath, currentDepth + 1);
+        }
+      } else if (entry.isFile()) {
+        const ext = path__namespace.extname(entry.name).toLowerCase();
+        if (MANUAL_AI_MIXED_EXTENSIONS.includes(ext)) {
+          if (discovered.length >= MAX_DISCOVERED_MIXED_MEDIA) {
+            hitLimit = true;
+            const limitMsg = `Discovered media files reached safety limit of ${MAX_DISCOVERED_MIXED_MEDIA}. Extra files omitted.`;
+            logger.warn(`[ManualAI:MixedFolder] ${limitMsg}`);
+            warningsOut?.push(limitMsg);
+            break;
+          }
+          discovered.push(fullPath);
+        }
+      }
+    }
+  }
+  traverse(folder, 0);
+  return discovered.sort((a, b) => {
+    const baseCmp = naturalCompare(path__namespace.basename(a), path__namespace.basename(b));
+    return baseCmp !== 0 ? baseCmp : naturalCompare(a, b);
+  });
+}
 function parseSceneNumberFromFilename(fileName) {
   const base = path__namespace.basename(fileName, path__namespace.extname(fileName)).trim();
   const m = /^(?:scene|s)[\s_-]*0*(\d+)(?!\d)/i.exec(base);
@@ -27816,12 +29482,34 @@ function planManualAiImport(params) {
   const missingSorted = [...status.missingSceneIndices].sort((a, b) => a - b);
   const supported = [];
   for (const f of files) {
-    if (!isSupportedImageExtension(f)) {
-      rejections.push(reject(f, "UNSUPPORTED_TYPE", `Unsupported file type "${path__namespace.extname(f) || "none"}". Use PNG, JPG, JPEG or WEBP.`));
+    if (params.mediaType === "mixed") {
+      const kind = detectManualImportMediaType(f);
+      if (kind === "unsupported") {
+        rejections.push(
+          reject(
+            f,
+            "UNSUPPORTED_TYPE",
+            `Unsupported file type "${path__namespace.extname(f) || "none"}". Use PNG, JPG, JPEG, WEBP, MP4, MOV, WEBM or MKV.`
+          )
+        );
+      } else {
+        supported.push(f);
+      }
     } else {
-      supported.push(f);
+      const supportedType = params.mediaType === "video" ? isSupportedVideoExtension(f) : isSupportedImageExtension(f);
+      if (!supportedType) {
+        const guidance = params.mediaType === "video" ? "Use MP4, MOV, WEBM or MKV." : "Use PNG, JPG, JPEG or WEBP.";
+        rejections.push(reject(f, "UNSUPPORTED_TYPE", `Unsupported file type "${path__namespace.extname(f) || "none"}". ${guidance}`));
+      } else {
+        supported.push(f);
+      }
     }
   }
+  const resolveCandidateMediaType = (filePath) => {
+    if (params.mediaType === "video") return { mediaType: "video" };
+    if (params.mediaType === "mixed" && isSupportedVideoExtension(filePath)) return { mediaType: "video" };
+    return {};
+  };
   const numbered = supported.map((f) => ({ f, n: parseSceneNumberFromFilename(f) }));
   const noneNumbered = numbered.length > 0 && numbered.every((x) => x.n === null);
   let needsConfirmation = false;
@@ -27830,7 +29518,13 @@ function planManualAiImport(params) {
     const sortedFiles = [...supported].sort((a, b) => naturalCompare(path__namespace.basename(a), path__namespace.basename(b)));
     if (sortedFiles.length === missingSorted.length) {
       sortedFiles.forEach(
-        (f, i) => candidates.push({ filePath: f, fileName: path__namespace.basename(f), sceneIndex: missingSorted[i], via: "natural-sort" })
+        (f, i) => candidates.push({
+          filePath: f,
+          fileName: path__namespace.basename(f),
+          sceneIndex: missingSorted[i],
+          via: "natural-sort",
+          ...resolveCandidateMediaType(f)
+        })
       );
       needsConfirmation = true;
     } else {
@@ -27851,7 +29545,13 @@ function planManualAiImport(params) {
           reject(x.f, "NO_SCENE_NUMBER", `File name has no scene number. Rename it like ${expectedFilenameForScene(missingSorted[0] ?? 1)}.`)
         );
       } else {
-        candidates.push({ filePath: x.f, fileName: path__namespace.basename(x.f), sceneIndex: x.n, via: "filename" });
+        candidates.push({
+          filePath: x.f,
+          fileName: path__namespace.basename(x.f),
+          sceneIndex: x.n,
+          via: "filename",
+          ...resolveCandidateMediaType(x.f)
+        });
       }
     }
   }
@@ -27937,7 +29637,8 @@ async function commitManualAiImport(params) {
       rejections.push(reject(m.filePath, "ALREADY_IMPORTED", `Scene ${sceneIndex} already has an image.`, { sceneIndex }));
       continue;
     }
-    const validation = validateImageFile(m.filePath, target);
+    const isVideo = m.mediaType === "video";
+    const validation = isVideo ? await validateVideoFile(m.filePath, target) : validateImageFile(m.filePath, target);
     if (!validation.ok) {
       rejections.push(reject(m.filePath, validation.code ?? "UNREADABLE", validation.message ?? "Invalid image.", { sceneIndex }));
       continue;
@@ -27953,14 +29654,18 @@ async function commitManualAiImport(params) {
       );
       continue;
     }
-    const finalName = expectedFilenameForScene(sceneIndex);
+    const finalName = isVideo ? `S${String(sceneIndex).padStart(4, "0")}${path__namespace.extname(m.filePath).toLowerCase()}` : expectedFilenameForScene(sceneIndex);
     const finalPath = path__namespace.join(outDir, finalName);
-    const tmpPath = path__namespace.join(outDir, `.tmp_${process.pid}_${Date.now()}_${sceneIndex}.png`);
+    const tmpPath = path__namespace.join(outDir, `.tmp_${process.pid}_${Date.now()}_${sceneIndex}${isVideo ? path__namespace.extname(finalName) : ".png"}`);
     try {
-      await normalizer(m.filePath, tmpPath, target.width, target.height);
-      const outDims = probeImageFileDimensions(tmpPath);
-      if (!outDims || outDims.width !== target.width || outDims.height !== target.height) {
-        throw new Error(`Normalized image is ${outDims ? `${outDims.width}x${outDims.height}` : "unreadable"}, expected ${target.width}x${target.height}`);
+      if (isVideo) {
+        await fs__namespace.promises.copyFile(m.filePath, tmpPath);
+      } else {
+        await normalizer(m.filePath, tmpPath, target.width, target.height);
+        const outDims = probeImageFileDimensions(tmpPath);
+        if (!outDims || outDims.width !== target.width || outDims.height !== target.height) {
+          throw new Error(`Normalized image is ${outDims ? `${outDims.width}x${outDims.height}` : "unreadable"}, expected ${target.width}x${target.height}`);
+        }
       }
       fs__namespace.renameSync(tmpPath, finalPath);
     } catch (err) {
@@ -27981,8 +29686,10 @@ async function commitManualAiImport(params) {
       status: "ready",
       sourcePath: m.filePath,
       localPath: finalPath,
-      width: target.width,
-      height: target.height,
+      width: isVideo ? validation.width : target.width,
+      height: isVideo ? validation.height : target.height,
+      mediaType: isVideo ? "video" : void 0,
+      durationSecs: isVideo ? "durationSecs" in validation ? validation.durationSecs : void 0 : void 0,
       sourceWidth: validation.width,
       sourceHeight: validation.height,
       importedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -27995,9 +29702,10 @@ async function commitManualAiImport(params) {
       sceneIndex,
       fileName: finalName,
       localPath: finalPath,
-      width: target.width,
-      height: target.height,
-      warnings
+      width: isVideo ? validation.width : target.width,
+      height: isVideo ? validation.height : target.height,
+      warnings,
+      mediaType: isVideo ? "video" : void 0
     });
   }
   const status = evaluateManualAiStatus({ projectDir, pack });
@@ -28005,12 +29713,1731 @@ async function commitManualAiImport(params) {
   manualAiAssetGate.notify(projectDir);
   return { imported, rejections, status };
 }
+function cleanText$3(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function dedupeStrings(arr) {
+  const seen = /* @__PURE__ */ new Set();
+  const result = [];
+  for (const item of arr) {
+    if (!item || typeof item !== "string") continue;
+    const cleaned = cleanText$3(item);
+    const lower = cleaned.toLowerCase();
+    if (lower && !seen.has(lower)) {
+      seen.add(lower);
+      result.push(cleaned);
+    }
+  }
+  return result;
+}
+const HUTTERITE_SPECIFIC_REGEX$1 = /\b(hutterite|hutterites|hutterian|anabaptist)\b/i;
+function isHutteriteContext(text, globalContext, identityBible) {
+  if (HUTTERITE_SPECIFIC_REGEX$1.test(text)) return true;
+  if (globalContext) {
+    const combined = `${globalContext.primarySubject || ""} ${(globalContext.exactTopicAnchors || []).join(" ")} ${(globalContext.contextualAnchors || []).join(" ")}`;
+    if (HUTTERITE_SPECIFIC_REGEX$1.test(combined)) return true;
+    if (globalContext.communities?.some((c) => HUTTERITE_SPECIFIC_REGEX$1.test(c.name))) return true;
+  }
+  if (identityBible?.entities?.some((e) => HUTTERITE_SPECIFIC_REGEX$1.test(e.canonicalName) || e.aliases.some((a) => HUTTERITE_SPECIFIC_REGEX$1.test(a)))) {
+    return true;
+  }
+  return false;
+}
+function resolveVideoSubjectGrounding(params) {
+  const { scene, globalContext, identityBible, sceneIdentity, sceneDirection, profile } = params;
+  const narration = cleanText$3(scene.narration);
+  const intent = cleanText$3(scene.visualIntent);
+  const sceneText = `${intent} ${narration}`.trim();
+  const sceneLower = sceneText.toLowerCase();
+  let matchedEntity;
+  let matchedCommunity;
+  if (identityBible && Array.isArray(identityBible.entities)) {
+    matchedEntity = identityBible.entities.find((e) => {
+      const name = e.canonicalName.toLowerCase();
+      if (sceneLower.includes(name)) return true;
+      return e.aliases?.some((a) => sceneLower.includes(a.toLowerCase()));
+    });
+    if (!matchedEntity && identityBible.primaryIdentityId) {
+      matchedEntity = identityBible.entities.find((e) => e.id === identityBible.primaryIdentityId);
+    }
+    if (!matchedEntity && identityBible.entities.length > 0) {
+      matchedEntity = identityBible.entities[0];
+    }
+  }
+  if (globalContext && Array.isArray(globalContext.communities)) {
+    matchedCommunity = globalContext.communities.find((c) => {
+      const name = c.name.toLowerCase();
+      return sceneLower.includes(name);
+    });
+    if (!matchedCommunity && globalContext.communities.length > 0) {
+      matchedCommunity = globalContext.communities[0];
+    }
+  }
+  const isCourthouse = /\b(courthouse|court house|courtroom|federal court|judge|judicial|legal records|hall of records|civic plaza)\b/i.test(sceneLower);
+  const isDocumentsOnly = /\b(document|documents|deed|deeds|ledger|ledgers|contract|records|registry|parchment|balance sheet|official paper)\b/i.test(sceneLower) && !/\b(men|women|people|workers|farmers|labor|crew)\b/i.test(sceneLower);
+  const isWorkshop = /\b(workshop|equipment maintenance|repairs|machine shop|workbench|mechanic|tool rack|hydraulic|fastening)\b/i.test(sceneLower);
+  const isKitchen = /\b(kitchen|cooking|baking|meal prep|communal meal|bread|roast|cutting board|pantry)\b/i.test(sceneLower);
+  const isAerialLandscape = /\b(aerial|drone|bird'?s eye|overhead|panoramic farm|prairie expanse|high altitude|landscape view)\b/i.test(sceneLower);
+  const isMedicalScene = profile === "health" || /\b(kidney|glomerulus|nephron|capillary|blood flow|vessel|cellular|organ|tissue|artery|filtration)\b/i.test(sceneLower);
+  const mentionsPeople = /\b(men|man|women|woman|people|workers?|farmers?|crew|group|individual|hands?|members?|team|soldiers?|craftsmen|technicians?|agronomists?|specialists?|botanists?|scientists?|engineers?|doctors?|surgeons?|analysts?|traders?|chefs?|cooks?|officers?|citizens?|residents?|person)\b/i.test(sceneLower);
+  let presence = "none";
+  if (sceneIdentity?.strength) {
+    presence = sceneIdentity.strength;
+  } else if (isCourthouse || isDocumentsOnly && !mentionsPeople) {
+    presence = matchedEntity || matchedCommunity ? "context" : "none";
+  } else if (isAerialLandscape && !mentionsPeople) {
+    presence = matchedEntity || matchedCommunity ? "visible" : "none";
+  } else if (mentionsPeople) {
+    presence = "dominant";
+  } else if (matchedEntity || matchedCommunity) {
+    presence = "visible";
+  }
+  let canonicalSubject = cleanText$3(intent || sceneDirection?.visualEvent?.subject || narration);
+  let subjectType = matchedEntity?.entityType || "other";
+  const aliases = matchedEntity?.aliases ? [...matchedEntity.aliases] : [];
+  const isHutterite = isHutteriteContext(sceneText, globalContext, identityBible);
+  if (isMedicalScene) {
+    subjectType = "species";
+    if (/\b(nephron|glomerulus|kidney)\b/i.test(sceneLower)) {
+      canonicalSubject = "Renal nephron glomerulus and microvascular capillary bed";
+    } else if (/\b(bladder)\b/i.test(sceneLower)) {
+      canonicalSubject = "Human urinary bladder wall and expanding internal lumen";
+    } else {
+      canonicalSubject = cleanText$3(intent || "human physiological tissue structures");
+    }
+  } else if (isCourthouse) {
+    canonicalSubject = "Exterior facade of a federal courthouse";
+    subjectType = "architecture";
+  } else if (isDocumentsOnly) {
+    canonicalSubject = "Archival legal documents and colony land registration records";
+    subjectType = "product";
+  } else if (isAerialLandscape && isHutterite) {
+    canonicalSubject = "Contemporary Hutterite communal farm colony";
+    subjectType = "location";
+  } else if (isWorkshop && isHutterite) {
+    canonicalSubject = "Hutterite men maintaining agricultural workshop equipment";
+    subjectType = "community";
+  } else if (isKitchen && isHutterite) {
+    canonicalSubject = "Hutterite women preparing food in a communal colony kitchen";
+    subjectType = "community";
+  } else if (isHutterite && mentionsPeople) {
+    canonicalSubject = "Hutterite colony members";
+    subjectType = "community";
+  } else if (matchedEntity) {
+    canonicalSubject = matchedEntity.canonicalName;
+    subjectType = matchedEntity.entityType;
+  } else if (globalContext?.primarySubject) {
+    if (presence === "context") {
+      canonicalSubject = cleanText$3(intent || sceneDirection?.visualEvent?.subject || narration);
+    } else {
+      canonicalSubject = cleanText$3(globalContext.primarySubject);
+    }
+  }
+  const requiredVisualTraits = [];
+  const optionalVisualTraits = [];
+  const wardrobe = [];
+  const physicalAppearance = [];
+  const architecture = [];
+  const environment = [];
+  const tools = [];
+  const machinery = [];
+  const materialCulture = [];
+  const socialBehavior = [];
+  const temporalMarkers = [];
+  const geographicMarkers = [];
+  const forbiddenSubstitutions = [];
+  const uncertaintyNotes = [];
+  if (matchedEntity) {
+    if (matchedEntity.requiredTraits) requiredVisualTraits.push(...matchedEntity.requiredTraits);
+    if (matchedEntity.optionalTraits) optionalVisualTraits.push(...matchedEntity.optionalTraits);
+    if (matchedEntity.forbiddenTraits) forbiddenSubstitutions.push(...matchedEntity.forbiddenTraits);
+    if (matchedEntity.mustNotConfuseWith) forbiddenSubstitutions.push(...matchedEntity.mustNotConfuseWith);
+    if (matchedEntity.uncertainty) uncertaintyNotes.push(...matchedEntity.uncertainty);
+    const sig = matchedEntity.visualSignature;
+    if (sig) {
+      if (presence === "dominant" || presence === "visible") {
+        if (sig.clothing) wardrobe.push(...sig.clothing);
+        if (sig.accessories) wardrobe.push(...sig.accessories);
+        if (sig.grooming) physicalAppearance.push(...sig.grooming);
+        if (sig.agePresentation) physicalAppearance.push(...sig.agePresentation);
+        if (sig.physiquePresentation) physicalAppearance.push(...sig.physiquePresentation);
+        if (sig.behavior) socialBehavior.push(...sig.behavior);
+        if (sig.socialGrouping) socialBehavior.push(...sig.socialGrouping);
+      }
+      if (sig.architecture) architecture.push(...sig.architecture);
+      if (sig.environment) environment.push(...sig.environment);
+      if (sig.tools) tools.push(...sig.tools);
+      if (sig.machinery) machinery.push(...sig.machinery);
+      if (sig.materialCulture) materialCulture.push(...sig.materialCulture);
+      if (sig.recurringObjects) materialCulture.push(...sig.recurringObjects);
+      if (sig.eraMarkers) temporalMarkers.push(...sig.eraMarkers);
+      if (sig.geographicMarkers) geographicMarkers.push(...sig.geographicMarkers);
+    }
+  }
+  if (matchedCommunity) {
+    if (matchedCommunity.mustNotConfuseWith) forbiddenSubstitutions.push(...matchedCommunity.mustNotConfuseWith);
+    if (matchedCommunity.visualIdentity) {
+      const vid = matchedCommunity.visualIdentity;
+      if (presence === "dominant" || presence === "visible") {
+        if (vid.clothing) wardrobe.push(...vid.clothing);
+        if (vid.grooming) physicalAppearance.push(...vid.grooming);
+        if (vid.accessories) wardrobe.push(...vid.accessories);
+        if (vid.socialBehavior) socialBehavior.push(...vid.socialBehavior);
+      }
+      if (vid.tools) tools.push(...vid.tools);
+      if (vid.environment) environment.push(...vid.environment);
+      if (vid.architecture) architecture.push(...vid.architecture);
+      if (vid.machinery) machinery.push(...vid.machinery);
+      if (vid.materialCulture) materialCulture.push(...vid.materialCulture);
+      if (vid.eraMarkers) temporalMarkers.push(...vid.eraMarkers);
+      if (vid.forbiddenTraits) forbiddenSubstitutions.push(...vid.forbiddenTraits);
+    }
+  }
+  if (globalContext) {
+    forbiddenSubstitutions.push(...globalContext.forbiddenSubstitutions || []);
+    if (globalContext.visualWorld) {
+      const vw = globalContext.visualWorld;
+      if (vw.architecture) architecture.push(...vw.architecture);
+      if (vw.environment) environment.push(...vw.environment);
+      if (vw.machinery) machinery.push(...vw.machinery);
+      if (vw.clothing && (presence === "dominant" || presence === "visible")) wardrobe.push(...vw.clothing);
+      if (vw.recurringObjects) materialCulture.push(...vw.recurringObjects);
+    }
+    if (globalContext.geography?.primaryRegion) geographicMarkers.push(globalContext.geography.primaryRegion);
+    if (globalContext.geography?.primaryCountry) geographicMarkers.push(globalContext.geography.primaryCountry);
+    if (globalContext.timeContext?.primaryPeriod) temporalMarkers.push(globalContext.timeContext.primaryPeriod);
+  }
+  if (isHutterite) {
+    forbiddenSubstitutions.push(
+      "generic Amish horse-and-buggy setting",
+      "Amish stereotyping",
+      "horse-drawn carriage",
+      "straw hats",
+      "invented religious ceremonies",
+      "anachronistic obsolete machinery",
+      "exaggerated costumes"
+    );
+    if (isCourthouse) {
+      architecture.push("classical stone courthouse", "limestone facade", "institutional columns", "broad exterior steps");
+      environment.push("civic plaza", "government district", "urban administrative setting");
+      wardrobe.length = 0;
+      tools.length = 0;
+      machinery.length = 0;
+    } else if (isDocumentsOnly) {
+      materialCulture.push("bound registration ledgers", "official stamped deed papers", "notarized documents");
+      tools.push("archival magnifying glass", "fountain pen");
+      environment.push("wooden archive desk", "institutional examination table");
+      wardrobe.length = 0;
+    } else if (isWorkshop) {
+      if (presence === "dominant" || presence === "visible") {
+        wardrobe.push("practical, modest collared work shirts", "durable work trousers", "appropriate working footwear");
+        socialBehavior.push("coordinated manual work", "collaborative equipment maintenance");
+      }
+      architecture.push("functional rural equipment workshop", "utilitarian colony workshop");
+      environment.push("organized tool racks", "industrial workbenches");
+      tools.push("hand tools", "wrenches", "mechanical fittings");
+      machinery.push("modern agricultural equipment", "mechanical housing", "hydraulic components");
+    } else if (isKitchen) {
+      if (presence === "dominant" || presence === "visible") {
+        wardrobe.push("modest practical dresses", "work aprons", "traditional dark head coverings");
+        socialBehavior.push("communal cooking preparation", "efficient collective food production");
+      }
+      architecture.push("large-scale communal colony kitchen", "commercial food preparation facility");
+      tools.push("commercial prep bowls", "stainless steel utensils", "wooden cutting boards");
+      environment.push("stainless steel countertops", "commercial range cookers", "organized pantry storage");
+    } else if (isAerialLandscape) {
+      architecture.push("communal farm colony layout", "central dining hall", "clustered residential buildings", "grain silos");
+      environment.push("expansive rural prairie farmland", "open agricultural fields", "vast horizon");
+      machinery.push("modern combines", "large agricultural tractors", "grain augers");
+      wardrobe.length = 0;
+    } else if (presence === "dominant" || presence === "visible") {
+      wardrobe.push("practical modest clothing", "collared shirts and trousers for men", "modest dresses for women");
+      environment.push("communal agricultural farmstead", "rural colony yard");
+      machinery.push("modern agricultural machinery");
+    }
+  }
+  if (isMedicalScene) {
+    environment.push("dark navy medical background", "accurate cellular tissue environment", "volumetric physiological depth");
+    physicalAppearance.push("semi-permeable endothelial membrane", "cellular transport structures");
+    forbiddenSubstitutions.push(
+      "fake diagnostic numbers",
+      "exaggerated disease gore",
+      "speculative molecular diagrams",
+      "floating currency symbols",
+      "agricultural machinery"
+    );
+    wardrobe.length = 0;
+    tools.length = 0;
+    machinery.length = 0;
+  }
+  if (/\b(roman|legion|centurion|gladiator|caesar|aqueduct)\b/i.test(sceneLower)) {
+    forbiddenSubstitutions.push("modern artifacts", "anachronistic objects", "medieval armor", "fantasy swords");
+    if (presence === "dominant" || presence === "visible") {
+      wardrobe.push("period-authentic wool tunics", "lorica armor", "caligae leather sandals", "galea helmets");
+      tools.push("gladius short swords", "pilum javelins", "scutum shields");
+      socialBehavior.push("disciplined military patrol", "grounded historical interaction");
+    }
+    architecture.push("stone and timber Roman fortifications", "defensive palisade", "watchtower");
+    environment.push("frontier wilderness", "rough gravel military road");
+    temporalMarkers.push("Roman imperial period");
+  }
+  const cleanWardrobe = dedupeStrings(wardrobe);
+  const cleanPhysicalAppearance = dedupeStrings(physicalAppearance);
+  const cleanArchitecture = dedupeStrings(architecture);
+  const cleanEnvironment = dedupeStrings(environment);
+  const cleanTools = dedupeStrings(tools);
+  const cleanMachinery = dedupeStrings(machinery).filter((m) => {
+    if (isHutterite && /\b(horse|buggy)\b/i.test(m)) return false;
+    return true;
+  });
+  const cleanMaterialCulture = dedupeStrings(materialCulture);
+  const cleanSocialBehavior = dedupeStrings(socialBehavior);
+  const cleanTemporalMarkers = dedupeStrings(temporalMarkers);
+  const cleanGeographicMarkers = dedupeStrings(geographicMarkers);
+  const cleanForbidden = dedupeStrings(forbiddenSubstitutions);
+  const cleanRequired = dedupeStrings(requiredVisualTraits);
+  const cleanOptional = dedupeStrings(optionalVisualTraits);
+  return {
+    canonicalSubject,
+    aliases: dedupeStrings(aliases),
+    subjectType,
+    presence,
+    requiredVisualTraits: cleanRequired,
+    optionalVisualTraits: cleanOptional,
+    wardrobe: cleanWardrobe,
+    physicalAppearance: cleanPhysicalAppearance,
+    architecture: cleanArchitecture,
+    environment: cleanEnvironment,
+    tools: cleanTools,
+    machinery: cleanMachinery,
+    materialCulture: cleanMaterialCulture,
+    socialBehavior: cleanSocialBehavior,
+    temporalMarkers: cleanTemporalMarkers,
+    geographicMarkers: cleanGeographicMarkers,
+    forbiddenSubstitutions: cleanForbidden,
+    uncertaintyNotes: dedupeStrings(uncertaintyNotes),
+    confidence: matchedEntity ? matchedEntity.confidence : matchedCommunity ? 0.85 : 0.75
+  };
+}
+function cleanText$2(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function normalizeKey(str) {
+  return str.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+function deduplicateKeywords(list, max = 16) {
+  const result = [];
+  const seen = /* @__PURE__ */ new Set();
+  for (const raw of list) {
+    const cleaned = cleanText$2(raw);
+    if (!cleaned || cleaned.length < 2) continue;
+    const key2 = normalizeKey(cleaned);
+    if (!key2 || seen.has(key2)) continue;
+    let isSubsumed = false;
+    for (const existingKey of seen) {
+      if (existingKey.length > 5 && key2.length > 5) {
+        if (existingKey.startsWith(key2) || key2.startsWith(existingKey)) {
+          isSubsumed = true;
+          break;
+        }
+      }
+    }
+    if (!isSubsumed) {
+      seen.add(key2);
+      result.push(cleaned);
+    }
+    if (result.length >= max) break;
+  }
+  return result;
+}
+function extractSceneVideoKeywords(params) {
+  const { scene, grounding, sceneDirection, niche } = params;
+  const candidates = [];
+  const isHealth = niche === "health" || grounding.subjectType === "species";
+  if (grounding.canonicalSubject) {
+    candidates.push(grounding.canonicalSubject);
+  }
+  if (grounding.presence === "dominant" || grounding.presence === "visible") {
+    if (grounding.aliases && grounding.aliases.length > 0) {
+      candidates.push(grounding.aliases[0]);
+    }
+    for (const trait of grounding.requiredVisualTraits.slice(0, 2)) {
+      candidates.push(trait);
+    }
+  }
+  if (grounding.presence === "dominant" || grounding.presence === "visible") {
+    for (const w of grounding.wardrobe.slice(0, 2)) {
+      candidates.push(w);
+    }
+    for (const a of grounding.physicalAppearance.slice(0, 2)) {
+      candidates.push(a);
+    }
+  }
+  const action = cleanText$2(sceneDirection?.visualEvent?.action);
+  if (action && !action.includes("demonstrating concrete dynamic action") && !action.includes("demonstrating realistic purposeful")) {
+    candidates.push(action);
+  }
+  for (const b of grounding.socialBehavior.slice(0, 2)) {
+    candidates.push(b);
+  }
+  for (const env of grounding.environment.slice(0, 2)) {
+    candidates.push(env);
+  }
+  for (const arch of grounding.architecture.slice(0, 2)) {
+    candidates.push(arch);
+  }
+  for (const tool of grounding.tools.slice(0, 2)) {
+    candidates.push(tool);
+  }
+  for (const m of grounding.machinery.slice(0, 2)) {
+    candidates.push(m);
+  }
+  for (const mc of grounding.materialCulture.slice(0, 2)) {
+    candidates.push(mc);
+  }
+  const shotType = cleanText$2(sceneDirection?.composition?.shotType);
+  if (shotType && !shotType.includes("standard")) {
+    candidates.push(shotType);
+  }
+  if (isHealth) {
+    candidates.push("medical documentary cutaway", "volumetric clinical lighting");
+  } else {
+    candidates.push("observational documentary cinematography", "natural daylight");
+  }
+  const filtered = candidates.filter((item) => {
+    const lower = item.toLowerCase();
+    if (!isHealth) {
+      if (lower.includes("kidney") || lower.includes("biological") || lower.includes("physiological") || lower.includes("glomerulus") || lower.includes("nephron") || lower.includes("cellular")) {
+        return false;
+      }
+    }
+    return true;
+  });
+  const result = deduplicateKeywords(filtered, 14);
+  if (result.length < 8) {
+    const fallbacks = isHealth ? ["human physiology", "cellular activity", "biological transport", "high clarity macro"] : ["documentary realism", "authentic setting", "fluid camera movement", "detailed environmental textures"];
+    for (const fb of fallbacks) {
+      if (result.length >= 8) break;
+      if (!result.map(normalizeKey).includes(normalizeKey(fb))) {
+        result.push(fb);
+      }
+    }
+  }
+  return result;
+}
+function extractSceneAvoidKeywords(params) {
+  const { grounding, niche, globalContext } = params;
+  const avoids = [];
+  const isHealth = niche === "health";
+  for (const f of grounding.forbiddenSubstitutions) {
+    if (f.toLowerCase().includes("amish") || f.toLowerCase().includes("confuse") || f.toLowerCase().includes("substitut")) {
+      avoids.push(f);
+      if (avoids.length >= 2) break;
+    }
+  }
+  for (const f of grounding.forbiddenSubstitutions) {
+    if (!avoids.includes(f)) {
+      avoids.push(f);
+    }
+    if (avoids.length >= 3) break;
+  }
+  if (globalContext?.negativeKeywords) {
+    for (const neg of globalContext.negativeKeywords) {
+      if (!avoids.includes(neg)) {
+        avoids.push(neg);
+        break;
+      }
+    }
+  }
+  if (isHealth) {
+    avoids.push("fake diagnostic UI");
+  } else {
+    avoids.push("medical imagery");
+  }
+  avoids.push("subtitles", "watermark");
+  return deduplicateKeywords(avoids, 8);
+}
+const MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION = 2;
+function cleanText$1(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function truncateWords$1(text, maxWords) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return words.slice(0, maxWords).join(" ").replace(/[,.;:\-]+$/, "");
+}
+function countWords$1(text) {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+function sha256(parts) {
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function writeFileAtomic(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+const VIDEO_NICHE_DIRECTIVES = {
+  health: {
+    style: "Photorealistic medical documentary sequence with biologically plausible anatomy and accurate physiological flow",
+    motionFocus: "realistic internal physiological motion, cellular transport, fluid dynamics, and biological cause-and-effect progression",
+    cameraMotion: "purposeful slow macro push-in with precise medical cutaway tracking",
+    environment: "dark navy medical background with subtle volumetric depth and accurate cellular tissue environment",
+    lighting: "clean clinical lighting with gentle directional rim light and dimensional highlights",
+    negativeConstraints: "no fake diagnostic numbers, no exaggerated disease gore, no speculative molecular diagrams, no speech, no background music, no UI text, no embedded captions, no logo, no watermark"
+  },
+  history: {
+    style: "Cinematic historical documentary reconstruction with authentic period-accurate material culture and garments",
+    motionFocus: "grounded historical human activity, practical manual labor, realistic era-specific tools, and environmental dynamics",
+    cameraMotion: "slow observational lateral tracking shot with smooth cinematic stabilization",
+    environment: "authentic historical setting with period architecture, natural dust motes, and atmospheric environmental depth",
+    lighting: "natural golden-hour illumination with long soft shadows and subtle atmospheric haze",
+    negativeConstraints: "no modern artifacts, no anachronistic objects, no artificial camera shake, no dialogue, no background music, no subtitles, no watermark, no logo"
+  },
+  "hutterite-documentary": {
+    style: "Authentic cinematic documentary of communal agrarian life with respectful observational realism",
+    motionFocus: "purposeful collective agricultural work, communal kitchen preparation, workshop craftsmanship, and realistic community coordination",
+    cameraMotion: "steady walking-speed lateral dolly shot framing both individual craftsmanship and collective scale",
+    environment: "authentic communal farmstead, colony kitchen or agricultural yard with practical working architecture and expansive rural sky",
+    lighting: "natural crisp morning daylight with atmospheric environmental depth",
+    negativeConstraints: "no Amish stereotyping, no invented religious dramatics, no talking to camera, no background music, no text overlays, no subtitles, no logo, no watermark"
+  },
+  finance: {
+    style: "Premium editorial financial documentary visual with sleek institutional realism",
+    motionFocus: "purposeful business operations, professional collaboration, active trading floor activity, and strategic decision-making",
+    cameraMotion: "restrained executive push-in with smooth architectural parallax",
+    environment: "modern corporate office, trading floor, or financial headquarters with refined glass and steel architecture",
+    lighting: "crisp daylight with sophisticated interior ambient reflections",
+    negativeConstraints: "no floating currency symbols, no fictional earnings charts, no glowing holographic graphs, no speech, no music, no subtitles, no logo, no watermark"
+  },
+  food: {
+    style: "High-end culinary documentary cinematography with rich sensory texture and authentic kitchen realism",
+    motionFocus: "physical cooking dynamics, gentle rising steam, slicing fresh ingredients, simmering liquids, and natural culinary motion",
+    cameraMotion: "smooth close-up tracking move with shallow depth of field focusing on culinary action",
+    environment: "authentic professional kitchen or rustic culinary workspace with natural wooden prep tables and focused cookware",
+    lighting: "soft directional window light accentuating fresh textures, moisture, and natural warmth",
+    negativeConstraints: "no cartoonish food animation, no unnatural floating ingredients, no speech, no music, no subtitles, no logo, no watermark"
+  },
+  technology: {
+    style: "Modern technical documentary sequence showcasing authentic engineering operations and sophisticated machinery",
+    motionFocus: "precise mechanical movement, active data center servers, robotic manufacturing, and tangible hardware processes",
+    cameraMotion: "controlled linear track along machinery showing mechanism interaction and operational flow",
+    environment: "clean advanced laboratory, data facility, or high-tech manufacturing floor",
+    lighting: "cool balanced ambient illumination with subtle indicator highlights and clean specular reflections",
+    negativeConstraints: "no generic sci-fi neon grids, no unreadable hallucinated UI text, no impossible fictional mechanisms, no speech, no music, no subtitles, no logo, no watermark"
+  },
+  travel: {
+    style: "Cinematic location documentary sequence capturing authentic cultural geography and human-scale exploration",
+    motionFocus: "natural pedestrian movement, environmental wind, moving local transit, and observational human journeys",
+    cameraMotion: "sweeping slow-panning camera move revealing expansive geographical scale",
+    environment: "authentic regional landscape, historic town square, or dramatic natural terrain with deep layered perspective",
+    lighting: "warm natural sunlight with atmospheric haze and rich environmental contrast",
+    negativeConstraints: "no tourist cliches, no staged exaggerated behavior, no dialogue, no background music, no subtitles, no logo, no watermark"
+  },
+  nature: {
+    style: "Cinematic natural-history documentary sequence with National Geographic observational clarity",
+    motionFocus: "authentic wildlife behavior, environmental dynamics, flowing water, swaying canopy, and shifting weather",
+    cameraMotion: "stabilized telephoto observational tracking keeping natural subject in steady frame",
+    environment: "pristine natural habitat with dense ecological layering and organic depth",
+    lighting: "unfiltered natural ambient light with rich organic tones and environmental depth",
+    negativeConstraints: "no anthropomorphized animal behavior, no artificial lighting, no narration audio, no music, no subtitles, no watermark, no logo"
+  },
+  documentary: {
+    style: "Photorealistic cinematic documentary sequence with natural observational presence",
+    motionFocus: "authentic human activity, environmental movement, and grounded narrative progression",
+    cameraMotion: "steady observational track at eye level maintaining clear compositional focus",
+    environment: "believable real-world environment with layered depth and natural spatial cues",
+    lighting: "natural cinematic illumination with balanced contrast and documentary color grading",
+    negativeConstraints: "no staged melodrama, no speech, no background music, no UI elements, no embedded subtitles, no watermark, no logo"
+  }
+};
+const HUTTERITE_SPECIFIC_REGEX = /\b(hutterite|hutterites|hutterian|anabaptist|hutterite\s*colony|hutterian\s*brethren)\b/i;
+const COMMUNAL_FARM_REGEX = /\b(communal\s*(?:farm|living|kitchen|work|meal))\b/i;
+function detectVideoNiche(groundingText, profile, globalContext, visualBrief) {
+  if (profile === "health") return "health";
+  const combined = `${groundingText} ${globalContext?.primarySubject || ""} ${globalContext?.centralThesis || ""} ${visualBrief?.corePromise || ""}`.toLowerCase();
+  if (HUTTERITE_SPECIFIC_REGEX.test(combined)) {
+    return "hutterite-documentary";
+  }
+  if (COMMUNAL_FARM_REGEX.test(combined) && (globalContext?.primarySubject?.toLowerCase().includes("hutterite") || globalContext?.communities?.some((c) => HUTTERITE_SPECIFIC_REGEX.test(c.name)))) {
+    return "hutterite-documentary";
+  }
+  const briefNiche = (visualBrief?.primaryNiche || "").toLowerCase();
+  if (briefNiche && briefNiche in VIDEO_NICHE_DIRECTIVES && briefNiche !== "documentary") {
+    return briefNiche;
+  }
+  const detected = detectVisualNiche(groundingText, globalContext);
+  return detected in VIDEO_NICHE_DIRECTIVES ? detected : "documentary";
+}
+function pickRoleCameraMotion(role, defaultMotion) {
+  switch (role) {
+    case "hook":
+    case "reveal":
+      return "slow purposeful push-in focusing closely on the critical detail";
+    case "mechanism":
+    case "cause-effect":
+      return "steady controlled tracking shot following physical progression and interaction";
+    case "problem":
+    case "question":
+      return "slow observational lateral dolly capturing tension and environmental scale";
+    case "lifestyle":
+    case "demonstration":
+      return "stabilized walking-speed medium tracking shot keeping pace with the subject";
+    case "setup":
+    case "transition":
+      return "wide establishing drift revealing spatial context and environmental scale";
+    default:
+      return defaultMotion;
+  }
+}
+function resolveVideoCameraMotion(params) {
+  const { scene, sceneDirection, directive, niche } = params;
+  const text = `${scene.visualIntent || ""} ${scene.narration || ""} ${sceneDirection?.composition?.shotType || ""}`.toLowerCase();
+  if (/\b(aerial|drone|bird'?s eye|overhead|top-down|high altitude|landscape panorama)\b/i.test(text)) {
+    return "drone glide with slow cinematic aerial tracking revealing spatial geography";
+  }
+  if (/\b(macro|extreme close-up|document|ledger|paper|parchment|microscopic|texture close-up)\b/i.test(text)) {
+    return "restrained slider movement maintaining locked macro framing on fine details";
+  }
+  if (/\b(workshop|repair|maintenance|hand tools|workbench|cooking|chopping|baking|culinary prep)\b/i.test(text)) {
+    return "controlled lateral tracking keeping pace with the hands and machinery interaction";
+  }
+  if (/\b(courthouse|facade|columns|architecture|institution|hallway|interior architecture)\b/i.test(text)) {
+    return "stable wide reveal with gentle architectural parallax";
+  }
+  if (niche === "health" || /\b(capillary|cellular|tissue|artery|vessel|organ|glomerulus|nephron)\b/i.test(text)) {
+    return "purposeful slow cutaway tracking following the anatomical pathway";
+  }
+  if (/\b(timelapse|time-lapse|stationary|locked-off|static observation|standstill)\b/i.test(text)) {
+    return "locked-off camera with subtle natural environmental drift";
+  }
+  return pickRoleCameraMotion(sceneDirection?.sceneRole, directive.cameraMotion);
+}
+function resolveObservableAction(params) {
+  const { scene, grounding, niche, sceneDirection } = params;
+  const dirAction = cleanText$1(sceneDirection?.visualEvent?.action);
+  const isHealth = niche === "health";
+  if (dirAction && !dirAction.includes("demonstrating concrete dynamic action") && !dirAction.includes("demonstrating realistic purposeful") && !dirAction.includes("actively engaging in physiological")) {
+    if (!isHealth && /\b(biological|physiological|cellular|organ|tissue)\b/i.test(dirAction)) ;
+    else {
+      return dirAction;
+    }
+  }
+  const text = `${scene.visualIntent || ""} ${scene.narration || ""}`.toLowerCase();
+  if (isHealth) {
+    if (text.includes("glomerulus") || text.includes("nephron") || text.includes("kidney")) {
+      return "arterial blood flows steadily through glomerular capillaries as metabolic waste filters across the semi-permeable membrane";
+    }
+    if (text.includes("bladder")) {
+      return "urine droplets descend through ureters into the bladder lumen, causing gentle expansion of the elastic bladder wall";
+    }
+    return "actively circulating physiological fluid through vascular pathways and microvascular beds";
+  }
+  if (niche === "hutterite-documentary") {
+    if (/\b(workshop|equipment|machine|maintenance|fitting|tool)\b/i.test(text)) {
+      return "one worker steadies a mechanical housing while another carefully checks a fastening and adjusts a fitting using an appropriate hand tool";
+    }
+    if (/\b(kitchen|cooking|baking|meal|bread|prep)\b/i.test(text)) {
+      return "workers portion fresh ingredients and stir large simmering preparation vessels on clean stainless steel counters";
+    }
+    if (/\b(courthouse|court|legal records|law)\b/i.test(text)) {
+      return "the camera frames the monumental stone facade and institutional steps as daylight reveals architectural details";
+    }
+    if (/\b(document|deed|records|ledger|parchment|registry)\b/i.test(text)) {
+      return "a hand carefully turns the aged ledger page, examining the ink registry entries and official seals";
+    }
+    if (/\b(aerial|drone|farmstead|colony|prairie)\b/i.test(text)) {
+      return "the camera tracks across the layout of communal residential buildings, grain silos, and expansive cultivated acreage";
+    }
+    return "collaboratively operating modern agricultural equipment and coordinating farmstead operations";
+  }
+  if (niche === "food") {
+    return "slicing fresh ingredients with focused knife work and simmering aromatic liquids on prep cookware";
+  }
+  if (niche === "technology") {
+    return "operating with precision mechanical calibration and hardware data flow";
+  }
+  if (niche === "finance") {
+    return "reviewing corporate financial records and analyzing market performance indicators";
+  }
+  if (niche === "history") {
+    if (/\b(roman|legion|soldier|guard)\b/i.test(text)) {
+      return "soldiers march in disciplined formation along the frontier perimeter, keeping watchful observation";
+    }
+    return "demonstrating period-authentic craftsmanship and grounded era-specific interaction";
+  }
+  if (niche === "nature") {
+    return "foraging and navigating naturally through the native habitat without disturbance";
+  }
+  if (niche === "travel") {
+    return "traversing regional pathways as local surroundings and geography unfold";
+  }
+  if (grounding.socialBehavior.length > 0) {
+    return grounding.socialBehavior[0];
+  }
+  return "engaging in purposeful daily activity grounded in authentic real-world surroundings";
+}
+function buildManualSceneVideoPrompt(params) {
+  const { scene, profile, globalContext, visualBrief, sceneDirection, outputResolution, identityBible, sceneIdentity } = params;
+  const isHealth = profile === "health";
+  const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
+  const narration = cleanText$1(scene.narration);
+  const intent = cleanText$1(scene.visualIntent);
+  const groundingText = `${narration} ${intent}`.trim();
+  const niche = detectVideoNiche(groundingText, profile, globalContext, visualBrief);
+  const directive = VIDEO_NICHE_DIRECTIVES[niche];
+  const durationSecs = typeof scene.duration === "number" && Number.isFinite(scene.duration) && scene.duration > 0 ? Math.round(scene.duration) : 5;
+  const grounding = params.subjectGrounding || resolveVideoSubjectGrounding({
+    scene,
+    globalContext,
+    identityBible,
+    sceneIdentity,
+    sceneDirection,
+    profile
+  });
+  const cameraMotion = resolveVideoCameraMotion({ scene, sceneDirection, directive, niche });
+  const shotType = cleanText$1(sceneDirection?.composition?.shotType) || (isHealth ? "macro cutaway shot" : "medium observational shot");
+  const lensFeel = cleanText$1(sceneDirection?.composition?.lensFeel) || (isHealth ? "100mm medical macro lens" : "35mm cinematic lens");
+  const subject = grounding.canonicalSubject || (isHealth ? "human physiological tissue structures" : "documentary subject in authentic setting");
+  const action = resolveObservableAction({ scene, grounding, niche, sceneDirection });
+  let subjectDetailClause = "";
+  if (grounding.presence === "dominant" || grounding.presence === "visible") {
+    const parts = [];
+    if (grounding.wardrobe.length > 0) {
+      parts.push(`wearing ${grounding.wardrobe.slice(0, 3).join(", ")}`);
+    }
+    if (grounding.physicalAppearance.length > 0) {
+      parts.push(`with ${grounding.physicalAppearance.slice(0, 2).join(", ")}`);
+    }
+    if (parts.length > 0) {
+      const forbiddenHint = grounding.forbiddenSubstitutions.length > 0 ? ` Their appearance and clothing should reflect the identity details established for this community rather than ${grounding.forbiddenSubstitutions[0]}.` : "";
+      subjectDetailClause = `A small group of ${subject} ${parts.join(" ")}.${forbiddenHint}`;
+    }
+  }
+  const narrationSummary = cleanText$1(narration);
+  const narrationClause = narrationSummary ? `grounded in the scene narrative: ${truncateWords$1(narrationSummary, 15)}` : "";
+  const beginningClause = narrationClause ? `In the beginning, establish ${subject}, ${narrationClause}.` : `In the beginning, establish ${subject} initiating action.`;
+  const middleChange = cleanText$1(sceneDirection?.visualEvent?.change);
+  const cleanMiddleChange = !isHealth && /\b(biological|physiological|cellular)\b/i.test(middleChange) ? "" : middleChange;
+  const middleClause = cleanMiddleChange ? `As the shot progresses, develop ${action} with ${cleanMiddleChange} while the camera executes a ${cameraMotion}.` : `As the clip progresses, maintain smooth visible development of ${action} while the camera executes a ${cameraMotion}.`;
+  let rawConsequence = cleanText$1(sceneDirection?.visualEvent?.consequence);
+  if (!isHealth) {
+    if (/\b(biological|physiological|cellular|organ|tissue)\b/i.test(rawConsequence)) {
+      rawConsequence = "observable real-world development";
+    }
+  }
+  const endingClause = rawConsequence ? `Toward the end of the shot, settle on the consequence: ${rawConsequence}.` : `Toward the end of the shot, smoothly complete the visible motion without abrupt stops.`;
+  const lighting = cleanText$1(sceneDirection?.lighting) || directive.lighting;
+  const envDetail = grounding.environment[0] || cleanText$1(sceneDirection?.composition?.background) || directive.environment;
+  const environmentClause = `Environment and atmosphere: ${envDetail}, illuminated by ${lighting}.`;
+  const realismClause = isHealth ? "Preserve anatomically accurate cellular proportions and believable physiological fluid mechanics." : "Preserve the real-world proportions of equipment, believable body mechanics and authentic contemporary rural working atmosphere.";
+  let continuityClause = "";
+  if (sceneDirection?.continuityNote) {
+    continuityClause = `Maintain strict continuity: ${cleanText$1(sceneDirection.continuityNote)}.`;
+  } else {
+    continuityClause = "Maintain strict continuity of wardrobe, architecture, lighting color temperature, and documentary palette with surrounding scenes.";
+  }
+  let overlayReserveClause = "";
+  if (sceneDirection?.textOverlay?.enabled && sceneDirection.textOverlay?.position) {
+    const pos = sceneDirection.textOverlay.position.replace("-", " ");
+    overlayReserveClause = `Reserve clean, uncluttered negative space in the ${pos} quadrant for external editorial captions.`;
+  }
+  const durationClause = `Target clip duration: ${durationSecs} seconds.`;
+  const techClause = `Horizontal 16:9 video (${dims}).`;
+  const negativeClause = `${directive.negativeConstraints}.`;
+  const visualKeywords = params.visualKeywords || extractSceneVideoKeywords({ scene, grounding, sceneDirection, niche });
+  const avoidKeywords = extractSceneAvoidKeywords({ grounding, globalContext, niche });
+  const keywordsClause = `Visual keywords: ${visualKeywords.join(", ")}.`;
+  const avoidClause = avoidKeywords.length > 0 ? `Avoid: ${avoidKeywords.join(", ")}.` : "";
+  const assemble = (level) => {
+    const parts = [
+      `${directive.style} capturing ${subject}.`,
+      subjectDetailClause,
+      beginningClause,
+      middleClause,
+      level < 3 ? endingClause : "",
+      `Framing: ${shotType} on a ${lensFeel}.`,
+      environmentClause,
+      level < 1 ? realismClause : "",
+      level < 2 ? continuityClause : "",
+      overlayReserveClause,
+      durationClause,
+      techClause,
+      negativeClause,
+      keywordsClause,
+      avoidClause
+    ];
+    return sanitizePromptLine(parts.filter(Boolean).join(" "));
+  };
+  let prompt = assemble(0);
+  if (countWords$1(prompt) > 310) prompt = assemble(1);
+  if (countWords$1(prompt) > 310) prompt = assemble(2);
+  if (countWords$1(prompt) > 310) prompt = assemble(3);
+  return prompt;
+}
+function computeManualVideoPromptInputHash(params) {
+  const parts = [
+    String(params.sceneIndex),
+    cleanText$1(params.narration),
+    cleanText$1(params.visualIntent),
+    String(params.duration || 5),
+    params.profile,
+    params.niche,
+    params.outputResolution,
+    params.sceneRole || "",
+    params.hookLevel || "",
+    params.visualEvent?.subject || "",
+    params.visualEvent?.action || "",
+    params.visualEvent?.change || "",
+    params.visualEvent?.consequence || "",
+    params.continuityNote || "",
+    params.cameraMotion || "",
+    params.groundingTraits || "",
+    params.globalContextHash || "",
+    (params.keywords || []).join(","),
+    (params.avoidKeywords || []).join(","),
+    String(MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION)
+  ];
+  return sha256(parts);
+}
+function formatManualAiVideoPromptText(pack) {
+  return [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex).map((entry) => `${formatSceneLabel(entry.sceneIndex)} | ${sanitizePromptLine(entry.prompt)}`).join("\n\n");
+}
+function getManualAiVideoPromptJsonPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-video-prompts.json");
+}
+function getManualAiVideoPromptTxtPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "manual-ai-video-prompts.txt");
+}
+function loadManualAiVideoPromptPack(projectDir) {
+  const p = getManualAiVideoPromptJsonPath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    const parsed = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+    if (!parsed || !Array.isArray(parsed.scenes)) return null;
+    return parsed;
+  } catch (err) {
+    logger.warn(`[ManualAI:VideoPrompt] Failed to read video prompt pack ${p}: ${err}`);
+    return null;
+  }
+}
+function saveManualAiVideoPromptPackFiles(projectDir, pack) {
+  writeFileAtomic(getManualAiVideoPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic(getManualAiVideoPromptTxtPath(projectDir), formatManualAiVideoPromptText(pack) + "\n");
+}
+function ensureManualAiVideoPromptPack(projectDir) {
+  const imagePack = loadManualAiPromptPack(projectDir);
+  let aiScenesToGenerate = [];
+  let profile = imagePack?.profile ?? "general";
+  let outputResolution = imagePack?.outputResolution ?? "1080p";
+  const planPath = path__namespace.join(projectDir, "analysis", "visual-mix-plan.json");
+  let planScenesMap = /* @__PURE__ */ new Map();
+  if (fs__namespace.existsSync(planPath)) {
+    try {
+      const planData = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+      if (planData?.profile) profile = planData.profile;
+      if (planData?.outputResolution) outputResolution = planData.outputResolution;
+      if (Array.isArray(planData?.scenes)) {
+        for (const s of planData.scenes) {
+          planScenesMap.set(s.sceneIndex, s);
+        }
+      }
+    } catch {
+    }
+  }
+  const masterEditPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (fs__namespace.existsSync(masterEditPath)) {
+    try {
+      const masterData = JSON.parse(fs__namespace.readFileSync(masterEditPath, "utf-8"));
+      const chapters = masterData?.chapters || [];
+      for (const ch of chapters) {
+        for (const seq of ch.chapters_seq || []) {
+          for (const sc of seq.scenes || []) {
+            if (!planScenesMap.has(sc.sceneIndex)) {
+              planScenesMap.set(sc.sceneIndex, {
+                sceneIndex: sc.sceneIndex,
+                narration: sc.narrativeText || sc.narration || "",
+                visualIntent: sc.visualIntent || "",
+                duration: sc.duration || 5,
+                strategy: "ai-still",
+                assetType: "ai-image",
+                imagePrompt: ""
+              });
+            }
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  if (imagePack && Array.isArray(imagePack.scenes) && imagePack.scenes.length > 0) {
+    aiScenesToGenerate = imagePack.scenes.map((s) => {
+      const fromPlan = planScenesMap.get(s.sceneIndex);
+      const resolvedNarration = fromPlan?.narration || fromPlan?.visualIntent || `Scene ${s.sceneIndex}`;
+      return {
+        sceneIndex: s.sceneIndex,
+        narration: resolvedNarration,
+        visualIntent: fromPlan?.visualIntent,
+        duration: fromPlan?.duration
+      };
+    });
+  } else if (planScenesMap.size > 0) {
+    for (const [idx, s] of planScenesMap.entries()) {
+      if (s.strategy === "ai-still") {
+        aiScenesToGenerate.push({
+          sceneIndex: idx,
+          narration: s.narration || s.visualIntent || `Scene ${idx}`,
+          visualIntent: s.visualIntent,
+          duration: s.duration
+        });
+      }
+    }
+  }
+  if (aiScenesToGenerate.length === 0) {
+    throw new Error("No AI-owned scenes found. Start production or generate a visual mix plan first.");
+  }
+  let globalContext;
+  const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+  if (fs__namespace.existsSync(contextPath)) {
+    try {
+      globalContext = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    } catch {
+    }
+  }
+  const identityBible = loadVisualIdentityBible(projectDir);
+  let visualBrief;
+  const briefPath = path__namespace.join(projectDir, "analysis", "manual-ai-visual-brief.json");
+  if (fs__namespace.existsSync(briefPath)) {
+    try {
+      visualBrief = JSON.parse(fs__namespace.readFileSync(briefPath, "utf-8"));
+    } catch {
+    }
+  }
+  const directionsMap = /* @__PURE__ */ new Map();
+  const directionsPath = path__namespace.join(projectDir, "analysis", "manual-ai-scene-directions.json");
+  if (fs__namespace.existsSync(directionsPath)) {
+    try {
+      const dirArtifact = JSON.parse(fs__namespace.readFileSync(directionsPath, "utf-8"));
+      if (Array.isArray(dirArtifact?.directions)) {
+        for (const d of dirArtifact.directions) {
+          directionsMap.set(d.sceneIndex, d);
+        }
+      }
+    } catch {
+    }
+  }
+  const existingPack = loadManualAiVideoPromptPack(projectDir);
+  const existingByScene = /* @__PURE__ */ new Map();
+  if (existingPack && existingPack.schemaVersion === MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION) {
+    for (const entry of existingPack.scenes) {
+      existingByScene.set(entry.sceneIndex, entry);
+    }
+  }
+  aiScenesToGenerate.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  const entries = [];
+  const globalContextHash = globalContext ? sha256([
+    globalContext.primarySubject || "",
+    globalContext.centralThesis || "",
+    (globalContext.exactTopicAnchors || []).join(","),
+    (globalContext.forbiddenSubstitutions || []).join(",")
+  ]) : "";
+  for (let i = 0; i < aiScenesToGenerate.length; i++) {
+    const item = aiScenesToGenerate[i];
+    const scenePlan = planScenesMap.get(item.sceneIndex) || {
+      sceneIndex: item.sceneIndex,
+      narration: item.narration,
+      visualIntent: item.visualIntent,
+      duration: item.duration || 5,
+      strategy: "ai-still",
+      assetType: "ai-image",
+      imagePrompt: ""
+    };
+    const sceneDirection = directionsMap.get(item.sceneIndex);
+    const groundingText = `${scenePlan.narration} ${scenePlan.visualIntent || ""}`.trim();
+    const niche = detectVideoNiche(groundingText, profile, globalContext, visualBrief);
+    const directive = VIDEO_NICHE_DIRECTIVES[niche];
+    const subjectGrounding = resolveVideoSubjectGrounding({
+      scene: scenePlan,
+      globalContext,
+      identityBible: identityBible ?? void 0,
+      sceneDirection,
+      profile
+    });
+    const cameraMotion = resolveVideoCameraMotion({
+      scene: scenePlan,
+      sceneDirection,
+      directive,
+      niche
+    });
+    const visualKeywords = extractSceneVideoKeywords({
+      scene: scenePlan,
+      grounding: subjectGrounding,
+      sceneDirection,
+      niche
+    });
+    const avoidKeywords = extractSceneAvoidKeywords({
+      grounding: subjectGrounding,
+      globalContext,
+      niche
+    });
+    const groundingTraits = sha256([
+      subjectGrounding.canonicalSubject,
+      subjectGrounding.presence,
+      subjectGrounding.wardrobe.join(","),
+      subjectGrounding.architecture.join(","),
+      subjectGrounding.environment.join(","),
+      subjectGrounding.machinery.join(","),
+      subjectGrounding.tools.join(","),
+      subjectGrounding.forbiddenSubstitutions.join(",")
+    ]);
+    const inputHash = computeManualVideoPromptInputHash({
+      sceneIndex: item.sceneIndex,
+      narration: scenePlan.narration,
+      visualIntent: scenePlan.visualIntent,
+      duration: scenePlan.duration,
+      profile,
+      niche,
+      outputResolution,
+      sceneRole: sceneDirection?.sceneRole,
+      hookLevel: sceneDirection?.hookLevel,
+      visualEvent: sceneDirection?.visualEvent,
+      continuityNote: sceneDirection?.continuityNote,
+      cameraMotion,
+      groundingTraits,
+      globalContextHash,
+      keywords: visualKeywords,
+      avoidKeywords
+    });
+    const cached = existingByScene.get(item.sceneIndex);
+    if (cached && cached.inputHash === inputHash) {
+      entries.push(cached);
+    } else {
+      i > 0 ? planScenesMap.get(aiScenesToGenerate[i - 1].sceneIndex) : void 0;
+      i < aiScenesToGenerate.length - 1 ? planScenesMap.get(aiScenesToGenerate[i + 1].sceneIndex) : void 0;
+      const prompt = buildManualSceneVideoPrompt({
+        scene: scenePlan,
+        profile,
+        globalContext,
+        visualBrief,
+        sceneDirection,
+        outputResolution,
+        identityBible: identityBible ?? void 0,
+        subjectGrounding,
+        visualKeywords
+      });
+      entries.push({
+        sceneIndex: item.sceneIndex,
+        sceneId: `scene_${item.sceneIndex}`,
+        prompt,
+        inputHash,
+        durationSecs: typeof scenePlan.duration === "number" && scenePlan.duration > 0 ? Math.round(scenePlan.duration) : 5,
+        niche,
+        expectedFilename: `S${String(item.sceneIndex).padStart(4, "0")}.mp4`
+      });
+    }
+  }
+  const seenIndices = /* @__PURE__ */ new Set();
+  for (const entry of entries) {
+    if (seenIndices.has(entry.sceneIndex)) {
+      throw new Error(`Duplicate sceneIndex ${entry.sceneIndex} in video prompt pack.`);
+    }
+    seenIndices.add(entry.sceneIndex);
+    if (!entry.prompt || entry.prompt.trim().length === 0) {
+      throw new Error(`Empty prompt generated for scene ${entry.sceneIndex}.`);
+    }
+  }
+  const newPack = {
+    schemaVersion: MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION,
+    generatedAt: existingPack?.generatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+    profile,
+    scenes: entries
+  };
+  saveManualAiVideoPromptPackFiles(projectDir, newPack);
+  logger.info(
+    `[ManualAI:VideoPrompt] ensureManualAiVideoPromptPack completed for project=${projectDir} totalPrompts=${entries.length} schemaVersion=${MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION}`
+  );
+  return newPack;
+}
+function cleanText(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function truncateWords(text, maxWords) {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return words.slice(0, maxWords).join(" ").replace(/[,.;:\-]+$/, "");
+}
+function countWords(text) {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+const NICHE_OPENING_PROFILES = {
+  "hutterite-documentary": {
+    defaultArchetype: "unusual-detail",
+    lighting: "natural crisp prairie morning daylight with directional rim illumination and long soft shadows",
+    realismDirective: "authentic contemporary communal agrarian life, practical communal workwear, modern large-scale farm equipment",
+    questionTemplate: "Why does this modern communal agrarian system rely on this specific coordinated practice?",
+    forbiddenKeywords: ["Amish horse and buggy", "quaint horse buggy", "straw bonnet", "primitive technology", "religious cult drama"]
+  },
+  health: {
+    defaultArchetype: "hidden-mechanism",
+    lighting: "clean clinical medical lighting with cool deep navy gradient and gentle biological volumetric depth",
+    realismDirective: "anatomically accurate biological structures, realistic fluid dynamics and cellular transport mechanics",
+    questionTemplate: "What unseen physiological mechanism regulates this critical biological exchange?",
+    forbiddenKeywords: ["fake diagnostic readouts", "cartoonish 3D organs", "exaggerated disease gore", "speculative molecular diagrams"]
+  },
+  history: {
+    defaultArchetype: "evidence-reveal",
+    lighting: "raking golden-hour daylight accentuating aged surface texture with deep natural shadows",
+    realismDirective: "period-accurate material culture, authentic historical artifacts, weathered physical documents and era-specific craftsmanship",
+    questionTemplate: "What crucial historical reality is recorded in this surviving physical artifact?",
+    forbiddenKeywords: ["modern synthetic fabrics", "anachronistic technology", "fictional dramatic reenactment posing as archival evidence"]
+  },
+  finance: {
+    defaultArchetype: "scale-contrast",
+    lighting: "crisp architectural daylight with refined glass reflections and balanced ambient contrast",
+    realismDirective: "institutional corporate realism, tangible business operations, real physical documentation and high-stakes operational environments",
+    questionTemplate: "How does this granular physical transaction reflect the immense scale of modern market operations?",
+    forbiddenKeywords: ["floating green currency holograms", "fake explosive trading graphs", "cartoon money stacks"]
+  },
+  food: {
+    defaultArchetype: "process-at-critical-moment",
+    lighting: "soft directional window daylight accentuating fresh moisture, steam, and crisp culinary texture",
+    realismDirective: "authentic culinary documentary realism, tangible ingredient textures, genuine thermal steam and knife precision",
+    questionTemplate: "What delicate physical transformation occurs at this exact culinary instant?",
+    forbiddenKeywords: ["cartoon food animation", "unnatural floating ingredients", "neon saturated artificial colors"]
+  },
+  technology: {
+    defaultArchetype: "hidden-mechanism",
+    lighting: "cool balanced laboratory illumination with subtle functional status LEDs and clean specular reflections",
+    realismDirective: "authentic engineering mechanisms, precise robotic movements, tangible silicon or machined hardware components",
+    questionTemplate: "What precise mechanical coordination allows this complex automated process to operate?",
+    forbiddenKeywords: ["sci-fi holographic grids", "hallucinated floating code", "impossible perpetual motion devices"]
+  },
+  travel: {
+    defaultArchetype: "unexpected-perspective",
+    lighting: "warm atmospheric daylight with layered geographic depth and rich regional color fidelity",
+    realismDirective: "authentic location documentary realism, natural architectural weathering, genuine pedestrian movement",
+    questionTemplate: "What enduring cultural relationship is revealed through this specific physical vantage point?",
+    forbiddenKeywords: ["staged tourist cliches", "unrealistic saturated postcards", "exaggerated exoticism"]
+  },
+  nature: {
+    defaultArchetype: "unusual-detail",
+    lighting: "unfiltered natural ambient light with rich organic tones and dense ecological depth",
+    realismDirective: "authentic wildlife behavior, plausible natural geology and genuine ecological interaction",
+    questionTemplate: "How does this minute biological adaptation enable survival in this demanding habitat?",
+    forbiddenKeywords: ["anthropomorphized animal behavior", "artificial studio lighting", "CGI creature movements"]
+  },
+  documentary: {
+    defaultArchetype: "unusual-detail",
+    lighting: "natural documentary illumination with balanced contrast and authentic real-world color grade",
+    realismDirective: "observational documentary realism, candid human presence, authentic practical tools and unvarnished working environments",
+    questionTemplate: "What essential truth about this operation becomes evident when examined in close physical detail?",
+    forbiddenKeywords: ["staged melodrama", "sensationalized disaster effects", "fake crisis scenarios"]
+  }
+};
+const RANK_DEFAULT_ARCHETYPES = {
+  1: ["unusual-detail", "process-at-critical-moment", "hidden-mechanism"],
+  2: ["scale-contrast", "physical-contrast", "unexpected-perspective"],
+  3: ["mystery-object", "hidden-mechanism", "before-after-tension"],
+  4: ["process-at-critical-moment", "evidence-reveal", "visible-consequence"],
+  5: ["visible-consequence", "unusual-detail", "hidden-mechanism"],
+  6: ["unexpected-perspective", "scale-contrast", "physical-contrast"],
+  7: ["physical-contrast", "evidence-reveal", "process-at-critical-moment"],
+  8: ["visible-consequence", "before-after-tension", "mystery-object"],
+  9: ["before-after-tension", "hidden-mechanism", "scale-contrast"],
+  10: ["unusual-detail", "process-at-critical-moment", "visible-consequence"]
+};
+const RANK_SHOT_TYPES = {
+  1: { shotType: "extreme macro close-up focusing sharply on fine surface detail", cameraAngle: "eye level perpendicular angle" },
+  2: { shotType: "low-angle medium three-quarter shot emphasizing scale contrast", cameraAngle: "steep low angle looking upward" },
+  3: { shotType: "tight detail close-up concealing surrounding context", cameraAngle: "focused 45-degree angle" },
+  4: { shotType: "medium observational tracking framing active physical interaction", cameraAngle: "eye level steady three-quarter angle" },
+  5: { shotType: "macro close-up on physical engagement between tools and materials", cameraAngle: "downward 60-degree close-range angle" },
+  6: { shotType: "elevated three-quarter overview revealing broader spatial context", cameraAngle: "elevated 30-degree high angle" },
+  7: { shotType: "candid eye-level medium shot maintaining observational distance", cameraAngle: "natural eye level profile" },
+  8: { shotType: "tight low-angle composition on tangible evidence or consequence", cameraAngle: "ground-level low angle" },
+  9: { shotType: "dynamic medium tracking shot following purposeful physical progression", cameraAngle: "slight low-angle three-quarter view" },
+  10: { shotType: "cinematic medium-wide progression with pronounced leading lines", cameraAngle: "eye-level centered with deep vanishing perspective" }
+};
+function extractGroundedFocalPoint(scene, niche, grounding, sceneDirection) {
+  const narration = cleanText(scene.narration);
+  const intent = cleanText(scene.visualIntent);
+  const text = `${intent} ${narration}`.toLowerCase();
+  if (sceneDirection?.visualEvent?.subject && sceneDirection.visualEvent.action) {
+    const s = cleanText(sceneDirection.visualEvent.subject);
+    const a = cleanText(sceneDirection.visualEvent.action);
+    const c = cleanText(sceneDirection.visualEvent.change || sceneDirection.visualEvent.consequence || "sharp physical clarity");
+    return {
+      focalPoint: s,
+      strikingDetail: c,
+      visibleAction: a
+    };
+  }
+  if (niche === "hutterite-documentary") {
+    if (/\b(pipe|water|winter|freeze|frozen|cold|frost|ice|subzero)\b/i.test(text)) {
+      return {
+        focalPoint: "a heavy industrial brass water coupling valve encrusted in thick rime frost",
+        focalDetail: "translucent ice crystals forming along the valve threading with frozen condensation",
+        visibleAction: "a pair of insulated leather work gloves applying steady counter-pressure to free the iced fitting"
+      };
+    }
+    if (/\b(kitchen|bake|baking|bread|dough|cook|meal|communal kitchen)\b/i.test(text)) {
+      return {
+        focalPoint: "the colossal spiral steel mixing arm of a commercial colony dough kneader",
+        strikingDetail: "taut bands of sourdough stretching and folding under mechanical torque",
+        visibleAction: "dense flour dust puffing slightly as the heavy arm drives through hundred-pound dough batches"
+      };
+    }
+    if (/\b(workshop|repair|weld|welding|machine|lathe|tool|hardware|metal)\b/i.test(text)) {
+      return {
+        focalPoint: "a heavy combine hydraulic piston assembly mounted on a colony steel workbench",
+        strikingDetail: "a fresh bead of dark lubricating oil catching the reflection of fluorescent shop lighting",
+        visibleAction: "a machinist using a hardened micrometer to verify the machined steel cylinder tolerance"
+      };
+    }
+    if (/\b(harvest|combine|tractor|field|prairie|grain|wheat|corn|crop)\b/i.test(text)) {
+      return {
+        focalPoint: "the massive rotating threshing cylinder of a modern combine harvester",
+        strikingDetail: "chaff and golden wheat dust swirling across gleaming hardened steel tines",
+        visibleAction: "the heavy reel drawing grain heads smoothly into the feeder house in continuous motion"
+      };
+    }
+    if (/\b(record|book|ledger|german|script|letter|history|ancestor|document)\b/i.test(text)) {
+      return {
+        focalPoint: "a leather-bound colony communal ledger opened to handwritten Fraktur script",
+        strikingDetail: "faded black iron gall ink strokes on heavy cotton rag paper with ruled ledger margins",
+        visibleAction: "weathered fingers turning an aged leaf to reveal meticulously numbered family records"
+      };
+    }
+    return {
+      focalPoint: "the communal working infrastructure of the colony farmstead",
+      strikingDetail: "practical galvanized steel fittings and organized tools showing decades of communal care",
+      visibleAction: "colony workers in practical denim overalls coordinating routine maintenance at dawn"
+    };
+  }
+  if (niche === "health") {
+    if (/\b(kidney|glomerul|nephron|filter|filtration|renal)\b/i.test(text)) {
+      return {
+        focalPoint: "a single renal glomerulus capillary loop in microscopic cutaway",
+        strikingDetail: "fenestrated endothelial wall actively filtering biological plasma under pulsatile pressure",
+        visibleAction: "cellular fluid streaming through micro-pores while cellular components remain retained"
+      };
+    }
+    if (/\b(heart|cardiac|artery|vessel|blood|circulation|aorta)\b/i.test(text)) {
+      return {
+        focalPoint: "the cross-section of a coronary arterial wall showing smooth muscle architecture",
+        strikingDetail: "layered collagen fibers flexing with each synchronized hydrostatic pulse",
+        visibleAction: "oxygenated erythrocytes gliding in steady laminar flow through the vascular lumen"
+      };
+    }
+    if (/\b(cell|membrane|receptor|protein|lipid|molecule)\b/i.test(text)) {
+      return {
+        focalPoint: "a cellular phospholipid bilayer with integrated membrane transport proteins",
+        strikingDetail: "hydrophobic lipid tails vibrating gently within the fluid mosaic matrix",
+        visibleAction: "conformation shifts in transmembrane channels enabling controlled ionic transport"
+      };
+    }
+    return {
+      focalPoint: "the intricate micro-architecture of the target anatomical structure",
+      strikingDetail: "clearly delineated cellular tissue boundaries with subtle biological fluid glow",
+      visibleAction: "active physiological transport occurring steadily across biological membranes"
+    };
+  }
+  if (niche === "history") {
+    if (/\b(document|treaty|letter|parchment|ledger|paper|signature)\b/i.test(text)) {
+      return {
+        focalPoint: "an authentic period parchment document with a deeply stamped wax seal",
+        strikingDetail: "hairline stress fractures across the vermilion wax and feathering quill ink strokes",
+        visibleAction: "a hand in period-accurate wool cuffs adjusting an antique brass magnifying glass above the text"
+      };
+    }
+    if (/\b(weapon|sword|iron|forge|blacksmith|armor|metal)\b/i.test(text)) {
+      return {
+        focalPoint: "a hand-forged iron implement resting on a scarred timber workbench",
+        strikingDetail: "hammer marks and dark carbon patina preserved along the tempered edge",
+        visibleAction: "a metalworker lifting the cooling piece with wrought-iron tongs into quench water"
+      };
+    }
+    return {
+      focalPoint: "an authentic period-specific artifact linked to the historical event",
+      strikingDetail: "tangible material wear, hand-tooled joinery, and genuine historical patina",
+      visibleAction: "purposeful manual handling revealing the functional craftsmanship of the era"
+    };
+  }
+  if (niche === "finance") {
+    if (/\b(ledger|audit|document|report|balance|sheet|statement)\b/i.test(text)) {
+      return {
+        focalPoint: "an audited physical financial balance sheet marked with red reconciliation notes",
+        strikingDetail: "handwritten variance annotations set against crisp laser-printed line items",
+        visibleAction: "an analyst placing an official validation stamp beside an unexpected numerical discrepancy"
+      };
+    }
+    return {
+      focalPoint: "a high-frequency operational trading desk terminal displaying market flow depth",
+      strikingDetail: "live order-book data flickering across architectural glass reflections",
+      visibleAction: "fingers executing rapid keyboard commands as real-time spread numbers fluctuate"
+    };
+  }
+  if (niche === "food") {
+    return {
+      focalPoint: "the precise physical boundary where raw ingredients undergo heat transformation",
+      strikingDetail: "fine moisture vaporising into fragrant steam as golden-brown crust caramelizes",
+      visibleAction: "a chef using a razor-sharp carbon knife to score the surface with rhythmic precision"
+    };
+  }
+  if (niche === "technology") {
+    return {
+      focalPoint: "the precision micro-actuator linkage of an automated assembly mechanism",
+      strikingDetail: "sub-millimeter machined titanium gear teeth engaging without backlash",
+      visibleAction: "stepper motors executing synchronized high-speed micro-steps along linear rails"
+    };
+  }
+  const subjectName = grounding.canonicalSubject || truncateWords(intent || narration, 6);
+  return {
+    focalPoint: `the central working component of ${subjectName}`,
+    strikingDetail: "weathered physical texture, practical wear marks and authentic environmental patina",
+    visibleAction: "deliberate hands-on interaction demonstrating functional operational mastery"
+  };
+}
+function resolveOpeningVisualHook(params) {
+  const { scene, openingRank, previousHooks, globalContext, sceneDirection, retentionHint, identityBible } = params;
+  const rank = Math.max(1, Math.min(10, openingRank));
+  const narration = cleanText(scene.narration);
+  const intent = cleanText(scene.visualIntent);
+  const groundingText = `${intent} ${narration}`.trim();
+  const profile = scene.category === "health" || sceneDirection && sceneDirection.sceneRole === "mechanism" ? "health" : "general";
+  const niche = detectVideoNiche(groundingText, profile, globalContext);
+  const nicheProfile = NICHE_OPENING_PROFILES[niche] || NICHE_OPENING_PROFILES["documentary"];
+  const grounding = resolveVideoSubjectGrounding({
+    scene,
+    globalContext,
+    identityBible,
+    sceneDirection,
+    profile
+  });
+  const candidateArchetypes = RANK_DEFAULT_ARCHETYPES[rank] || ["unusual-detail"];
+  const lastArchetype = previousHooks.length > 0 ? previousHooks[previousHooks.length - 1].hookArchetype : null;
+  const secondLastArchetype = previousHooks.length > 1 ? previousHooks[previousHooks.length - 2].hookArchetype : null;
+  let selectedArchetype = candidateArchetypes[0];
+  if (/\b(scale|massive|micro|microscopic|vast|tiny|thousands|colony-wide)\b/i.test(groundingText)) {
+    selectedArchetype = "scale-contrast";
+  } else if (/\b(gear|pipe|valve|piston|wire|mechanism|filter|engine|pump)\b/i.test(groundingText)) {
+    selectedArchetype = "hidden-mechanism";
+  } else if (/\b(ledger|document|record|certificate|paper|letter|contract)\b/i.test(groundingText)) {
+    selectedArchetype = "evidence-reveal";
+  } else if (/\b(ice|frost|cold|heat|steam|rust|pressure|wear|crack)\b/i.test(groundingText)) {
+    selectedArchetype = "physical-contrast";
+  } else if (/\b(knead|dough|weld|cut|slice|pour|assemble|inject|harvest)\b/i.test(groundingText)) {
+    selectedArchetype = "process-at-critical-moment";
+  }
+  if (selectedArchetype === lastArchetype) {
+    const alternative = candidateArchetypes.find((a) => a !== lastArchetype && a !== secondLastArchetype);
+    if (alternative) selectedArchetype = alternative;
+  }
+  const rankPreset = RANK_SHOT_TYPES[rank] || RANK_SHOT_TYPES[1];
+  let shotType = rankPreset.shotType;
+  let cameraAngle = rankPreset.cameraAngle;
+  if (previousHooks.length > 0 && previousHooks[previousHooks.length - 1].shotType === shotType) {
+    if (shotType.includes("macro")) {
+      shotType = "tight low-angle composition with sharp foreground isolation";
+      cameraAngle = "low-angle looking slightly upward";
+    } else {
+      shotType = "macro detail framing isolating the central mechanical feature";
+      cameraAngle = "downward 45-degree close-up";
+    }
+  }
+  const focalData = extractGroundedFocalPoint(scene, niche, grounding, sceneDirection);
+  const canonicalSubject = grounding.canonicalSubject || cleanText(sceneDirection?.visualEvent?.subject) || "authentic documentary subject";
+  let viewerQuestion = nicheProfile.questionTemplate;
+  if (retentionHint?.reason) {
+    viewerQuestion = `How does this specific detail explain why ${cleanText(retentionHint.reason)}?`;
+  } else if (sceneDirection?.viewerShouldNotice) {
+    viewerQuestion = `Why is ${cleanText(sceneDirection.viewerShouldNotice)} happening at this pivotal stage?`;
+  } else if (narration) {
+    viewerQuestion = `What unexpected consequence stems from ${truncateWords(narration, 10)}?`;
+  }
+  const requiredTraits = [
+    ...grounding.wardrobe.slice(0, 2),
+    ...grounding.tools.slice(0, 2),
+    ...grounding.machinery.slice(0, 2),
+    ...grounding.architecture.slice(0, 1)
+  ].filter(Boolean);
+  const forbiddenSubstitutions = [
+    ...grounding.forbiddenSubstitutions,
+    ...nicheProfile.forbiddenKeywords
+  ].filter((v, i, a) => a.indexOf(v) === i);
+  return {
+    sceneIndex: scene.sceneIndex,
+    openingRank: rank,
+    canonicalSubject,
+    niche,
+    sceneNarration: narration,
+    visualIntent: intent,
+    hookArchetype: selectedArchetype,
+    visualFocalPoint: focalData.focalPoint,
+    strikingDetail: focalData.strikingDetail,
+    visibleAction: focalData.visibleAction,
+    viewerQuestion,
+    shotType,
+    cameraAngle,
+    lighting: cleanText(sceneDirection?.lighting) || nicheProfile.lighting,
+    requiredIdentityTraits: requiredTraits,
+    forbiddenSubstitutions,
+    evidenceSource: sceneDirection ? "scene-direction" : "grounding-engine",
+    confidence: grounding.confidence || 0.85
+  };
+}
+function composeOpeningImagePrompt(params) {
+  const { blueprint, outputResolution } = params;
+  const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
+  const nicheProfile = NICHE_OPENING_PROFILES[blueprint.niche] || NICHE_OPENING_PROFILES["documentary"];
+  const openingHeader = `Documentary photograph capturing a compelling opening visual hook: an unexpected view of ${blueprint.visualFocalPoint}, frozen in a decisive instant as ${blueprint.visibleAction}.`;
+  const questionClause = `The visual presents a concrete narrative question: ${blueprint.viewerQuestion}`;
+  const compositionClause = `Composition: ${blueprint.shotType} from a ${blueprint.cameraAngle}, establishing ${blueprint.visualFocalPoint} with extreme focal priority and crisp separation from the background.`;
+  const detailClause = `Visual detail: ${blueprint.strikingDetail}, framed against an authentic background of ${blueprint.canonicalSubject}.`;
+  const lightingClause = `Lighting: ${blueprint.lighting}.`;
+  let identityClause = nicheProfile.realismDirective;
+  if (blueprint.requiredIdentityTraits.length > 0) {
+    identityClause += `, featuring ${blueprint.requiredIdentityTraits.slice(0, 3).join(", ")}`;
+  }
+  const forbiddenClause = blueprint.forbiddenSubstitutions.length > 0 ? `Strictly authentic depiction: no ${blueprint.forbiddenSubstitutions.slice(0, 3).join(", no ")}.` : "";
+  const techClause = `16:9 horizontal frame (${dims}), photorealistic authentic documentary still, natural film grain, no text, no subtitles, no labels, no watermark, no logo.`;
+  const assemble = (includeQuestion, includeIdentity) => {
+    const parts = [
+      openingHeader,
+      includeQuestion ? questionClause : "",
+      compositionClause,
+      detailClause,
+      lightingClause,
+      includeIdentity ? identityClause : "",
+      forbiddenClause,
+      techClause
+    ];
+    return sanitizePromptLine(parts.filter(Boolean).join(" "));
+  };
+  let prompt = assemble(true, true);
+  if (countWords(prompt) > 240) prompt = assemble(false, true);
+  if (countWords(prompt) > 240) prompt = assemble(false, false);
+  return prompt;
+}
+function composeOpeningVideoPrompt(params) {
+  const { blueprint, scene, durationSecs, niche } = params;
+  const directive = VIDEO_NICHE_DIRECTIVES[niche] || VIDEO_NICHE_DIRECTIVES.documentary;
+  const duration = durationSecs > 0 ? durationSecs : 5;
+  const cameraMotion = resolveVideoCameraMotion({
+    scene,
+    directive,
+    niche
+  });
+  const firstFrameBeat = `Opening frame (0:00): The shot opens immediately on ${blueprint.visualFocalPoint} with ${blueprint.strikingDetail}, initiating immediate physical engagement.`;
+  const developmentBeat = `Development: As the clip progresses, ${blueprint.visibleAction} unfolds smoothly with the camera executing a ${cameraMotion}.`;
+  const payoffBeat = `Payoff: Toward the final seconds, settle on the consequence: ${blueprint.strikingDetail} in full functional operation, creating a compelling handoff to the following scene.`;
+  const framingClause = `Framing: ${blueprint.shotType} from a ${blueprint.cameraAngle}. Environment: ${directive.environment}, illuminated by ${blueprint.lighting}.`;
+  const antiArtifactDirective = "no distorted hands, no morphing equipment, no inconsistent object geometry, no unnatural movements, no unstable character identity, no impossible physical transformations";
+  let identityClause = "";
+  if (blueprint.requiredIdentityTraits.length > 0) {
+    identityClause = `Subject traits: ${blueprint.requiredIdentityTraits.slice(0, 3).join(", ")}.`;
+  }
+  const forbiddenClause = blueprint.forbiddenSubstitutions.length > 0 ? `Strictly avoid: ${blueprint.forbiddenSubstitutions.slice(0, 3).join(", ")}.` : "";
+  const techClause = `Target clip duration: ${duration} seconds. Horizontal 16:9 video (1920x1080). No speech, no dialogue, no narration audio, no background music, no text overlays, no subtitles, no watermark, no logo.`;
+  const assemble = (includePayoff, includeIdentity) => {
+    const parts = [
+      `${directive.style} capturing ${blueprint.canonicalSubject}.`,
+      firstFrameBeat,
+      developmentBeat,
+      includePayoff ? payoffBeat : "",
+      framingClause,
+      includeIdentity ? identityClause : "",
+      antiArtifactDirective,
+      forbiddenClause,
+      techClause
+    ];
+    return sanitizePromptLine(parts.filter(Boolean).join(" "));
+  };
+  let prompt = assemble(true, true);
+  if (countWords(prompt) > 300) prompt = assemble(false, true);
+  if (countWords(prompt) > 300) prompt = assemble(false, false);
+  return prompt;
+}
+function scoreOpeningVisualHook(params) {
+  const { blueprint, generatedPrompt, priorHooks } = params;
+  const p = generatedPrompt.toLowerCase();
+  const reasons = [];
+  const subTokens = blueprint.canonicalSubject.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+  const subMatches = subTokens.filter((w) => p.includes(w));
+  const subjectSpecificity = subTokens.length > 0 ? Math.min(10, Math.round(subMatches.length / subTokens.length * 10)) : 8;
+  const narrTokens = `${blueprint.sceneNarration} ${blueprint.visualIntent}`.toLowerCase().split(/\s+/).filter((w) => w.length > 4);
+  const narrMatches = narrTokens.filter((w) => p.includes(w));
+  const grounding = narrTokens.length > 0 ? Math.min(10, Math.round(narrMatches.length / Math.min(narrTokens.length, 5) * 10)) : 8;
+  const focalTokens = blueprint.visualFocalPoint.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+  const focalMatches = focalTokens.filter((w) => p.includes(w));
+  const unusualDetail = focalTokens.length > 0 ? Math.min(10, Math.round(focalMatches.length / Math.min(focalTokens.length, 3) * 10)) : 7;
+  const hasFocalPriority = /focal priority|framing|focusing sharply|opening frame|dominant/i.test(p);
+  const focalClarity = hasFocalPriority ? 10 : 6;
+  const hasActionVerb = /\b(unfolds|initiates|freezing|frozen|turning|filtering|applying|kneading|drawing|gliding|engaging|operating|scoring|flexing)\b/i.test(p);
+  const visibleActionOrMoment = hasActionVerb ? 10 : 6;
+  const hasContrast = /\b(contrast|separation|against|frost|steam|tension|macro|fine surface|scale|pressure|dark|gleaming)\b/i.test(p);
+  const visualContrast = hasContrast ? 10 : 7;
+  const hasPlausibleCamera = /\b(macro|close-up|tracking|angle|slider|overview|eye level|three-quarter)\b/i.test(p);
+  const hasUnrealisticCamera = /\b(impossible camera|hyperspeed warp|infinite zoom)\b/i.test(p);
+  const cameraPlausibility = (hasPlausibleCamera ? 8 : 4) + (hasUnrealisticCamera ? -4 : 2);
+  const lastHook = priorHooks.length > 0 ? priorHooks[priorHooks.length - 1] : null;
+  let noveltyRelative = 10;
+  if (lastHook) {
+    if (lastHook.hookArchetype === blueprint.hookArchetype) noveltyRelative -= 3;
+    if (lastHook.shotType === blueprint.shotType) noveltyRelative -= 3;
+  }
+  noveltyRelative = Math.max(4, noveltyRelative);
+  let accuracy = 10;
+  const positivePrompt = p.replace(/\b(?:strictly authentic depiction:?\s*no|strictly avoid:?|avoid:?|no\s+)[^.]*\./gi, " ").replace(/\b(?:no text|no subtitles|no watermark|no logo)[^.]*\./gi, " ");
+  for (const forbidden of blueprint.forbiddenSubstitutions) {
+    const fLower = forbidden.toLowerCase().trim();
+    if (!fLower) continue;
+    if (positivePrompt.includes(fLower)) {
+      accuracy -= 5;
+      reasons.push(`Contains forbidden substitution: "${forbidden}"`);
+    }
+  }
+  accuracy = Math.max(0, accuracy);
+  let absenceOfContradictions = 10;
+  if (/extreme macro/i.test(p) && /wide establishing/i.test(p)) {
+    absenceOfContradictions -= 5;
+    reasons.push("Contradictory shot types: macro and wide establishing");
+  }
+  if (/no text/i.test(p) && /render exactly one editorial text/i.test(p)) {
+    absenceOfContradictions -= 5;
+    reasons.push("Contradictory text directives");
+  }
+  absenceOfContradictions = Math.max(0, absenceOfContradictions);
+  const score = Math.round(
+    subjectSpecificity + grounding + unusualDetail + focalClarity + visibleActionOrMoment + visualContrast + cameraPlausibility + noveltyRelative + accuracy + absenceOfContradictions
+  );
+  const passed = score >= 65 && absenceOfContradictions >= 5 && accuracy >= 5;
+  return {
+    score,
+    passed,
+    dimensions: {
+      subjectSpecificity,
+      grounding,
+      unusualDetail,
+      focalClarity,
+      visibleActionOrMoment,
+      visualContrast,
+      cameraPlausibility,
+      noveltyRelative,
+      accuracy,
+      absenceOfContradictions
+    },
+    reasons
+  };
+}
+function buildOpeningEnhancedCopyText(params) {
+  const { mode, projectDir, baseEntries } = params;
+  if (!baseEntries || baseEntries.length === 0) return "";
+  const sorted = [...baseEntries].sort((a, b) => a.sceneIndex - b.sceneIndex);
+  const openingSlice = sorted.slice(0, 10);
+  const openingSceneIndices = new Set(openingSlice.map((e) => e.sceneIndex));
+  let globalContext;
+  const contextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+  if (fs__namespace.existsSync(contextPath)) {
+    try {
+      globalContext = JSON.parse(fs__namespace.readFileSync(contextPath, "utf-8"));
+    } catch {
+    }
+  }
+  const identityBible = loadVisualIdentityBible(projectDir) || void 0;
+  let visualMixScenesMap = /* @__PURE__ */ new Map();
+  const planPath = getVisualMixPlanFilePath(projectDir);
+  let outputResolution = "1080p";
+  if (fs__namespace.existsSync(planPath)) {
+    try {
+      const planData = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
+      if (planData?.outputResolution) outputResolution = planData.outputResolution;
+      if (Array.isArray(planData?.scenes)) {
+        for (const s of planData.scenes) {
+          visualMixScenesMap.set(s.sceneIndex, s);
+        }
+      }
+    } catch {
+    }
+  }
+  const masterEditPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  if (fs__namespace.existsSync(masterEditPath)) {
+    try {
+      const masterData = JSON.parse(fs__namespace.readFileSync(masterEditPath, "utf-8"));
+      for (const ch of masterData?.chapters || []) {
+        for (const seq of ch.chapters_seq || []) {
+          for (const sc of seq.scenes || []) {
+            if (!visualMixScenesMap.has(sc.sceneIndex)) {
+              visualMixScenesMap.set(sc.sceneIndex, {
+                sceneIndex: sc.sceneIndex,
+                narration: sc.narrativeText || sc.narration || "",
+                visualIntent: sc.visualIntent || "",
+                duration: sc.duration || 5,
+                strategy: "ai-still",
+                assetType: "ai-image",
+                imagePrompt: ""
+              });
+            }
+          }
+        }
+      }
+    } catch {
+    }
+  }
+  const directionsMap = /* @__PURE__ */ new Map();
+  const directionsPath = getManualAiSceneDirectionsPath(projectDir);
+  if (fs__namespace.existsSync(directionsPath)) {
+    try {
+      const raw = JSON.parse(fs__namespace.readFileSync(directionsPath, "utf-8"));
+      const list = Array.isArray(raw) ? raw : raw?.scenes || [];
+      for (const d of list) {
+        directionsMap.set(d.sceneIndex, d);
+      }
+    } catch {
+    }
+  }
+  const retentionScenesMap = /* @__PURE__ */ new Map();
+  const retentionPath = path__namespace.join(projectDir, "analysis", "retention-plan.json");
+  if (fs__namespace.existsSync(retentionPath)) {
+    try {
+      const retentionData = JSON.parse(fs__namespace.readFileSync(retentionPath, "utf-8"));
+      if (Array.isArray(retentionData?.scenes)) {
+        for (const s of retentionData.scenes) {
+          retentionScenesMap.set(s.sceneIndex, s);
+        }
+      }
+    } catch {
+    }
+  }
+  const priorHooks = [];
+  const enhancedMap = /* @__PURE__ */ new Map();
+  for (let i = 0; i < openingSlice.length; i++) {
+    const entry = openingSlice[i];
+    const rank = i + 1;
+    let scenePlan = visualMixScenesMap.get(entry.sceneIndex);
+    if (!scenePlan) {
+      scenePlan = {
+        sceneIndex: entry.sceneIndex,
+        narration: entry.prompt || "",
+        visualIntent: entry.prompt || "",
+        duration: 5,
+        strategy: "ai-still",
+        assetType: "ai-image",
+        imagePrompt: entry.prompt
+      };
+    }
+    const sceneDirection = directionsMap.get(entry.sceneIndex);
+    const retentionHint = retentionScenesMap.get(entry.sceneIndex);
+    const blueprint = resolveOpeningVisualHook({
+      scene: scenePlan,
+      openingRank: rank,
+      previousHooks: priorHooks,
+      globalContext,
+      sceneDirection,
+      retentionHint,
+      identityBible
+    });
+    let enhancedPrompt;
+    if (mode === "image") {
+      enhancedPrompt = composeOpeningImagePrompt({
+        basePrompt: entry.prompt,
+        blueprint,
+        outputResolution
+      });
+    } else {
+      enhancedPrompt = composeOpeningVideoPrompt({
+        basePrompt: entry.prompt,
+        blueprint,
+        scene: scenePlan,
+        durationSecs: scenePlan.duration || 5,
+        niche: blueprint.niche
+      });
+    }
+    const evalResult = scoreOpeningVisualHook({
+      blueprint,
+      generatedPrompt: enhancedPrompt,
+      priorHooks
+    });
+    if (evalResult.passed) {
+      enhancedMap.set(entry.sceneIndex, enhancedPrompt);
+      priorHooks.push(blueprint);
+    } else {
+      logger.warn(
+        `[OpeningHookCopy] Scene ${entry.sceneIndex} hook evaluation fallback (score=${evalResult.score}): ${evalResult.reasons.join(", ")}`
+      );
+      enhancedMap.set(entry.sceneIndex, entry.prompt);
+    }
+  }
+  const outputLines = sorted.map((entry) => {
+    const promptText = openingSceneIndices.has(entry.sceneIndex) ? enhancedMap.get(entry.sceneIndex) || entry.prompt : entry.prompt;
+    return `${formatSceneLabel(entry.sceneIndex)} | ${sanitizePromptLine(promptText)}`;
+  });
+  return outputLines.join("\n\n");
+}
+const MAX_DISCOVERED_VIDEOS = 250;
+const MAX_VIDEO_FOLDER_DEPTH = 3;
 function listImagesInFolder(folder) {
   try {
     return fs__namespace.readdirSync(folder, { withFileTypes: true }).filter((d) => d.isFile() && MANUAL_AI_SUPPORTED_EXTENSIONS.includes(path__namespace.extname(d.name).toLowerCase())).map((d) => path__namespace.join(folder, d.name));
   } catch {
     return [];
   }
+}
+function listVideosInFolder(folder, maxDepth = MAX_VIDEO_FOLDER_DEPTH, warningsOut) {
+  if (!fs__namespace.existsSync(folder)) {
+    throw new Error(`Folder does not exist: ${folder}`);
+  }
+  const rootStat = fs__namespace.statSync(folder);
+  if (!rootStat.isDirectory()) {
+    throw new Error(`Path is not a directory: ${folder}`);
+  }
+  const discovered = [];
+  let hitLimit = false;
+  function traverse(currentDir, currentDepth) {
+    if (hitLimit || currentDepth > maxDepth) return;
+    let entries;
+    try {
+      entries = fs__namespace.readdirSync(currentDir, { withFileTypes: true });
+    } catch (err) {
+      const msg = `Unable to read directory: ${currentDir} (${err instanceof Error ? err.message : String(err)})`;
+      logger.warn(`[ManualAI:VideoFolder] ${msg}`);
+      warningsOut?.push(msg);
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
+      if (entry.name.startsWith(".")) continue;
+      const fullPath = path__namespace.join(currentDir, entry.name);
+      if (entry.isDirectory()) {
+        if (currentDepth < maxDepth) {
+          traverse(fullPath, currentDepth + 1);
+        }
+      } else if (entry.isFile()) {
+        const ext = path__namespace.extname(entry.name).toLowerCase();
+        if (MANUAL_AI_VIDEO_EXTENSIONS.includes(ext)) {
+          if (discovered.length >= MAX_DISCOVERED_VIDEOS) {
+            hitLimit = true;
+            const limitMsg = `Discovered video files reached safety limit of ${MAX_DISCOVERED_VIDEOS}. Extra files omitted.`;
+            logger.warn(`[ManualAI:VideoFolder] ${limitMsg}`);
+            warningsOut?.push(limitMsg);
+            break;
+          }
+          discovered.push(fullPath);
+        }
+      }
+    }
+  }
+  traverse(folder, 0);
+  return discovered.sort((a, b) => {
+    const baseCmp = naturalCompare(path__namespace.basename(a), path__namespace.basename(b));
+    return baseCmp !== 0 ? baseCmp : naturalCompare(a, b);
+  });
 }
 function registerManualAiHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_STATUS, async (_event, params) => {
@@ -28030,9 +31457,37 @@ function registerManualAiHandlers(ipcMain) {
       const norm2 = normalizeProjectDir(params.projectDir);
       const text = readManualAiPromptText(norm2);
       if (text === null) return { success: false, error: "No prompt pack exists yet." };
-      return { success: true, text };
+      const pack = loadManualAiPromptPack(norm2);
+      if (!pack || !pack.scenes || pack.scenes.length === 0) {
+        return { success: true, text };
+      }
+      const enhancedText = buildOpeningEnhancedCopyText({
+        mode: "image",
+        projectDir: norm2,
+        baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt }))
+      });
+      return { success: true, text: enhancedText };
     } catch (err) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, async (_event, params) => {
+    try {
+      if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+      const norm2 = normalizeProjectDir(params.projectDir);
+      logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm2}`);
+      const pack = ensureManualAiVideoPromptPack(norm2);
+      const enhancedText = buildOpeningEnhancedCopyText({
+        mode: "video",
+        projectDir: norm2,
+        baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt }))
+      });
+      logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts with opening visual hooks`);
+      return { success: true, text: enhancedText };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`);
+      return { success: false, error: msg };
     }
   });
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, async (_event, params) => {
@@ -28095,6 +31550,82 @@ function registerManualAiHandlers(ipcMain) {
       }
     }
   );
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_SELECT_VIDEOS, async (_event, params) => {
+    try {
+      const folder = params?.mode === "folder";
+      const opts = folder ? { title: "Select the folder with your AI videos", properties: ["openDirectory"] } : {
+        title: "Select AI videos",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "Videos", extensions: MANUAL_AI_VIDEO_EXTENSIONS.map((e) => e.slice(1)) }]
+      };
+      const win = electron.BrowserWindow.getFocusedWindow();
+      const res = win ? await electron.dialog.showOpenDialog(win, opts) : await electron.dialog.showOpenDialog(opts);
+      if (res.canceled || res.filePaths.length === 0) return { success: true, filePaths: [], canceled: true };
+      if (folder) {
+        const warnings = [];
+        const folderPath = res.filePaths[0];
+        const filePaths = listVideosInFolder(folderPath, MAX_VIDEO_FOLDER_DEPTH, warnings);
+        logger.info(`[ManualAI:VideoFolder] Discovered ${filePaths.length} videos in ${folderPath}`);
+        return {
+          success: true,
+          filePaths,
+          folderPath,
+          discoveredCount: filePaths.length,
+          warnings: warnings.length > 0 ? warnings : void 0
+        };
+      }
+      return {
+        success: true,
+        filePaths: res.filePaths,
+        discoveredCount: res.filePaths.length
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[ManualAI:VideoFolder] Select videos failed: ${msg}`);
+      return { success: false, filePaths: [], error: msg };
+    }
+  });
+  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_SELECT_MIXED, async (_event, params) => {
+    try {
+      const folder = params?.mode === "folder";
+      const opts = folder ? { title: "Select the folder with your AI images and videos", properties: ["openDirectory"] } : {
+        title: "Select AI images and videos",
+        properties: ["openFile", "multiSelections"],
+        filters: [{ name: "Media (Images & Videos)", extensions: MANUAL_AI_MIXED_EXTENSIONS.map((e) => e.slice(1)) }]
+      };
+      const win = electron.BrowserWindow.getFocusedWindow();
+      const res = win ? await electron.dialog.showOpenDialog(win, opts) : await electron.dialog.showOpenDialog(opts);
+      if (res.canceled || res.filePaths.length === 0) return { success: true, filePaths: [], canceled: true };
+      if (folder) {
+        const warnings = [];
+        const folderPath = res.filePaths[0];
+        const filePaths = listMixedMediaInFolder(folderPath, MAX_MIXED_FOLDER_DEPTH, warnings);
+        const { imageCount: imageCount2, videoCount: videoCount2 } = countMixedMedia(filePaths);
+        logger.info(`[ManualAI:MixedFolder] Discovered ${filePaths.length} media files (${imageCount2} images, ${videoCount2} videos) in ${folderPath}`);
+        return {
+          success: true,
+          filePaths,
+          folderPath,
+          discoveredCount: filePaths.length,
+          imageCount: imageCount2,
+          videoCount: videoCount2,
+          warnings: warnings.length > 0 ? warnings : void 0
+        };
+      }
+      const { imageCount, videoCount } = countMixedMedia(res.filePaths);
+      return {
+        success: true,
+        filePaths: res.filePaths,
+        discoveredCount: res.filePaths.length,
+        imageCount,
+        videoCount
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.error(`[ManualAI:MixedFolder] Select mixed media failed: ${msg}`);
+      return { success: false, filePaths: [], error: msg };
+    }
+  });
   ipcMain.handle(
     IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT,
     async (_event, params) => {
@@ -28106,7 +31637,8 @@ function registerManualAiHandlers(ipcMain) {
         const plan = planManualAiImport({
           projectDir: norm2,
           filePaths: params.filePaths,
-          replaceExisting: params.replaceExisting
+          replaceExisting: params.replaceExisting,
+          mediaType: params.mediaType
         });
         return { success: true, plan };
       } catch (err) {

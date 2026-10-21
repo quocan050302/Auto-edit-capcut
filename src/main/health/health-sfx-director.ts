@@ -236,7 +236,7 @@ export class HealthSfxDirector {
   }
 
   /**
-   * Preloads standard SFX types used by Opening Retention Composer so they are cached 
+   * Preloads standard SFX types used by Opening Retention Composer so they are cached
    * and available synchronously for the renderer.
    */
   public static async preloadStandardOpeningSfx(projectDir: string, openverseToken?: string): Promise<void> {

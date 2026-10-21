@@ -107,9 +107,12 @@ const IPC_CHANNELS = {
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: "manual-ai:get-status",
   MANUAL_AI_GET_PROMPT_TEXT: "manual-ai:get-prompt-text",
+  MANUAL_AI_GET_VIDEO_PROMPT_TEXT: "manual-ai:get-video-prompt-text",
   MANUAL_AI_EXPORT_TXT: "manual-ai:export-txt",
   MANUAL_AI_OPEN_PROMPT_FILE: "manual-ai:open-prompt-file",
   MANUAL_AI_SELECT_IMAGES: "manual-ai:select-images",
+  MANUAL_AI_SELECT_VIDEOS: "manual-ai:select-videos",
+  MANUAL_AI_SELECT_MIXED: "manual-ai:select-mixed",
   MANUAL_AI_PLAN_IMPORT: "manual-ai:plan-import",
   MANUAL_AI_COMMIT_IMPORT: "manual-ai:commit-import",
   MANUAL_AI_STATUS_UPDATED: "manual-ai:status-updated",
@@ -328,9 +331,12 @@ const api = {
   manualAi: {
     getStatus: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_STATUS, { projectDir }),
     getPromptText: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
+    getVideoPromptText: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir }),
     exportTxt: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, { projectDir }),
     openPromptFile: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, { projectDir }),
     selectImages: (mode) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES, { mode }),
+    selectVideos: (mode) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_VIDEOS, { mode }),
+    selectMixed: (mode) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_MIXED, { mode }),
     planImport: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_PLAN_IMPORT, params),
     commitImport: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_COMMIT_IMPORT, params),
     onStatusUpdated: (callback) => {

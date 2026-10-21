@@ -27,6 +27,7 @@ import { ProofVisualOverlay } from './components/ProofVisualOverlay'
 import { VisualGrammarOverlay } from './components/VisualGrammarOverlay'
 import { OpeningRetentionOverlay } from './components/OpeningRetentionOverlay'
 import { resolveCaptionAnimation } from './animations/presets'
+import { OverlayTimelineIndex } from './utils/overlay-timeline-index'
 import type { CaptionPlan, VisualGrammarDecision } from '../../shared/types'
 import type { ProofVisual } from '../../src/main/retention/retention-types'
 import type { OpeningRetentionEvent } from '../../src/main/retention/opening-retention-types'
@@ -43,11 +44,38 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, vi
   const { fps } = useVideoConfig()
   const currentTime = frame / fps
 
-  // Filter active phrases tại frame hiện tại
-  const activePhrases = (captionPlan?.phrases ?? []).filter(
-    (p) => currentTime >= p.startTime && currentTime <= p.endTime
-  )
+  // Indexed timeline for phrases (O(log N + k) query per frame, built once per composition/block)
+  const phrasesIndex = React.useMemo(() => {
+    return new OverlayTimelineIndex(captionPlan?.phrases ?? [], (p) => ({
+      startTime: p.startTime,
+      endTime: p.endTime
+    }))
+  }, [captionPlan?.phrases])
 
+  // Active phrases at current frame
+  const activePhrases = phrasesIndex.queryActive(currentTime)
+
+  // Indexed timeline for Proof Visuals
+  const proofVisualsIndex = React.useMemo(() => {
+    return new OverlayTimelineIndex(proofVisuals ?? [], (pv) => {
+      if (pv.absoluteStartTime == null || pv.absoluteEndTime == null) return null
+      return { startTime: pv.absoluteStartTime, endTime: pv.absoluteEndTime }
+    })
+  }, [proofVisuals])
+
+  const activeProofs = proofVisualsIndex.queryActive(currentTime)
+
+  // Indexed timeline for Visual Grammar
+  const visualGrammarIndex = React.useMemo(() => {
+    return new OverlayTimelineIndex(visualGrammar ?? [], (dec) => {
+      if (!dec.enabled) return null
+      const startTime = dec.absoluteStartTime ?? 0
+      const endTime = dec.absoluteEndTime ?? (startTime + (dec.duration ?? 0))
+      return { startTime, endTime }
+    })
+  }, [visualGrammar])
+
+  const activeGrammar = visualGrammarIndex.queryActive(currentTime)
 
   return (
     <AbsoluteFill style={{ backgroundColor: '#00FF00' }}>
@@ -57,7 +85,7 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, vi
         const preset = phrase.presetType ?? inferPreset(phrase.emphasisType)
 
         // Tìm index thực trong toàn bộ phrases array (để variation rule)
-        const phraseIndex = captionPlan.phrases.indexOf(phrase)
+        const phraseIndex = phrase.originalIndex ?? (captionPlan ? captionPlan.phrases.indexOf(phrase) : 0)
 
         switch (preset) {
           case 'big_statement': {
@@ -121,13 +149,14 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, vi
       })}
 
       {/* Proof Visual overlays — rendered on top of captions, below UI */}
-      {(proofVisuals ?? []).map((proof, idx) => {
+      {activeProofs.map((proof, idx) => {
         if (proof.absoluteStartTime == null || proof.absoluteEndTime == null) return null
         const entranceFrame = Math.round(proof.absoluteStartTime * fps)
         const exitFrame = Math.round(proof.absoluteEndTime * fps)
+        const originalIndex = (proof as any).originalIndex ?? (proofVisuals ? proofVisuals.indexOf(proof) : idx)
         return (
           <ProofVisualOverlay
-            key={`pv_${idx}_${proof.primaryText}`}
+            key={`pv_${originalIndex}_${proof.primaryText}`}
             proof={proof}
             entranceFrame={entranceFrame}
             exitFrame={exitFrame}
@@ -136,15 +165,16 @@ export const CaptionsOverlay: React.FC<Props> = ({ captionPlan, proofVisuals, vi
       })}
 
       {/* Visual Scene Grammar overlays */}
-      {(visualGrammar ?? []).map((dec, idx) => {
+      {activeGrammar.map((dec, idx) => {
         if (!dec.enabled) return null
         const startTime = dec.absoluteStartTime ?? 0
         const endTime = dec.absoluteEndTime ?? (startTime + dec.duration)
         const entranceFrame = Math.round(startTime * fps)
         const exitFrame = Math.round(endTime * fps)
+        const originalIndex = (dec as any).originalIndex ?? (visualGrammar ? visualGrammar.indexOf(dec) : idx)
         return (
           <VisualGrammarOverlay
-            key={`vg_${idx}_${dec.sceneId}_${dec.type}`}
+            key={`vg_${originalIndex}_${dec.sceneId}_${dec.type}`}
             decision={dec}
             entranceFrame={entranceFrame}
             exitFrame={exitFrame}

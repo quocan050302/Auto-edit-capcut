@@ -17,6 +17,7 @@ import {
   recordModelSuccess,
   recordModelFailure
 } from "../ai/model-health"
+import { executePlanningRequest, PlanningCancelledError } from "../ai/planning-request"
 import type { GlobalScriptContext, TranscriptResult } from "../../../shared/types"
 
 export type ProgressCallback = (msg: string, pct: number) => void
@@ -79,9 +80,13 @@ export async function analyzeGlobalContext(params: {
   scriptText?: string | null
   transcript?: TranscriptResult | null
   forceRegenerate?: boolean
+  signal?: AbortSignal
   onProgress?: ProgressCallback
 }): Promise<GlobalScriptContext> {
-  const { projectDir, apiKey, forceRegenerate = false } = params
+  const { projectDir, apiKey, forceRegenerate = false, signal } = params
+  if (signal?.aborted) {
+    throw new PlanningCancelledError("analyzeGlobalContext")
+  }
   const progress = params.onProgress ?? (() => {})
   const modelId = params.model ?? "gemini-3.5-flash"
 
@@ -133,11 +138,13 @@ export async function analyzeGlobalContext(params: {
       const fallbackModels = getAvailableModelsForTask("global_context", rawModel)
 
       for (let mIdx = 0; mIdx < fallbackModels.length; mIdx++) {
+        if (signal?.aborted) throw new PlanningCancelledError("analyzeGlobalContext")
         const currentModel = fallbackModels[mIdx]
         let retryCount = 0
         const maxRetries = 1
 
         while (retryCount <= maxRetries) {
+          if (signal?.aborted) throw new PlanningCancelledError("analyzeGlobalContext")
           try {
             progress(
               retryCount === 0
@@ -145,10 +152,23 @@ export async function analyzeGlobalContext(params: {
                 : `Retry ${retryCount}/${maxRetries} (${currentModel})...`,
               0.05 + mIdx * 0.15 + retryCount * 0.05
             )
-            const response = await ai.models.generateContent({
-              model: currentModel,
-              contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
-              config: { responseMimeType: "application/json", temperature: 0.2, maxOutputTokens: 8192 }
+            const timeoutMs = 45000
+            const response = await executePlanningRequest({
+              task: `Global Context (${currentModel})`,
+              timeoutMs,
+              signal,
+              execute: (reqSignal) =>
+                ai.models.generateContent({
+                  model: currentModel,
+                  contents: [{ role: "user", parts: [{ text: SYSTEM_PROMPT + "\n\n" + prompt }] }],
+                  config: {
+                    responseMimeType: "application/json",
+                    temperature: 0.2,
+                    maxOutputTokens: 8192,
+                    abortSignal: reqSignal,
+                    httpOptions: { timeout: timeoutMs }
+                  }
+                })
             })
             rawJson = response.text ?? ""
             if (rawJson) {
@@ -157,6 +177,9 @@ export async function analyzeGlobalContext(params: {
               break
             }
           } catch (err: unknown) {
+            if (signal?.aborted || err instanceof PlanningCancelledError) {
+              throw err
+            }
             const { kind, message } = classifyGeminiErrorKind(err)
             recordModelFailure(currentModel, kind)
             aiError = message
@@ -175,6 +198,12 @@ export async function analyzeGlobalContext(params: {
 
             if (kind === "BAD_REQUEST") {
               logger.warn(`[GlobalContext] Gemini bad request: ${message.slice(0, 100)}`)
+              break
+            }
+
+            if (kind === "TIMEOUT") {
+              const nextModel = fallbackModels[mIdx + 1]
+              logger.warn(`[GlobalContext] Gemini ${currentModel} timed out. Switching immediately to ${nextModel ?? "fallback"}...`)
               break
             }
 
@@ -200,6 +229,9 @@ export async function analyzeGlobalContext(params: {
         if (rawJson) break
       }
     } catch (outerErr: unknown) {
+      if (signal?.aborted || outerErr instanceof PlanningCancelledError) {
+        throw outerErr
+      }
       aiError = outerErr instanceof Error ? outerErr.message : String(outerErr)
       logger.warn(`[GlobalContext] Gemini client initialization failed: ${aiError}`)
     }

@@ -215,6 +215,7 @@ export async function runPlanningStage(
     projectDir: options.projectDir,
     apiKey,
     model: options.geminiModel,
+    signal,
     onProgress: (msg, prog) => {
       checkAborted(signal)
       onProgress(msg, prog)

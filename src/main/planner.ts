@@ -11,7 +11,14 @@ import {
 import { getAvailableModelsForTask } from './ai/model-router'
 import { recordModelSuccess, recordModelFailure } from './ai/model-health'
 import { sanitizeStockQuery, dedupeStockQueries } from './stock/query-sanitizer'
-import type { TranscriptResult, MasterEditPlanRetentionExt, Pacing } from '../../shared/types'
+import {
+  executePlanningRequest,
+  PlanningTimeoutError,
+  PlanningCancelledError,
+  computeBatchTimeoutMs,
+  computeOutputTokenBudget
+} from './ai/planning-request'
+import type { TranscriptResult, MasterEditPlanRetentionExt, Pacing, GlobalScriptContext } from '../../shared/types'
 import { analyzePacing, flattenPlanScenes } from './pacing-guard'
 import type { PacingScene } from './pacing-guard'
 import { buildSceneSkeleton, type SceneSkeleton } from './planning/scene-segmenter'
@@ -135,28 +142,113 @@ interface OutlineChapter {
   sequences: OutlineSequence[]
 }
 
-function buildAlgorithmicOutline(skeletons: SceneSkeleton[], totalDuration: number): OutlineChapter[] {
-  const numChapters = Math.min(6, Math.max(3, Math.round(totalDuration / 180)))
-  const scenesPerChapter = Math.ceil(skeletons.length / numChapters)
-  const chapters: OutlineChapter[] = []
+function buildAlgorithmicOutline(
+  skeletons: SceneSkeleton[],
+  totalDuration: number,
+  globalContextSummary?: string
+): OutlineChapter[] {
+  if (skeletons.length === 0) return []
 
-  for (let chIdx = 0; chIdx < numChapters; chIdx++) {
-    const chStartIdx = chIdx * scenesPerChapter
-    const chEndIdx = Math.min((chIdx + 1) * scenesPerChapter, skeletons.length)
-    const chScenes = skeletons.slice(chStartIdx, chEndIdx)
+  // Short script optimization: 1 scene
+  if (skeletons.length === 1) {
+    const s = skeletons[0]
+    return [
+      {
+        chapterIndex: 1,
+        title: 'Chapter 1: Story Arc',
+        purpose: 'Narrative presentation',
+        startSceneIndex: s.sceneIndex,
+        endSceneIndex: s.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: 'Sequence 1: Visual Presentation',
+            startSceneIndex: s.sceneIndex,
+            endSceneIndex: s.sceneIndex
+          }
+        ]
+      }
+    ]
+  }
+
+  // Short script optimization: 2 scenes
+  if (skeletons.length === 2) {
+    const s1 = skeletons[0]
+    const s2 = skeletons[1]
+    return [
+      {
+        chapterIndex: 1,
+        title: 'Chapter 1: Introduction & Premise',
+        purpose: 'Introduction and subject establishment',
+        startSceneIndex: s1.sceneIndex,
+        endSceneIndex: s1.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: 'Sequence 1: Opening Shot',
+            startSceneIndex: s1.sceneIndex,
+            endSceneIndex: s1.sceneIndex
+          }
+        ]
+      },
+      {
+        chapterIndex: 2,
+        title: 'Chapter 2: Development & Conclusion',
+        purpose: 'Narrative payoff',
+        startSceneIndex: s2.sceneIndex,
+        endSceneIndex: s2.sceneIndex,
+        sequences: [
+          {
+            sequenceIndex: 1,
+            title: 'Sequence 1: Conclusion',
+            startSceneIndex: s2.sceneIndex,
+            endSceneIndex: s2.sceneIndex
+          }
+        ]
+      }
+    ]
+  }
+
+  // Normal / Multi-scene project: 3+ scenes
+  const maxPossibleChapters = Math.min(skeletons.length, 6)
+  const minPossibleChapters = Math.min(skeletons.length, skeletons.length >= 6 ? 3 : 2)
+  const durationBasedChapters = Math.round(totalDuration / 180)
+  const numChapters = Math.max(
+    minPossibleChapters,
+    Math.min(maxPossibleChapters, durationBasedChapters || minPossibleChapters)
+  )
+
+  const chapters: OutlineChapter[] = []
+  let currentScenePointer = 0
+
+  for (let chIdx = 0; chIdx < numChapters && currentScenePointer < skeletons.length; chIdx++) {
+    const remainingChapters = numChapters - chIdx
+    const remainingScenes = skeletons.length - currentScenePointer
+    const countForThisChapter = chIdx === numChapters - 1
+      ? remainingScenes
+      : Math.min(remainingScenes, Math.max(1, Math.ceil(remainingScenes / remainingChapters)))
+
+    const chScenes = skeletons.slice(currentScenePointer, currentScenePointer + countForThisChapter)
+    currentScenePointer += countForThisChapter
     if (chScenes.length === 0) continue
 
     const startSceneIndex = chScenes[0].sceneIndex
     const endSceneIndex = chScenes[chScenes.length - 1].sceneIndex
 
-    const numSequences = Math.min(4, Math.max(2, Math.round(chScenes.length / 8)))
-    const scenesPerSeq = Math.ceil(chScenes.length / numSequences)
+    const maxSequences = Math.min(chScenes.length, 4)
+    const numSequences = Math.max(1, Math.min(maxSequences, Math.round(chScenes.length / 8) || 1))
     const sequences: OutlineSequence[] = []
 
-    for (let seqIdx = 0; seqIdx < numSequences; seqIdx++) {
-      const seqStartIdx = seqIdx * scenesPerSeq
-      const seqEndIdx = Math.min((seqIdx + 1) * scenesPerSeq, chScenes.length)
-      const seqScenes = chScenes.slice(seqStartIdx, seqEndIdx)
+    let seqPointer = 0
+    for (let seqIdx = 0; seqIdx < numSequences && seqPointer < chScenes.length; seqIdx++) {
+      const remainingSeqs = numSequences - seqIdx
+      const remainingSeqScenes = chScenes.length - seqPointer
+      const countForThisSeq = seqIdx === numSequences - 1
+        ? remainingSeqScenes
+        : Math.min(remainingSeqScenes, Math.max(1, Math.ceil(remainingSeqScenes / remainingSeqs)))
+
+      const seqScenes = chScenes.slice(seqPointer, seqPointer + countForThisSeq)
+      seqPointer += countForThisSeq
       if (seqScenes.length === 0) continue
 
       sequences.push({
@@ -190,8 +282,22 @@ async function generateChapterOutlineWithGemini(
   skeletons: SceneSkeleton[],
   globalContextSummary: string,
   totalDuration: number,
+  signal?: AbortSignal,
   onProgress?: (msg: string, pct: number) => void
 ): Promise<OutlineChapter[]> {
+  if (skeletons.length === 0) return []
+
+  // Deterministic valid outline for 1-2 scenes without slow API overhead
+  if (skeletons.length <= 2) {
+    logger.info(`[PLAN] Short script with ${skeletons.length} scenes: using deterministic chapter outline`)
+    return buildAlgorithmicOutline(skeletons, totalDuration, globalContextSummary)
+  }
+
+  if (!modelChain || modelChain.length === 0) {
+    logger.warn('[PLAN] No models available for outline. Using algorithmic outline.')
+    return buildAlgorithmicOutline(skeletons, totalDuration, globalContextSummary)
+  }
+
   const firstIndex = skeletons[0].sceneIndex
   const lastIndex = skeletons[skeletons.length - 1].sceneIndex
   const step = Math.max(1, Math.floor(skeletons.length / 10))
@@ -199,6 +305,12 @@ async function generateChapterOutlineWithGemini(
     .filter((_, i) => i === 0 || i === skeletons.length - 1 || i % step === 0)
     .map((s) => `Scene ${s.sceneIndex} (${s.startTime.toFixed(1)}s): "${s.narrativeText.slice(0, 70)}"`)
     .join('\n')
+
+  const isShortScript = skeletons.length <= 5
+  const chapterPromptGoal = isShortScript
+    ? `Divide the ${skeletons.length} scenes into 1 to 2 chapters, each with 1 to 2 sequences.`
+    : `Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.`
+  const minRequiredChapters = isShortScript ? 1 : 2
 
   const prompt = `You are a documentary story director creating a high-level chapter and sequence outline.
 Video Duration: ${totalDuration.toFixed(0)}s
@@ -209,7 +321,7 @@ ${globalContextSummary ? `## GLOBAL CONTEXT\n${globalContextSummary}\n` : ''}
 ${sampleScenes}
 
 ## YOUR TASK
-Divide the ${skeletons.length} scenes into 3 to 6 chapters, each with 2 to 4 sequences.
+${chapterPromptGoal}
 Every scene from ${firstIndex} to ${lastIndex} MUST be included in exactly one sequence.
 Ensure no gaps and no overlaps in startSceneIndex and endSceneIndex.
 
@@ -221,36 +333,50 @@ Return ONLY valid JSON matching this schema:
       "title": "Meaningful Chapter Title",
       "purpose": "Narrative purpose",
       "startSceneIndex": 1,
-      "endSceneIndex": 25,
+      "endSceneIndex": ${skeletons.length},
       "sequences": [
         {
           "sequenceIndex": 1,
           "title": "Sequence title",
           "startSceneIndex": 1,
-          "endSceneIndex": 12
+          "endSceneIndex": ${skeletons.length}
         }
       ]
     }
   ]
 }`
 
-  for (let attempt = 0; attempt < Math.min(3, modelChain.length); attempt++) {
+  const outlineTimeoutMs = isShortScript ? 35000 : 50000
+  const maxAttempts = Math.min(2, modelChain.length)
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError('generateChapterOutlineWithGemini')
+    }
     const model = modelChain[attempt]
     try {
       onProgress?.(`Generating story arc outline (${model})...`, 0.20)
-      const res = await ai.models.generateContent({
-        model,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.2,
-          maxOutputTokens: 4096
-        }
+      const res = await executePlanningRequest({
+        task: `Chapter outline (${model})`,
+        timeoutMs: outlineTimeoutMs,
+        signal,
+        execute: (reqSignal) =>
+          ai.models.generateContent({
+            model,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.2,
+              maxOutputTokens: 4096,
+              abortSignal: reqSignal,
+              httpOptions: { timeout: outlineTimeoutMs }
+            }
+          })
       })
       const clean = (res.text ?? '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
       const data = JSON.parse(clean) as { chapters?: OutlineChapter[] }
 
-      if (data.chapters && data.chapters.length >= 2) {
+      if (data.chapters && data.chapters.length >= minRequiredChapters) {
         const covered = new Set<number>()
         let valid = true
         for (const ch of data.chapters) {
@@ -278,20 +404,21 @@ Return ONLY valid JSON matching this schema:
           return data.chapters
         }
       }
-    } catch (err) {
+    } catch (err: unknown) {
+      if (signal?.aborted || err instanceof PlanningCancelledError) {
+        throw err
+      }
       const { kind } = classifyGeminiErrorKind(err)
       recordModelFailure(model, kind)
-      if (kind === 'MODEL_NOT_FOUND') {
-        const nextModel = modelChain[attempt + 1]
-        logger.warn(`[GeminiModel] Model ${model} is unavailable for this account. Falling back to ${nextModel ?? 'algorithmic outline fallback'}.`)
-      } else {
-        logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`)
+      if (kind === 'AUTH_ERROR') {
+        break
       }
+      logger.warn(`[PLAN] Gemini outline attempt with ${model} failed (${kind}): ${err}`)
     }
   }
 
   logger.info('[PLAN] Using algorithmic chapter outline fallback')
-  return buildAlgorithmicOutline(skeletons, totalDuration)
+  return buildAlgorithmicOutline(skeletons, totalDuration, globalContextSummary)
 }
 
 // ─── Batch Prompt Builder ─────────────────────────────────────────────────────
@@ -381,78 +508,139 @@ async function enrichScenesBatchWithGemini(
   mediaFiles: MediaClip[],
   batchIndex: number,
   totalBatches: number,
+  signal?: AbortSignal,
   onProgress?: (msg: string, pct: number) => void
 ): Promise<{ enrichedMap: Map<number, Partial<ScenePlan>>; modelUsed: string; usedFallback: boolean }> {
-  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles)
   const enrichedMap = new Map<number, Partial<ScenePlan>>()
+
+  if (!modelChain || modelChain.length === 0) {
+    logger.warn(`[PLAN] No available models in planning route for batch ${batchIndex + 1}. Using algorithmic fallback.`)
+    for (const skel of batchScenes) {
+      const queries = extractVisualQueries(skel.narrativeText)
+      enrichedMap.set(skel.sceneIndex, {
+        sceneIndex: skel.sceneIndex,
+        visualIntent: queries[0] ?? 'Documentary cinematic b-roll',
+        visualNote: `Visual shot: ${queries[0]}`,
+        searchQueries:
+          queries.length >= 3
+            ? queries
+            : [...queries, 'documentary archive footage', 'historical b-roll cinematic'].slice(0, 3),
+        mediaType: 'video',
+        transitionIn: 'cut',
+        energyLevel: inferEnergyLevelFromText(skel.narrativeText),
+        shotType: inferShotTypeFromText(skel.narrativeText)
+      })
+    }
+    return { enrichedMap, modelUsed: 'algorithmic-fallback', usedFallback: true }
+  }
+
+  const prompt = buildBatchEnrichmentPrompt(batchScenes, globalContextSummary, mediaFiles)
+  const timeoutMs = computeBatchTimeoutMs(batchScenes.length)
+  const outputTokenBudget = computeOutputTokenBudget(batchScenes.length)
+  const validBatchIndices = new Set(batchScenes.map((s) => s.sceneIndex))
 
   let activeModelIndex = 0
   let lastError = ''
   let successModel = modelChain[0]
   let usedFallback = false
+  const maxAttempts = Math.min(2, Math.max(1, modelChain.length))
 
-  for (let attempt = 1; attempt <= 4; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError('enrichScenesBatchWithGemini')
+    }
+
     const currentModel = modelChain[activeModelIndex]
+    if (!currentModel) break
+
+    const requestStartTime = Date.now()
     try {
       onProgress?.(
-        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${currentModel})...`,
-        0.25 + (batchIndex / totalBatches) * 0.55
+        `Analyzing visual plan batch ${batchIndex + 1}/${totalBatches} (${batchScenes.length} scenes, attempt ${attempt}/${maxAttempts}: ${currentModel})...`,
+        0.25 + (batchIndex / totalBatches) * 0.55 + (attempt - 1) * 0.02
       )
-      const res = await ai.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
-          responseMimeType: 'application/json',
-          temperature: 0.3,
-          maxOutputTokens: 8192
-        }
+
+      const res = await executePlanningRequest({
+        task: `Planning batch ${batchIndex + 1}/${totalBatches} (${currentModel})`,
+        timeoutMs,
+        signal,
+        execute: (reqSignal) =>
+          ai.models.generateContent({
+            model: currentModel,
+            contents: prompt,
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.3,
+              maxOutputTokens: outputTokenBudget,
+              abortSignal: reqSignal,
+              httpOptions: { timeout: timeoutMs }
+            }
+          })
       })
+
       const clean = (res.text ?? '').replace(/^```json\s*/i, '').replace(/```\s*$/i, '').trim()
       const items = JSON.parse(clean) as Array<Partial<ScenePlan> & { sceneIndex?: number }>
 
       if (Array.isArray(items)) {
+        let acceptedCount = 0
         for (const item of items) {
-          if (typeof item.sceneIndex === 'number') {
-            enrichedMap.set(item.sceneIndex, item)
+          if (typeof item.sceneIndex === 'number' && validBatchIndices.has(item.sceneIndex)) {
+            if (!enrichedMap.has(item.sceneIndex)) {
+              const validatedItem: Partial<ScenePlan> = {
+                sceneIndex: item.sceneIndex,
+                visualIntent: typeof item.visualIntent === 'string' && item.visualIntent.trim()
+                  ? item.visualIntent.trim()
+                  : undefined,
+                visualNote: typeof item.visualNote === 'string' ? item.visualNote.trim() : undefined,
+                searchQueries: Array.isArray(item.searchQueries) && item.searchQueries.length > 0
+                  ? item.searchQueries.filter((q) => typeof q === 'string' && q.trim())
+                  : undefined,
+                mediaType: item.mediaType === 'image' || item.mediaType === 'video' ? item.mediaType : 'video',
+                transitionIn: item.transitionIn === 'fade' || item.transitionIn === 'dissolve' || item.transitionIn === 'wipe' ? item.transitionIn : 'cut',
+                energyLevel: item.energyLevel === 'low' || item.energyLevel === 'high' ? item.energyLevel : 'medium',
+                shotType: item.shotType === 'wide' || item.shotType === 'close-up' || item.shotType === 'abstract' ? item.shotType : 'medium',
+                localAsset: typeof item.localAsset === 'string' ? item.localAsset.trim() : null
+              }
+              enrichedMap.set(item.sceneIndex, validatedItem)
+              acceptedCount++
+            }
           }
         }
-        recordModelSuccess(currentModel)
-        successModel = currentModel
-        break
+
+        if (acceptedCount > 0) {
+          recordModelSuccess(currentModel)
+          successModel = currentModel
+          const elapsed = Date.now() - requestStartTime
+          logger.info(
+            `[PLAN] Batch ${batchIndex + 1}/${totalBatches} enriched ${acceptedCount}/${batchScenes.length} scenes with ${currentModel} in ${elapsed}ms`
+          )
+          break
+        }
       }
     } catch (err: unknown) {
+      if (signal?.aborted || err instanceof PlanningCancelledError) {
+        throw err
+      }
+
+      const elapsed = Date.now() - requestStartTime
       const msg = err instanceof Error ? err.message : String(err)
       lastError = msg
       const { kind } = classifyGeminiErrorKind(err)
       recordModelFailure(currentModel, kind)
 
-      if (kind === 'MODEL_NOT_FOUND') {
-        const nextModel = modelChain[activeModelIndex + 1]
-        logger.warn(`[GeminiModel] Saved model ${currentModel} is unavailable for this account. Falling back to ${nextModel ?? 'algorithmic fallback'}.`)
-        if (activeModelIndex + 1 < modelChain.length) {
-          activeModelIndex++
-          continue
-        } else {
-          break
-        }
+      logger.warn(
+        `[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed after ${elapsed}ms (${kind}): ${msg}`
+      )
+
+      if (kind === 'AUTH_ERROR') {
+        logger.error(`[PLAN] Authentication error encountered. Stopping AI attempts for batch.`)
+        break
       }
 
-      logger.warn(`[PLAN] Batch ${batchIndex + 1} attempt ${attempt} with ${currentModel} failed: ${msg}`)
-
-      const isOverloaded =
-        kind === 'RATE_LIMIT' ||
-        kind === 'SERVICE_UNAVAILABLE' ||
-        msg.includes('503') ||
-        msg.includes('429') ||
-        msg.includes('UNAVAILABLE') ||
-        msg.includes('high demand')
-      if (isOverloaded && activeModelIndex + 1 < modelChain.length) {
+      if (activeModelIndex + 1 < modelChain.length) {
         activeModelIndex++
-        await new Promise((r) => setTimeout(r, 1500))
-        continue
-      }
-      if (attempt < 4) {
-        await new Promise((r) => setTimeout(r, 2000))
+        const nextModel = modelChain[activeModelIndex]
+        logger.info(`[PLAN] Switching to fallback model: ${nextModel}`)
       }
     }
   }
@@ -645,9 +833,14 @@ export async function buildEditPlan(params: {
   apiKey: string
   model?: string
   scriptPath?: string | null
+  signal?: AbortSignal
   onProgress?: (msg: string, pct: number) => void
 }): Promise<MasterEditPlan> {
-  const { projectDir, apiKey, onProgress } = params
+  const { projectDir, apiKey, onProgress, signal } = params
+  if (signal?.aborted) {
+    throw new PlanningCancelledError('buildEditPlan')
+  }
+
   const modelId = params.model ?? 'gemini-3.8-flash'
   const progress = (msg: string, pct: number): void => {
     logger.info(`[PLAN] ${msg}`)
@@ -736,16 +929,18 @@ export async function buildEditPlan(params: {
     return fallbackPlan
   }
 
-  // 5. Global Script Context (Section 12)
+  // 5. Global Script Context (Section 12) - Scope Fix (Part J)
+  let ctx: GlobalScriptContext | null = null
   let globalContextSummary = ''
   try {
     progress('Preparing global documentary context...', 0.16)
-    const ctx = await analyzeGlobalContext({
+    ctx = await analyzeGlobalContext({
       projectDir,
       apiKey: cleanApiKey,
       model: modelId,
       scriptText,
       transcript,
+      signal,
       onProgress: (m, p) => progress(m, 0.16 + p * 0.04)
     })
     globalContextSummary = [
@@ -757,7 +952,10 @@ export async function buildEditPlan(params: {
       ctx.negativeKeywords?.length ? `Negative Keywords (avoid): ${ctx.negativeKeywords.join(', ')}` : '',
       ctx.visualWorld?.documentaryStyle ? `Visual Style: ${ctx.visualWorld.documentaryStyle}` : ''
     ].filter(Boolean).join('\n')
-  } catch (err) {
+  } catch (err: unknown) {
+    if (signal?.aborted || err instanceof PlanningCancelledError) {
+      throw err
+    }
     logger.warn(`[PLAN] Global context extraction failed: ${err}`)
   }
 
@@ -781,6 +979,7 @@ export async function buildEditPlan(params: {
     skeletons,
     globalContextSummary,
     transcript.duration,
+    signal,
     (m, p) => progress(m, p)
   )
 
@@ -789,10 +988,37 @@ export async function buildEditPlan(params: {
   const totalBatches = Math.ceil(skeletons.length / BATCH_SIZE)
   const allEnrichedMap = new Map<number, Partial<ScenePlan>>()
   let hadAnyBatchFallback = false
-  let primaryModelUsed = fallbackModelChain[0]
+  let primaryModelUsed = fallbackModelChain[0] ?? 'gemini-3.8-flash'
+
+  // Safe interim checkpointing (Part K)
+  const checkpointPath = join(projectDir, 'analysis', '.planning-checkpoint.json')
+  if (sourceHash && fs.existsSync(checkpointPath)) {
+    try {
+      const ckpt = JSON.parse(fs.readFileSync(checkpointPath, 'utf-8'))
+      if (ckpt && ckpt.sourceHash === sourceHash && ckpt.totalScenes === skeletons.length && ckpt.scenes) {
+        for (const [idxStr, sc] of Object.entries(ckpt.scenes)) {
+          allEnrichedMap.set(Number(idxStr), sc as Partial<ScenePlan>)
+        }
+        logger.info(`[PLAN] Reused ${allEnrichedMap.size}/${skeletons.length} enriched scenes from checkpoint`)
+      }
+    } catch {
+      /* ignore invalid checkpoint */
+    }
+  }
 
   for (let b = 0; b < totalBatches; b++) {
+    if (signal?.aborted) {
+      throw new PlanningCancelledError('buildEditPlan')
+    }
+
     const batchScenes = skeletons.slice(b * BATCH_SIZE, (b + 1) * BATCH_SIZE)
+    const isBatchAlreadyComplete = batchScenes.every((s) => allEnrichedMap.has(s.sceneIndex))
+
+    if (isBatchAlreadyComplete) {
+      logger.info(`[PLAN] Batch ${b + 1}/${totalBatches} fully present in checkpoint. Skipping Gemini request.`)
+      continue
+    }
+
     const { enrichedMap, modelUsed, usedFallback } = await enrichScenesBatchWithGemini(
       ai,
       fallbackModelChain,
@@ -801,6 +1027,7 @@ export async function buildEditPlan(params: {
       mediaFiles,
       b,
       totalBatches,
+      signal,
       progress
     )
 
@@ -809,6 +1036,23 @@ export async function buildEditPlan(params: {
     }
     if (usedFallback) hadAnyBatchFallback = true
     if (b === 0) primaryModelUsed = modelUsed
+
+    // Persist checkpoint after each batch
+    if (sourceHash) {
+      try {
+        const scenesObj: Record<number, Partial<ScenePlan>> = {}
+        for (const [idx, sc] of allEnrichedMap.entries()) {
+          scenesObj[idx] = sc
+        }
+        fs.writeFileSync(
+          checkpointPath,
+          JSON.stringify({ sourceHash, totalScenes: skeletons.length, scenes: scenesObj }),
+          'utf-8'
+        )
+      } catch {
+        /* non-fatal */
+      }
+    }
   }
 
   // 8. Assemble Full Plan Structure (Chapters -> Sequences -> Scenes)
@@ -987,9 +1231,23 @@ export async function buildEditPlan(params: {
   }
 
   // 12. Save Master Edit Plan (Section 19)
+  if (signal?.aborted) {
+    throw new PlanningCancelledError('buildEditPlan')
+  }
+
   progress('Saving master edit plan...', 0.95)
   const planPath = join(projectDir, 'analysis', 'master-edit-plan.json')
   fs.writeFileSync(planPath, JSON.stringify(plan, null, 2), 'utf-8')
+
+  // Clean up interim checkpoint if present
+  try {
+    if (fs.existsSync(checkpointPath)) {
+      fs.unlinkSync(checkpointPath)
+    }
+  } catch {
+    /* ignore */
+  }
+
   logger.info('Edit plan saved', {
     chapters: plan.chapters.length,
     scenes: plan.totalScenes,

@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-10-20T15:22:03.423Z",
+  "results": [
+    {
+      "scenarioName": "30s_video_cold",
+      "durationSecs": 30,
+      "totalFrames": 900,
+      "fps": 30,
+      "resolution": {
+        "width": 640,
+        "height": 360
+      },
+      "wallClockMs": 20570,
+      "peakRssMb": 463,
+      "overlayBlocksTotal": 0,
+      "overlayBlocksReused": 0,
+      "overlayBlocksRendered": 0,
+      "outputFilePath": "/var/folders/n_/hz396std3x792_n2yrmrcw640000gn/T/remotion-perf-bench-r5BHhb/bench-30s/output/final_output.mp4",
+      "outputFileSizeKb": 2907,
+      "success": true
+    },
+    {
+      "scenarioName": "30s_video_warm",
+      "durationSecs": 30,
+      "totalFrames": 900,
+      "fps": 30,
+      "resolution": {
+        "width": 640,
+        "height": 360
+      },
+      "wallClockMs": 1000,
+      "peakRssMb": 167,
+      "overlayBlocksTotal": 0,
+      "overlayBlocksReused": 0,
+      "overlayBlocksRendered": 0,
+      "outputFilePath": "/var/folders/n_/hz396std3x792_n2yrmrcw640000gn/T/remotion-perf-bench-r5BHhb/bench-30s/output/final_output.mp4",
+      "outputFileSizeKb": 2907,
+      "success": true
+    },
+    {
+      "scenarioName": "120s_video_multiblock",
+      "durationSecs": 120,
+      "totalFrames": 3600,
+      "fps": 30,
+      "resolution": {
+        "width": 640,
+        "height": 360
+      },
+      "wallClockMs": 72508,
+      "peakRssMb": 400,
+      "overlayBlocksTotal": 0,
+      "overlayBlocksReused": 0,
+      "overlayBlocksRendered": 0,
+      "outputFilePath": "/var/folders/n_/hz396std3x792_n2yrmrcw640000gn/T/remotion-perf-bench-r5BHhb/bench-120s/output/final_output.mp4",
+      "outputFileSizeKb": 15441,
+      "success": true
+    }
+  ]
+}
