@@ -157,6 +157,10 @@ function blackSegments(file: string): Array<{ start: number; dur: number }> {
 
 async function main(): Promise<void> {
   console.log(`\n=== Render resume integration (${SCENES} scenes, ${TOTAL / 60} min, ${W}x${H}@${FPS}) ===\n`)
+  if (process.platform === 'win32') {
+    console.log('  ⚠ Skipped on Windows: relies on POSIX ps/pgrep for child SIGKILL tracking')
+    return
+  }
   const fx = makeProject('main')
   let firstKill = ''
   let secondKill = ''

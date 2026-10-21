@@ -11821,20 +11821,22 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   });
   const isPromptMode = mix.mode === "custom-mix" && mix.aiImageRatio > 0 && resolveAiImageMode(mix) === "prompt";
   const hasBridge = typeof window !== "undefined" && Boolean(window.api?.manualAi);
-  const [status, setStatus] = reactExports.useState(null);
-  const [notice, setNotice] = reactExports.useState(null);
-  const [busy, setBusy] = reactExports.useState(false);
-  const [plan, setPlan] = reactExports.useState(null);
-  const [videoSelection, setVideoSelection] = reactExports.useState(null);
-  const [mixedSelection, setMixedSelection] = reactExports.useState(null);
-  const [pendingRejections, setPendingRejections] = reactExports.useState([]);
-  const [showImportMenu, setShowImportMenu] = reactExports.useState(false);
-  const [showVideoImportMenu, setShowVideoImportMenu] = reactExports.useState(false);
-  const [showMixedImportMenu, setShowMixedImportMenu] = reactExports.useState(false);
-  const [showPrompts, setShowPrompts] = reactExports.useState(false);
-  const lastVersion = reactExports.useRef(void 0);
-  const bridgeLoggedRef = reactExports.useRef(false);
-  reactExports.useEffect(() => {
+  const [status, setStatus] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [plan, setPlan] = useState(null);
+  const [videoSelection, setVideoSelection] = useState(null);
+  const [mixedSelection, setMixedSelection] = useState(null);
+  const [pendingRejections, setPendingRejections] = useState([]);
+  const [showImportMenu, setShowImportMenu] = useState(false);
+  const [showVideoImportMenu, setShowVideoImportMenu] = useState(false);
+  const [showMixedImportMenu, setShowMixedImportMenu] = useState(false);
+  const [showPrompts, setShowPrompts] = useState(false);
+  const [editorialSettings, setEditorialSettings] = useState(null);
+  const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = useState(false);
+  const lastVersion = useRef(void 0);
+  const bridgeLoggedRef = useRef(false);
+  useEffect(() => {
     if (!hasBridge && !bridgeLoggedRef.current) {
       bridgeLoggedRef.current = true;
       console.error(
@@ -11842,7 +11844,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       );
     }
   }, [hasBridge]);
-  const refresh = reactExports.useCallback(async () => {
+  const refresh = useCallback(async () => {
     if (!projectDir) return;
     if (!window.api?.manualAi) {
       return;
@@ -11850,13 +11852,19 @@ function ManualAiPromptPanel({ project, pipelineState }) {
     try {
       const s = await window.api.manualAi.getStatus(projectDir);
       setStatus(s);
+      if (window.api.manualAi.getEditorialSettings) {
+        const ed2 = await window.api.manualAi.getEditorialSettings(projectDir);
+        if (ed2.success && ed2.settings) {
+          setEditorialSettings(ed2.settings);
+        }
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[ManualAI] getStatus failed:", msg);
       setNotice(`Unable to read Manual AI status: ${msg}`);
     }
   }, [projectDir]);
-  reactExports.useEffect(() => {
+  useEffect(() => {
     if (!isPromptMode || !projectDir) return;
     void refresh();
     const off = window.api?.manualAi?.onStatusUpdated?.((payload) => {
@@ -11868,7 +11876,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       off?.();
     };
   }, [isPromptMode, projectDir, refresh]);
-  reactExports.useEffect(() => {
+  useEffect(() => {
     if (!isPromptMode || !projectDir) return;
     const v2 = pipelineState?.version;
     if (v2 !== lastVersion.current) {
@@ -11891,8 +11899,8 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   const showStock = Boolean(waitInfo);
   const missing = status?.missingSceneIndices?.length ? status.missingSceneIndices : waitInfo?.missingSceneIndices ?? [];
   const staleCount = status?.staleSceneIndices?.length ?? 0;
-  const rows = reactExports.useMemo(() => status?.rows ?? [], [status]);
-  reactExports.useEffect(() => {
+  const rows = useMemo(() => status?.rows ?? [], [status]);
+  useEffect(() => {
     if (!isPromptMode || !projectDir || !hasBridge) return;
     if (effectiveAllReady) return;
     const isWaiting = Boolean(waitInfo && !effectiveAllReady);
@@ -11942,15 +11950,27 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   async function handleCopyAllVideoPrompts() {
     if (!window.api?.manualAi) return;
     try {
-      const res = await window.api.manualAi.getVideoPromptText(projectDir);
+      const res = await window.api.manualAi.getVideoPromptText(projectDir, editorialSettings ?? void 0);
       if (!res.success || !res.text) {
         setNotice(res.error || "Video prompts are unavailable.");
         return;
       }
       const copied = copyToClipboard(res.text);
+      const modeLabel = editorialSettings?.promptMode === "embedded-editorial" ? "editorial video" : "video";
       setNotice(
-        copied ? `Copied ${effectiveExpected} video prompts to clipboard.` : "Could not access the clipboard."
+        copied ? `Copied ${effectiveExpected} ${modeLabel} prompts to clipboard.` : "Could not access the clipboard."
       );
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : String(err));
+    }
+  }
+  async function handleUpdateEditorialSettings(patch) {
+    if (!window.api?.manualAi?.updateEditorialSettings || !projectDir) return;
+    try {
+      const res = await window.api.manualAi.updateEditorialSettings(projectDir, patch);
+      if (res.success && res.settings) {
+        setEditorialSettings(res.settings);
+      }
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     }
@@ -12176,6 +12196,147 @@ function ManualAiPromptPanel({ project, pipelineState }) {
         /* @__PURE__ */ jsxRuntimeExports.jsx("div", { id: "manual-ai-stock-count", style: { fontSize: "15px", fontWeight: 700 }, children: showStock ? `${stockReady} / ${stockExpected} ready${stockReady >= stockExpected && stockExpected > 0 ? " ✓" : ""}` : "—" })
       ] })
     ] }),
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          padding: "12px 16px",
+          borderRadius: "8px",
+          background: "rgba(15, 23, 42, 0.45)",
+          border: "1px solid rgba(129, 140, 248, 0.2)",
+          display: "flex",
+          flexDirection: "column",
+          gap: "10px"
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }, children: "🎬 Video Prompt Style:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    fontSize: "11px",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                    background: editorialSettings?.promptMode === "embedded-editorial" ? "rgba(99, 102, 241, 0.2)" : "rgba(255, 255, 255, 0.08)",
+                    color: editorialSettings?.promptMode === "embedded-editorial" ? "#a5b4fc" : "var(--text-secondary)"
+                  },
+                  children: editorialSettings?.promptMode === "embedded-editorial" ? "AI Embedded Editorial Active" : "Classic Mode"
+                }
+              )
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "editorial-mode-classic",
+                  className: `btn btn-sm ${editorialSettings?.promptMode !== "embedded-editorial" ? "btn-primary" : "btn-secondary"}`,
+                  onClick: () => void handleUpdateEditorialSettings({ promptMode: "classic" }),
+                  children: "Classic (Original)"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "editorial-mode-embedded",
+                  className: `btn btn-sm ${editorialSettings?.promptMode === "embedded-editorial" ? "btn-primary" : "btn-secondary"}`,
+                  onClick: () => void handleUpdateEditorialSettings({ promptMode: "embedded-editorial" }),
+                  children: "AI Embedded Editorial"
+                }
+              )
+            ] })
+          ] }),
+          editorialSettings?.promptMode === "embedded-editorial" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "16px", flexWrap: "wrap", fontSize: "12px", color: "var(--text-secondary)", paddingTop: "4px", borderTop: "1px solid rgba(255, 255, 255, 0.05)" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: "checkbox",
+                  id: "editorial-senior-friendly-toggle",
+                  checked: editorialSettings.readability === "senior-friendly",
+                  onChange: (e) => void handleUpdateEditorialSettings({ readability: e.target.checked ? "senior-friendly" : "standard" })
+                }
+              ),
+              "Senior-Friendly Readability (50+ Contrast & Sizing)"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: "checkbox",
+                  id: "editorial-density-toggle",
+                  checked: editorialSettings.labelDensity === "balanced",
+                  onChange: (e) => void handleUpdateEditorialSettings({ labelDensity: e.target.checked ? "balanced" : "minimal" })
+                }
+              ),
+              "Balanced Density (Include grounded focus labels)"
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "input",
+                {
+                  type: "checkbox",
+                  id: "editorial-leader-lines-toggle",
+                  checked: editorialSettings.preferLeaderLines,
+                  onChange: (e) => void handleUpdateEditorialSettings({ preferLeaderLines: e.target.checked })
+                }
+              ),
+              "Include Graphic Leader Lines"
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", paddingTop: "6px", borderTop: "1px solid rgba(255, 255, 255, 0.05)" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: "⚡ Render Output Mode:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 600, color: editorialSettings?.renderOverlayMode === "source-only" ? "#38bdf8" : "#a3e635" }, children: editorialSettings?.renderOverlayMode === "source-only" ? "Source Only (Overlays Omitted)" : "Full Production (Remotion Captions + Overlays)" })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "render-mode-full",
+                  className: `btn btn-sm ${editorialSettings?.renderOverlayMode !== "source-only" ? "btn-primary" : "btn-secondary"}`,
+                  onClick: () => void handleUpdateEditorialSettings({ renderOverlayMode: "full" }),
+                  children: "Full (Default)"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: "render-mode-source-only",
+                  className: `btn btn-sm ${editorialSettings?.renderOverlayMode === "source-only" ? "btn-primary" : "btn-secondary"}`,
+                  onClick: () => {
+                    if (editorialSettings?.renderOverlayMode !== "source-only") {
+                      setShowSourceOnlyConfirm(true);
+                    }
+                  },
+                  children: "Source Only (Low-Memory)"
+                }
+              )
+            ] })
+          ] })
+        ]
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ConfirmDialog,
+      {
+        isOpen: showSourceOnlyConfirm,
+        title: "Activate Source Only Render Mode?",
+        message: "Source Only mode renders directly from imported/generated visuals and audio without app-generated visual overlays.\r\n\r\nTrade-offs:\r\n• Remotion dynamic captions will NOT be rendered\r\n• Proof Visual overlays will NOT be rendered\r\n• Visual Scene Grammar overlays will NOT be rendered\r\n• Opening graphic overlays will NOT be rendered\r\n\r\nVoiceover, music, footage, scene transitions, and final QA remain 100% intact. Labels must already exist in source media.",
+        confirmText: "Activate Source Only",
+        cancelText: "Keep Full Mode",
+        onConfirm: () => {
+          setShowSourceOnlyConfirm(false);
+          void handleUpdateEditorialSettings({ renderOverlayMode: "source-only" });
+        },
+        onCancel: () => setShowSourceOnlyConfirm(false)
+      }
+    ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", position: "relative", alignItems: "center" }, children: [
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         "button",

@@ -538,9 +538,17 @@ async function main(): Promise<void> {
     assert.strictEqual(isInsideCacheRoot(proj, root), false)
     assert.strictEqual(isInsideCacheRoot(proj, path.join(root, '..', '..', 'source.mp4')), false)
     assert.strictEqual(isInsideCacheRoot(proj, path.join(root, 'ws', '..', '..', '..', 'source.mp4')), false)
-    fs.symlinkSync(outside, path.join(root, 'evil'))
-    assert.strictEqual(isInsideCacheRoot(proj, path.join(root, 'evil', 'precious.txt')), false)
-    assert.throws(() => safeRemoveCachePath(proj, path.join(root, 'evil', 'precious.txt')))
+    try {
+      fs.symlinkSync(outside, path.join(root, 'evil'))
+      assert.strictEqual(isInsideCacheRoot(proj, path.join(root, 'evil', 'precious.txt')), false)
+      assert.throws(() => safeRemoveCachePath(proj, path.join(root, 'evil', 'precious.txt')))
+    } catch (symlinkErr: any) {
+      if (process.platform === 'win32' && symlinkErr?.code === 'EPERM') {
+        // Windows non-elevated developer mode restriction: skip symlink test
+      } else {
+        throw symlinkErr
+      }
+    }
     assert.throws(() => safeRemoveCachePath(proj, path.join(proj, 'source.mp4')))
     assert.ok(fs.existsSync(path.join(outside, 'precious.txt')))
     assert.ok(fs.existsSync(path.join(proj, 'source.mp4')))

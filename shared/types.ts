@@ -515,6 +515,40 @@ export interface ManualAiImportResult {
   status: ManualAiStatus
 }
 
+// ─── Universal AI-Embedded Editorial Focus Settings ──────────────────────────
+
+export type EditorialPromptMode = 'classic' | 'embedded-editorial'
+export type EditorialLabelDensity = 'minimal' | 'balanced'
+export type EditorialReadability = 'standard' | 'senior-friendly'
+export type EditorialRenderOverlayMode = 'full' | 'source-only'
+
+export interface EditorialGenerationSettings {
+  schemaVersion: 1
+  promptMode: EditorialPromptMode
+  labelDensity: EditorialLabelDensity
+  readability: EditorialReadability
+  preferLeaderLines: boolean
+  renderOverlayMode: EditorialRenderOverlayMode
+}
+
+export type EmbeddedEditorialVerificationStatus = 'unverified' | 'verified' | 'rejected'
+
+export interface EmbeddedEditorialVerificationRecord {
+  sceneIndex: number
+  assetFingerprint: string
+  expectedText?: string
+  confirmedText?: string
+  status: EmbeddedEditorialVerificationStatus
+  checkedByUser: boolean
+  checkedAt?: string
+}
+
+export interface EmbeddedEditorialVerificationArtifact {
+  schemaVersion: 1
+  updatedAt: string
+  scenes: Record<string, EmbeddedEditorialVerificationRecord>
+}
+
 export interface ProjectInputs {
   scriptPath: string | null
   voiceoverPath: string | null
@@ -1486,6 +1520,10 @@ export const IPC_CHANNELS = {
   MANUAL_AI_PLAN_IMPORT: 'manual-ai:plan-import',
   MANUAL_AI_COMMIT_IMPORT: 'manual-ai:commit-import',
   MANUAL_AI_STATUS_UPDATED: 'manual-ai:status-updated',
+  MANUAL_AI_GET_EDITORIAL_SETTINGS: 'manual-ai:get-editorial-settings',
+  MANUAL_AI_UPDATE_EDITORIAL_SETTINGS: 'manual-ai:update-editorial-settings',
+  MANUAL_AI_GET_EDITORIAL_VERIFICATION: 'manual-ai:get-editorial-verification',
+  MANUAL_AI_RECORD_EDITORIAL_VERIFICATION: 'manual-ai:record-editorial-verification',
 
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: 'research:sidecar-status',

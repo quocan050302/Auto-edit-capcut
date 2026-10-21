@@ -397,6 +397,10 @@ const IPC_CHANNELS = {
   MANUAL_AI_PLAN_IMPORT: "manual-ai:plan-import",
   MANUAL_AI_COMMIT_IMPORT: "manual-ai:commit-import",
   MANUAL_AI_STATUS_UPDATED: "manual-ai:status-updated",
+  MANUAL_AI_GET_EDITORIAL_SETTINGS: "manual-ai:get-editorial-settings",
+  MANUAL_AI_UPDATE_EDITORIAL_SETTINGS: "manual-ai:update-editorial-settings",
+  MANUAL_AI_GET_EDITORIAL_VERIFICATION: "manual-ai:get-editorial-verification",
+  MANUAL_AI_RECORD_EDITORIAL_VERIFICATION: "manual-ai:record-editorial-verification",
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
@@ -6869,7 +6873,7 @@ const RETENTION_PLAN_SCHEMA_VERSION = 1;
 function sha256$4(text) {
   return crypto__namespace.createHash("sha256").update(text).digest("hex");
 }
-function writeFileAtomic$3(filePath, content) {
+function writeFileAtomic$5(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -7290,7 +7294,7 @@ function loadRetentionPlan(projectDir) {
 }
 function saveRetentionPlan(projectDir, plan) {
   const p = getRetentionPlanPath(projectDir);
-  writeFileAtomic$3(p, JSON.stringify(plan, null, 2));
+  writeFileAtomic$5(p, JSON.stringify(plan, null, 2));
   logger.info(
     `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
   );
@@ -12267,7 +12271,7 @@ function resolveSceneIdentity(params) {
   }
   return binding;
 }
-function cleanText$5(text) {
+function cleanText$6(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
@@ -12276,7 +12280,7 @@ function truncateWords$2(text, maxWords) {
   if (words.length <= maxWords) return words.join(" ");
   return words.slice(0, maxWords).join(" ").replace(/[,.;:\-]+$/, "");
 }
-function countWords$2(text) {
+function countWords$3(text) {
   return text.split(/\s+/).filter(Boolean).length;
 }
 function normWs$1(text) {
@@ -12379,7 +12383,7 @@ function pickMood(text) {
 const HEALTH_SAFETY = "Scientifically plausible anatomy with correct organ relationships, medical documentary quality, no fake diagnostic results, no exact molecular structures, no citations, no medical text inside the image.";
 function shortIdea(scene) {
   if (!scene) return "";
-  return truncateWords$2(cleanText$5(scene.visualIntent || scene.narration), 6);
+  return truncateWords$2(cleanText$6(scene.visualIntent || scene.narration), 6);
 }
 function calculatePromptQualityScore(params) {
   const p = params.prompt.toLowerCase();
@@ -12434,8 +12438,8 @@ function buildManualScenePrompt(params) {
   const { scene, profile, globalContext, previousScene, nextScene, outputResolution, sceneDirection } = params;
   const isHealth = profile === "health";
   const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
-  const narration = cleanText$5(scene.narration);
-  const intent = cleanText$5(scene.visualIntent);
+  const narration = cleanText$6(scene.narration);
+  const intent = cleanText$6(scene.visualIntent);
   const groundingText = `${narration} ${intent}`;
   const niche = detectVisualNiche(groundingText, globalContext);
   if (sceneDirection) {
@@ -12443,9 +12447,9 @@ function buildManualScenePrompt(params) {
     const hook = sceneDirection.hookLevel;
     const isMechanism = ["mechanism", "cause-effect", "consequence", "reveal"].includes(role);
     const isHighHook = hook === "high";
-    let subject2 = cleanText$5(sceneDirection.visualEvent?.subject || intent || narration);
+    let subject2 = cleanText$6(sceneDirection.visualEvent?.subject || intent || narration);
     subject2 = truncateWords$2(subject2, 24);
-    let action = cleanText$5(sceneDirection.visualEvent?.action);
+    let action = cleanText$6(sceneDirection.visualEvent?.action);
     if (!action && isHealth) {
       action = "actively filtering and transporting biological fluid";
     } else if (!action) {
@@ -12458,23 +12462,23 @@ function buildManualScenePrompt(params) {
     } else {
       opening2 = `${NICHE_OPENING[niche]} ${subject2}, ${action}`;
     }
-    const changeClause = sceneDirection.visualEvent?.change ? `with ${cleanText$5(sceneDirection.visualEvent.change)}` : "";
-    const causeClause = sceneDirection.visualEvent?.cause ? `visibly triggered by ${cleanText$5(sceneDirection.visualEvent.cause)}` : "";
-    const consequenceClause = sceneDirection.visualEvent?.consequence ? `resulting in ${cleanText$5(sceneDirection.visualEvent.consequence)}` : "";
+    const changeClause = sceneDirection.visualEvent?.change ? `with ${cleanText$6(sceneDirection.visualEvent.change)}` : "";
+    const causeClause = sceneDirection.visualEvent?.cause ? `visibly triggered by ${cleanText$6(sceneDirection.visualEvent.cause)}` : "";
+    const consequenceClause = sceneDirection.visualEvent?.consequence ? `resulting in ${cleanText$6(sceneDirection.visualEvent.consequence)}` : "";
     const dynamics = [changeClause, causeClause, consequenceClause].filter(Boolean).join(", ");
-    const viewerNotice = cleanText$5(sceneDirection.viewerShouldNotice || narration);
+    const viewerNotice = cleanText$6(sceneDirection.viewerShouldNotice || narration);
     const comprehensionClause = viewerNotice ? `The viewer should immediately understand that ${truncateWords$2(viewerNotice, 16)}.` : "";
     const comp = sceneDirection.composition;
     const subjectFraming = isMechanism ? "with the main subject occupying roughly 60-70% of the useful frame" : "with strong central presence";
     const compositionClause = `Composition: ${comp.shotType || "close three-quarter view"}, ${subjectFraming}, ${comp.cameraAngle || "eye level"}, ${comp.lensFeel || (isHealth ? "85mm medical-documentary lens" : "50mm prime lens")}, ${comp.focalPriority || "precise focal priority"}.`;
-    const fg = cleanText$5(comp.foreground) || "dominant active subject";
-    const bg = cleanText$5(comp.background) || (isHealth ? "controlled dark navy background with gentle biological volumetric depth" : NICHE_BACKGROUND[niche]);
+    const fg = cleanText$6(comp.foreground) || "dominant active subject";
+    const bg = cleanText$6(comp.background) || (isHealth ? "controlled dark navy background with gentle biological volumetric depth" : NICHE_BACKGROUND[niche]);
     const depthClause = `Foreground: ${fg}. Background: ${bg}.`;
-    const lighting2 = cleanText$5(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche]);
-    const color = cleanText$5(sceneDirection.colorStrategy) || (isHealth ? "deep navy blue with warm tissue highlights" : "authentic documentary grade");
+    const lighting2 = cleanText$6(sceneDirection.lighting) || (isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche]);
+    const color = cleanText$6(sceneDirection.colorStrategy) || (isHealth ? "deep navy blue with warm tissue highlights" : "authentic documentary grade");
     const lightClause = `Lighting and palette: ${lighting2}, ${color}.`;
     const realismClause = isHealth ? "Realistic internal tissue, plausible organ and vessel relationships, directional biological visual flow, medical documentary realism, no gore, no fake diagnostic results, no anatomical labels." : "High-end cinematic documentary realism, natural candid behavior, believable real-world environment, balanced cinematic grade.";
-    const continuityNote = cleanText$5(sceneDirection.continuityNote);
+    const continuityNote = cleanText$6(sceneDirection.continuityNote);
     const continuityClause2 = continuityNote ? `Continuity: ${continuityNote}.` : "";
     let negativeSpaceClause = "";
     let overlayDirective = "";
@@ -12487,7 +12491,7 @@ function buildManualScenePrompt(params) {
       overlayConstraint = isHealth ? `Only the exact specified editorial overlay text is permitted. No other text, no captions, no anatomical labels, no UI, no watermark, no logo.` : `Only the exact specified editorial overlay text is permitted. No other text, no captions, no UI, no watermark, no logo.`;
     } else {
       if (comp.negativeSpace) {
-        negativeSpaceClause = `Composition balance: ${cleanText$5(comp.negativeSpace)}.`;
+        negativeSpaceClause = `Composition balance: ${cleanText$6(comp.negativeSpace)}.`;
       }
       overlayConstraint = isHealth ? `No text overlay, no subtitles, no anatomical labels, no UI, no watermark, no logo.` : `No text overlay, no subtitles, no UI, no watermark, no logo.`;
     }
@@ -12509,9 +12513,9 @@ function buildManualScenePrompt(params) {
       return sanitizePromptLine(parts.filter(Boolean).join(" "));
     };
     let prompt2 = composeWithTarget(true, true, true);
-    if (countWords$2(prompt2) > 250) prompt2 = composeWithTarget(true, true, false);
-    if (countWords$2(prompt2) > 250) prompt2 = composeWithTarget(false, true, false);
-    if (countWords$2(prompt2) > 250) prompt2 = composeWithTarget(false, false, false);
+    if (countWords$3(prompt2) > 250) prompt2 = composeWithTarget(true, true, false);
+    if (countWords$3(prompt2) > 250) prompt2 = composeWithTarget(false, true, false);
+    if (countWords$3(prompt2) > 250) prompt2 = composeWithTarget(false, false, false);
     return prompt2;
   }
   const opening = isHealth ? "Premium cinematic medical documentary still of" : NICHE_OPENING[niche];
@@ -12522,13 +12526,13 @@ function buildManualScenePrompt(params) {
   const mood = pickMood(groundingText);
   const lighting = isHealth ? HEALTH_LIGHTING[(Math.max(1, scene.sceneIndex) - 1) % HEALTH_LIGHTING.length] : NICHE_LIGHTING[niche];
   const worldEnv = globalContext?.visualWorld?.environment?.[0];
-  const colorMood = cleanText$5(globalContext?.visualWorld?.colorMood);
-  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText$5(worldEnv) || NICHE_BACKGROUND[niche]}`;
+  const colorMood = cleanText$6(globalContext?.visualWorld?.colorMood);
+  const background = isHealth ? "clear foreground subject over a controlled dark navy gradient background with soft volumetric depth" : `clear foreground subject over a ${cleanText$6(worldEnv) || NICHE_BACKGROUND[niche]}`;
   if (isHealth && !/\b(filter|flow|fill|contract|narrow|expand|release|absorb|accumulat|separat|slow|accelerat|signal|respond|circulat|pump)\b/i.test(subject)) {
     subject = `${subject}, actively demonstrating physiological biological processes`;
   }
   const styleCore = isHealth ? `${getHealthCategoryDetails(scene.category || "conceptual")}. ${HEALTH_SAFETY}` : `${NICHE_STYLE_DIRECTIVES[niche]}.`;
-  const anchorSubject = cleanText$5(globalContext?.primarySubject);
+  const anchorSubject = cleanText$6(globalContext?.primarySubject);
   const worldParts = [
     anchorSubject ? `topic ${truncateWords$2(anchorSubject, 6)}` : "",
     colorMood ? `colour mood ${truncateWords$2(colorMood, 4)}` : ""
@@ -12557,8 +12561,8 @@ function buildManualScenePrompt(params) {
     return sanitizePromptLine(parts.filter(Boolean).join(" "));
   };
   let prompt = compose(24, true, true);
-  if (countWords$2(prompt) > 200) prompt = compose(20, true, false);
-  if (countWords$2(prompt) > 200) prompt = compose(14, false, false);
+  if (countWords$3(prompt) > 200) prompt = compose(20, true, false);
+  if (countWords$3(prompt) > 200) prompt = compose(14, false, false);
   if (params.identityBible && params.identityBinding) {
     const enrichment = enrichPromptWithIdentity({
       basePrompt: prompt,
@@ -12679,7 +12683,7 @@ function buildManualAiPromptPack(params) {
   }
   entries.sort((a, b) => a.sceneIndex - b.sceneIndex);
   const totalPrompts = entries.length;
-  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords$2(e.prompt), 0) / totalPrompts) : 0;
+  const avgWords = totalPrompts > 0 ? Math.round(entries.reduce((sum, e) => sum + countWords$3(e.prompt), 0) / totalPrompts) : 0;
   const highHook = entries.filter((e) => e.hookLevel === "high").length;
   const mediumHook = entries.filter((e) => e.hookLevel === "medium").length;
   const lowHook = entries.filter((e) => e.hookLevel === "low").length;
@@ -12720,7 +12724,7 @@ function formatManualAiPromptText(pack) {
   const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   return sorted.map((e) => `${formatSceneLabel(e.sceneIndex)} | ${sanitizePromptLine(e.prompt)}`).join("\n\n");
 }
-function writeFileAtomic$2(filePath, content) {
+function writeFileAtomic$4(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -12740,8 +12744,8 @@ function loadManualAiPromptPack(projectDir) {
   }
 }
 function saveManualAiPromptPackFiles(projectDir, pack) {
-  writeFileAtomic$2(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic$2(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
+  writeFileAtomic$4(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$4(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
 }
 function readManualAiPromptText(projectDir) {
   const pack = loadManualAiPromptPack(projectDir);
@@ -12988,6 +12992,88 @@ function findMissingManualAiScenes(projectDir) {
     if (!ok) missing.push(idx);
   }
   return missing;
+}
+const EDITORIAL_SETTINGS_SCHEMA_VERSION = 1;
+const DEFAULT_EDITORIAL_SETTINGS = {
+  schemaVersion: EDITORIAL_SETTINGS_SCHEMA_VERSION,
+  promptMode: "classic",
+  labelDensity: "minimal",
+  readability: "standard",
+  preferLeaderLines: true,
+  renderOverlayMode: "full"
+};
+function getEditorialFocusSettingsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "editorial-focus-settings.v1.json");
+}
+function writeFileAtomic$3(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function validateSettings(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ...DEFAULT_EDITORIAL_SETTINGS };
+  }
+  const obj = raw;
+  const promptMode = obj.promptMode === "embedded-editorial" ? "embedded-editorial" : "classic";
+  const labelDensity = obj.labelDensity === "balanced" ? "balanced" : "minimal";
+  const readability = obj.readability === "senior-friendly" ? "senior-friendly" : "standard";
+  const preferLeaderLines = typeof obj.preferLeaderLines === "boolean" ? obj.preferLeaderLines : true;
+  const renderOverlayMode = obj.renderOverlayMode === "source-only" ? "source-only" : "full";
+  return {
+    schemaVersion: EDITORIAL_SETTINGS_SCHEMA_VERSION,
+    promptMode,
+    labelDensity,
+    readability,
+    preferLeaderLines,
+    renderOverlayMode
+  };
+}
+function loadEditorialFocusSettings(projectDir) {
+  if (!projectDir) return { ...DEFAULT_EDITORIAL_SETTINGS };
+  const settingsPath = getEditorialFocusSettingsPath(projectDir);
+  if (!fs__namespace.existsSync(settingsPath)) {
+    return { ...DEFAULT_EDITORIAL_SETTINGS };
+  }
+  try {
+    const raw = JSON.parse(fs__namespace.readFileSync(settingsPath, "utf-8"));
+    return validateSettings(raw);
+  } catch (err) {
+    logger.warn(`[EditorialSettings] Failed to parse ${settingsPath}, falling back to defaults: ${String(err)}`);
+    return { ...DEFAULT_EDITORIAL_SETTINGS };
+  }
+}
+function saveEditorialFocusSettings(projectDir, settings) {
+  const current = loadEditorialFocusSettings(projectDir);
+  const merged = validateSettings({
+    ...current,
+    ...settings
+  });
+  const settingsPath = getEditorialFocusSettingsPath(projectDir);
+  writeFileAtomic$3(settingsPath, JSON.stringify(merged, null, 2));
+  logger.info(`[EditorialSettings] Saved project editorial settings to ${settingsPath}`);
+  return merged;
+}
+function resolveEffectiveOverlayPolicy(settings) {
+  const isSourceOnly = settings?.renderOverlayMode === "source-only";
+  if (isSourceOnly) {
+    return {
+      renderCaptions: false,
+      renderProofVisuals: false,
+      renderVisualGrammar: false,
+      renderOpeningGraphics: false,
+      mode: "source-only"
+    };
+  }
+  return {
+    renderCaptions: true,
+    renderProofVisuals: true,
+    renderVisualGrammar: true,
+    renderOpeningGraphics: true,
+    mode: "full"
+  };
 }
 const RENDER_CACHE_RELATIVE = path__namespace.join(".cache", "render-v2");
 function getRenderCacheRoot(projectDir) {
@@ -14232,6 +14318,7 @@ function prepareRenderPlan(params) {
   const fps = params.fps ?? 30;
   const projectDir = normalizePathForFFmpeg(params.projectDir);
   const voiceoverPath = normalizePathForFFmpeg(params.voiceoverPath);
+  const editorialSettings = params.editorialSettings || loadEditorialFocusSettings(projectDir);
   const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
   if (!fs__namespace.existsSync(planPath)) throw new Error("No edit plan found. Run AI Planning first.");
   const plan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
@@ -14504,7 +14591,8 @@ function prepareRenderPlan(params) {
     // part of the workspace key; the resolved decisions are hashed into every overlay
     // block fingerprint (overlayPropsHash) instead, which invalidates overlays correctly.
     visualGrammarSettings: { prod: hashes.productionSettings },
-    sceneFingerprints: sceneJobs.map((j) => j.fingerprint)
+    sceneFingerprints: sceneJobs.map((j) => j.fingerprint),
+    renderOverlayMode: editorialSettings.renderOverlayMode
   });
   return {
     projectDir,
@@ -14531,7 +14619,8 @@ function prepareRenderPlan(params) {
     hashes,
     renderFingerprint,
     assemblyFingerprint,
-    totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0)
+    totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0),
+    editorialSettings
   };
 }
 function computeRenderRequestKey(params) {
@@ -14547,7 +14636,8 @@ function computeRenderRequestKey(params) {
     captions: params.captionPlan ? hashJsonValue(params.captionPlan) : "none",
     plan: hashFileContent(path__namespace.join(analysis, "master-edit-plan.json")),
     audio: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
-    stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json"))
+    stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json")),
+    editorial: hashFileContent(path__namespace.join(analysis, "editorial-focus-settings.v1.json"))
   });
 }
 async function renderVideo(params) {
@@ -14614,7 +14704,8 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       fps,
       captionPlan: params.captionPlan,
       transitionSettings: params.transitionSettings,
-      encoderKey: encoder.key
+      encoderKey: encoder.key,
+      editorialSettings: params.editorialSettings
     });
     const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions, retentionPlan, retentionPlanMap, visualPlanMap } = prepared;
     const totalScenes = scenes.length;
@@ -15183,8 +15274,10 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       `[RENDER] Audio mixing output validated: path=${mixedVideo} sizeBytes=${fs__namespace.statSync(mixedVideo).size} duration=${audioProbe?.duration.toFixed(3)}s`
     );
     throwIfAborted(signal);
+    const effectiveEditorialSettings = prepared.editorialSettings || loadEditorialFocusSettings(projectDir);
+    const overlayPolicy = resolveEffectiveOverlayPolicy(effectiveEditorialSettings);
     let proofVisuals = [];
-    if (retentionSettings.proofVisualsEnabled) {
+    if (overlayPolicy.renderProofVisuals && retentionSettings.proofVisualsEnabled) {
       try {
         proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan ?? { enabled: false, activeRanges: [], phrases: [] });
         logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`);
@@ -15206,7 +15299,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     }
     const prodSettings = loadProductionSettings(projectDir);
     let visualGrammar = [];
-    if (prodSettings.enabled && prodSettings.visualSceneGrammarEnabled) {
+    if (overlayPolicy.renderVisualGrammar && prodSettings.enabled && prodSettings.visualSceneGrammarEnabled) {
       try {
         let vgPlan = loadVisualGrammarPlan(projectDir);
         if (!vgPlan) {
@@ -15234,9 +15327,9 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         visualGrammar = [];
       }
     }
-    const hasCaptions = !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0);
-    const hasProofVisuals = proofVisuals.length > 0;
-    const hasVisualGrammar = visualGrammar.length > 0;
+    const hasCaptions = overlayPolicy.renderCaptions && !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0);
+    const hasProofVisuals = overlayPolicy.renderProofVisuals && proofVisuals.length > 0;
+    const hasVisualGrammar = overlayPolicy.renderVisualGrammar && visualGrammar.length > 0;
     const hasOverlay = hasCaptions || hasProofVisuals || hasVisualGrammar;
     let finalWorkingPath = mixedVideo;
     let reusedOverlayBlocks = 0;
@@ -24418,7 +24511,7 @@ function broadcastManualAiStatus(projectDir, status) {
 function sha256$1(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
-function cleanText$4(text) {
+function cleanText$5(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
@@ -24426,7 +24519,7 @@ function extractNumbers(text) {
   const matches = text.match(/\b\d+(?:[.,]\d+)?%?\b/g);
   return matches ? matches.map((m) => m.replace(/,/g, "")) : [];
 }
-function writeFileAtomic$1(filePath, content) {
+function writeFileAtomic$2(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -24447,7 +24540,7 @@ function computeScriptHash(scriptText, profile, globalContext) {
 }
 function computeSceneDirectionsHash(briefHash, aiScenes) {
   const sceneTokens = aiScenes.map(
-    (s) => `${s.sceneIndex}:${cleanText$4(s.narration)}:${cleanText$4(s.visualIntent)}`
+    (s) => `${s.sceneIndex}:${cleanText$5(s.narration)}:${cleanText$5(s.visualIntent)}`
   );
   return sha256$1([briefHash, ...sceneTokens, String(MANUAL_AI_VISUAL_DIRECTOR_SCHEMA_VERSION)]);
 }
@@ -24694,8 +24787,8 @@ function extractActionVerb(text, isHealth) {
 }
 function buildFallbackSceneDirection(scene, profile, isOpening) {
   const isHealth = profile === "health";
-  const narration = cleanText$4(scene.narration);
-  const intent = cleanText$4(scene.visualIntent);
+  const narration = cleanText$5(scene.narration);
+  const intent = cleanText$5(scene.visualIntent);
   const combined = `${narration} ${intent}`;
   const role = inferFallbackSceneRole(combined, isOpening);
   const hook = inferFallbackHookLevel(role, isOpening);
@@ -24759,11 +24852,11 @@ async function analyzeSceneBatchWithGemini(params) {
   const candidateModels = getAvailableModelsForTask("manual_ai_visual_director", preferredModel);
   const scenesPayload = batchScenes.map((s) => ({
     sceneIndex: s.sceneIndex,
-    narration: cleanText$4(s.narration),
-    visualIntent: cleanText$4(s.visualIntent)
+    narration: cleanText$5(s.narration),
+    visualIntent: cleanText$5(s.visualIntent)
   }));
-  const prevText = prevContext ? `SCENE ${prevContext.sceneIndex}: ${cleanText$4(prevContext.narration)}` : "None (start of video)";
-  const nextText = nextContext ? `SCENE ${nextContext.sceneIndex}: ${cleanText$4(nextContext.narration)}` : "None (end of video)";
+  const prevText = prevContext ? `SCENE ${prevContext.sceneIndex}: ${cleanText$5(prevContext.narration)}` : "None (start of video)";
+  const nextText = nextContext ? `SCENE ${nextContext.sceneIndex}: ${cleanText$5(nextContext.narration)}` : "None (end of video)";
   const prompt = `You are the Lead Visual Director for a cinematic documentary (${profile}).
 GLOBAL VISUAL BRIEF:
 - Storytelling Mode: ${brief.storytellingMode}
@@ -24823,11 +24916,11 @@ Return ONLY a valid JSON array of ${scenesPayload.length} objects matching the s
             sceneIndex: s.sceneIndex,
             sceneRole: raw.sceneRole || inferFallbackSceneRole(s.narration, s.sceneIndex === 1),
             hookLevel: raw.hookLevel || "medium",
-            coreMeaning: raw.coreMeaning || cleanText$4(s.narration).slice(0, 100),
+            coreMeaning: raw.coreMeaning || cleanText$5(s.narration).slice(0, 100),
             viewerShouldNotice: raw.viewerShouldNotice || "The visible action of the subject",
             curiosityGap: raw.curiosityGap,
             visualEvent: {
-              subject: raw.visualEvent.subject || cleanText$4(s.visualIntent || s.narration),
+              subject: raw.visualEvent.subject || cleanText$5(s.visualIntent || s.narration),
               action: raw.visualEvent.action || extractActionVerb(s.narration, profile === "health"),
               change: raw.visualEvent.change,
               cause: raw.visualEvent.cause,
@@ -25006,7 +25099,7 @@ async function prepareManualAiVisualDirection(params) {
       }
     };
   }
-  const fullScriptText = params.scriptText || plan.scenes.map((s) => cleanText$4(s.narration)).join(" ");
+  const fullScriptText = params.scriptText || plan.scenes.map((s) => cleanText$5(s.narration)).join(" ");
   const scriptHashVal = computeScriptHash(fullScriptText, profile, globalContext);
   const briefPath = getManualAiVisualBriefPath(projectDir);
   const directionsPath = getManualAiSceneDirectionsPath(projectDir);
@@ -25025,7 +25118,7 @@ async function prepareManualAiVisualDirection(params) {
     }
   }
   if (!brief) {
-    const scenesSummary = plan.scenes.map((s) => `Scene ${s.sceneIndex}: ${cleanText$4(s.narration).slice(0, 120)} | Intent: ${cleanText$4(s.visualIntent).slice(0, 80)}`).join("\n");
+    const scenesSummary = plan.scenes.map((s) => `Scene ${s.sceneIndex}: ${cleanText$5(s.narration).slice(0, 120)} | Intent: ${cleanText$5(s.visualIntent).slice(0, 80)}`).join("\n");
     try {
       if (params.apiKey) {
         brief = await generateGlobalVisualBriefWithGemini({
@@ -25050,7 +25143,7 @@ async function prepareManualAiVisualDirection(params) {
         aiScenes[0]?.narration
       );
     }
-    writeFileAtomic$1(briefPath, JSON.stringify(brief, null, 2));
+    writeFileAtomic$2(briefPath, JSON.stringify(brief, null, 2));
   }
   const globalMs = Date.now() - globalT0;
   const briefHash = sha256$1([
@@ -25147,7 +25240,7 @@ async function prepareManualAiVisualDirection(params) {
       overlayCount: overlayCount2,
       directions: sceneDirectionsList
     };
-    writeFileAtomic$1(directionsPath, JSON.stringify(artifact, null, 2));
+    writeFileAtomic$2(directionsPath, JSON.stringify(artifact, null, 2));
   } else {
     enrichedCount = sceneDirectionsList.filter((d) => d.confidence > 0.8).length;
     fallbackCount = sceneDirectionsList.length - enrichedCount;
@@ -29713,7 +29806,7 @@ async function commitManualAiImport(params) {
   manualAiAssetGate.notify(projectDir);
   return { imported, rejections, status };
 }
-function cleanText$3(text) {
+function cleanText$4(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
@@ -29722,7 +29815,7 @@ function dedupeStrings(arr) {
   const result = [];
   for (const item of arr) {
     if (!item || typeof item !== "string") continue;
-    const cleaned = cleanText$3(item);
+    const cleaned = cleanText$4(item);
     const lower = cleaned.toLowerCase();
     if (lower && !seen.has(lower)) {
       seen.add(lower);
@@ -29746,8 +29839,8 @@ function isHutteriteContext(text, globalContext, identityBible) {
 }
 function resolveVideoSubjectGrounding(params) {
   const { scene, globalContext, identityBible, sceneIdentity, sceneDirection, profile } = params;
-  const narration = cleanText$3(scene.narration);
-  const intent = cleanText$3(scene.visualIntent);
+  const narration = cleanText$4(scene.narration);
+  const intent = cleanText$4(scene.visualIntent);
   const sceneText = `${intent} ${narration}`.trim();
   const sceneLower = sceneText.toLowerCase();
   let matchedEntity;
@@ -29793,7 +29886,7 @@ function resolveVideoSubjectGrounding(params) {
   } else if (matchedEntity || matchedCommunity) {
     presence = "visible";
   }
-  let canonicalSubject = cleanText$3(intent || sceneDirection?.visualEvent?.subject || narration);
+  let canonicalSubject = cleanText$4(intent || sceneDirection?.visualEvent?.subject || narration);
   let subjectType = matchedEntity?.entityType || "other";
   const aliases = matchedEntity?.aliases ? [...matchedEntity.aliases] : [];
   const isHutterite = isHutteriteContext(sceneText, globalContext, identityBible);
@@ -29804,7 +29897,7 @@ function resolveVideoSubjectGrounding(params) {
     } else if (/\b(bladder)\b/i.test(sceneLower)) {
       canonicalSubject = "Human urinary bladder wall and expanding internal lumen";
     } else {
-      canonicalSubject = cleanText$3(intent || "human physiological tissue structures");
+      canonicalSubject = cleanText$4(intent || "human physiological tissue structures");
     }
   } else if (isCourthouse) {
     canonicalSubject = "Exterior facade of a federal courthouse";
@@ -29829,9 +29922,9 @@ function resolveVideoSubjectGrounding(params) {
     subjectType = matchedEntity.entityType;
   } else if (globalContext?.primarySubject) {
     if (presence === "context") {
-      canonicalSubject = cleanText$3(intent || sceneDirection?.visualEvent?.subject || narration);
+      canonicalSubject = cleanText$4(intent || sceneDirection?.visualEvent?.subject || narration);
     } else {
-      canonicalSubject = cleanText$3(globalContext.primarySubject);
+      canonicalSubject = cleanText$4(globalContext.primarySubject);
     }
   }
   const requiredVisualTraits = [];
@@ -30020,7 +30113,7 @@ function resolveVideoSubjectGrounding(params) {
     confidence: matchedEntity ? matchedEntity.confidence : matchedCommunity ? 0.85 : 0.75
   };
 }
-function cleanText$2(text) {
+function cleanText$3(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
@@ -30031,7 +30124,7 @@ function deduplicateKeywords(list, max = 16) {
   const result = [];
   const seen = /* @__PURE__ */ new Set();
   for (const raw of list) {
-    const cleaned = cleanText$2(raw);
+    const cleaned = cleanText$3(raw);
     if (!cleaned || cleaned.length < 2) continue;
     const key2 = normalizeKey(cleaned);
     if (!key2 || seen.has(key2)) continue;
@@ -30075,7 +30168,7 @@ function extractSceneVideoKeywords(params) {
       candidates.push(a);
     }
   }
-  const action = cleanText$2(sceneDirection?.visualEvent?.action);
+  const action = cleanText$3(sceneDirection?.visualEvent?.action);
   if (action && !action.includes("demonstrating concrete dynamic action") && !action.includes("demonstrating realistic purposeful")) {
     candidates.push(action);
   }
@@ -30097,7 +30190,7 @@ function extractSceneVideoKeywords(params) {
   for (const mc of grounding.materialCulture.slice(0, 2)) {
     candidates.push(mc);
   }
-  const shotType = cleanText$2(sceneDirection?.composition?.shotType);
+  const shotType = cleanText$3(sceneDirection?.composition?.shotType);
   if (shotType && !shotType.includes("standard")) {
     candidates.push(shotType);
   }
@@ -30160,7 +30253,7 @@ function extractSceneAvoidKeywords(params) {
   return deduplicateKeywords(avoids, 8);
 }
 const MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION = 2;
-function cleanText$1(text) {
+function cleanText$2(text) {
   if (typeof text !== "string") return "";
   return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
 }
@@ -30169,13 +30262,13 @@ function truncateWords$1(text, maxWords) {
   if (words.length <= maxWords) return words.join(" ");
   return words.slice(0, maxWords).join(" ").replace(/[,.;:\-]+$/, "");
 }
-function countWords$1(text) {
+function countWords$2(text) {
   return text.split(/\s+/).filter(Boolean).length;
 }
 function sha256(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
-function writeFileAtomic(filePath, content) {
+function writeFileAtomic$1(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -30320,7 +30413,7 @@ function resolveVideoCameraMotion(params) {
 }
 function resolveObservableAction(params) {
   const { scene, grounding, niche, sceneDirection } = params;
-  const dirAction = cleanText$1(sceneDirection?.visualEvent?.action);
+  const dirAction = cleanText$2(sceneDirection?.visualEvent?.action);
   const isHealth = niche === "health";
   if (dirAction && !dirAction.includes("demonstrating concrete dynamic action") && !dirAction.includes("demonstrating realistic purposeful") && !dirAction.includes("actively engaging in physiological")) {
     if (!isHealth && /\b(biological|physiological|cellular|organ|tissue)\b/i.test(dirAction)) ;
@@ -30386,8 +30479,8 @@ function buildManualSceneVideoPrompt(params) {
   const { scene, profile, globalContext, visualBrief, sceneDirection, outputResolution, identityBible, sceneIdentity } = params;
   const isHealth = profile === "health";
   const dims = outputResolution === "4k" ? "3840x2160" : outputResolution === "2k" ? "2560x1440" : "1920x1080";
-  const narration = cleanText$1(scene.narration);
-  const intent = cleanText$1(scene.visualIntent);
+  const narration = cleanText$2(scene.narration);
+  const intent = cleanText$2(scene.visualIntent);
   const groundingText = `${narration} ${intent}`.trim();
   const niche = detectVideoNiche(groundingText, profile, globalContext, visualBrief);
   const directive = VIDEO_NICHE_DIRECTIVES[niche];
@@ -30401,8 +30494,8 @@ function buildManualSceneVideoPrompt(params) {
     profile
   });
   const cameraMotion = resolveVideoCameraMotion({ scene, sceneDirection, directive, niche });
-  const shotType = cleanText$1(sceneDirection?.composition?.shotType) || (isHealth ? "macro cutaway shot" : "medium observational shot");
-  const lensFeel = cleanText$1(sceneDirection?.composition?.lensFeel) || (isHealth ? "100mm medical macro lens" : "35mm cinematic lens");
+  const shotType = cleanText$2(sceneDirection?.composition?.shotType) || (isHealth ? "macro cutaway shot" : "medium observational shot");
+  const lensFeel = cleanText$2(sceneDirection?.composition?.lensFeel) || (isHealth ? "100mm medical macro lens" : "35mm cinematic lens");
   const subject = grounding.canonicalSubject || (isHealth ? "human physiological tissue structures" : "documentary subject in authentic setting");
   const action = resolveObservableAction({ scene, grounding, niche, sceneDirection });
   let subjectDetailClause = "";
@@ -30419,26 +30512,26 @@ function buildManualSceneVideoPrompt(params) {
       subjectDetailClause = `A small group of ${subject} ${parts.join(" ")}.${forbiddenHint}`;
     }
   }
-  const narrationSummary = cleanText$1(narration);
+  const narrationSummary = cleanText$2(narration);
   const narrationClause = narrationSummary ? `grounded in the scene narrative: ${truncateWords$1(narrationSummary, 15)}` : "";
   const beginningClause = narrationClause ? `In the beginning, establish ${subject}, ${narrationClause}.` : `In the beginning, establish ${subject} initiating action.`;
-  const middleChange = cleanText$1(sceneDirection?.visualEvent?.change);
+  const middleChange = cleanText$2(sceneDirection?.visualEvent?.change);
   const cleanMiddleChange = !isHealth && /\b(biological|physiological|cellular)\b/i.test(middleChange) ? "" : middleChange;
   const middleClause = cleanMiddleChange ? `As the shot progresses, develop ${action} with ${cleanMiddleChange} while the camera executes a ${cameraMotion}.` : `As the clip progresses, maintain smooth visible development of ${action} while the camera executes a ${cameraMotion}.`;
-  let rawConsequence = cleanText$1(sceneDirection?.visualEvent?.consequence);
+  let rawConsequence = cleanText$2(sceneDirection?.visualEvent?.consequence);
   if (!isHealth) {
     if (/\b(biological|physiological|cellular|organ|tissue)\b/i.test(rawConsequence)) {
       rawConsequence = "observable real-world development";
     }
   }
   const endingClause = rawConsequence ? `Toward the end of the shot, settle on the consequence: ${rawConsequence}.` : `Toward the end of the shot, smoothly complete the visible motion without abrupt stops.`;
-  const lighting = cleanText$1(sceneDirection?.lighting) || directive.lighting;
-  const envDetail = grounding.environment[0] || cleanText$1(sceneDirection?.composition?.background) || directive.environment;
+  const lighting = cleanText$2(sceneDirection?.lighting) || directive.lighting;
+  const envDetail = grounding.environment[0] || cleanText$2(sceneDirection?.composition?.background) || directive.environment;
   const environmentClause = `Environment and atmosphere: ${envDetail}, illuminated by ${lighting}.`;
   const realismClause = isHealth ? "Preserve anatomically accurate cellular proportions and believable physiological fluid mechanics." : "Preserve the real-world proportions of equipment, believable body mechanics and authentic contemporary rural working atmosphere.";
   let continuityClause = "";
   if (sceneDirection?.continuityNote) {
-    continuityClause = `Maintain strict continuity: ${cleanText$1(sceneDirection.continuityNote)}.`;
+    continuityClause = `Maintain strict continuity: ${cleanText$2(sceneDirection.continuityNote)}.`;
   } else {
     continuityClause = "Maintain strict continuity of wardrobe, architecture, lighting color temperature, and documentary palette with surrounding scenes.";
   }
@@ -30475,16 +30568,16 @@ function buildManualSceneVideoPrompt(params) {
     return sanitizePromptLine(parts.filter(Boolean).join(" "));
   };
   let prompt = assemble(0);
-  if (countWords$1(prompt) > 310) prompt = assemble(1);
-  if (countWords$1(prompt) > 310) prompt = assemble(2);
-  if (countWords$1(prompt) > 310) prompt = assemble(3);
+  if (countWords$2(prompt) > 310) prompt = assemble(1);
+  if (countWords$2(prompt) > 310) prompt = assemble(2);
+  if (countWords$2(prompt) > 310) prompt = assemble(3);
   return prompt;
 }
 function computeManualVideoPromptInputHash(params) {
   const parts = [
     String(params.sceneIndex),
-    cleanText$1(params.narration),
-    cleanText$1(params.visualIntent),
+    cleanText$2(params.narration),
+    cleanText$2(params.visualIntent),
     String(params.duration || 5),
     params.profile,
     params.niche,
@@ -30527,8 +30620,8 @@ function loadManualAiVideoPromptPack(projectDir) {
   }
 }
 function saveManualAiVideoPromptPackFiles(projectDir, pack) {
-  writeFileAtomic(getManualAiVideoPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic(getManualAiVideoPromptTxtPath(projectDir), formatManualAiVideoPromptText(pack) + "\n");
+  writeFileAtomic$1(getManualAiVideoPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$1(getManualAiVideoPromptTxtPath(projectDir), formatManualAiVideoPromptText(pack) + "\n");
 }
 function ensureManualAiVideoPromptPack(projectDir) {
   const imagePack = loadManualAiPromptPack(projectDir);
@@ -30762,6 +30855,329 @@ function ensureManualAiVideoPromptPack(projectDir) {
     `[ManualAI:VideoPrompt] ensureManualAiVideoPromptPack completed for project=${projectDir} totalPrompts=${entries.length} schemaVersion=${MANUAL_AI_VIDEO_PROMPT_SCHEMA_VERSION}`
   );
   return newPack;
+}
+function cleanText$1(text) {
+  if (typeof text !== "string") return "";
+  return text.replace(/["'`]/g, "").replace(/[^\p{L}\p{N}\s,.\-:;%()/]/gu, " ").replace(/\s+/g, " ").trim();
+}
+function countWords$1(text) {
+  return text.split(/\s+/).filter(Boolean).length;
+}
+const COMMON_ABBREVIATIONS = /* @__PURE__ */ new Set([
+  "DNA",
+  "RNA",
+  "MRI",
+  "CT",
+  "ECG",
+  "EKG",
+  "AI",
+  "CPU",
+  "GPU",
+  "RAM",
+  "CNC",
+  "GPS",
+  "LED",
+  "LCD",
+  "UHD",
+  "NASA",
+  "ESA",
+  "FDA",
+  "WHO",
+  "USD",
+  "EUR",
+  "GBP",
+  "CAD",
+  "AUD",
+  "JPY",
+  "CNY",
+  "ROI",
+  "GDP",
+  "B2B",
+  "SaaS"
+]);
+function capitalizeWord(word, isFirst, lowerWords) {
+  if (!word) return "";
+  const upper = word.toUpperCase();
+  if (COMMON_ABBREVIATIONS.has(upper)) return upper;
+  const stripped = word.replace(/[^a-zA-Z0-9]/g, "");
+  if (COMMON_ABBREVIATIONS.has(stripped.toUpperCase())) {
+    return word.toUpperCase();
+  }
+  const lower = word.toLowerCase();
+  if (!isFirst && lowerWords.has(lower)) {
+    return lower;
+  }
+  return lower.charAt(0).toUpperCase() + lower.slice(1);
+}
+function toEditorialTitleCase(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lowerWords = /* @__PURE__ */ new Set(["and", "or", "the", "of", "in", "on", "at", "to", "for", "with", "by", "as", "via", "vs", "vs."]);
+  return words.map((word, i) => {
+    if (word.includes("-")) {
+      return word.split("-").map((sub, subIdx) => capitalizeWord(sub, i === 0 && subIdx === 0, lowerWords)).join("-");
+    }
+    return capitalizeWord(word, i === 0, lowerWords);
+  }).join(" ");
+}
+const ABSTRACT_CONCEPTS_REGEX = /\b(concept|principle|idea|trend|inflation|growth|cooperation|unity|longevity|efficiency|tradition|faith|philosophy|strategy|future|past|legacy|mindset|culture)\b/i;
+const HEALTH_EXCLUSIVE_TERMS = /\b(cellular|mitochondria|alveoli|coronary|myocardial|artery|vein|organ|tissue|biological|pathogen|enzyme|diagnosis|symptom|bloodstream)\b/i;
+const AMISH_STEREOTYPE_TERMS = /\b(amish|horse\s*buggy|buggy|horse-drawn|bonnet|straw\s*hat|quaint|primitive|pre-industrial)\b/i;
+const HUMAN_CLINICAL_TERMS = /\b(human\s*patient|clinical\s*trial|hospital\s*bed|patient|surgeon|stethoscope)\b/i;
+function resolveFocusContent(params) {
+  const { scene, sceneDirection, globalContext, niche, previousInstructions, settings } = params;
+  const warnings = [];
+  const recent = previousInstructions && previousInstructions.length > 0 ? previousInstructions[previousInstructions.length - 1] : null;
+  const priorRecent = previousInstructions && previousInstructions.length > 1 ? previousInstructions[previousInstructions.length - 2] : null;
+  if (sceneDirection?.textOverlay?.enabled && sceneDirection.textOverlay.text) {
+    const rawText = cleanText$1(sceneDirection.textOverlay.text);
+    if (rawText.length > 0) {
+      const hasNumber = /\d/.test(rawText);
+      const numberInContext = /\d/.test(scene.narration) || globalContext && /\d/.test(globalContext.centralThesis || "");
+      if (hasNumber && !numberInContext) {
+        warnings.push(`Suppressed invented numerical text: "${rawText}"`);
+      } else {
+        if (niche !== "health" && HEALTH_EXCLUSIVE_TERMS.test(rawText)) {
+          warnings.push(`Cross-niche guard: suppressed medical terminology in ${niche} scene: "${rawText}"`);
+        } else if (niche === "hutterite-documentary" && AMISH_STEREOTYPE_TERMS.test(rawText)) {
+          warnings.push(`Hutterite authenticity guard: suppressed Amish stereotype in text: "${rawText}"`);
+        } else if (niche === "nature" && HUMAN_CLINICAL_TERMS.test(rawText)) {
+          warnings.push(`Nature guard: suppressed human clinical term in wildlife scene: "${rawText}"`);
+        } else {
+          const formatted = toEditorialTitleCase(rawText);
+          if (recent?.exactText && recent.exactText.toLowerCase() === formatted.toLowerCase()) {
+            return {
+              presentationMode: "none",
+              evidenceSource: "deduplication",
+              confidence: 0.9,
+              reason: "Suppressed consecutive duplicate label",
+              warnings
+            };
+          }
+          let focusTarget = cleanText$1(sceneDirection.visualEvent?.subject);
+          if (!focusTarget && sceneDirection.composition?.focalPriority) {
+            focusTarget = cleanText$1(sceneDirection.composition.focalPriority);
+          }
+          if (!focusTarget) {
+            focusTarget = formatted;
+          }
+          const isComparison = sceneDirection.textOverlay.purpose === "comparison" || /\b(vs\.?|versus|compared\s+to|while)\b/i.test(scene.narration);
+          let secondaryText;
+          if (isComparison && /\s+vs\.?\s+/i.test(formatted)) {
+            const parts = formatted.split(/\s+vs\.?\s+/i);
+            if (parts.length === 2) {
+              return {
+                presentationMode: "comparison",
+                exactText: parts[0].trim(),
+                secondaryText: parts[1].trim(),
+                focusTarget,
+                focusPurpose: "comparison",
+                evidenceSource: "sceneDirection.textOverlay",
+                confidence: sceneDirection.confidence || 0.95,
+                reason: sceneDirection.textOverlay.reason || "Visual Director comparative overlay",
+                warnings
+              };
+            }
+          }
+          return {
+            presentationMode: "single-label",
+            exactText: formatted,
+            secondaryText,
+            focusTarget,
+            focusPurpose: sceneDirection.textOverlay.purpose || "mechanism",
+            evidenceSource: "sceneDirection.textOverlay",
+            confidence: sceneDirection.confidence || 0.9,
+            reason: sceneDirection.textOverlay.reason || "Visual Director grounded textOverlay",
+            warnings
+          };
+        }
+      }
+    }
+  }
+  const density = settings?.labelDensity || "minimal";
+  if (density === "minimal") {
+    return {
+      presentationMode: "none",
+      evidenceSource: "minimal-density-default",
+      confidence: 1,
+      reason: "Minimal label density: no overlay explicitly commanded",
+      warnings
+    };
+  }
+  if (recent?.presentationMode !== "none" && priorRecent?.presentationMode !== "none") {
+    return {
+      presentationMode: "none",
+      evidenceSource: "density-pacing-guard",
+      confidence: 0.9,
+      reason: "Preventing more than 2 consecutive scenes from having labels",
+      warnings
+    };
+  }
+  const subjectCandidate = cleanText$1(sceneDirection?.visualEvent?.subject) || cleanText$1(scene.visualIntent?.split(/[,.;]/)[0]);
+  if (!subjectCandidate || countWords$1(subjectCandidate) > 5 || countWords$1(subjectCandidate) < 1) {
+    return {
+      presentationMode: "none",
+      evidenceSource: "insufficient-grounding",
+      confidence: 0.85,
+      reason: "Scene lacks a short grounded visual focal subject",
+      warnings
+    };
+  }
+  if (ABSTRACT_CONCEPTS_REGEX.test(subjectCandidate)) {
+    return {
+      presentationMode: "none",
+      evidenceSource: "abstract-subject-guard",
+      confidence: 0.9,
+      reason: "Subject is abstract; clean documentary shot without text preferred",
+      warnings
+    };
+  }
+  if (niche !== "health" && HEALTH_EXCLUSIVE_TERMS.test(subjectCandidate)) {
+    return {
+      presentationMode: "none",
+      evidenceSource: "cross-niche-guard",
+      confidence: 0.95,
+      reason: "Cross-niche contamination prevented",
+      warnings
+    };
+  }
+  if (niche === "hutterite-documentary" && AMISH_STEREOTYPE_TERMS.test(subjectCandidate)) {
+    return {
+      presentationMode: "none",
+      evidenceSource: "hutterite-authenticity-guard",
+      confidence: 0.95,
+      reason: "Stereotype term prevented",
+      warnings
+    };
+  }
+  const formattedLabel = toEditorialTitleCase(subjectCandidate);
+  if (recent?.exactText && recent.exactText.toLowerCase() === formattedLabel.toLowerCase()) {
+    return {
+      presentationMode: "none",
+      evidenceSource: "deduplication",
+      confidence: 0.9,
+      reason: "Suppressed consecutive duplicate label",
+      warnings
+    };
+  }
+  return {
+    presentationMode: "single-label",
+    exactText: formattedLabel,
+    focusTarget: subjectCandidate,
+    focusPurpose: sceneDirection?.sceneRole || "visual-focus",
+    evidenceSource: "scene.visualIntent",
+    confidence: 0.8,
+    reason: "Balanced density grounded visual subject label",
+    warnings
+  };
+}
+function resolveFocusPresentation(content, params) {
+  const { scene, sceneDirection, durationSecs, settings } = params;
+  const sceneDuration = durationSecs > 0 ? durationSecs : 5;
+  if (content.presentationMode === "none" || !content.exactText) {
+    return {
+      sceneIndex: scene.sceneIndex,
+      presentationMode: "none",
+      confidence: content.confidence,
+      evidenceSource: content.evidenceSource,
+      reason: content.reason,
+      warnings: content.warnings
+    };
+  }
+  const readabilityProfile = settings?.readability === "senior-friendly" ? "senior-friendly" : "standard";
+  let labelPosition = "top-left";
+  if (sceneDirection?.textOverlay?.position) {
+    labelPosition = sceneDirection.textOverlay.position;
+  } else if (scene.sceneIndex % 2 === 1) {
+    labelPosition = "top-right";
+  }
+  const isAbstract = ABSTRACT_CONCEPTS_REGEX.test(content.focusTarget || "");
+  const preferLeader = settings?.preferLeaderLines !== false;
+  const leaderLine = preferLeader && !isAbstract && content.presentationMode !== "comparison";
+  const highlightTarget = !isAbstract && content.presentationMode !== "comparison";
+  let animation = "fade-in";
+  if (readabilityProfile === "senior-friendly") {
+    animation = leaderLine ? "line-draw" : "fade-in";
+  } else {
+    if (content.focusPurpose === "reveal" || content.focusPurpose === "mechanism") {
+      animation = "reveal-hold";
+    } else if (content.focusPurpose === "hook") {
+      animation = "focus-pop";
+    } else if (content.presentationMode === "comparison") {
+      animation = "soft-slide";
+    } else if (leaderLine) {
+      animation = "line-draw";
+    } else {
+      animation = "fade-in";
+    }
+  }
+  const appearanceTimeSecs = scene.sceneIndex <= 2 ? 0.3 : Math.min(0.6, Math.max(0.2, Number((sceneDuration * 0.12).toFixed(2))));
+  const holdDurationSecs = Math.min(
+    3.5,
+    Math.max(1.5, Number((sceneDuration - appearanceTimeSecs - 0.5).toFixed(2)))
+  );
+  return {
+    sceneIndex: scene.sceneIndex,
+    presentationMode: content.presentationMode,
+    exactText: content.exactText,
+    secondaryText: content.secondaryText,
+    focusTarget: content.focusTarget,
+    focusPurpose: content.focusPurpose,
+    labelPosition,
+    leaderLine,
+    highlightTarget,
+    animation,
+    appearanceTimeSecs,
+    holdDurationSecs,
+    language: "en",
+    readabilityProfile,
+    confidence: content.confidence,
+    evidenceSource: content.evidenceSource,
+    reason: content.reason,
+    warnings: content.warnings
+  };
+}
+function resolveEditorialFocus(params) {
+  const content = resolveFocusContent(params);
+  return resolveFocusPresentation(content, params);
+}
+function stripConflictingTextProhibitions(prompt) {
+  return prompt.replace(/Reserve clean, uncluttered negative space in the [^.]+ quadrant for external editorial captions\.\s*/gi, "").replace(
+    /\bno\s+(?:UI\s+text|text\s+overlays|embedded\s+captions|embedded\s+subtitles|UI\s+elements|unreadable\s+hallucinated\s+UI\s+text|subtitles)(?:,\s*)?/gi,
+    ""
+  ).replace(/\bno\s+text\b(?:,\s*)?/gi, "").replace(/\bno\s+labels\b(?:,\s*)?/gi, "").replace(/,\s*,/g, ",").replace(/,\s*\./g, ".").replace(/\s+/g, " ").trim();
+}
+function composeEmbeddedEditorialVideoPrompt(params) {
+  const { basePrompt, instruction, sceneDurationSecs } = params;
+  if (instruction.presentationMode === "none" || !instruction.exactText) {
+    return sanitizePromptLine(basePrompt);
+  }
+  let cleanedBase = stripConflictingTextProhibitions(basePrompt);
+  const positionStr = (instruction.labelPosition || "top-left").replace("-", " ");
+  const typographyClause = instruction.readabilityProfile === "senior-friendly" ? "Clean, ultra-high-contrast large bold sans-serif editorial typography with crisp white lettering and dark translucent pill backing for maximum senior-friendly legibility" : "Clean, high-contrast modern sans-serif editorial typography with crisp lettering and subtle translucent backing";
+  let targetClause = "";
+  if (instruction.focusTarget) {
+    const parts = [`identifying the visible ${instruction.focusTarget}`];
+    if (instruction.leaderLine) {
+      parts.push("with a sleek minimal thin graphic leader line extending from the label directly to the target");
+    }
+    if (instruction.highlightTarget) {
+      parts.push("and a subtle focused bounding highlight around the structure");
+    }
+    targetClause = parts.join(" ") + ".";
+  }
+  const animName = instruction.animation || "fade-in";
+  const appTime = (instruction.appearanceTimeSecs ?? 0.5).toFixed(1);
+  const holdTime = (instruction.holdDurationSecs ?? Math.max(1.5, sceneDurationSecs - 1.5)).toFixed(1);
+  const animationClause = `Animated editorial entrance: ${animName} appearing at ${appTime}s and holding steady for ${holdTime}s before softly receding.`;
+  let labelClause;
+  if (instruction.presentationMode === "comparison" && instruction.secondaryText) {
+    labelClause = `Embedded editorial comparison: Display exactly: "${instruction.exactText}" alongside secondary label: "${instruction.secondaryText}". Positioned in the ${positionStr} quadrant. ${typographyClause}. ${targetClause} ${animationClause}`;
+  } else {
+    labelClause = `Embedded editorial label: Display exactly: "${instruction.exactText}". Positioned in the ${positionStr} quadrant. ${typographyClause}. ${targetClause} ${animationClause}`;
+  }
+  const exceptionClause = "Only the exact specified editorial label is allowed. No additional on-screen text, subtitles, UI elements, logos or watermark.";
+  const fullPrompt = `${cleanedBase} ${labelClause} ${exceptionClause}`;
+  return sanitizePromptLine(fullPrompt);
 }
 function cleanText(text) {
   if (typeof text !== "string") return "";
@@ -31254,15 +31670,26 @@ function buildOpeningEnhancedCopyText(params) {
   let visualMixScenesMap = /* @__PURE__ */ new Map();
   const planPath = getVisualMixPlanFilePath(projectDir);
   let outputResolution = "1080p";
+  let profile = "general";
   if (fs__namespace.existsSync(planPath)) {
     try {
       const planData = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
       if (planData?.outputResolution) outputResolution = planData.outputResolution;
+      if (planData?.profile) profile = planData.profile;
       if (Array.isArray(planData?.scenes)) {
         for (const s of planData.scenes) {
           visualMixScenesMap.set(s.sceneIndex, s);
         }
       }
+    } catch {
+    }
+  }
+  let visualBrief;
+  const briefPath = getManualAiVisualBriefPath(projectDir);
+  if (fs__namespace.existsSync(briefPath)) {
+    try {
+      visualBrief = JSON.parse(fs__namespace.readFileSync(briefPath, "utf-8"));
+      if (visualBrief?.profile) profile = visualBrief.profile;
     } catch {
     }
   }
@@ -31374,11 +31801,104 @@ function buildOpeningEnhancedCopyText(params) {
       enhancedMap.set(entry.sceneIndex, entry.prompt);
     }
   }
+  const editorialSettings = params.editorialSettings || loadEditorialFocusSettings(projectDir);
+  if (mode === "video" && editorialSettings.promptMode === "embedded-editorial") {
+    const prevEditorialInstructions = [];
+    const outputLines2 = sorted.map((entry) => {
+      const basePromptText = openingSceneIndices.has(entry.sceneIndex) ? enhancedMap.get(entry.sceneIndex) || entry.prompt : entry.prompt;
+      let scenePlan = visualMixScenesMap.get(entry.sceneIndex);
+      if (!scenePlan) {
+        scenePlan = {
+          sceneIndex: entry.sceneIndex,
+          narration: entry.prompt || "",
+          visualIntent: entry.prompt || "",
+          duration: 5,
+          strategy: "ai-still",
+          assetType: "ai-image",
+          imagePrompt: entry.prompt
+        };
+      }
+      const sceneDirection = directionsMap.get(entry.sceneIndex);
+      const groundingText = `${scenePlan.narration} ${scenePlan.visualIntent || ""}`.trim();
+      const niche = detectVideoNiche(groundingText, profile, globalContext, visualBrief);
+      const instruction = resolveEditorialFocus({
+        scene: scenePlan,
+        sceneDirection,
+        globalContext,
+        niche,
+        durationSecs: scenePlan.duration || 5,
+        previousInstructions: prevEditorialInstructions,
+        settings: editorialSettings
+      });
+      prevEditorialInstructions.push(instruction);
+      const embeddedPrompt = composeEmbeddedEditorialVideoPrompt({
+        basePrompt: basePromptText,
+        instruction,
+        sceneDurationSecs: scenePlan.duration || 5
+      });
+      return `${formatSceneLabel(entry.sceneIndex)} | ${sanitizePromptLine(embeddedPrompt)}`;
+    });
+    return outputLines2.join("\n\n");
+  }
   const outputLines = sorted.map((entry) => {
     const promptText = openingSceneIndices.has(entry.sceneIndex) ? enhancedMap.get(entry.sceneIndex) || entry.prompt : entry.prompt;
     return `${formatSceneLabel(entry.sceneIndex)} | ${sanitizePromptLine(promptText)}`;
   });
   return outputLines.join("\n\n");
+}
+const EDITORIAL_VERIFICATION_SCHEMA_VERSION = 1;
+function getEditorialVerificationPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "embedded-editorial-verification.v1.json");
+}
+function writeFileAtomic(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function loadEditorialVerification(projectDir) {
+  const vPath = getEditorialVerificationPath(projectDir);
+  if (!fs__namespace.existsSync(vPath)) {
+    return {
+      schemaVersion: EDITORIAL_VERIFICATION_SCHEMA_VERSION,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      scenes: {}
+    };
+  }
+  try {
+    const raw = JSON.parse(fs__namespace.readFileSync(vPath, "utf-8"));
+    if (raw && typeof raw === "object" && raw.schemaVersion === EDITORIAL_VERIFICATION_SCHEMA_VERSION && typeof raw.scenes === "object") {
+      return raw;
+    }
+  } catch (err) {
+    logger.warn(`[EditorialVerification] Error reading ${vPath}: ${String(err)}`);
+  }
+  return {
+    schemaVersion: EDITORIAL_VERIFICATION_SCHEMA_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    scenes: {}
+  };
+}
+function saveEditorialVerification(projectDir, artifact) {
+  const vPath = getEditorialVerificationPath(projectDir);
+  artifact.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  writeFileAtomic(vPath, JSON.stringify(artifact, null, 2));
+}
+function recordAssetVerification(projectDir, params) {
+  const artifact = loadEditorialVerification(projectDir);
+  const record = {
+    sceneIndex: params.sceneIndex,
+    assetFingerprint: params.assetFingerprint,
+    expectedText: params.expectedText,
+    confirmedText: params.confirmedText,
+    status: params.status,
+    checkedByUser: params.checkedByUser,
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+  artifact.scenes[String(params.sceneIndex)] = record;
+  saveEditorialVerification(projectDir, artifact);
+  return record;
 }
 const MAX_DISCOVERED_VIDEOS = 250;
 const MAX_VIDEO_FOLDER_DEPTH = 3;
@@ -31471,25 +31991,82 @@ function registerManualAiHandlers(ipcMain) {
       return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
-  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, async (_event, params) => {
-    try {
-      if (!params?.projectDir) return { success: false, error: "projectDir is required." };
-      const norm2 = normalizeProjectDir(params.projectDir);
-      logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm2}`);
-      const pack = ensureManualAiVideoPromptPack(norm2);
-      const enhancedText = buildOpeningEnhancedCopyText({
-        mode: "video",
-        projectDir: norm2,
-        baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt }))
-      });
-      logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts with opening visual hooks`);
-      return { success: true, text: enhancedText };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`);
-      return { success: false, error: msg };
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+        const norm2 = normalizeProjectDir(params.projectDir);
+        logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm2}`);
+        const pack = ensureManualAiVideoPromptPack(norm2);
+        const editorialSettings = params?.settings ? saveEditorialFocusSettings(norm2, params.settings) : loadEditorialFocusSettings(norm2);
+        const enhancedText = buildOpeningEnhancedCopyText({
+          mode: "video",
+          projectDir: norm2,
+          baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt })),
+          editorialSettings
+        });
+        logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts (promptMode=${editorialSettings.promptMode})`);
+        return { success: true, text: enhancedText };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`);
+        return { success: false, error: msg };
+      }
     }
-  });
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_SETTINGS,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+        const norm2 = normalizeProjectDir(params.projectDir);
+        const settings = loadEditorialFocusSettings(norm2);
+        return { success: true, settings };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_UPDATE_EDITORIAL_SETTINGS,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+        const norm2 = normalizeProjectDir(params.projectDir);
+        const updated = saveEditorialFocusSettings(norm2, params.settings || {});
+        return { success: true, settings: updated };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_VERIFICATION,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+        const norm2 = normalizeProjectDir(params.projectDir);
+        const artifact = loadEditorialVerification(norm2);
+        return { success: true, artifact };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_RECORD_EDITORIAL_VERIFICATION,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: "projectDir is required." };
+        const norm2 = normalizeProjectDir(params.projectDir);
+        const record = recordAssetVerification(norm2, params);
+        return { success: true, record };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+  );
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, async (_event, params) => {
     try {
       if (!params?.projectDir) return { success: false, error: "projectDir is required." };

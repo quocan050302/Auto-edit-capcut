@@ -116,6 +116,10 @@ const IPC_CHANNELS = {
   MANUAL_AI_PLAN_IMPORT: "manual-ai:plan-import",
   MANUAL_AI_COMMIT_IMPORT: "manual-ai:commit-import",
   MANUAL_AI_STATUS_UPDATED: "manual-ai:status-updated",
+  MANUAL_AI_GET_EDITORIAL_SETTINGS: "manual-ai:get-editorial-settings",
+  MANUAL_AI_UPDATE_EDITORIAL_SETTINGS: "manual-ai:update-editorial-settings",
+  MANUAL_AI_GET_EDITORIAL_VERIFICATION: "manual-ai:get-editorial-verification",
+  MANUAL_AI_RECORD_EDITORIAL_VERIFICATION: "manual-ai:record-editorial-verification",
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
@@ -331,7 +335,11 @@ const api = {
   manualAi: {
     getStatus: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_STATUS, { projectDir }),
     getPromptText: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
-    getVideoPromptText: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir }),
+    getVideoPromptText: (projectDir, settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir, settings }),
+    getEditorialSettings: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_SETTINGS, { projectDir }),
+    updateEditorialSettings: (projectDir, settings) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_UPDATE_EDITORIAL_SETTINGS, { projectDir, settings }),
+    getEditorialVerification: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_VERIFICATION, { projectDir }),
+    recordEditorialVerification: (params) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_RECORD_EDITORIAL_VERIFICATION, params),
     exportTxt: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, { projectDir }),
     openPromptFile: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_OPEN_PROMPT_FILE, { projectDir }),
     selectImages: (mode) => electron.ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_SELECT_IMAGES, { mode }),

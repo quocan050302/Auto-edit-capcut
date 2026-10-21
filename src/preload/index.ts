@@ -41,6 +41,10 @@ import type {
   ManualAiImportMapping,
   ManualAiImportPlan,
   ManualAiImportResult,
+  EditorialGenerationSettings,
+  EmbeddedEditorialVerificationArtifact,
+  EmbeddedEditorialVerificationRecord,
+  EmbeddedEditorialVerificationStatus,
   RenderRecoveryInfo,
   RenderPreferencesDTO
 } from '../../shared/types'
@@ -456,9 +460,37 @@ const api = {
       ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_PROMPT_TEXT, { projectDir }),
 
     getVideoPromptText: (
-      projectDir: string
+      projectDir: string,
+      settings?: Partial<EditorialGenerationSettings>
     ): Promise<{ success: boolean; text?: string; error?: string }> =>
-      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir }),
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, { projectDir, settings }),
+
+    getEditorialSettings: (
+      projectDir: string
+    ): Promise<{ success: boolean; settings?: EditorialGenerationSettings; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_SETTINGS, { projectDir }),
+
+    updateEditorialSettings: (
+      projectDir: string,
+      settings: Partial<EditorialGenerationSettings>
+    ): Promise<{ success: boolean; settings?: EditorialGenerationSettings; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_UPDATE_EDITORIAL_SETTINGS, { projectDir, settings }),
+
+    getEditorialVerification: (
+      projectDir: string
+    ): Promise<{ success: boolean; artifact?: EmbeddedEditorialVerificationArtifact; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_VERIFICATION, { projectDir }),
+
+    recordEditorialVerification: (params: {
+      projectDir: string
+      sceneIndex: number
+      assetFingerprint: string
+      expectedText?: string
+      confirmedText?: string
+      status: EmbeddedEditorialVerificationStatus
+      checkedByUser: boolean
+    }): Promise<{ success: boolean; record?: EmbeddedEditorialVerificationRecord; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.MANUAL_AI_RECORD_EDITORIAL_VERIFICATION, params),
 
     exportTxt: (
       projectDir: string

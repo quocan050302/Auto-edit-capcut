@@ -234,6 +234,7 @@ export interface RenderFingerprintInput {
   proofVisualSettings: unknown
   visualGrammarSettings: unknown
   sceneFingerprints: string[]
+  renderOverlayMode?: string
 }
 
 /**

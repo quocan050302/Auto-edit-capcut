@@ -33,6 +33,15 @@ import {
 import { loadVisualIdentityBible } from '../../content-intelligence/visual-identity-bible'
 import type { VisualIdentityBible } from '../../content-intelligence/visual-identity-types'
 import type { RetentionPlan, RetentionScenePlan } from '../../retention/retention-types'
+import {
+  loadEditorialFocusSettings,
+  type EditorialGenerationSettings
+} from './editorial-focus-settings'
+import {
+  resolveEditorialFocus,
+  type EditorialFocusInstruction
+} from './editorial-focus-director'
+import { composeEmbeddedEditorialVideoPrompt } from './editorial-video-prompt'
 
 // ─── Universal Opening Hook Types ───────────────────────────────────────────
 
@@ -759,6 +768,7 @@ export function buildOpeningEnhancedCopyText(params: {
   mode: 'image' | 'video'
   projectDir: string
   baseEntries: Array<{ sceneIndex: number; prompt: string }>
+  editorialSettings?: EditorialGenerationSettings
 }): string {
   const { mode, projectDir, baseEntries } = params
   if (!baseEntries || baseEntries.length === 0) return ''
@@ -786,15 +796,28 @@ export function buildOpeningEnhancedCopyText(params: {
   let visualMixScenesMap = new Map<number, VisualMixScenePlan>()
   const planPath = getVisualMixPlanFilePath(projectDir)
   let outputResolution: AiImageOutputResolution = '1080p'
+  let profile: VisualMixProfile = 'general'
   if (fs.existsSync(planPath)) {
     try {
       const planData = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
       if (planData?.outputResolution) outputResolution = planData.outputResolution
+      if (planData?.profile) profile = planData.profile
       if (Array.isArray(planData?.scenes)) {
         for (const s of planData.scenes) {
           visualMixScenesMap.set(s.sceneIndex, s)
         }
       }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  let visualBrief: ManualAiVisualBrief | undefined
+  const briefPath = getManualAiVisualBriefPath(projectDir)
+  if (fs.existsSync(briefPath)) {
+    try {
+      visualBrief = JSON.parse(fs.readFileSync(briefPath, 'utf-8'))
+      if (visualBrief?.profile) profile = visualBrief.profile
     } catch {
       /* ignore */
     }
@@ -926,6 +949,58 @@ export function buildOpeningEnhancedCopyText(params: {
   }
 
   // 5. Assemble final copied text: first 10 enhanced, remaining byte-for-byte identical
+  const editorialSettings = params.editorialSettings || loadEditorialFocusSettings(projectDir)
+
+  if (mode === 'video' && editorialSettings.promptMode === 'embedded-editorial') {
+    const prevEditorialInstructions: EditorialFocusInstruction[] = []
+    const outputLines = sorted.map((entry) => {
+      const basePromptText = openingSceneIndices.has(entry.sceneIndex)
+        ? enhancedMap.get(entry.sceneIndex) || entry.prompt
+        : entry.prompt
+
+      let scenePlan = visualMixScenesMap.get(entry.sceneIndex)
+      if (!scenePlan) {
+        scenePlan = {
+          sceneIndex: entry.sceneIndex,
+          narration: entry.prompt || '',
+          visualIntent: entry.prompt || '',
+          duration: 5,
+          strategy: 'ai-still',
+          assetType: 'ai-image',
+          imagePrompt: entry.prompt
+        }
+      }
+
+      const sceneDirection = directionsMap.get(entry.sceneIndex)
+      const groundingText = `${scenePlan.narration} ${scenePlan.visualIntent || ''}`.trim()
+      const niche = detectVideoNiche(groundingText, profile, globalContext, visualBrief)
+
+      const instruction = resolveEditorialFocus({
+        scene: scenePlan,
+        sceneDirection,
+        globalContext,
+        identityBible,
+        niche,
+        durationSecs: scenePlan.duration || 5,
+        previousInstructions: prevEditorialInstructions,
+        settings: editorialSettings
+      })
+      prevEditorialInstructions.push(instruction)
+
+      const embeddedPrompt = composeEmbeddedEditorialVideoPrompt({
+        basePrompt: basePromptText,
+        instruction,
+        sceneDurationSecs: scenePlan.duration || 5,
+        outputResolution
+      })
+
+      return `${formatSceneLabel(entry.sceneIndex)} | ${sanitizePromptLine(embeddedPrompt)}`
+    })
+
+    return outputLines.join('\n\n')
+  }
+
+  // Classic mode: Byte-for-byte identical to baseline QA
   const outputLines = sorted.map((entry) => {
     const promptText = openingSceneIndices.has(entry.sceneIndex)
       ? enhancedMap.get(entry.sceneIndex) || entry.prompt

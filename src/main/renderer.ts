@@ -34,6 +34,11 @@ import { runRenderPostflight } from './qa/render-postflight'
 import { buildHealthMotionFilter } from './health/health-motion'
 import type { HealthVisualScenePlan, HealthMotionPreset } from './health/health-visual-types'
 import { findMissingManualAiScenes } from './visual-mix/manual-ai/manual-ai-validator'
+import {
+  loadEditorialFocusSettings,
+  type EditorialGenerationSettings
+} from './visual-mix/manual-ai/editorial-focus-settings'
+import { resolveEffectiveOverlayPolicy } from './render-cache/editorial-render-policy'
 
 // ── Resumable Render Engine V2 ───────────────────────────────────────────────
 import {
@@ -653,6 +658,7 @@ export interface PreparedRenderPlan {
   renderFingerprint: string
   assemblyFingerprint: string
   totalDurationSecs: number
+  editorialSettings?: EditorialGenerationSettings
 }
 
 export function encoderKeyFor(mode: VideoEncoderMode | string | undefined, resolution: { width: number; height: number }, fps: number): string {
@@ -674,12 +680,14 @@ export function prepareRenderPlan(params: {
   captionPlan?: CaptionPlan
   transitionSettings?: RenderTransitionSettings
   encoderKey: string
+  editorialSettings?: EditorialGenerationSettings
 }): PreparedRenderPlan {
   const outputName = params.outputName ?? 'final_output'
   const resolution = params.resolution ?? { width: 1920, height: 1080 }
   const fps = params.fps ?? 30
   const projectDir = normalizePathForFFmpeg(params.projectDir)
   const voiceoverPath = normalizePathForFFmpeg(params.voiceoverPath)
+  const editorialSettings = params.editorialSettings || loadEditorialFocusSettings(projectDir)
 
   // ── 1. Load edit plan ─────────────────────────────────────────────────────
   const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
@@ -993,7 +1001,8 @@ export function prepareRenderPlan(params: {
     // part of the workspace key; the resolved decisions are hashed into every overlay
     // block fingerprint (overlayPropsHash) instead, which invalidates overlays correctly.
     visualGrammarSettings: { prod: hashes.productionSettings },
-    sceneFingerprints: sceneJobs.map((j) => j.fingerprint)
+    sceneFingerprints: sceneJobs.map((j) => j.fingerprint),
+    renderOverlayMode: editorialSettings.renderOverlayMode
   })
 
   return {
@@ -1021,7 +1030,8 @@ export function prepareRenderPlan(params: {
     hashes,
     renderFingerprint,
     assemblyFingerprint,
-    totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0)
+    totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0),
+    editorialSettings
   }
 }
 
@@ -1047,7 +1057,8 @@ export function computeRenderRequestKey(params: {
     captions: params.captionPlan ? hashJsonValue(params.captionPlan) : 'none',
     plan: hashFileContent(path.join(analysis, 'master-edit-plan.json')),
     audio: hashFileContent(path.join(analysis, 'audio-plan.json')),
-    stock: hashFileContent(path.join(analysis, 'stock-assignments.json'))
+    stock: hashFileContent(path.join(analysis, 'stock-assignments.json')),
+    editorial: hashFileContent(path.join(analysis, 'editorial-focus-settings.v1.json'))
   })
 }
 
@@ -1062,6 +1073,7 @@ export interface RenderVideoParams {
   captionPlan?: CaptionPlan   // optional — nếu null/undefined sẽ bỏ qua bước burn caption
   transitionSettings?: RenderTransitionSettings
   onProgress?: (p: RenderProgress) => void
+  editorialSettings?: EditorialGenerationSettings
   // ── Resumable Render Engine V2 (all optional — defaults keep legacy behaviour) ──
   signal?: AbortSignal
   resourceProfile?: RenderResourceProfile
@@ -1152,7 +1164,8 @@ async function renderVideoV2(
       fps,
       captionPlan: params.captionPlan,
       transitionSettings: params.transitionSettings,
-      encoderKey: encoder.key
+      encoderKey: encoder.key,
+      editorialSettings: params.editorialSettings
     })
     const { projectDir, voiceoverPath, scenes, sceneEntries, sceneJobs, retentionSettings, retentionDecisions, retentionPlan, retentionPlanMap, visualPlanMap } = prepared
     const totalScenes = scenes.length
@@ -1805,8 +1818,11 @@ async function renderVideoV2(
 
     // ── 9. Render Overlays (Captions, Proof Visuals, Visual Scene Grammar) ───
     throwIfAborted(signal)
+    const effectiveEditorialSettings = prepared.editorialSettings || loadEditorialFocusSettings(projectDir)
+    const overlayPolicy = resolveEffectiveOverlayPolicy(effectiveEditorialSettings)
+
     let proofVisuals: ProofVisual[] = []
-    if (retentionSettings.proofVisualsEnabled) {
+    if (overlayPolicy.renderProofVisuals && retentionSettings.proofVisualsEnabled) {
       try {
         proofVisuals = buildProofVisualList(scenes, retentionDecisions, params.captionPlan ?? { enabled: false, activeRanges: [], phrases: [] })
         logger.info(`[RENDER] ProofVisuals: ${proofVisuals.length} overlays built`)
@@ -1828,7 +1844,7 @@ async function renderVideoV2(
     const prodSettings = loadProductionSettings(projectDir)
     let visualGrammar: Array<VisualGrammarDecision & { absoluteStartTime?: number; absoluteEndTime?: number }> = []
 
-    if (prodSettings.enabled && prodSettings.visualSceneGrammarEnabled) {
+    if (overlayPolicy.renderVisualGrammar && prodSettings.enabled && prodSettings.visualSceneGrammarEnabled) {
       try {
         let vgPlan = loadVisualGrammarPlan(projectDir)
         if (!vgPlan) {
@@ -1860,9 +1876,9 @@ async function renderVideoV2(
       }
     }
 
-    const hasCaptions = !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0)
-    const hasProofVisuals = proofVisuals.length > 0
-    const hasVisualGrammar = visualGrammar.length > 0
+    const hasCaptions = overlayPolicy.renderCaptions && !!(params.captionPlan?.enabled && (params.captionPlan?.phrases?.length ?? 0) > 0)
+    const hasProofVisuals = overlayPolicy.renderProofVisuals && proofVisuals.length > 0
+    const hasVisualGrammar = overlayPolicy.renderVisualGrammar && visualGrammar.length > 0
     const hasOverlay = hasCaptions || hasProofVisuals || hasVisualGrammar
 
     let finalWorkingPath = mixedVideo

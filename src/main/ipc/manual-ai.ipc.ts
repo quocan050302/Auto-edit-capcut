@@ -28,6 +28,16 @@ import {
   getManualAiStatus,
   broadcastManualAiStatus
 } from '../visual-mix/manual-ai/manual-ai-broadcaster'
+import {
+  loadEditorialFocusSettings,
+  saveEditorialFocusSettings,
+  type EditorialGenerationSettings
+} from '../visual-mix/manual-ai/editorial-focus-settings'
+import {
+  loadEditorialVerification,
+  recordAssetVerification,
+  type EmbeddedEditorialVerificationStatus
+} from '../visual-mix/manual-ai/editorial-verification'
 
 export { getManualAiStatus, broadcastManualAiStatus, listMixedMediaInFolder }
 
@@ -149,27 +159,102 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
     }
   })
 
-  ipcMain.handle(IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT, async (_event, params: { projectDir: string }) => {
-    try {
-      if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
-      const norm = normalizeProjectDir(params.projectDir)
-      logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm}`)
-      const pack = ensureManualAiVideoPromptPack(norm)
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_GET_VIDEO_PROMPT_TEXT,
+    async (_event, params: { projectDir: string; settings?: Partial<EditorialGenerationSettings> }) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
+        const norm = normalizeProjectDir(params.projectDir)
+        logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm}`)
+        const pack = ensureManualAiVideoPromptPack(norm)
 
-      const enhancedText = buildOpeningEnhancedCopyText({
-        mode: 'video',
-        projectDir: norm,
-        baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt }))
-      })
+        const editorialSettings = params?.settings
+          ? saveEditorialFocusSettings(norm, params.settings)
+          : loadEditorialFocusSettings(norm)
 
-      logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts with opening visual hooks`)
-      return { success: true, text: enhancedText }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`)
-      return { success: false, error: msg }
+        const enhancedText = buildOpeningEnhancedCopyText({
+          mode: 'video',
+          projectDir: norm,
+          baseEntries: pack.scenes.map((s) => ({ sceneIndex: s.sceneIndex, prompt: s.prompt })),
+          editorialSettings
+        })
+
+        logger.info(`[ManualAI:VideoPrompt] Successfully generated ${pack.scenes.length} video prompts (promptMode=${editorialSettings.promptMode})`)
+        return { success: true, text: enhancedText }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.error(`[ManualAI:VideoPrompt] Get video prompt text failed: ${msg}`)
+        return { success: false, error: msg }
+      }
     }
-  })
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_SETTINGS,
+    async (_event, params: { projectDir: string }) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
+        const norm = normalizeProjectDir(params.projectDir)
+        const settings = loadEditorialFocusSettings(norm)
+        return { success: true, settings }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_UPDATE_EDITORIAL_SETTINGS,
+    async (_event, params: { projectDir: string; settings: Partial<EditorialGenerationSettings> }) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
+        const norm = normalizeProjectDir(params.projectDir)
+        const updated = saveEditorialFocusSettings(norm, params.settings || {})
+        return { success: true, settings: updated }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_GET_EDITORIAL_VERIFICATION,
+    async (_event, params: { projectDir: string }) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
+        const norm = normalizeProjectDir(params.projectDir)
+        const artifact = loadEditorialVerification(norm)
+        return { success: true, artifact }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
+
+  ipcMain.handle(
+    IPC_CHANNELS.MANUAL_AI_RECORD_EDITORIAL_VERIFICATION,
+    async (
+      _event,
+      params: {
+        projectDir: string
+        sceneIndex: number
+        assetFingerprint: string
+        expectedText?: string
+        confirmedText?: string
+        status: EmbeddedEditorialVerificationStatus
+        checkedByUser: boolean
+      }
+    ) => {
+      try {
+        if (!params?.projectDir) return { success: false, error: 'projectDir is required.' }
+        const norm = normalizeProjectDir(params.projectDir)
+        const record = recordAssetVerification(norm, params)
+        return { success: true, record }
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) }
+      }
+    }
+  )
 
   ipcMain.handle(IPC_CHANNELS.MANUAL_AI_EXPORT_TXT, async (_event, params: { projectDir: string }) => {
     try {
