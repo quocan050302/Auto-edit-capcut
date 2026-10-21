@@ -535,6 +535,15 @@ export function determineInvalidatedStages(
     invalidated.add('postflight')
   }
 
+  // Editorial render overlay mode thay đổi (Full vs Source Only)
+  const oldOverlayMode = oldState.options.editorialSettings?.renderOverlayMode ?? 'full'
+  const newOverlayMode = newOptions.editorialSettings?.renderOverlayMode ?? 'full'
+  if (oldOverlayMode !== newOverlayMode) {
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
   return Array.from(invalidated)
 }
 

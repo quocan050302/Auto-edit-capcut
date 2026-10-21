@@ -12,15 +12,16 @@ import { runContextAwareStockEngine } from '../stock/context-stock-engine'
 import { runStockEngine } from '../stock/stock-engine'
 import { runAudioDirector, loadAudioPlan } from '../audio/audio-director'
 import { runRenderPreflight } from '../qa/render-preflight'
-import { renderVideo } from '../renderer'
+import { renderVideo, computeRenderRequestKey } from '../renderer'
 import { runHealthVisualEngine } from '../health/health-visual-engine'
 import { HealthSfxDirector, SfxDirectorSceneInput } from '../health/health-sfx-director'
 import type { HealthSfxCuePlan } from '../health/health-visual-types'
-import type { ManualAiWaitInfo } from '../../../shared/types'
+import type { ManualAiWaitInfo, EditorialGenerationSettings } from '../../../shared/types'
 import { startCoordinatedRender } from '../render-cache/render-service'
 import { computeSourceFingerprint } from './source-fingerprint'
 import { renderJobCoordinator } from '../render-cache/render-job-coordinator'
-import { cleanupOrphanOutputPartials } from '../render-cache/render-cache-manager'
+import { cleanupOrphanOutputPartials, readActiveRender, type RenderResumeParams } from '../render-cache/render-cache-manager'
+import { probeMedia } from '../render-cache/ffmpeg-process'
 import { ensureRetentionPlan } from '../retention/retention-director'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
 import {
@@ -890,35 +891,6 @@ export async function runRenderStage(
     }
   }
 
-  // Kiểm tra xem đã có video render hoàn chỉnh và hợp lệ trên đĩa chưa
-  const baseTargetName = options.outputName || 'final_output'
-  const defaultCompletedVideo = path.join(outputDir, `${baseTargetName}.mp4`)
-  if (fs.existsSync(defaultCompletedVideo)) {
-    try {
-      const stat = fs.statSync(defaultCompletedVideo)
-      if (stat.size > 1024 * 1024) {
-        onProgress('Found valid completed video output, skipping render', 1.0)
-        return {
-          success: true,
-          cached: true,
-          artifactPath: defaultCompletedVideo,
-          data: {
-            outputPath: defaultCompletedVideo,
-            durationSecs: 0,
-            fileSizeBytes: stat.size
-          },
-          stats: {
-            outputPath: defaultCompletedVideo,
-            fileSizeBytes: stat.size,
-            reused: true
-          }
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-  }
-
   // Load CaptionPlan nếu có
   let captionPlan: CaptionPlan | undefined
   try {
@@ -928,6 +900,70 @@ export async function runRenderStage(
     }
   } catch {
     /* ignore */
+  }
+
+  // Section 16 & Requirement 171: Kiểm tra xem đã có video render hoàn chỉnh, hợp lệ VÀ
+  // khớp chính xác request fingerprint, metadata và checkpoint trên đĩa chưa.
+  const baseTargetName = options.outputName || 'final_output'
+  const defaultCompletedVideo = path.join(outputDir, `${baseTargetName}.mp4`)
+  if (fs.existsSync(defaultCompletedVideo)) {
+    try {
+      const stat = fs.statSync(defaultCompletedVideo)
+      if (stat.size > 1024 * 1024) {
+        const activeRecord = readActiveRender(options.projectDir)
+        const expectedRequestKey = computeRenderRequestKey({
+          projectDir: options.projectDir,
+          voiceoverPath: options.voiceoverPath,
+          outputName: baseTargetName,
+          resolution: options.resolution,
+          fps: options.fps,
+          transitionSettings: options.transitionSettings,
+          captionPlan,
+          editorialSettings: options.editorialSettings
+        })
+
+        const activeParams = activeRecord?.params as (RenderResumeParams & { editorialSettings?: EditorialGenerationSettings }) | undefined
+        const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? 'full'
+        const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? 'full'
+
+        const isExactMatch =
+          activeRecord &&
+          activeRecord.status === 'completed' &&
+          activeRecord.renderFingerprint === expectedRequestKey &&
+          requestedOverlayMode === cachedOverlayMode
+
+        if (isExactMatch) {
+          const probe = await probeMedia(defaultCompletedVideo, { signal })
+          if (probe && probe.hasVideo && probe.duration > 0) {
+            logger.info(
+              `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
+            )
+            onProgress('Found verified completed video output matching settings, skipping render', 1.0)
+            return {
+              success: true,
+              cached: true,
+              artifactPath: defaultCompletedVideo,
+              data: {
+                outputPath: defaultCompletedVideo,
+                durationSecs: probe.duration,
+                fileSizeBytes: stat.size
+              },
+              stats: {
+                outputPath: defaultCompletedVideo,
+                fileSizeBytes: stat.size,
+                reused: true
+              }
+            }
+          }
+        } else {
+          logger.info(
+            `[RenderStage] Existing output ${path.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+          )
+        }
+      }
+    } catch {
+      /* ignore and proceed to coordinated render */
+    }
   }
 
   // Đảm bảo không ghi đè file output đang tồn tại
@@ -953,6 +989,7 @@ export async function runRenderStage(
     fps: options.fps,
     transitionSettings: options.transitionSettings,
     captionPlan,
+    editorialSettings: options.editorialSettings,
     source: 'pipeline',
     externalSignal: signal,
     onProgress: (p) => {

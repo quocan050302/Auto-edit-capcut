@@ -168,9 +168,8 @@ export function registerManualAiHandlers(ipcMain: IpcMain): void {
         logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm}`)
         const pack = ensureManualAiVideoPromptPack(norm)
 
-        const editorialSettings = params?.settings
-          ? saveEditorialFocusSettings(norm, params.settings)
-          : loadEditorialFocusSettings(norm)
+        // Read-only: Video prompt copying never mutates or overwrites persisted project settings.
+        const editorialSettings = loadEditorialFocusSettings(norm)
 
         const enhancedText = buildOpeningEnhancedCopyText({
           mode: 'video',

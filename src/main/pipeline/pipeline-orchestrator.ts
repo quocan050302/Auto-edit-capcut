@@ -43,6 +43,7 @@ import {
   isPreflightValid,
   reconcileProjectArtifacts
 } from './pipeline-artifacts'
+import { loadEditorialFocusSettings } from '../visual-mix/manual-ai/editorial-focus-settings'
 import {
   runValidationStage,
   runTranscriptionStage,
@@ -242,6 +243,12 @@ class PipelineOrchestrator {
     const { projectDir } = options
     if (!projectDir) throw new Error('projectDir is required to start Auto Production Pipeline.')
     const norm = normalizeProjectDir(projectDir)
+    const effectiveEditorial = options.editorialSettings ?? loadEditorialFocusSettings(norm)
+    const effectiveOptions: AutoPipelineOptions = {
+      ...options,
+      projectDir: norm,
+      editorialSettings: effectiveEditorial
+    }
 
     return this.withProjectLock(norm, async () => {
       // 1. Kiểm tra in-memory instance đang hoạt động
@@ -251,7 +258,7 @@ class PipelineOrchestrator {
         const currentState = loadPipelineState(norm)
         return {
           runId: existing.runId,
-          state: currentState ?? createInitialPipelineState(options, computeInputFingerprint(norm, options.scriptPath, options.voiceoverPath), existing.runId)
+          state: currentState ?? createInitialPipelineState(effectiveOptions, computeInputFingerprint(norm, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath), existing.runId)
         }
       }
 
@@ -274,20 +281,20 @@ class PipelineOrchestrator {
         }
       }
 
-      const fingerprint = computeInputFingerprint(norm, options.scriptPath, options.voiceoverPath)
+      const fingerprint = computeInputFingerprint(norm, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath)
       const runId = uuidv4()
 
       if (!state) {
-        state = createInitialPipelineState(options, fingerprint, runId)
+        state = createInitialPipelineState(effectiveOptions, fingerprint, runId)
       } else {
-        const invalidated = determineInvalidatedStages(state, options, fingerprint)
+        const invalidated = determineInvalidatedStages(state, effectiveOptions, fingerprint)
         if (invalidated.length > 0) {
           applyInvalidation(state, invalidated)
           logger.info(`[Pipeline] Invalidated stages: ${invalidated.join(', ')}`)
         }
         state.runId = runId
         state.inputFingerprint = fingerprint
-        state.options = options
+        state.options = effectiveOptions
         state.overallStatus = 'running'
         state.version = (state.version ?? 0) + 1
         state.updatedAt = new Date().toISOString()

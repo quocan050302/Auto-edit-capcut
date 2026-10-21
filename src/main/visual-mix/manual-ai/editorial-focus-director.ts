@@ -115,6 +115,19 @@ const AMISH_STEREOTYPE_TERMS =
 const HUMAN_CLINICAL_TERMS =
   /\b(human\s*patient|clinical\s*trial|hospital\s*bed|patient|surgeon|stethoscope)\b/i
 
+function isBiologicalOrHealthNiche(niche: string): boolean {
+  const norm = (niche || '').toLowerCase()
+  return (
+    norm === 'health' ||
+    norm.includes('wildlife') ||
+    norm.includes('biology') ||
+    norm.includes('nature') ||
+    norm.includes('animal') ||
+    norm.includes('zoology') ||
+    norm.includes('veterinary')
+  )
+}
+
 // ─── Content Resolver ────────────────────────────────────────────────────────
 
 interface FocusContentResult {
@@ -237,7 +250,14 @@ function resolveFocusContent(params: ResolveEditorialFocusParams): FocusContentR
 
   // Balanced mode: evaluate whether this scene contains a concrete visible object or mechanism
   // Guard: Avoid 3 consecutive labeled scenes
-  if (recent?.presentationMode !== 'none' && priorRecent?.presentationMode !== 'none') {
+  if (
+    recent &&
+    recent.presentationMode &&
+    recent.presentationMode !== 'none' &&
+    priorRecent &&
+    priorRecent.presentationMode &&
+    priorRecent.presentationMode !== 'none'
+  ) {
     return {
       presentationMode: 'none',
       evidenceSource: 'density-pacing-guard',
@@ -274,15 +294,29 @@ function resolveFocusContent(params: ResolveEditorialFocusParams): FocusContentR
   }
 
   // Guard: Cross-niche semantic filters
-  if (niche !== 'health' && HEALTH_EXCLUSIVE_TERMS.test(subjectCandidate)) {
+  // 1. Human clinical terms are strictly excluded outside health documentaries
+  if (niche !== 'health' && HUMAN_CLINICAL_TERMS.test(subjectCandidate)) {
     return {
       presentationMode: 'none',
       evidenceSource: 'cross-niche-guard',
       confidence: 0.95,
-      reason: 'Cross-niche contamination prevented',
+      reason: 'Human clinical terms excluded outside health domain',
       warnings
     }
   }
+
+  // 2. Biological / anatomical terms are excluded from non-biological niches (finance, tech, history, agriculture)
+  if (!isBiologicalOrHealthNiche(niche) && HEALTH_EXCLUSIVE_TERMS.test(subjectCandidate)) {
+    return {
+      presentationMode: 'none',
+      evidenceSource: 'cross-niche-guard',
+      confidence: 0.95,
+      reason: 'Biological terminology excluded outside health and life science domains',
+      warnings
+    }
+  }
+
+  // 3. Prevent Amish stereotypes in Hutterite documentary
   if (niche === 'hutterite-documentary' && AMISH_STEREOTYPE_TERMS.test(subjectCandidate)) {
     return {
       presentationMode: 'none',
@@ -374,16 +408,38 @@ function resolveFocusPresentation(
     }
   }
 
-  // Timing: calculate appearance and hold duration respecting actual scene duration
-  const appearanceTimeSecs =
+  // Timing: calculate appearance and hold duration strictly respecting scene duration
+  // Timeline constraints:
+  // appearanceTimeSecs >= 0
+  // holdDurationSecs >= 0
+  // appearanceTimeSecs + holdDurationSecs <= sceneDuration
+  const rawAppearance =
     scene.sceneIndex <= 2
       ? 0.3
       : Math.min(0.6, Math.max(0.2, Number((sceneDuration * 0.12).toFixed(2))))
 
-  const holdDurationSecs = Math.min(
-    3.5,
-    Math.max(1.5, Number((sceneDuration - appearanceTimeSecs - 0.5).toFixed(2)))
-  )
+  // If scene is very short (e.g. <= 1.5s), clamp appearance to at most 15% of scene duration
+  const appearanceTimeSecs =
+    sceneDuration <= 1.5
+      ? Math.max(0.05, Number((sceneDuration * 0.15).toFixed(2)))
+      : Math.min(rawAppearance, Math.max(0.2, Number((sceneDuration - 0.5).toFixed(2))))
+
+  // Allocate remaining window for hold
+  const availableTime = Math.max(0, Number((sceneDuration - appearanceTimeSecs).toFixed(2)))
+  // Leave exit cushion if scene is long enough
+  const exitCushion = sceneDuration > 2.0 ? 0.3 : 0.05
+  const maxHold = Math.max(0, Number((availableTime - exitCushion).toFixed(2)))
+
+  const targetHold = readabilityProfile === 'senior-friendly' ? 3.0 : 2.5
+  let holdDurationSecs = Math.min(3.5, Math.min(targetHold, maxHold))
+
+  if (holdDurationSecs <= 0 && availableTime > 0.2) {
+    holdDurationSecs = Number((availableTime * 0.8).toFixed(2))
+  }
+  // Hard clamp invariant
+  if (appearanceTimeSecs + holdDurationSecs > sceneDuration) {
+    holdDurationSecs = Math.max(0, Number((sceneDuration - appearanceTimeSecs).toFixed(2)))
+  }
 
   return {
     sceneIndex: scene.sceneIndex,

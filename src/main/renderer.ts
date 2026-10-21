@@ -1044,6 +1044,7 @@ export function computeRenderRequestKey(params: {
   fps?: number
   transitionSettings?: RenderTransitionSettings
   captionPlan?: CaptionPlan
+  editorialSettings?: EditorialGenerationSettings
 }): string {
   const projectDir = normalizePathForFFmpeg(params.projectDir)
   const analysis = path.join(projectDir, 'analysis')
@@ -1058,7 +1059,9 @@ export function computeRenderRequestKey(params: {
     plan: hashFileContent(path.join(analysis, 'master-edit-plan.json')),
     audio: hashFileContent(path.join(analysis, 'audio-plan.json')),
     stock: hashFileContent(path.join(analysis, 'stock-assignments.json')),
-    editorial: hashFileContent(path.join(analysis, 'editorial-focus-settings.v1.json'))
+    editorial: params.editorialSettings
+      ? hashJsonValue(params.editorialSettings)
+      : hashFileContent(path.join(analysis, 'editorial-focus-settings.v1.json'))
   })
 }
 
@@ -1297,7 +1300,8 @@ async function renderVideoV2(
         outputName,
         resolution,
         fps,
-        transitionSettings: params.transitionSettings
+        transitionSettings: params.transitionSettings,
+        editorialSettings: prepared.editorialSettings
       },
       autoResumeAfterCrash: prefs.autoResumeAfterCrash,
       autoResumeCount: params.isAutoResume

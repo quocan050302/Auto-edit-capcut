@@ -9,11 +9,10 @@ import type {
   ProjectState
 } from '../../../../shared/types'
 import { resolveAiImageMode, resolveVisualMixConfig } from '../../../../shared/types'
-import { ConfirmDialog } from './ConfirmDialog'
-
 interface ManualAiPromptPanelProps {
   project: ProjectState
   pipelineState: AutoPipelineState | null
+  onNavigateToSetup?: () => void
 }
 
 export type ManualAiPanelState =
@@ -100,7 +99,7 @@ interface MixedMediaSelection {
   needsConfirmation?: boolean
 }
 
-export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPanelProps): React.ReactElement | null {
+export function ManualAiPromptPanel({ project, pipelineState, onNavigateToSetup }: ManualAiPromptPanelProps): React.ReactElement | null {
   const projectDir = project.projectDir
   const mix = resolveVisualMixConfig({
     visualSourceMode: project.inputs.visualSourceMode,
@@ -124,7 +123,6 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   const [showMixedImportMenu, setShowMixedImportMenu] = useState(false)
   const [showPrompts, setShowPrompts] = useState(false)
   const [editorialSettings, setEditorialSettings] = useState<EditorialGenerationSettings | null>(null)
-  const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = useState(false)
   const isMountedRef = useRef(true)
   const currentProjectDirRef = useRef(projectDir)
   const lastVersion = useRef<number | undefined>(undefined)
@@ -283,7 +281,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   async function handleCopyAllVideoPrompts(): Promise<void> {
     if (!window.api?.manualAi) return
     try {
-      const res = await window.api.manualAi.getVideoPromptText(projectDir, editorialSettings ?? undefined)
+      const res = await window.api.manualAi.getVideoPromptText(projectDir)
       if (!res.success || !res.text) {
         setNotice(res.error || 'Video prompts are unavailable.')
         return
@@ -295,18 +293,6 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
           ? `Copied ${effectiveExpected} ${modeLabel} prompts to clipboard.`
           : 'Could not access the clipboard.'
       )
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err))
-    }
-  }
-
-  async function handleUpdateEditorialSettings(patch: Partial<EditorialGenerationSettings>): Promise<void> {
-    if (!window.api?.manualAi?.updateEditorialSettings || !projectDir) return
-    try {
-      const res = await window.api.manualAi.updateEditorialSettings(projectDir, patch)
-      if (res.success && res.settings) {
-        setEditorialSettings(res.settings)
-      }
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err))
     }
@@ -580,24 +566,26 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
         </div>
       </div>
 
-      {/* Universal AI-Embedded Editorial Director Controls */}
+      {/* Read-only Editorial Configuration Summary (Configured in Step 2 Setup) */}
       <div
+        id="manual-ai-editorial-summary"
         style={{
           padding: '12px 16px',
           borderRadius: '8px',
-          background: 'rgba(15, 23, 42, 0.45)',
+          background: 'rgba(0, 0, 0, 0.25)',
           border: '1px solid rgba(129, 140, 248, 0.2)',
           display: 'flex',
           flexDirection: 'column',
-          gap: '10px'
+          gap: '8px'
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-primary)' }}>
-              🎬 Video Prompt Style:
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text-primary)' }}>
+              🎬 Video Editorial Configuration:
             </span>
             <span
+              id="manual-ai-editorial-mode-badge"
               style={{
                 fontSize: '11px',
                 padding: '2px 8px',
@@ -606,117 +594,48 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
                 color: editorialSettings?.promptMode === 'embedded-editorial' ? '#a5b4fc' : 'var(--text-secondary)'
               }}
             >
-              {editorialSettings?.promptMode === 'embedded-editorial' ? 'AI Embedded Editorial Active' : 'Classic Mode'}
+              {editorialSettings?.promptMode === 'embedded-editorial' ? 'AI Embedded Editorial' : 'Classic Mode'}
             </span>
           </div>
 
-          <div style={{ display: 'flex', gap: '6px' }}>
+          {onNavigateToSetup && (
             <button
               type="button"
-              id="editorial-mode-classic"
-              className={`btn btn-sm ${editorialSettings?.promptMode !== 'embedded-editorial' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => void handleUpdateEditorialSettings({ promptMode: 'classic' })}
+              id="manual-ai-change-in-setup-btn"
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: '11px', padding: '2px 8px' }}
+              onClick={onNavigateToSetup}
+              title="Editorial options and Render Output Mode are configured in Step 2 Setup"
             >
-              Classic (Original)
+              ⚙️ Change in Setup
             </button>
-            <button
-              type="button"
-              id="editorial-mode-embedded"
-              className={`btn btn-sm ${editorialSettings?.promptMode === 'embedded-editorial' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => void handleUpdateEditorialSettings({ promptMode: 'embedded-editorial' })}
-            >
-              AI Embedded Editorial
-            </button>
-          </div>
+          )}
         </div>
 
-        {editorialSettings?.promptMode === 'embedded-editorial' && (
-          <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', fontSize: '12px', color: 'var(--text-secondary)', paddingTop: '4px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                id="editorial-senior-friendly-toggle"
-                checked={editorialSettings.readability === 'senior-friendly'}
-                onChange={(e) => void handleUpdateEditorialSettings({ readability: e.target.checked ? 'senior-friendly' : 'standard' })}
-              />
-              Senior-Friendly Readability (50+ Contrast & Sizing)
-            </label>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                id="editorial-density-toggle"
-                checked={editorialSettings.labelDensity === 'balanced'}
-                onChange={(e) => void handleUpdateEditorialSettings({ labelDensity: e.target.checked ? 'balanced' : 'minimal' })}
-              />
-              Balanced Density (Include grounded focus labels)
-            </label>
-            <label style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', cursor: 'pointer' }}>
-              <input
-                type="checkbox"
-                id="editorial-leader-lines-toggle"
-                checked={editorialSettings.preferLeaderLines}
-                onChange={(e) => void handleUpdateEditorialSettings({ preferLeaderLines: e.target.checked })}
-              />
-              Include Graphic Leader Lines
-            </label>
-          </div>
-        )}
-
-        {/* Render Presentation Mode selector */}
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px', paddingTop: '6px', borderTop: '1px solid rgba(255, 255, 255, 0.05)' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-            <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
-              ⚡ Render Output Mode:
-            </span>
-            <span style={{ fontSize: '12px', fontWeight: 600, color: editorialSettings?.renderOverlayMode === 'source-only' ? '#38bdf8' : '#a3e635' }}>
-              {editorialSettings?.renderOverlayMode === 'source-only' ? 'Source Only (Overlays Omitted)' : 'Full Production (Remotion Captions + Overlays)'}
-            </span>
-          </div>
-          <div style={{ display: 'flex', gap: '6px' }}>
-            <button
-              type="button"
-              id="render-mode-full"
-              className={`btn btn-sm ${editorialSettings?.renderOverlayMode !== 'source-only' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => void handleUpdateEditorialSettings({ renderOverlayMode: 'full' })}
-            >
-              Full (Default)
-            </button>
-            <button
-              type="button"
-              id="render-mode-source-only"
-              className={`btn btn-sm ${editorialSettings?.renderOverlayMode === 'source-only' ? 'btn-primary' : 'btn-secondary'}`}
-              onClick={() => {
-                if (editorialSettings?.renderOverlayMode !== 'source-only') {
-                  setShowSourceOnlyConfirm(true)
-                }
-              }}
-            >
-              Source Only (Low-Memory)
-            </button>
-          </div>
+        <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap', fontSize: '11px', color: 'var(--text-secondary)' }}>
+          {editorialSettings?.promptMode === 'embedded-editorial' ? (
+            <>
+              <span>
+                Readability: <strong style={{ color: '#fff' }}>{editorialSettings.readability === 'senior-friendly' ? 'Senior-Friendly (50+)' : 'Standard'}</strong>
+              </span>
+              <span>
+                Label Density: <strong style={{ color: '#fff' }}>{editorialSettings.labelDensity === 'balanced' ? 'Balanced' : 'Minimal'}</strong>
+              </span>
+              <span>
+                Leader Lines: <strong style={{ color: '#fff' }}>{editorialSettings.preferLeaderLines ? 'Enabled' : 'Disabled'}</strong>
+              </span>
+            </>
+          ) : (
+            <span>Original prompt composition without on-screen focus labels.</span>
+          )}
+          <span>
+            Render Mode:{' '}
+            <strong style={{ color: editorialSettings?.renderOverlayMode === 'source-only' ? '#38bdf8' : '#a3e635' }}>
+              {editorialSettings?.renderOverlayMode === 'source-only' ? 'Source Only' : 'Full Production'}
+            </strong>
+          </span>
         </div>
       </div>
-
-      <ConfirmDialog
-        isOpen={showSourceOnlyConfirm}
-        title="Activate Source Only Render Mode?"
-        message="Source Only mode renders directly from imported/generated visuals and audio without app-generated visual overlays.
-
-Trade-offs:
-• Remotion dynamic captions will NOT be rendered
-• Proof Visual overlays will NOT be rendered
-• Visual Scene Grammar overlays will NOT be rendered
-• Opening graphic overlays will NOT be rendered
-
-Voiceover, music, footage, scene transitions, and final QA remain 100% intact. Labels must already exist in source media."
-        confirmText="Activate Source Only"
-        cancelText="Keep Full Mode"
-        onConfirm={() => {
-          setShowSourceOnlyConfirm(false)
-          void handleUpdateEditorialSettings({ renderOverlayMode: 'source-only' })
-        }}
-        onCancel={() => setShowSourceOnlyConfirm(false)}
-      />
 
       <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', position: 'relative', alignItems: 'center' }}>
         <button

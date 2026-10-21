@@ -9,7 +9,8 @@ import type {
   VisualMixConfig,
   AiImageOutputResolution,
   AiFailureBehavior,
-  AiImageMode
+  AiImageMode,
+  EditorialGenerationSettings
 } from '../../../../shared/types'
 import {
   resolveVisualMixConfig,
@@ -20,6 +21,8 @@ import {
 } from '../../../../shared/types'
 import { usePipeline } from '../hooks/usePipeline'
 import { useUiPreferences } from '../hooks/useUiPreferences'
+import { useEditorialSettings } from '../hooks/useEditorialSettings'
+import { EditorialSetupControls } from '../components/EditorialSetupControls'
 import { PipelineTimeline } from '../components/PipelineTimeline'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -121,6 +124,7 @@ function FileRow({
 }
 
 interface VisualSourceSectionProps {
+  projectDir: string
   isCustomMix: boolean
   currentAiPercent: number
   currentStockPercent: number
@@ -136,9 +140,14 @@ interface VisualSourceSectionProps {
   aiImageMode?: AiImageMode
   onSelectAiImageMode?: (mode: AiImageMode) => void
   isAdvanced?: boolean
+  editorialSettings: EditorialGenerationSettings
+  isSavingEditorial: boolean
+  editorialError?: string | null
+  onUpdateEditorialSettings: (patch: Partial<EditorialGenerationSettings>) => Promise<boolean | void>
 }
 
 function VisualSourceSection({
+  projectDir,
   isCustomMix,
   currentAiPercent,
   currentStockPercent,
@@ -153,7 +162,11 @@ function VisualSourceSection({
   onSelectFailureBehavior,
   aiImageMode = 'auto',
   onSelectAiImageMode,
-  isAdvanced
+  isAdvanced,
+  editorialSettings,
+  isSavingEditorial,
+  editorialError,
+  onUpdateEditorialSettings
 }: VisualSourceSectionProps): React.ReactElement {
   const containerClass = isAdvanced ? 'panel' : 'setup-section'
   const idSuffix = isAdvanced ? '-adv' : ''
@@ -513,6 +526,18 @@ function VisualSourceSection({
               </div>
             </div>
 
+            {/* AI VIDEO EDITORIAL SETTINGS (Step 2 Setup placement) */}
+            <EditorialSetupControls
+              projectDir={projectDir}
+              settings={editorialSettings}
+              disabled={isRunning}
+              promptModeEligible={currentAiPercent > 0 && aiImageMode === 'prompt'}
+              saving={isSavingEditorial}
+              error={editorialError}
+              onChange={onUpdateEditorialSettings}
+              idSuffix={idSuffix}
+            />
+
             {/* AI Generation Failure handling (strict by default) */}
             {currentAiPercent > 0 && aiImageMode !== 'prompt' && (
               <details
@@ -635,6 +660,21 @@ function VisualSourceSection({
             )}
           </div>
         )}
+
+        {!isCustomMix && (
+          <div style={{ marginTop: '12px' }}>
+            <EditorialSetupControls
+              projectDir={projectDir}
+              settings={editorialSettings}
+              disabled={isRunning}
+              promptModeEligible={false}
+              saving={isSavingEditorial}
+              error={editorialError}
+              onChange={onUpdateEditorialSettings}
+              idSuffix={idSuffix}
+            />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -663,6 +703,15 @@ export function InputPage({
   const currentAiPercent = Math.round(effectiveMix.aiImageRatio * 100)
   const currentStockPercent = 100 - currentAiPercent
   const aiImageMode: AiImageMode = isCustomMix && currentAiPercent > 0 ? resolveAiImageMode(effectiveMix) : 'auto'
+
+  // Universal Editorial Settings (Step 2 Setup authoritative hook)
+  const {
+    settings: editorialSettings,
+    isSaving: isSavingEditorial,
+    error: editorialError,
+    updateSettings: updateEditorialSettings,
+    waitForPendingSaves: waitForPendingEditorialSaves
+  } = useEditorialSettings(project.projectDir)
 
   // Flow health check for Custom Mix with AI ratio > 0
   const [flowHealth, setFlowHealth] = useState<{
@@ -894,6 +943,22 @@ export function InputPage({
     if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return
     setIsStarting(true)
     try {
+      // 1. Await pending saves to prevent last-click race condition
+      await waitForPendingEditorialSaves()
+
+      // 2. Authoritative backend readback before starting pipeline
+      let confirmedEditorial = editorialSettings
+      if (window.api?.manualAi?.getEditorialSettings) {
+        try {
+          const edRes = await window.api.manualAi.getEditorialSettings(project.projectDir)
+          if (edRes.success && edRes.settings) {
+            confirmedEditorial = edRes.settings
+          }
+        } catch (edErr) {
+          console.warn('[Setup] Error reading confirmed editorial settings:', edErr)
+        }
+      }
+
       const resolvedMix = resolveVisualMixConfig({
         visualSourceMode: inputs.visualSourceMode,
         visualMixConfig: inputs.visualMixConfig,
@@ -902,7 +967,7 @@ export function InputPage({
       const resolvedProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
 
       console.log(
-        `[Setup] Starting pipeline:\nprofileMode=${resolvedProfileMode}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}`
+        `[Setup] Starting pipeline:\nprofileMode=${resolvedProfileMode}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}\neditorialMode=${confirmedEditorial.promptMode}\nrenderMode=${confirmedEditorial.renderOverlayMode}`
       )
 
       const ok = await startPipeline({
@@ -916,6 +981,7 @@ export function InputPage({
         contentProfileMode: resolvedProfileMode,
         visualSourceMode: resolvedMix.mode,
         visualMixConfig: resolvedMix,
+        editorialSettings: confirmedEditorial,
         healthVisualConfig: (inputs.contentType === 'health' || resolvedProfileMode === 'health') && resolvedMix.mode === 'custom-mix' ? {
           aiRatio: resolvedMix.aiImageRatio,
           stockRatio: resolvedMix.stockFootageRatio,
@@ -1020,6 +1086,7 @@ export function InputPage({
 
         {/* Visual Source / Mix Section */}
         <VisualSourceSection
+          projectDir={project.projectDir}
           isCustomMix={isCustomMix}
           currentAiPercent={currentAiPercent}
           currentStockPercent={currentStockPercent}
@@ -1035,6 +1102,10 @@ export function InputPage({
           aiImageMode={aiImageMode}
           onSelectAiImageMode={handleSelectAiImageMode}
           isAdvanced={false}
+          editorialSettings={editorialSettings}
+          isSavingEditorial={isSavingEditorial}
+          editorialError={editorialError}
+          onUpdateEditorialSettings={updateEditorialSettings}
         />
 
         {/* Required Inputs Section */}
@@ -1497,6 +1568,7 @@ export function InputPage({
 
       {/* Visual Source / Mix Section */}
       <VisualSourceSection
+        projectDir={project.projectDir}
         isCustomMix={isCustomMix}
         currentAiPercent={currentAiPercent}
         currentStockPercent={currentStockPercent}
@@ -1512,6 +1584,10 @@ export function InputPage({
         aiImageMode={aiImageMode}
         onSelectAiImageMode={handleSelectAiImageMode}
         isAdvanced={true}
+        editorialSettings={editorialSettings}
+        isSavingEditorial={isSavingEditorial}
+        editorialError={editorialError}
+        onUpdateEditorialSettings={updateEditorialSettings}
       />
 
       {/* Required Source Files */}

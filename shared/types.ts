@@ -1771,6 +1771,7 @@ export interface AutoPipelineOptions {
   visualSourceMode?: VisualSourceMode
   visualMixConfig?: VisualMixConfig
   healthVisualConfig?: HealthVisualConfig
+  editorialSettings?: EditorialGenerationSettings
 }
 
 export type PipelineOverallStatus =

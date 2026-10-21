@@ -4401,6 +4401,13 @@ function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
     invalidated.add("rendering");
     invalidated.add("postflight");
   }
+  const oldOverlayMode = oldState.options.editorialSettings?.renderOverlayMode ?? "full";
+  const newOverlayMode = newOptions.editorialSettings?.renderOverlayMode ?? "full";
+  if (oldOverlayMode !== newOverlayMode) {
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
   return Array.from(invalidated);
 }
 function applyInvalidation(state2, invalidatedStages) {
@@ -14637,7 +14644,7 @@ function computeRenderRequestKey(params) {
     plan: hashFileContent(path__namespace.join(analysis, "master-edit-plan.json")),
     audio: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
     stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json")),
-    editorial: hashFileContent(path__namespace.join(analysis, "editorial-focus-settings.v1.json"))
+    editorial: params.editorialSettings ? hashJsonValue(params.editorialSettings) : hashFileContent(path__namespace.join(analysis, "editorial-focus-settings.v1.json"))
   });
 }
 async function renderVideo(params) {
@@ -14817,7 +14824,8 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
         outputName,
         resolution,
         fps,
-        transitionSettings: params.transitionSettings
+        transitionSettings: params.transitionSettings,
+        editorialSettings: prepared.editorialSettings
       },
       autoResumeAfterCrash: prefs.autoResumeAfterCrash,
       autoResumeCount: params.isAutoResume ? (previousActive?.autoResumeCount ?? 0) + 1 : params.source === "pipeline" && previousActive?.renderFingerprint === prepared.renderFingerprint && previousActive.status !== "completed" ? previousActive.autoResumeCount ?? 0 : 0,
@@ -26809,32 +26817,6 @@ async function runRenderStage(options, onProgress, signal) {
     } catch {
     }
   }
-  const baseTargetName = options.outputName || "final_output";
-  const defaultCompletedVideo = path__namespace.join(outputDir, `${baseTargetName}.mp4`);
-  if (fs__namespace.existsSync(defaultCompletedVideo)) {
-    try {
-      const stat = fs__namespace.statSync(defaultCompletedVideo);
-      if (stat.size > 1024 * 1024) {
-        onProgress("Found valid completed video output, skipping render", 1);
-        return {
-          success: true,
-          cached: true,
-          artifactPath: defaultCompletedVideo,
-          data: {
-            outputPath: defaultCompletedVideo,
-            durationSecs: 0,
-            fileSizeBytes: stat.size
-          },
-          stats: {
-            outputPath: defaultCompletedVideo,
-            fileSizeBytes: stat.size,
-            reused: true
-          }
-        };
-      }
-    } catch {
-    }
-  }
   let captionPlan;
   try {
     const loaded = loadCaptionPlan(options.projectDir);
@@ -26842,6 +26824,59 @@ async function runRenderStage(options, onProgress, signal) {
       captionPlan = loaded;
     }
   } catch {
+  }
+  const baseTargetName = options.outputName || "final_output";
+  const defaultCompletedVideo = path__namespace.join(outputDir, `${baseTargetName}.mp4`);
+  if (fs__namespace.existsSync(defaultCompletedVideo)) {
+    try {
+      const stat = fs__namespace.statSync(defaultCompletedVideo);
+      if (stat.size > 1024 * 1024) {
+        const activeRecord = readActiveRender(options.projectDir);
+        const expectedRequestKey = computeRenderRequestKey({
+          projectDir: options.projectDir,
+          voiceoverPath: options.voiceoverPath,
+          outputName: baseTargetName,
+          resolution: options.resolution,
+          fps: options.fps,
+          transitionSettings: options.transitionSettings,
+          captionPlan,
+          editorialSettings: options.editorialSettings
+        });
+        const activeParams = activeRecord?.params;
+        const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? "full";
+        const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? "full";
+        const isExactMatch = activeRecord && activeRecord.status === "completed" && activeRecord.renderFingerprint === expectedRequestKey && requestedOverlayMode === cachedOverlayMode;
+        if (isExactMatch) {
+          const probe = await probeMedia$1(defaultCompletedVideo, { signal });
+          if (probe && probe.hasVideo && probe.duration > 0) {
+            logger.info(
+              `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
+            );
+            onProgress("Found verified completed video output matching settings, skipping render", 1);
+            return {
+              success: true,
+              cached: true,
+              artifactPath: defaultCompletedVideo,
+              data: {
+                outputPath: defaultCompletedVideo,
+                durationSecs: probe.duration,
+                fileSizeBytes: stat.size
+              },
+              stats: {
+                outputPath: defaultCompletedVideo,
+                fileSizeBytes: stat.size,
+                reused: true
+              }
+            };
+          }
+        } else {
+          logger.info(
+            `[RenderStage] Existing output ${path__namespace.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+          );
+        }
+      }
+    } catch {
+    }
   }
   let targetName = baseTargetName;
   let candidatePath = path__namespace.join(outputDir, `${targetName}.mp4`);
@@ -26861,6 +26896,7 @@ async function runRenderStage(options, onProgress, signal) {
     fps: options.fps,
     transitionSettings: options.transitionSettings,
     captionPlan,
+    editorialSettings: options.editorialSettings,
     source: "pipeline",
     externalSignal: signal,
     onProgress: (p) => {
@@ -27187,6 +27223,12 @@ class PipelineOrchestrator {
     const { projectDir } = options;
     if (!projectDir) throw new Error("projectDir is required to start Auto Production Pipeline.");
     const norm2 = normalizeProjectDir(projectDir);
+    const effectiveEditorial = options.editorialSettings ?? loadEditorialFocusSettings(norm2);
+    const effectiveOptions = {
+      ...options,
+      projectDir: norm2,
+      editorialSettings: effectiveEditorial
+    };
     return this.withProjectLock(norm2, async () => {
       const existing = this.activeInstances.get(norm2);
       if (existing) {
@@ -27194,7 +27236,7 @@ class PipelineOrchestrator {
         const currentState = loadPipelineState(norm2);
         return {
           runId: existing.runId,
-          state: currentState ?? createInitialPipelineState(options, computeInputFingerprint(norm2, options.scriptPath, options.voiceoverPath), existing.runId)
+          state: currentState ?? createInitialPipelineState(effectiveOptions, computeInputFingerprint(norm2, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath), existing.runId)
         };
       }
       let state2 = loadPipelineState(norm2);
@@ -27209,19 +27251,19 @@ class PipelineOrchestrator {
           savePipelineStateAtomic(norm2, state2);
         }
       }
-      const fingerprint = computeInputFingerprint(norm2, options.scriptPath, options.voiceoverPath);
+      const fingerprint = computeInputFingerprint(norm2, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath);
       const runId = uuid.v4();
       if (!state2) {
-        state2 = createInitialPipelineState(options, fingerprint, runId);
+        state2 = createInitialPipelineState(effectiveOptions, fingerprint, runId);
       } else {
-        const invalidated = determineInvalidatedStages(state2, options, fingerprint);
+        const invalidated = determineInvalidatedStages(state2, effectiveOptions, fingerprint);
         if (invalidated.length > 0) {
           applyInvalidation(state2, invalidated);
           logger.info(`[Pipeline] Invalidated stages: ${invalidated.join(", ")}`);
         }
         state2.runId = runId;
         state2.inputFingerprint = fingerprint;
-        state2.options = options;
+        state2.options = effectiveOptions;
         state2.overallStatus = "running";
         state2.version = (state2.version ?? 0) + 1;
         state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -30923,6 +30965,10 @@ const ABSTRACT_CONCEPTS_REGEX = /\b(concept|principle|idea|trend|inflation|growt
 const HEALTH_EXCLUSIVE_TERMS = /\b(cellular|mitochondria|alveoli|coronary|myocardial|artery|vein|organ|tissue|biological|pathogen|enzyme|diagnosis|symptom|bloodstream)\b/i;
 const AMISH_STEREOTYPE_TERMS = /\b(amish|horse\s*buggy|buggy|horse-drawn|bonnet|straw\s*hat|quaint|primitive|pre-industrial)\b/i;
 const HUMAN_CLINICAL_TERMS = /\b(human\s*patient|clinical\s*trial|hospital\s*bed|patient|surgeon|stethoscope)\b/i;
+function isBiologicalOrHealthNiche(niche) {
+  const norm2 = (niche || "").toLowerCase();
+  return norm2 === "health" || norm2.includes("wildlife") || norm2.includes("biology") || norm2.includes("nature") || norm2.includes("animal") || norm2.includes("zoology") || norm2.includes("veterinary");
+}
 function resolveFocusContent(params) {
   const { scene, sceneDirection, globalContext, niche, previousInstructions, settings } = params;
   const warnings = [];
@@ -31003,7 +31049,7 @@ function resolveFocusContent(params) {
       warnings
     };
   }
-  if (recent?.presentationMode !== "none" && priorRecent?.presentationMode !== "none") {
+  if (recent && recent.presentationMode && recent.presentationMode !== "none" && priorRecent && priorRecent.presentationMode && priorRecent.presentationMode !== "none") {
     return {
       presentationMode: "none",
       evidenceSource: "density-pacing-guard",
@@ -31031,12 +31077,21 @@ function resolveFocusContent(params) {
       warnings
     };
   }
-  if (niche !== "health" && HEALTH_EXCLUSIVE_TERMS.test(subjectCandidate)) {
+  if (niche !== "health" && HUMAN_CLINICAL_TERMS.test(subjectCandidate)) {
     return {
       presentationMode: "none",
       evidenceSource: "cross-niche-guard",
       confidence: 0.95,
-      reason: "Cross-niche contamination prevented",
+      reason: "Human clinical terms excluded outside health domain",
+      warnings
+    };
+  }
+  if (!isBiologicalOrHealthNiche(niche) && HEALTH_EXCLUSIVE_TERMS.test(subjectCandidate)) {
+    return {
+      presentationMode: "none",
+      evidenceSource: "cross-niche-guard",
+      confidence: 0.95,
+      reason: "Biological terminology excluded outside health and life science domains",
       warnings
     };
   }
@@ -31110,11 +31165,19 @@ function resolveFocusPresentation(content, params) {
       animation = "fade-in";
     }
   }
-  const appearanceTimeSecs = scene.sceneIndex <= 2 ? 0.3 : Math.min(0.6, Math.max(0.2, Number((sceneDuration * 0.12).toFixed(2))));
-  const holdDurationSecs = Math.min(
-    3.5,
-    Math.max(1.5, Number((sceneDuration - appearanceTimeSecs - 0.5).toFixed(2)))
-  );
+  const rawAppearance = scene.sceneIndex <= 2 ? 0.3 : Math.min(0.6, Math.max(0.2, Number((sceneDuration * 0.12).toFixed(2))));
+  const appearanceTimeSecs = sceneDuration <= 1.5 ? Math.max(0.05, Number((sceneDuration * 0.15).toFixed(2))) : Math.min(rawAppearance, Math.max(0.2, Number((sceneDuration - 0.5).toFixed(2))));
+  const availableTime = Math.max(0, Number((sceneDuration - appearanceTimeSecs).toFixed(2)));
+  const exitCushion = sceneDuration > 2 ? 0.3 : 0.05;
+  const maxHold = Math.max(0, Number((availableTime - exitCushion).toFixed(2)));
+  const targetHold = readabilityProfile === "senior-friendly" ? 3 : 2.5;
+  let holdDurationSecs = Math.min(3.5, Math.min(targetHold, maxHold));
+  if (holdDurationSecs <= 0 && availableTime > 0.2) {
+    holdDurationSecs = Number((availableTime * 0.8).toFixed(2));
+  }
+  if (appearanceTimeSecs + holdDurationSecs > sceneDuration) {
+    holdDurationSecs = Math.max(0, Number((sceneDuration - appearanceTimeSecs).toFixed(2)));
+  }
   return {
     sceneIndex: scene.sceneIndex,
     presentationMode: content.presentationMode,
@@ -31999,7 +32062,7 @@ function registerManualAiHandlers(ipcMain) {
         const norm2 = normalizeProjectDir(params.projectDir);
         logger.info(`[ManualAI:VideoPrompt] Generating video prompt text for projectDir=${norm2}`);
         const pack = ensureManualAiVideoPromptPack(norm2);
-        const editorialSettings = params?.settings ? saveEditorialFocusSettings(norm2, params.settings) : loadEditorialFocusSettings(norm2);
+        const editorialSettings = loadEditorialFocusSettings(norm2);
         const enhancedText = buildOpeningEnhancedCopyText({
           mode: "video",
           projectDir: norm2,

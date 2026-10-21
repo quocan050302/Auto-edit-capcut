@@ -34,7 +34,7 @@ import {
   type RenderManifestV2
 } from './render-manifest'
 import { shortFingerprint } from './render-fingerprint'
-import type { RenderTransitionSettings } from '../../../shared/types'
+import type { RenderTransitionSettings, EditorialGenerationSettings } from '../../../shared/types'
 
 export const RENDER_CACHE_RELATIVE = path.join('.cache', 'render-v2')
 
@@ -106,6 +106,7 @@ export interface RenderResumeParams {
   resolution: { width: number; height: number }
   fps: number
   transitionSettings?: RenderTransitionSettings
+  editorialSettings?: EditorialGenerationSettings
 }
 
 export type ActiveRenderStatus = 'running' | 'completed' | 'interrupted' | 'cancelled' | 'failed'

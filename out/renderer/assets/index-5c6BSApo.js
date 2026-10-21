@@ -8192,6 +8192,633 @@ function useUiPreferences() {
     isAdvancedMode: interfaceMode === "advanced"
   };
 }
+const DEFAULT_EDITORIAL_SETTINGS = {
+  schemaVersion: 1,
+  promptMode: "classic",
+  labelDensity: "minimal",
+  readability: "standard",
+  preferLeaderLines: true,
+  renderOverlayMode: "full"
+};
+function useEditorialSettings(projectDir) {
+  const [settings, setSettings] = reactExports.useState(DEFAULT_EDITORIAL_SETTINGS);
+  const [isLoading, setIsLoading] = reactExports.useState(false);
+  const [isSaving, setIsSaving] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState(null);
+  const isMountedRef = reactExports.useRef(true);
+  const currentProjectDirRef = reactExports.useRef(projectDir ?? null);
+  const confirmedSettingsRef = reactExports.useRef(DEFAULT_EDITORIAL_SETTINGS);
+  const optimisticSettingsRef = reactExports.useRef(DEFAULT_EDITORIAL_SETTINGS);
+  const saveQueueRef = reactExports.useRef(Promise.resolve(true));
+  const pendingCountRef = reactExports.useRef(0);
+  reactExports.useEffect(() => {
+    isMountedRef.current = true;
+    currentProjectDirRef.current = projectDir ?? null;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [projectDir]);
+  const reloadSettings = reactExports.useCallback(async () => {
+    if (!projectDir) {
+      if (isMountedRef.current) {
+        setSettings(DEFAULT_EDITORIAL_SETTINGS);
+        confirmedSettingsRef.current = DEFAULT_EDITORIAL_SETTINGS;
+        optimisticSettingsRef.current = DEFAULT_EDITORIAL_SETTINGS;
+        setError(null);
+      }
+      return;
+    }
+    if (!window.api?.manualAi?.getEditorialSettings) {
+      if (isMountedRef.current) {
+        setError("Manual AI bridge unavailable.");
+      }
+      return;
+    }
+    const requestedDir = projectDir;
+    if (isMountedRef.current) {
+      setIsLoading(true);
+      setError(null);
+    }
+    try {
+      const res = await window.api.manualAi.getEditorialSettings(requestedDir);
+      if (!isMountedRef.current || currentProjectDirRef.current !== requestedDir) {
+        return;
+      }
+      if (res.success && res.settings) {
+        setSettings(res.settings);
+        confirmedSettingsRef.current = res.settings;
+        optimisticSettingsRef.current = res.settings;
+        setError(null);
+      } else {
+        const errMsg = res.error || "Failed to load editorial settings.";
+        setError(errMsg);
+      }
+    } catch (err) {
+      if (!isMountedRef.current || currentProjectDirRef.current !== requestedDir) {
+        return;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+    } finally {
+      if (isMountedRef.current && currentProjectDirRef.current === requestedDir) {
+        setIsLoading(false);
+      }
+    }
+  }, [projectDir]);
+  reactExports.useEffect(() => {
+    void reloadSettings();
+  }, [projectDir, reloadSettings]);
+  const updateSettings = reactExports.useCallback(
+    async (patch) => {
+      const targetDir = currentProjectDirRef.current;
+      if (!targetDir) {
+        setError("No active project directory.");
+        return false;
+      }
+      if (!window.api?.manualAi?.updateEditorialSettings) {
+        setError("Manual AI settings API unavailable.");
+        return false;
+      }
+      const nextOptimistic = {
+        ...optimisticSettingsRef.current,
+        ...patch,
+        schemaVersion: 1
+      };
+      optimisticSettingsRef.current = nextOptimistic;
+      if (isMountedRef.current) {
+        setSettings(nextOptimistic);
+        setError(null);
+      }
+      pendingCountRef.current += 1;
+      if (isMountedRef.current) {
+        setIsSaving(true);
+      }
+      const queuedOperation = saveQueueRef.current.then(async () => {
+        try {
+          if (currentProjectDirRef.current !== targetDir) {
+            return false;
+          }
+          const res = await window.api.manualAi.updateEditorialSettings(targetDir, patch);
+          if (!isMountedRef.current || currentProjectDirRef.current !== targetDir) {
+            return res.success;
+          }
+          if (res.success && res.settings) {
+            confirmedSettingsRef.current = res.settings;
+            if (pendingCountRef.current <= 1) {
+              optimisticSettingsRef.current = res.settings;
+              setSettings(res.settings);
+            }
+            return true;
+          } else {
+            const msg = res.error || "Failed to persist editorial settings.";
+            setError(msg);
+            optimisticSettingsRef.current = confirmedSettingsRef.current;
+            setSettings(confirmedSettingsRef.current);
+            return false;
+          }
+        } catch (err) {
+          if (isMountedRef.current && currentProjectDirRef.current === targetDir) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setError(msg);
+            optimisticSettingsRef.current = confirmedSettingsRef.current;
+            setSettings(confirmedSettingsRef.current);
+          }
+          return false;
+        } finally {
+          pendingCountRef.current = Math.max(0, pendingCountRef.current - 1);
+          if (isMountedRef.current && pendingCountRef.current === 0) {
+            setIsSaving(false);
+          }
+        }
+      });
+      saveQueueRef.current = queuedOperation.catch(() => false);
+      return queuedOperation;
+    },
+    []
+  );
+  const waitForPendingSaves = reactExports.useCallback(async () => {
+    await saveQueueRef.current;
+    return confirmedSettingsRef.current;
+  }, []);
+  return {
+    settings,
+    isLoading,
+    isSaving,
+    error,
+    updateSettings,
+    reloadSettings,
+    waitForPendingSaves,
+    hasPendingSaves: pendingCountRef.current > 0
+  };
+}
+function ConfirmDialog({
+  isOpen,
+  title,
+  message,
+  confirmText = "Confirm",
+  cancelText = "Cancel",
+  isDestructive = false,
+  onConfirm,
+  onCancel
+}) {
+  const confirmBtnRef = reactExports.useRef(null);
+  reactExports.useEffect(() => {
+    if (isOpen) {
+      confirmBtnRef.current?.focus();
+      const handleKeyDown = (e) => {
+        if (e.key === "Escape") {
+          e.preventDefault();
+          onCancel();
+        }
+      };
+      window.addEventListener("keydown", handleKeyDown);
+      return () => window.removeEventListener("keydown", handleKeyDown);
+    }
+  }, [isOpen, onCancel]);
+  if (!isOpen) return null;
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "modal-overlay modal-backdrop", onClick: onCancel, role: "dialog", "aria-modal": "true", "aria-labelledby": "dialog-title", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      className: "modal modal-box confirm-dialog-box",
+      onClick: (e) => e.stopPropagation(),
+      style: { maxWidth: "440px" },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-header", children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-title", id: "dialog-title", style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            isDestructive ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--color-error)" }, children: "⚠️" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--brand-accent)" }, children: "ℹ️" }),
+            title
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              className: "modal-close",
+              onClick: onCancel,
+              "aria-label": "Close dialog",
+              children: "✕"
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "modal-body", style: { padding: "16px 20px", color: "var(--text-secondary)", fontSize: "13px", lineHeight: 1.6 }, children: message }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-footer", style: { display: "flex", justifyContent: "flex-end", gap: "10px", padding: "14px 20px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              className: "btn btn-secondary",
+              onClick: onCancel,
+              children: cancelText
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "button",
+            {
+              type: "button",
+              ref: confirmBtnRef,
+              className: `btn ${isDestructive ? "btn-danger" : "btn-primary"}`,
+              onClick: onConfirm,
+              style: isDestructive ? { background: "#dc2626", borderColor: "#ef4444", color: "#fff" } : void 0,
+              children: confirmText
+            }
+          )
+        ] })
+      ]
+    }
+  ) });
+}
+function EditorialSetupControls({
+  settings,
+  disabled,
+  promptModeEligible,
+  saving,
+  error,
+  onChange,
+  idSuffix = ""
+}) {
+  const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = reactExports.useState(false);
+  const isEmbedded = settings.promptMode === "embedded-editorial";
+  const isSourceOnly = settings.renderOverlayMode === "source-only";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      id: `editorial-setup-controls${idSuffix}`,
+      style: {
+        marginTop: "12px",
+        padding: "16px",
+        borderRadius: "var(--radius-lg, 12px)",
+        border: "1px solid rgba(129, 140, 248, 0.25)",
+        background: "linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(14, 165, 233, 0.04))",
+        display: "flex",
+        flexDirection: "column",
+        gap: "12px"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", letterSpacing: "0.02em" }, children: "🎬 AI VIDEO EDITORIAL SETTINGS" }),
+            saving && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--color-brand, #818cf8)", display: "inline-flex", alignItems: "center", gap: "4px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "spinner-sm", style: { width: "10px", height: "10px" } }),
+              " Saving..."
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Step 2 Setup Configuration" })
+        ] }),
+        error && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            id: `editorial-setup-error${idSuffix}`,
+            style: {
+              padding: "8px 12px",
+              borderRadius: "6px",
+              background: "rgba(239, 68, 68, 0.15)",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+              color: "#f87171",
+              fontSize: "12px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between"
+            },
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "⚠️ ",
+              error
+            ] })
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "6px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }, children: "Video Prompt Style" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Choose whether generated video prompts include on-screen editorial focus labels." })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: `editorial-mode-classic${idSuffix}`,
+                  className: `btn btn-sm ${!isEmbedded ? "btn-primary" : "btn-secondary"}`,
+                  style: { fontSize: "11px", padding: "4px 10px" },
+                  onClick: () => void onChange({ promptMode: "classic" }),
+                  disabled: disabled || !promptModeEligible,
+                  title: !promptModeEligible ? "Active in Custom Mix with Manual Prompt AI images." : void 0,
+                  children: "Classic (Original)"
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "button",
+                {
+                  type: "button",
+                  id: `editorial-mode-embedded${idSuffix}`,
+                  className: `btn btn-sm ${isEmbedded ? "btn-primary" : "btn-secondary"}`,
+                  style: { fontSize: "11px", padding: "4px 10px" },
+                  onClick: () => void onChange({ promptMode: "embedded-editorial" }),
+                  disabled: disabled || !promptModeEligible,
+                  title: !promptModeEligible ? "Active in Custom Mix with Manual Prompt AI images." : void 0,
+                  children: "AI Embedded Editorial"
+                }
+              )
+            ] })
+          ] }),
+          !promptModeEligible && /* @__PURE__ */ jsxRuntimeExports.jsx(
+            "div",
+            {
+              id: `editorial-prompt-ineligible-note${idSuffix}`,
+              style: {
+                fontSize: "11px",
+                color: "var(--text-secondary)",
+                fontStyle: "italic",
+                padding: "4px 8px",
+                borderRadius: "4px",
+                background: "rgba(255, 255, 255, 0.04)"
+              },
+              children: "ℹ️ Video prompt styles apply when AI Image Mode is set to “Prompt” in Custom Mix. Previously saved editorial preferences remain preserved."
+            }
+          )
+        ] }),
+        isEmbedded && promptModeEligible && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            id: `editorial-embedded-options${idSuffix}`,
+            style: {
+              padding: "10px 12px",
+              borderRadius: "8px",
+              background: "rgba(0, 0, 0, 0.25)",
+              border: "1px solid rgba(255, 255, 255, 0.08)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "var(--color-brand, #818cf8)" }, children: "Editorial Text & Focus Options:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "8px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "label",
+                  {
+                    htmlFor: `editorial-senior-friendly-toggle${idSuffix}`,
+                    style: {
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "8px",
+                      cursor: disabled ? "default" : "pointer",
+                      fontSize: "12px",
+                      color: "var(--text-primary)"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          type: "checkbox",
+                          id: `editorial-senior-friendly-toggle${idSuffix}`,
+                          checked: settings.readability === "senior-friendly",
+                          onChange: (e) => void onChange({ readability: e.target.checked ? "senior-friendly" : "standard" }),
+                          disabled,
+                          style: { marginTop: "2px" }
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600 }, children: "Senior-Friendly Readability (50+)" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Large, high-contrast labels with restrained motion, easier to read for older viewers." })
+                      ] })
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "label",
+                  {
+                    htmlFor: `editorial-density-toggle${idSuffix}`,
+                    style: {
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "8px",
+                      cursor: disabled ? "default" : "pointer",
+                      fontSize: "12px",
+                      color: "var(--text-primary)"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          type: "checkbox",
+                          id: `editorial-density-toggle${idSuffix}`,
+                          checked: settings.labelDensity === "balanced",
+                          onChange: (e) => void onChange({ labelDensity: e.target.checked ? "balanced" : "minimal" }),
+                          disabled,
+                          style: { marginTop: "2px" }
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600 }, children: "Balanced Label Density" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Allow grounded labels on additional scenes when they help explain the visual." })
+                      ] })
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "label",
+                  {
+                    htmlFor: `editorial-leader-lines-toggle${idSuffix}`,
+                    style: {
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: "8px",
+                      cursor: disabled ? "default" : "pointer",
+                      fontSize: "12px",
+                      color: "var(--text-primary)"
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsx(
+                        "input",
+                        {
+                          type: "checkbox",
+                          id: `editorial-leader-lines-toggle${idSuffix}`,
+                          checked: settings.preferLeaderLines,
+                          onChange: (e) => void onChange({ preferLeaderLines: e.target.checked }),
+                          disabled,
+                          style: { marginTop: "2px" }
+                        }
+                      ),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontWeight: 600 }, children: "Include Graphic Leader Lines" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Use thin animated pointers to identify visible objects or mechanisms." })
+                      ] })
+                    ]
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    marginTop: "4px",
+                    padding: "6px 10px",
+                    borderRadius: "6px",
+                    background: "rgba(234, 179, 8, 0.08)",
+                    border: "1px solid rgba(234, 179, 8, 0.25)",
+                    fontSize: "11px",
+                    color: "#facc15"
+                  },
+                  children: [
+                    "⚠️ ",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "Review note:" }),
+                    " AI-generated text may contain spelling errors. Review the generated clips before importing."
+                  ]
+                }
+              )
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", paddingTop: "8px", borderTop: "1px solid rgba(255, 255, 255, 0.06)" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }, children: "⚡ Render Output Mode:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", fontWeight: 600, color: isSourceOnly ? "#38bdf8" : "#a3e635" }, children: isSourceOnly ? "Source Only" : "Full Production" })
+            ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: isSourceOnly ? "Direct visuals & audio mixing. Dynamic captions and Remotion overlays omitted (lowest RAM)." : "Full Remotion dynamic captions, proof visuals, and grammar overlays composited (standard)." })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                id: `render-mode-full${idSuffix}`,
+                className: `btn btn-sm ${!isSourceOnly ? "btn-primary" : "btn-secondary"}`,
+                style: { fontSize: "11px", padding: "4px 10px" },
+                onClick: () => void onChange({ renderOverlayMode: "full" }),
+                disabled,
+                children: "Full Production"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                id: `render-mode-source-only${idSuffix}`,
+                className: `btn btn-sm ${isSourceOnly ? "btn-primary" : "btn-secondary"}`,
+                style: { fontSize: "11px", padding: "4px 10px" },
+                onClick: () => {
+                  if (!isSourceOnly) {
+                    setShowSourceOnlyConfirm(true);
+                  }
+                },
+                disabled,
+                children: "Source Only (Low-Memory)"
+              }
+            )
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            id: `editorial-setup-summary${idSuffix}`,
+            style: {
+              marginTop: "4px",
+              padding: "8px 12px",
+              borderRadius: "6px",
+              background: "rgba(0, 0, 0, 0.2)",
+              border: "1px solid rgba(255, 255, 255, 0.05)",
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
+              flexWrap: "wrap",
+              fontSize: "11px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontWeight: 600, color: "var(--text-secondary)" }, children: "Summary:" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    padding: "2px 6px",
+                    borderRadius: "4px",
+                    background: isEmbedded ? "rgba(99, 102, 241, 0.2)" : "rgba(255, 255, 255, 0.08)",
+                    color: isEmbedded ? "#a5b4fc" : "var(--text-secondary)"
+                  },
+                  children: isEmbedded ? "AI Embedded Editorial" : "Classic Mode"
+                }
+              ),
+              isEmbedded && /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 6px",
+                      borderRadius: "4px",
+                      background: settings.readability === "senior-friendly" ? "rgba(56, 189, 248, 0.15)" : "rgba(255, 255, 255, 0.05)",
+                      color: settings.readability === "senior-friendly" ? "#38bdf8" : "var(--text-secondary)"
+                    },
+                    children: settings.readability === "senior-friendly" ? "Senior-Friendly (50+)" : "Standard Readability"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 6px",
+                      borderRadius: "4px",
+                      background: settings.labelDensity === "balanced" ? "rgba(163, 230, 53, 0.15)" : "rgba(255, 255, 255, 0.05)",
+                      color: settings.labelDensity === "balanced" ? "#a3e635" : "var(--text-secondary)"
+                    },
+                    children: settings.labelDensity === "balanced" ? "Balanced Labels" : "Minimal Labels"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 6px",
+                      borderRadius: "4px",
+                      background: settings.preferLeaderLines ? "rgba(168, 85, 247, 0.15)" : "rgba(255, 255, 255, 0.05)",
+                      color: settings.preferLeaderLines ? "#c084fc" : "var(--text-secondary)"
+                    },
+                    children: settings.preferLeaderLines ? "Leader Lines" : "No Leader Lines"
+                  }
+                )
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsx(
+                "span",
+                {
+                  style: {
+                    padding: "2px 6px",
+                    borderRadius: "4px",
+                    background: isSourceOnly ? "rgba(56, 189, 248, 0.2)" : "rgba(163, 230, 53, 0.2)",
+                    color: isSourceOnly ? "#38bdf8" : "#a3e635",
+                    fontWeight: 600
+                  },
+                  children: isSourceOnly ? "Source Only" : "Full Production"
+                }
+              )
+            ]
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsx(
+          ConfirmDialog,
+          {
+            isOpen: showSourceOnlyConfirm,
+            title: "Activate Source Only Render Mode?",
+            message: `Source Only mode renders directly from imported/generated visuals and audio without app-generated visual overlays.
+
+Trade-offs:
+• Remotion dynamic captions will NOT be rendered
+• Proof Visual overlays will NOT be rendered
+• Visual Scene Grammar overlays will NOT be rendered
+• Opening graphic overlays will NOT be rendered
+
+Recommended when:
+• Running on low-memory systems or minimizing render time
+• Generating visuals that already contain all necessary text`,
+            confirmText: "Activate Source Only",
+            cancelText: "Keep Full Production",
+            onConfirm: () => {
+              setShowSourceOnlyConfirm(false);
+              void onChange({ renderOverlayMode: "source-only" });
+            },
+            onCancel: () => setShowSourceOnlyConfirm(false)
+          }
+        )
+      ]
+    }
+  );
+}
 const ORDERED_STAGES = [
   { key: "validating", title: "Validate Inputs", pageName: "input" },
   { key: "transcribing", title: "Transcription", pageName: "transcribe" },
@@ -8646,81 +9273,6 @@ function CollapsibleSection({
     ),
     isExpanded && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "collapsible-section-body", id: contentId, role: "region", "aria-labelledby": headerId, children })
   ] });
-}
-function ConfirmDialog({
-  isOpen,
-  title,
-  message,
-  confirmText = "Confirm",
-  cancelText = "Cancel",
-  isDestructive = false,
-  onConfirm,
-  onCancel
-}) {
-  const confirmBtnRef = reactExports.useRef(null);
-  reactExports.useEffect(() => {
-    if (isOpen) {
-      confirmBtnRef.current?.focus();
-      const handleKeyDown = (e) => {
-        if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      };
-      window.addEventListener("keydown", handleKeyDown);
-      return () => window.removeEventListener("keydown", handleKeyDown);
-    }
-  }, [isOpen, onCancel]);
-  if (!isOpen) return null;
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "modal-overlay modal-backdrop", onClick: onCancel, role: "dialog", "aria-modal": "true", "aria-labelledby": "dialog-title", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
-    "div",
-    {
-      className: "modal modal-box confirm-dialog-box",
-      onClick: (e) => e.stopPropagation(),
-      style: { maxWidth: "440px" },
-      children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-header", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-title", id: "dialog-title", style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-            isDestructive ? /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--color-error)" }, children: "⚠️" }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "var(--brand-accent)" }, children: "ℹ️" }),
-            title
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              type: "button",
-              className: "modal-close",
-              onClick: onCancel,
-              "aria-label": "Close dialog",
-              children: "✕"
-            }
-          )
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "modal-body", style: { padding: "16px 20px", color: "var(--text-secondary)", fontSize: "13px", lineHeight: 1.6 }, children: message }),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "modal-footer", style: { display: "flex", justifyContent: "flex-end", gap: "10px", padding: "14px 20px" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              type: "button",
-              className: "btn btn-secondary",
-              onClick: onCancel,
-              children: cancelText
-            }
-          ),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              type: "button",
-              ref: confirmBtnRef,
-              className: `btn ${isDestructive ? "btn-danger" : "btn-primary"}`,
-              onClick: onConfirm,
-              style: isDestructive ? { background: "#dc2626", borderColor: "#ef4444", color: "#fff" } : void 0,
-              children: confirmText
-            }
-          )
-        ] })
-      ]
-    }
-  ) });
 }
 const PIPELINE_STAGE_TO_PAGE = {
   idle: "input",
@@ -9317,6 +9869,7 @@ function FileRow({
   ] });
 }
 function VisualSourceSection({
+  projectDir,
   isCustomMix,
   currentAiPercent,
   currentStockPercent,
@@ -9331,7 +9884,11 @@ function VisualSourceSection({
   onSelectFailureBehavior,
   aiImageMode = "auto",
   onSelectAiImageMode,
-  isAdvanced
+  isAdvanced,
+  editorialSettings,
+  isSavingEditorial,
+  editorialError,
+  onUpdateEditorialSettings
 }) {
   const containerClass = isAdvanced ? "panel" : "setup-section";
   const idSuffix = isAdvanced ? "-adv" : "";
@@ -9713,6 +10270,19 @@ function VisualSourceSection({
                 (imageOutputResolution || "1080p") === "4k" && "4K: Highest quality, slower generation/export"
               ] })
             ] }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              EditorialSetupControls,
+              {
+                projectDir,
+                settings: editorialSettings,
+                disabled: isRunning,
+                promptModeEligible: currentAiPercent > 0 && aiImageMode === "prompt",
+                saving: isSavingEditorial,
+                error: editorialError,
+                onChange: onUpdateEditorialSettings,
+                idSuffix
+              }
+            ),
             currentAiPercent > 0 && aiImageMode !== "prompt" && /* @__PURE__ */ jsxRuntimeExports.jsxs(
               "details",
               {
@@ -9835,7 +10405,20 @@ function VisualSourceSection({
             ) : /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "No Google Flow images required (100% stock footage)." })
           ]
         }
-      )
+      ),
+      !isCustomMix && /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { marginTop: "12px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+        EditorialSetupControls,
+        {
+          projectDir,
+          settings: editorialSettings,
+          disabled: isRunning,
+          promptModeEligible: false,
+          saving: isSavingEditorial,
+          error: editorialError,
+          onChange: onUpdateEditorialSettings,
+          idSuffix
+        }
+      ) })
     ] })
   ] });
 }
@@ -9858,6 +10441,13 @@ function InputPage({
   const currentAiPercent = Math.round(effectiveMix.aiImageRatio * 100);
   const currentStockPercent = 100 - currentAiPercent;
   const aiImageMode = isCustomMix && currentAiPercent > 0 ? resolveAiImageMode(effectiveMix) : "auto";
+  const {
+    settings: editorialSettings,
+    isSaving: isSavingEditorial,
+    error: editorialError,
+    updateSettings: updateEditorialSettings,
+    waitForPendingSaves: waitForPendingEditorialSaves
+  } = useEditorialSettings(project.projectDir);
   const [flowHealth, setFlowHealth] = reactExports.useState({ checking: false });
   reactExports.useEffect(() => {
     let cancelled = false;
@@ -10038,6 +10628,18 @@ function InputPage({
     if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return;
     setIsStarting(true);
     try {
+      await waitForPendingEditorialSaves();
+      let confirmedEditorial = editorialSettings;
+      if (window.api?.manualAi?.getEditorialSettings) {
+        try {
+          const edRes = await window.api.manualAi.getEditorialSettings(project.projectDir);
+          if (edRes.success && edRes.settings) {
+            confirmedEditorial = edRes.settings;
+          }
+        } catch (edErr) {
+          console.warn("[Setup] Error reading confirmed editorial settings:", edErr);
+        }
+      }
       const resolvedMix = resolveVisualMixConfig({
         visualSourceMode: inputs.visualSourceMode,
         visualMixConfig: inputs.visualMixConfig,
@@ -10050,7 +10652,9 @@ profileMode=${resolvedProfileMode}
 visualSource=${resolvedMix.mode}
 AI=${Math.round(resolvedMix.aiImageRatio * 100)}%
 Stock=${Math.round(resolvedMix.stockFootageRatio * 100)}%
-resolution=${resolvedMix.imageOutputResolution}`
+resolution=${resolvedMix.imageOutputResolution}
+editorialMode=${confirmedEditorial.promptMode}
+renderMode=${confirmedEditorial.renderOverlayMode}`
       );
       const ok2 = await startPipeline({
         projectDir: project.projectDir,
@@ -10063,6 +10667,7 @@ resolution=${resolvedMix.imageOutputResolution}`
         contentProfileMode: resolvedProfileMode,
         visualSourceMode: resolvedMix.mode,
         visualMixConfig: resolvedMix,
+        editorialSettings: confirmedEditorial,
         healthVisualConfig: (inputs.contentType === "health" || resolvedProfileMode === "health") && resolvedMix.mode === "custom-mix" ? {
           aiRatio: resolvedMix.aiImageRatio,
           stockRatio: resolvedMix.stockFootageRatio,
@@ -10142,6 +10747,7 @@ resolution=${resolvedMix.imageOutputResolution}`
       /* @__PURE__ */ jsxRuntimeExports.jsx(
         VisualSourceSection,
         {
+          projectDir: project.projectDir,
           isCustomMix,
           currentAiPercent,
           currentStockPercent,
@@ -10156,7 +10762,11 @@ resolution=${resolvedMix.imageOutputResolution}`
           onSelectFailureBehavior: handleSelectFailureBehavior,
           aiImageMode,
           onSelectAiImageMode: handleSelectAiImageMode,
-          isAdvanced: false
+          isAdvanced: false,
+          editorialSettings,
+          isSavingEditorial,
+          editorialError,
+          onUpdateEditorialSettings: updateEditorialSettings
         }
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setup-section", children: [
@@ -10585,6 +11195,7 @@ resolution=${resolvedMix.imageOutputResolution}`
     /* @__PURE__ */ jsxRuntimeExports.jsx(
       VisualSourceSection,
       {
+        projectDir: project.projectDir,
         isCustomMix,
         currentAiPercent,
         currentStockPercent,
@@ -10599,7 +11210,11 @@ resolution=${resolvedMix.imageOutputResolution}`
         onSelectFailureBehavior: handleSelectFailureBehavior,
         aiImageMode,
         onSelectAiImageMode: handleSelectAiImageMode,
-        isAdvanced: true
+        isAdvanced: true,
+        editorialSettings,
+        isSavingEditorial,
+        editorialError,
+        onUpdateEditorialSettings: updateEditorialSettings
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
@@ -11812,7 +12427,7 @@ const statBoxStyle = {
   background: "rgba(0, 0, 0, 0.25)",
   border: "1px solid rgba(255, 255, 255, 0.08)"
 };
-function ManualAiPromptPanel({ project, pipelineState }) {
+function ManualAiPromptPanel({ project, pipelineState, onNavigateToSetup }) {
   const projectDir = project.projectDir;
   const mix = resolveVisualMixConfig({
     visualSourceMode: project.inputs.visualSourceMode,
@@ -11833,7 +12448,6 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   const [showMixedImportMenu, setShowMixedImportMenu] = reactExports.useState(false);
   const [showPrompts, setShowPrompts] = reactExports.useState(false);
   const [editorialSettings, setEditorialSettings] = reactExports.useState(null);
-  const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = reactExports.useState(false);
   const isMountedRef = reactExports.useRef(true);
   const currentProjectDirRef = reactExports.useRef(projectDir);
   const lastVersion = reactExports.useRef(void 0);
@@ -11962,7 +12576,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   async function handleCopyAllVideoPrompts() {
     if (!window.api?.manualAi) return;
     try {
-      const res = await window.api.manualAi.getVideoPromptText(projectDir, editorialSettings ?? void 0);
+      const res = await window.api.manualAi.getVideoPromptText(projectDir);
       if (!res.success || !res.text) {
         setNotice(res.error || "Video prompts are unavailable.");
         return;
@@ -11972,17 +12586,6 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       setNotice(
         copied ? `Copied ${effectiveExpected} ${modeLabel} prompts to clipboard.` : "Could not access the clipboard."
       );
-    } catch (err) {
-      setNotice(err instanceof Error ? err.message : String(err));
-    }
-  }
-  async function handleUpdateEditorialSettings(patch) {
-    if (!window.api?.manualAi?.updateEditorialSettings || !projectDir) return;
-    try {
-      const res = await window.api.manualAi.updateEditorialSettings(projectDir, patch);
-      if (res.success && res.settings) {
-        setEditorialSettings(res.settings);
-      }
     } catch (err) {
       setNotice(err instanceof Error ? err.message : String(err));
     }
@@ -12218,22 +12821,24 @@ function ManualAiPromptPanel({ project, pipelineState }) {
     /* @__PURE__ */ jsxRuntimeExports.jsxs(
       "div",
       {
+        id: "manual-ai-editorial-summary",
         style: {
           padding: "12px 16px",
           borderRadius: "8px",
-          background: "rgba(15, 23, 42, 0.45)",
+          background: "rgba(0, 0, 0, 0.25)",
           border: "1px solid rgba(129, 140, 248, 0.2)",
           display: "flex",
           flexDirection: "column",
-          gap: "10px"
+          gap: "8px"
         },
         children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 600, color: "var(--text-primary)" }, children: "🎬 Video Prompt Style:" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }, children: "🎬 Video Editorial Configuration:" }),
               /* @__PURE__ */ jsxRuntimeExports.jsx(
                 "span",
                 {
+                  id: "manual-ai-editorial-mode-badge",
                   style: {
                     fontSize: "11px",
                     padding: "2px 8px",
@@ -12241,119 +12846,45 @@ function ManualAiPromptPanel({ project, pipelineState }) {
                     background: editorialSettings?.promptMode === "embedded-editorial" ? "rgba(99, 102, 241, 0.2)" : "rgba(255, 255, 255, 0.08)",
                     color: editorialSettings?.promptMode === "embedded-editorial" ? "#a5b4fc" : "var(--text-secondary)"
                   },
-                  children: editorialSettings?.promptMode === "embedded-editorial" ? "AI Embedded Editorial Active" : "Classic Mode"
+                  children: editorialSettings?.promptMode === "embedded-editorial" ? "AI Embedded Editorial" : "Classic Mode"
                 }
               )
             ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  id: "editorial-mode-classic",
-                  className: `btn btn-sm ${editorialSettings?.promptMode !== "embedded-editorial" ? "btn-primary" : "btn-secondary"}`,
-                  onClick: () => void handleUpdateEditorialSettings({ promptMode: "classic" }),
-                  children: "Classic (Original)"
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  id: "editorial-mode-embedded",
-                  className: `btn btn-sm ${editorialSettings?.promptMode === "embedded-editorial" ? "btn-primary" : "btn-secondary"}`,
-                  onClick: () => void handleUpdateEditorialSettings({ promptMode: "embedded-editorial" }),
-                  children: "AI Embedded Editorial"
-                }
-              )
-            ] })
+            onNavigateToSetup && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                id: "manual-ai-change-in-setup-btn",
+                className: "btn btn-secondary btn-sm",
+                style: { fontSize: "11px", padding: "2px 8px" },
+                onClick: onNavigateToSetup,
+                title: "Editorial options and Render Output Mode are configured in Step 2 Setup",
+                children: "⚙️ Change in Setup"
+              }
+            )
           ] }),
-          editorialSettings?.promptMode === "embedded-editorial" && /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "16px", flexWrap: "wrap", fontSize: "12px", color: "var(--text-secondary)", paddingTop: "4px", borderTop: "1px solid rgba(255, 255, 255, 0.05)" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "input",
-                {
-                  type: "checkbox",
-                  id: "editorial-senior-friendly-toggle",
-                  checked: editorialSettings.readability === "senior-friendly",
-                  onChange: (e) => void handleUpdateEditorialSettings({ readability: e.target.checked ? "senior-friendly" : "standard" })
-                }
-              ),
-              "Senior-Friendly Readability (50+ Contrast & Sizing)"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "input",
-                {
-                  type: "checkbox",
-                  id: "editorial-density-toggle",
-                  checked: editorialSettings.labelDensity === "balanced",
-                  onChange: (e) => void handleUpdateEditorialSettings({ labelDensity: e.target.checked ? "balanced" : "minimal" })
-                }
-              ),
-              "Balanced Density (Include grounded focus labels)"
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: "6px", cursor: "pointer" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "input",
-                {
-                  type: "checkbox",
-                  id: "editorial-leader-lines-toggle",
-                  checked: editorialSettings.preferLeaderLines,
-                  onChange: (e) => void handleUpdateEditorialSettings({ preferLeaderLines: e.target.checked })
-                }
-              ),
-              "Include Graphic Leader Lines"
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px", paddingTop: "6px", borderTop: "1px solid rgba(255, 255, 255, 0.05)" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: "⚡ Render Output Mode:" }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 600, color: editorialSettings?.renderOverlayMode === "source-only" ? "#38bdf8" : "#a3e635" }, children: editorialSettings?.renderOverlayMode === "source-only" ? "Source Only (Overlays Omitted)" : "Full Production (Remotion Captions + Overlays)" })
-            ] }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  id: "render-mode-full",
-                  className: `btn btn-sm ${editorialSettings?.renderOverlayMode !== "source-only" ? "btn-primary" : "btn-secondary"}`,
-                  onClick: () => void handleUpdateEditorialSettings({ renderOverlayMode: "full" }),
-                  children: "Full (Default)"
-                }
-              ),
-              /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  id: "render-mode-source-only",
-                  className: `btn btn-sm ${editorialSettings?.renderOverlayMode === "source-only" ? "btn-primary" : "btn-secondary"}`,
-                  onClick: () => {
-                    if (editorialSettings?.renderOverlayMode !== "source-only") {
-                      setShowSourceOnlyConfirm(true);
-                    }
-                  },
-                  children: "Source Only (Low-Memory)"
-                }
-              )
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "12px", flexWrap: "wrap", fontSize: "11px", color: "var(--text-secondary)" }, children: [
+            editorialSettings?.promptMode === "embedded-editorial" ? /* @__PURE__ */ jsxRuntimeExports.jsxs(jsxRuntimeExports.Fragment, { children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                "Readability: ",
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#fff" }, children: editorialSettings.readability === "senior-friendly" ? "Senior-Friendly (50+)" : "Standard" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                "Label Density: ",
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#fff" }, children: editorialSettings.labelDensity === "balanced" ? "Balanced" : "Minimal" })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                "Leader Lines: ",
+                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "#fff" }, children: editorialSettings.preferLeaderLines ? "Enabled" : "Disabled" })
+              ] })
+            ] }) : /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Original prompt composition without on-screen focus labels." }),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "Render Mode:",
+              " ",
+              /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: editorialSettings?.renderOverlayMode === "source-only" ? "#38bdf8" : "#a3e635" }, children: editorialSettings?.renderOverlayMode === "source-only" ? "Source Only" : "Full Production" })
             ] })
           ] })
         ]
-      }
-    ),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(
-      ConfirmDialog,
-      {
-        isOpen: showSourceOnlyConfirm,
-        title: "Activate Source Only Render Mode?",
-        message: "Source Only mode renders directly from imported/generated visuals and audio without app-generated visual overlays.\r\n\r\nTrade-offs:\r\n• Remotion dynamic captions will NOT be rendered\r\n• Proof Visual overlays will NOT be rendered\r\n• Visual Scene Grammar overlays will NOT be rendered\r\n• Opening graphic overlays will NOT be rendered\r\n\r\nVoiceover, music, footage, scene transitions, and final QA remain 100% intact. Labels must already exist in source media.",
-        confirmText: "Activate Source Only",
-        cancelText: "Keep Full Mode",
-        onConfirm: () => {
-          setShowSourceOnlyConfirm(false);
-          void handleUpdateEditorialSettings({ renderOverlayMode: "source-only" });
-        },
-        onCancel: () => setShowSourceOnlyConfirm(false)
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", position: "relative", alignItems: "center" }, children: [
@@ -13369,7 +13900,14 @@ function ClientPipelineDashboard({
         )
       ] })
     ] }),
-    /* @__PURE__ */ jsxRuntimeExports.jsx(ManualAiPromptPanel, { project, pipelineState }),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ManualAiPromptPanel,
+      {
+        project,
+        pipelineState,
+        onNavigateToSetup: onNavigate ? () => onNavigate("input") : void 0
+      }
+    ),
     (visualTruthSummary.hasData || claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0) && /* @__PURE__ */ jsxRuntimeExports.jsx(
       "div",
       {

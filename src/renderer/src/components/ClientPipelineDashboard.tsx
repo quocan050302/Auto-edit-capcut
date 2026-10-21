@@ -619,7 +619,11 @@ export function ClientPipelineDashboard({
       </div>
 
       {/* Prompt mode: prompt pack + manual AI image import (renders nothing in Auto / Default) */}
-      <ManualAiPromptPanel project={project} pipelineState={pipelineState} />
+      <ManualAiPromptPanel
+        project={project}
+        pipelineState={pipelineState}
+        onNavigateToSetup={onNavigate ? () => onNavigate('input') : undefined}
+      />
 
       {/* Production Intelligence: Visual Match & Evidence Coverage (Client Mode) */}
       {(visualTruthSummary.hasData || (claimLedger && (claimLedger.summary?.totalClaims ?? 0) > 0)) && (
