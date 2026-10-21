@@ -40,9 +40,9 @@ export function ConfirmDialog({
   if (!isOpen) return null
 
   return (
-    <div className="modal-backdrop" onClick={onCancel} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
+    <div className="modal-overlay modal-backdrop" onClick={onCancel} role="dialog" aria-modal="true" aria-labelledby="dialog-title">
       <div
-        className="modal-box confirm-dialog-box"
+        className="modal modal-box confirm-dialog-box"
         onClick={(e) => e.stopPropagation()}
         style={{ maxWidth: '440px' }}
       >

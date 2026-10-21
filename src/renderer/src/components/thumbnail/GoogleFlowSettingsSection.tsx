@@ -42,7 +42,11 @@ const StatusIndicator: React.FC<StatusIndicatorProps> = ({ label, value, detail 
   )
 }
 
-export const GoogleFlowSettingsSection: React.FC = () => {
+export interface GoogleFlowSettingsSectionProps {
+  projectDir?: string
+}
+
+export const GoogleFlowSettingsSection: React.FC<GoogleFlowSettingsSectionProps> = () => {
   const [settings, setSettings] = useState<RuntimeSettings>({
     mode: 'external',
     bridgeUrl: 'http://127.0.0.1:8100',

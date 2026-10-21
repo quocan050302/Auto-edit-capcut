@@ -180,7 +180,8 @@ export const ThumbnailStudioPage: React.FC<ThumbnailStudioPageProps> = ({
           <ThumbnailTemplateSelector
             templates={templates}
             selectedTemplateId={selectedTemplateId || settings?.selectedTemplateId || ''}
-            onSelect={handleTemplateChange}
+            onChange={(id) => void handleTemplateChange(id)}
+            onManageLibrary={() => onNavigate?.('thumbnail-library')}
           />
         </div>
 

@@ -1,3 +1,4 @@
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AutoPipelineState,
   EditorialGenerationSettings,
@@ -22,6 +23,7 @@ export type ManualAiPanelState =
   | 'waiting-for-images'
   | 'ready'
   | 'error'
+
 
 const MAX_MISSING_PREVIEW = 40
 
@@ -123,8 +125,18 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   const [showPrompts, setShowPrompts] = useState(false)
   const [editorialSettings, setEditorialSettings] = useState<EditorialGenerationSettings | null>(null)
   const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = useState(false)
+  const isMountedRef = useRef(true)
+  const currentProjectDirRef = useRef(projectDir)
   const lastVersion = useRef<number | undefined>(undefined)
   const bridgeLoggedRef = useRef(false)
+
+  useEffect(() => {
+    isMountedRef.current = true
+    currentProjectDirRef.current = projectDir
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [projectDir])
 
   // Warn once in console if preload bridge is missing
   useEffect(() => {
@@ -137,20 +149,23 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   }, [hasBridge])
 
   const refresh = useCallback(async (): Promise<void> => {
-    if (!projectDir) return
+    if (!projectDir || !isMountedRef.current) return
     if (!window.api?.manualAi) {
       return
     }
     try {
       const s = await window.api.manualAi.getStatus(projectDir)
+      if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
       setStatus(s)
       if (window.api.manualAi.getEditorialSettings) {
         const ed = await window.api.manualAi.getEditorialSettings(projectDir)
+        if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
         if (ed.success && ed.settings) {
           setEditorialSettings(ed.settings)
         }
       }
     } catch (err) {
+      if (!isMountedRef.current) return
       const msg = err instanceof Error ? err.message : String(err)
       console.error('[ManualAI] getStatus failed:', msg)
       setNotice(`Unable to read Manual AI status: ${msg}`)
@@ -162,7 +177,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     if (!isPromptMode || !projectDir) return
     void refresh()
     const off = window.api?.manualAi?.onStatusUpdated?.((payload) => {
-      if (payload.projectDir === projectDir) {
+      if (isMountedRef.current && payload.projectDir === projectDir) {
         setStatus(payload.status)
       }
     })
@@ -314,10 +329,11 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     mappings: ManualAiImportMapping[],
     opts: { replaceExisting?: boolean; allowLowResolution?: boolean } = {}
   ): Promise<void> {
-    if (!window.api?.manualAi) return
+    if (!window.api?.manualAi || !isMountedRef.current) return
     setBusy(true)
     try {
       const res = await window.api.manualAi.commitImport({ projectDir, mappings, ...opts })
+      if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
       if (!res.success || !res.result) {
         setNotice(res.error || 'Import failed.')
         return
@@ -333,12 +349,14 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
           (res.result.rejections.length > 0 ? ` · ${res.result.rejections.length} need attention` : '')
       )
     } finally {
-      setBusy(false)
+      if (isMountedRef.current) {
+        setBusy(false)
+      }
     }
   }
 
   async function handleSelect(mode: 'files' | 'folder', mediaType: 'image' | 'video' = 'image'): Promise<void> {
-    if (!window.api?.manualAi) return
+    if (!window.api?.manualAi || !isMountedRef.current) return
     setShowImportMenu(false)
     setShowVideoImportMenu(false)
     setShowMixedImportMenu(false)
@@ -346,6 +364,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
     const picked = mediaType === 'video'
       ? await window.api.manualAi.selectVideos(mode)
       : await window.api.manualAi.selectImages(mode)
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
     if (!picked.success) {
       setNotice(picked.error || 'Could not open the file picker.')
       return
@@ -365,6 +384,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
       filePaths: picked.filePaths,
       ...(mediaType === 'video' ? { mediaType: 'video' as const } : {})
     })
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
     if (!planned.success || !planned.plan) {
       setNotice(planned.error || 'Could not analyse the selected files.')
       return
@@ -406,13 +426,14 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
   }
 
   async function handleSelectMixed(mode: 'files' | 'folder'): Promise<void> {
-    if (!window.api?.manualAi) return
+    if (!window.api?.manualAi || !isMountedRef.current) return
     setShowImportMenu(false)
     setShowVideoImportMenu(false)
     setShowMixedImportMenu(false)
     setNotice(null)
 
     const picked = await (window.api.manualAi as any).selectMixed(mode)
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
     if (!picked.success) {
       setNotice(picked.error || 'Could not open the file picker.')
       return
@@ -429,6 +450,7 @@ export function ManualAiPromptPanel({ project, pipelineState }: ManualAiPromptPa
       filePaths: picked.filePaths,
       mediaType: 'mixed'
     })
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return
     if (!planned.success || !planned.plan) {
       setNotice(planned.error || 'Could not analyse the selected files.')
       return

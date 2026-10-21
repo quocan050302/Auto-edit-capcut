@@ -1,6 +1,6 @@
 import React, { useState } from 'react'
 import { ClientPipelineDashboard } from './components/ClientPipelineDashboard'
-import type { AutoPipelineState, ProjectState } from '../../shared/types'
+import type { AutoPipelineState, ProjectState } from '../../../shared/types'
 
 const mockProject: ProjectState = {
   id: 'mock-proj-1',

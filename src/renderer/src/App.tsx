@@ -23,6 +23,7 @@ import { useStock } from './hooks/useStock'
 import { useAudioDirector } from './hooks/useAudioDirector'
 import { useUiPreferences } from './hooks/useUiPreferences'
 import { YouTubeResearchPage } from './features/youtube-research/pages/YouTubeResearchPage'
+import { AppErrorBoundary } from './components/AppErrorBoundary'
 
 export type Page =
   | 'home'
@@ -218,106 +219,114 @@ export default function App(): React.ReactElement {
         )}
 
         <div className="main-content">
-          {currentPage === 'home' && (
-            <HomePage
-              onCreate={handleCreateProject}
-              onOpen={handleOpenProject}
-              onNavigate={(p) => navigate(p as Page)}
-            />
-          )}
+          <AppErrorBoundary
+            key={currentPage}
+            isRouteLevel={true}
+            fallbackTitle={`Something went wrong displaying the ${currentPage} page.`}
+            onNavigateProduction={project ? () => navigate('production') : undefined}
+            onNavigateHome={() => navigate('home')}
+          >
+            {currentPage === 'home' && (
+              <HomePage
+                onCreate={handleCreateProject}
+                onOpen={handleOpenProject}
+                onNavigate={(p) => navigate(p as Page)}
+              />
+            )}
 
-          {currentPage === 'input' && project && (
-            <InputPage
-              project={project}
-              onUpdateInputs={updateInputs}
-              onScanMedia={handleScanMedia}
-              isScanning={isScanning}
-              onNavigate={(p) => navigate(p as Page)}
-            />
-          )}
+            {currentPage === 'input' && project && (
+              <InputPage
+                project={project}
+                onUpdateInputs={updateInputs}
+                onScanMedia={handleScanMedia}
+                isScanning={isScanning}
+                onNavigate={(p) => navigate(p as Page)}
+              />
+            )}
 
-          {currentPage === 'production' && project && (
-            <ProductionPage
-              project={project}
-              onNavigate={(p) => navigate(p as Page)}
-            />
-          )}
+            {currentPage === 'production' && project && (
+              <ProductionPage
+                project={project}
+                onNavigate={(p) => navigate(p as Page)}
+              />
+            )}
 
-          {currentPage === 'transcribe' && project && (
-            <TranscriptionPage
-              project={project}
-              transcript={transcript}
-              isTranscribing={isTranscribing}
-              transcribeProgress={transcribeProgress}
-              onStartTranscription={handleTranscribe}
-            />
-          )}
+            {currentPage === 'transcribe' && project && (
+              <TranscriptionPage
+                project={project}
+                transcript={transcript}
+                isTranscribing={isTranscribing}
+                transcribeProgress={transcribeProgress}
+                onStartTranscription={handleTranscribe}
+              />
+            )}
 
-          {currentPage === 'planning' && project && (
-            <PlanningPage project={project} />
-          )}
+            {currentPage === 'planning' && project && (
+              <PlanningPage project={project} />
+            )}
 
-          {currentPage === 'captions' && project && (
-            <CaptionsPage projectDir={project.projectDir} />
-          )}
+            {currentPage === 'captions' && project && (
+              <CaptionsPage projectDir={project.projectDir} />
+            )}
 
-          {currentPage === 'stock' && project && (
-            <StockPage
-              project={project}
-              review={stockReview}
-              isRunning={isStockRunning}
-              progress={stockProgress}
-              onRun={() => runStockSearch(project.projectDir)}
-              onReplace={(idx, q) => stockReplace(project.projectDir, idx, q)}
-              onLock={(idx, locked) => stockLock(project.projectDir, idx, locked)}
-              onUpload={(idx) => stockUpload(project.projectDir, idx)}
-              onLoad={() => loadStockReview(project.projectDir)}
-            />
-          )}
+            {currentPage === 'stock' && project && (
+              <StockPage
+                project={project}
+                review={stockReview}
+                isRunning={isStockRunning}
+                progress={stockProgress}
+                onRun={() => runStockSearch(project.projectDir)}
+                onReplace={(idx, q) => stockReplace(project.projectDir, idx, q)}
+                onLock={(idx, locked) => stockLock(project.projectDir, idx, locked)}
+                onUpload={(idx) => stockUpload(project.projectDir, idx)}
+                onLoad={() => loadStockReview(project.projectDir)}
+              />
+            )}
 
-          {currentPage === 'audio' && project && (
-            <AudioDirectorPage
-              project={project}
-              audioDirector={audioDirector}
-            />
-          )}
+            {currentPage === 'audio' && project && (
+              <AudioDirectorPage
+                project={project}
+                audioDirector={audioDirector}
+              />
+            )}
 
-          {currentPage === 'settings' && project && (
-            <SettingsPage project={project} onUpdateSettings={updateSettings} />
-          )}
+            {currentPage === 'settings' && project && (
+              <SettingsPage project={project} onUpdateSettings={updateSettings} />
+            )}
 
-          {currentPage === 'analysis' && project && (
-            <AnalysisPage project={project} scanResult={scanResult} />
-          )}
+            {currentPage === 'analysis' && project && (
+              <AnalysisPage project={project} scanResult={scanResult} />
+            )}
 
-          {currentPage === 'render' && project && (
-            <RenderPage
-              project={project}
-              onNavigate={(p) => navigate(p as Page)}
-            />
-          )}
+            {currentPage === 'render' && project && (
+              <RenderPage
+                project={project}
+                onNavigate={(p) => navigate(p as Page)}
+              />
+            )}
 
-          {currentPage === 'qa' && <QAPage />}
+            {currentPage === 'qa' && <QAPage />}
 
-          {currentPage === 'youtube-research' && (
-            <YouTubeResearchPage
-              project={project}
-              onNavigate={(p) => navigate(p as Page)}
-            />
-          )}
+            {currentPage === 'youtube-research' && (
+              <YouTubeResearchPage
+                project={project}
+                onNavigate={(p) => navigate(p as Page)}
+              />
+            )}
 
-          {currentPage === 'thumbnails' && project && (
-            <ThumbnailStudioPage
-              project={project}
-              onNavigate={(p) => navigate(p as Page)}
-            />
-          )}
+            {currentPage === 'thumbnails' && project && (
+              <ThumbnailStudioPage
+                project={project}
+                onNavigate={(p) => navigate(p as Page)}
+              />
+            )}
 
-          {currentPage === 'thumbnail-library' && (
-            <ThumbnailPromptLibraryPage
-              onBack={() => navigate(project ? 'thumbnails' : 'home')}
-            />
-          )}
+            {currentPage === 'thumbnail-library' && (
+              <ThumbnailPromptLibraryPage
+                onBack={() => navigate(project ? 'thumbnails' : 'home')}
+              />
+            )}
+          </AppErrorBoundary>
         </div>
       </div>
 

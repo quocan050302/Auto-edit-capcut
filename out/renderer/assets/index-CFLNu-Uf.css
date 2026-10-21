@@ -949,7 +949,8 @@ body {
 }
 
 /* ---------- Modal ---------- */
-.modal-overlay {
+.modal-overlay,
+.modal-backdrop {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.75);
@@ -970,7 +971,8 @@ body {
   }
 }
 
-.modal {
+.modal,
+.modal-box {
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xl);

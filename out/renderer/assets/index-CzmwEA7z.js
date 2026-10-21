@@ -8672,10 +8672,10 @@ function ConfirmDialog({
     }
   }, [isOpen, onCancel]);
   if (!isOpen) return null;
-  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "modal-backdrop", onClick: onCancel, role: "dialog", "aria-modal": "true", "aria-labelledby": "dialog-title", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+  return /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "modal-overlay modal-backdrop", onClick: onCancel, role: "dialog", "aria-modal": "true", "aria-labelledby": "dialog-title", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
     "div",
     {
-      className: "modal-box confirm-dialog-box",
+      className: "modal modal-box confirm-dialog-box",
       onClick: (e) => e.stopPropagation(),
       style: { maxWidth: "440px" },
       children: [
@@ -11821,22 +11821,31 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   });
   const isPromptMode = mix.mode === "custom-mix" && mix.aiImageRatio > 0 && resolveAiImageMode(mix) === "prompt";
   const hasBridge = typeof window !== "undefined" && Boolean(window.api?.manualAi);
-  const [status, setStatus] = useState(null);
-  const [notice, setNotice] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [plan, setPlan] = useState(null);
-  const [videoSelection, setVideoSelection] = useState(null);
-  const [mixedSelection, setMixedSelection] = useState(null);
-  const [pendingRejections, setPendingRejections] = useState([]);
-  const [showImportMenu, setShowImportMenu] = useState(false);
-  const [showVideoImportMenu, setShowVideoImportMenu] = useState(false);
-  const [showMixedImportMenu, setShowMixedImportMenu] = useState(false);
-  const [showPrompts, setShowPrompts] = useState(false);
-  const [editorialSettings, setEditorialSettings] = useState(null);
-  const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = useState(false);
-  const lastVersion = useRef(void 0);
-  const bridgeLoggedRef = useRef(false);
-  useEffect(() => {
+  const [status, setStatus] = reactExports.useState(null);
+  const [notice, setNotice] = reactExports.useState(null);
+  const [busy, setBusy] = reactExports.useState(false);
+  const [plan, setPlan] = reactExports.useState(null);
+  const [videoSelection, setVideoSelection] = reactExports.useState(null);
+  const [mixedSelection, setMixedSelection] = reactExports.useState(null);
+  const [pendingRejections, setPendingRejections] = reactExports.useState([]);
+  const [showImportMenu, setShowImportMenu] = reactExports.useState(false);
+  const [showVideoImportMenu, setShowVideoImportMenu] = reactExports.useState(false);
+  const [showMixedImportMenu, setShowMixedImportMenu] = reactExports.useState(false);
+  const [showPrompts, setShowPrompts] = reactExports.useState(false);
+  const [editorialSettings, setEditorialSettings] = reactExports.useState(null);
+  const [showSourceOnlyConfirm, setShowSourceOnlyConfirm] = reactExports.useState(false);
+  const isMountedRef = reactExports.useRef(true);
+  const currentProjectDirRef = reactExports.useRef(projectDir);
+  const lastVersion = reactExports.useRef(void 0);
+  const bridgeLoggedRef = reactExports.useRef(false);
+  reactExports.useEffect(() => {
+    isMountedRef.current = true;
+    currentProjectDirRef.current = projectDir;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [projectDir]);
+  reactExports.useEffect(() => {
     if (!hasBridge && !bridgeLoggedRef.current) {
       bridgeLoggedRef.current = true;
       console.error(
@@ -11844,31 +11853,34 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       );
     }
   }, [hasBridge]);
-  const refresh = useCallback(async () => {
-    if (!projectDir) return;
+  const refresh = reactExports.useCallback(async () => {
+    if (!projectDir || !isMountedRef.current) return;
     if (!window.api?.manualAi) {
       return;
     }
     try {
       const s = await window.api.manualAi.getStatus(projectDir);
+      if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
       setStatus(s);
       if (window.api.manualAi.getEditorialSettings) {
         const ed2 = await window.api.manualAi.getEditorialSettings(projectDir);
+        if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
         if (ed2.success && ed2.settings) {
           setEditorialSettings(ed2.settings);
         }
       }
     } catch (err) {
+      if (!isMountedRef.current) return;
       const msg = err instanceof Error ? err.message : String(err);
       console.error("[ManualAI] getStatus failed:", msg);
       setNotice(`Unable to read Manual AI status: ${msg}`);
     }
   }, [projectDir]);
-  useEffect(() => {
+  reactExports.useEffect(() => {
     if (!isPromptMode || !projectDir) return;
     void refresh();
     const off = window.api?.manualAi?.onStatusUpdated?.((payload) => {
-      if (payload.projectDir === projectDir) {
+      if (isMountedRef.current && payload.projectDir === projectDir) {
         setStatus(payload.status);
       }
     });
@@ -11876,7 +11888,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       off?.();
     };
   }, [isPromptMode, projectDir, refresh]);
-  useEffect(() => {
+  reactExports.useEffect(() => {
     if (!isPromptMode || !projectDir) return;
     const v2 = pipelineState?.version;
     if (v2 !== lastVersion.current) {
@@ -11899,8 +11911,8 @@ function ManualAiPromptPanel({ project, pipelineState }) {
   const showStock = Boolean(waitInfo);
   const missing = status?.missingSceneIndices?.length ? status.missingSceneIndices : waitInfo?.missingSceneIndices ?? [];
   const staleCount = status?.staleSceneIndices?.length ?? 0;
-  const rows = useMemo(() => status?.rows ?? [], [status]);
-  useEffect(() => {
+  const rows = reactExports.useMemo(() => status?.rows ?? [], [status]);
+  reactExports.useEffect(() => {
     if (!isPromptMode || !projectDir || !hasBridge) return;
     if (effectiveAllReady) return;
     const isWaiting = Boolean(waitInfo && !effectiveAllReady);
@@ -11987,10 +11999,11 @@ function ManualAiPromptPanel({ project, pipelineState }) {
     if (!res.success) setNotice(res.error || "Could not open the prompt file.");
   }
   async function commit(mappings, opts = {}) {
-    if (!window.api?.manualAi) return;
+    if (!window.api?.manualAi || !isMountedRef.current) return;
     setBusy(true);
     try {
       const res = await window.api.manualAi.commitImport({ projectDir, mappings, ...opts });
+      if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
       if (!res.success || !res.result) {
         setNotice(res.error || "Import failed.");
         return;
@@ -12005,16 +12018,19 @@ function ManualAiPromptPanel({ project, pipelineState }) {
         `${n2} asset${n2 === 1 ? "" : "s"} imported · ${res.result.status.ready}/${res.result.status.expected} ready` + (res.result.rejections.length > 0 ? ` · ${res.result.rejections.length} need attention` : "")
       );
     } finally {
-      setBusy(false);
+      if (isMountedRef.current) {
+        setBusy(false);
+      }
     }
   }
   async function handleSelect(mode, mediaType = "image") {
-    if (!window.api?.manualAi) return;
+    if (!window.api?.manualAi || !isMountedRef.current) return;
     setShowImportMenu(false);
     setShowVideoImportMenu(false);
     setShowMixedImportMenu(false);
     setNotice(null);
     const picked = mediaType === "video" ? await window.api.manualAi.selectVideos(mode) : await window.api.manualAi.selectImages(mode);
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
     if (!picked.success) {
       setNotice(picked.error || "Could not open the file picker.");
       return;
@@ -12032,6 +12048,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       filePaths: picked.filePaths,
       ...mediaType === "video" ? { mediaType: "video" } : {}
     });
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
     if (!planned.success || !planned.plan) {
       setNotice(planned.error || "Could not analyse the selected files.");
       return;
@@ -12068,12 +12085,13 @@ function ManualAiPromptPanel({ project, pipelineState }) {
     else setNotice("Nothing could be imported. See the messages below.");
   }
   async function handleSelectMixed(mode) {
-    if (!window.api?.manualAi) return;
+    if (!window.api?.manualAi || !isMountedRef.current) return;
     setShowImportMenu(false);
     setShowVideoImportMenu(false);
     setShowMixedImportMenu(false);
     setNotice(null);
     const picked = await window.api.manualAi.selectMixed(mode);
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
     if (!picked.success) {
       setNotice(picked.error || "Could not open the file picker.");
       return;
@@ -12089,6 +12107,7 @@ function ManualAiPromptPanel({ project, pipelineState }) {
       filePaths: picked.filePaths,
       mediaType: "mixed"
     });
+    if (!isMountedRef.current || currentProjectDirRef.current !== projectDir) return;
     if (!planned.success || !planned.plan) {
       setNotice(planned.error || "Could not analyse the selected files.");
       return;
@@ -18248,7 +18267,7 @@ function StoryboardSceneCard({
                   /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "img",
                     {
-                      src: `file://${asset.localPath}`,
+                      src: `app-media:///${encodeURIComponent(asset.localPath.replace(/\\/g, "/"))}`,
                       alt: "AI Still Preview",
                       style: {
                         width: "160px",
@@ -18904,8 +18923,8 @@ Licenses: ${res.licensesPath}`);
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "9px", color: "var(--text-muted)" }, children: "CONTRADICTED" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { background: "var(--bg-void)", padding: "8px", borderRadius: "4px", textAlign: "center" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "15px", fontWeight: 700, color: claimLedger.summary.coveragePct >= 70 ? "#22c55e" : "#f59e0b" }, children: [
-              claimLedger.summary.coveragePct,
+            /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "15px", fontWeight: 700, color: (claimLedger.summary?.coveragePct ?? 0) >= 70 ? "#22c55e" : "#f59e0b" }, children: [
+              claimLedger.summary?.coveragePct ?? 0,
               "%"
             ] }),
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "9px", color: "var(--text-muted)" }, children: "COVERAGE" })
@@ -21719,7 +21738,8 @@ const ThumbnailStudioPage = ({
                   {
                     templates,
                     selectedTemplateId: selectedTemplateId || settings?.selectedTemplateId || "",
-                    onSelect: handleTemplateChange
+                    onChange: (id2) => void handleTemplateChange(id2),
+                    onManageLibrary: () => onNavigate?.("thumbnail-library")
                   }
                 )
               ] }),
@@ -30015,6 +30035,317 @@ function YouTubeResearchPage({ onNavigate }) {
     )
   ] }) });
 }
+class AppErrorBoundary extends reactExports.Component {
+  constructor(props) {
+    super(props);
+    this.state = {
+      hasError: false,
+      error: null,
+      errorInfo: null,
+      copiedNotice: false
+    };
+  }
+  static getDerivedStateFromError(error) {
+    return {
+      hasError: true,
+      error
+    };
+  }
+  componentDidCatch(error, errorInfo) {
+    this.setState({ errorInfo });
+    console.error("[AppErrorBoundary] Caught uncaught React error in UI tree:", error, errorInfo);
+  }
+  handleReload = () => {
+    window.location.reload();
+  };
+  handleReset = () => {
+    this.setState({
+      hasError: false,
+      error: null,
+      errorInfo: null,
+      copiedNotice: false
+    });
+    this.props.onRecover?.();
+  };
+  handleCopyDiagnostics = () => {
+    const { error, errorInfo } = this.state;
+    const diagnostics = [
+      "=== Long-Form AI Video Factory UI Diagnostics ===",
+      `Timestamp: ${(/* @__PURE__ */ new Date()).toISOString()}`,
+      `Error: ${error?.name || "Error"}: ${error?.message || "Unknown error"}`,
+      "Stack Trace:",
+      error?.stack || "No stack available",
+      "Component Stack:",
+      errorInfo?.componentStack || "No component stack available"
+    ].join("\n\n");
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(diagnostics).then(() => {
+        this.setState({ copiedNotice: true });
+        setTimeout(() => this.setState({ copiedNotice: false }), 3e3);
+      }).catch(() => {
+      });
+    }
+  };
+  render() {
+    const { hasError, error, errorInfo, copiedNotice } = this.state;
+    const {
+      children,
+      fallbackTitle = "Something went wrong displaying this page.",
+      fallbackMessage = "The application encountered an unexpected interface error. Your imported media, project configuration, and ongoing production work on disk remain completely safe.",
+      isRouteLevel = false,
+      onNavigateProduction,
+      onNavigateHome
+    } = this.props;
+    if (!hasError) {
+      return children;
+    }
+    const errorDetails = [
+      error?.message,
+      errorInfo?.componentStack
+    ].filter(Boolean).join("\n");
+    return /* @__PURE__ */ jsxRuntimeExports.jsx(
+      "div",
+      {
+        className: isRouteLevel ? "route-error-boundary-container" : "app-error-boundary-full",
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          minHeight: isRouteLevel ? "400px" : "100vh",
+          height: isRouteLevel ? "100%" : "100vh",
+          width: "100%",
+          backgroundColor: "#0a0a0f",
+          color: "#f3f4f6",
+          padding: "24px",
+          boxSizing: "border-box",
+          fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif'
+        },
+        role: "alert",
+        children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              maxWidth: "680px",
+              width: "100%",
+              background: "rgba(18, 18, 28, 0.95)",
+              border: "1px solid rgba(239, 68, 68, 0.35)",
+              borderRadius: "12px",
+              boxShadow: "0 20px 40px rgba(0, 0, 0, 0.6), 0 0 30px rgba(239, 68, 68, 0.1)",
+              padding: "32px",
+              boxSizing: "border-box",
+              display: "flex",
+              flexDirection: "column",
+              gap: "20px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "14px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "div",
+                  {
+                    style: {
+                      width: "44px",
+                      height: "44px",
+                      borderRadius: "10px",
+                      background: "rgba(239, 68, 68, 0.15)",
+                      border: "1px solid rgba(239, 68, 68, 0.3)",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: "22px",
+                      flexShrink: 0
+                    },
+                    children: "⚠️"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "h2",
+                    {
+                      style: {
+                        margin: 0,
+                        fontSize: "18px",
+                        fontWeight: 700,
+                        color: "#ffffff",
+                        letterSpacing: "-0.01em"
+                      },
+                      children: fallbackTitle
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "p",
+                    {
+                      style: {
+                        margin: "4px 0 0 0",
+                        fontSize: "13px",
+                        color: "#9ca3af",
+                        lineHeight: 1.5
+                      },
+                      children: fallbackMessage
+                    }
+                  )
+                ] })
+              ] }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "div",
+                {
+                  style: {
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: "10px",
+                    paddingTop: "6px"
+                  },
+                  children: [
+                    onNavigateProduction && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-primary",
+                        onClick: () => {
+                          this.handleReset();
+                          onNavigateProduction();
+                        },
+                        style: {
+                          background: "#6366f1",
+                          color: "#ffffff",
+                          border: "none",
+                          padding: "9px 18px",
+                          borderRadius: "6px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          fontSize: "13px"
+                        },
+                        children: "Return to Production"
+                      }
+                    ),
+                    onNavigateHome && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary",
+                        onClick: () => {
+                          this.handleReset();
+                          onNavigateHome();
+                        },
+                        style: {
+                          background: "rgba(255, 255, 255, 0.08)",
+                          color: "#e5e7eb",
+                          border: "1px solid rgba(255, 255, 255, 0.15)",
+                          padding: "9px 18px",
+                          borderRadius: "6px",
+                          fontWeight: 500,
+                          cursor: "pointer",
+                          fontSize: "13px"
+                        },
+                        children: "Go to Project Home"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary",
+                        onClick: this.handleReset,
+                        style: {
+                          background: "rgba(255, 255, 255, 0.08)",
+                          color: "#e5e7eb",
+                          border: "1px solid rgba(255, 255, 255, 0.15)",
+                          padding: "9px 18px",
+                          borderRadius: "6px",
+                          fontWeight: 500,
+                          cursor: "pointer",
+                          fontSize: "13px"
+                        },
+                        children: "Try Recovering Page"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary",
+                        onClick: this.handleReload,
+                        style: {
+                          background: "rgba(255, 255, 255, 0.08)",
+                          color: "#e5e7eb",
+                          border: "1px solid rgba(255, 255, 255, 0.15)",
+                          padding: "9px 18px",
+                          borderRadius: "6px",
+                          fontWeight: 500,
+                          cursor: "pointer",
+                          fontSize: "13px"
+                        },
+                        children: "Reload Interface"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary",
+                        onClick: this.handleCopyDiagnostics,
+                        style: {
+                          background: "rgba(255, 255, 255, 0.05)",
+                          color: "#9ca3af",
+                          border: "1px solid rgba(255, 255, 255, 0.1)",
+                          padding: "9px 16px",
+                          borderRadius: "6px",
+                          fontWeight: 500,
+                          cursor: "pointer",
+                          fontSize: "13px",
+                          marginLeft: "auto"
+                        },
+                        children: copiedNotice ? "✓ Copied to Clipboard" : "Copy Diagnostics"
+                      }
+                    )
+                  ]
+                }
+              ),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "details",
+                {
+                  style: {
+                    marginTop: "4px",
+                    padding: "12px 14px",
+                    borderRadius: "8px",
+                    background: "rgba(0, 0, 0, 0.4)",
+                    border: "1px solid rgba(255, 255, 255, 0.08)",
+                    fontSize: "12px",
+                    color: "#9ca3af"
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs("summary", { style: { cursor: "pointer", color: "#cbd5e1", fontWeight: 600 }, children: [
+                      "Technical Error Details (",
+                      error?.name || "Error",
+                      ")"
+                    ] }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "pre",
+                      {
+                        style: {
+                          marginTop: "10px",
+                          marginBottom: 0,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all",
+                          fontFamily: "Consolas, Monaco, monospace",
+                          fontSize: "11px",
+                          color: "#f87171",
+                          maxHeight: "220px",
+                          overflowY: "auto"
+                        },
+                        children: errorDetails || error?.message || "No stack trace captured."
+                      }
+                    )
+                  ]
+                }
+              )
+            ]
+          }
+        )
+      }
+    );
+  }
+}
 function App() {
   const [currentPage, setCurrentPage] = reactExports.useState("home");
   const { isSimpleMode, toggleInterfaceMode } = useUiPreferences();
@@ -30158,101 +30489,349 @@ function App() {
           } : null
         }
       ),
-      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "main-content", children: [
-        currentPage === "home" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          HomePage,
-          {
-            onCreate: handleCreateProject,
-            onOpen: handleOpenProject,
-            onNavigate: (p2) => navigate(p2)
-          }
-        ),
-        currentPage === "input" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          InputPage,
-          {
-            project,
-            onUpdateInputs: updateInputs,
-            onScanMedia: handleScanMedia,
-            isScanning,
-            onNavigate: (p2) => navigate(p2)
-          }
-        ),
-        currentPage === "production" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ProductionPage,
-          {
-            project,
-            onNavigate: (p2) => navigate(p2)
-          }
-        ),
-        currentPage === "transcribe" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          TranscriptionPage,
-          {
-            project,
-            transcript,
-            isTranscribing,
-            transcribeProgress,
-            onStartTranscription: handleTranscribe
-          }
-        ),
-        currentPage === "planning" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(PlanningPage, { project }),
-        currentPage === "captions" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(CaptionsPage, { projectDir: project.projectDir }),
-        currentPage === "stock" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          StockPage,
-          {
-            project,
-            review: stockReview,
-            isRunning: isStockRunning,
-            progress: stockProgress,
-            onRun: () => runStockSearch(project.projectDir),
-            onReplace: (idx, q2) => stockReplace(project.projectDir, idx, q2),
-            onLock: (idx, locked) => stockLock(project.projectDir, idx, locked),
-            onUpload: (idx) => stockUpload(project.projectDir, idx),
-            onLoad: () => loadStockReview(project.projectDir)
-          }
-        ),
-        currentPage === "audio" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          AudioDirectorPage,
-          {
-            project,
-            audioDirector
-          }
-        ),
-        currentPage === "settings" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsPage, { project, onUpdateSettings: updateSettings }),
-        currentPage === "analysis" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(AnalysisPage, { project, scanResult }),
-        currentPage === "render" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          RenderPage,
-          {
-            project,
-            onNavigate: (p2) => navigate(p2)
-          }
-        ),
-        currentPage === "qa" && /* @__PURE__ */ jsxRuntimeExports.jsx(QAPage, {}),
-        currentPage === "youtube-research" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          YouTubeResearchPage,
-          {
-            project,
-            onNavigate: (p2) => navigate(p2)
-          }
-        ),
-        currentPage === "thumbnails" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ThumbnailStudioPage,
-          {
-            project,
-            onNavigate: (p2) => navigate(p2)
-          }
-        ),
-        currentPage === "thumbnail-library" && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          ThumbnailPromptLibraryPage,
-          {
-            onBack: () => navigate(project ? "thumbnails" : "home")
-          }
-        )
-      ] })
+      /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "main-content", children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+        AppErrorBoundary,
+        {
+          isRouteLevel: true,
+          fallbackTitle: `Something went wrong displaying the ${currentPage} page.`,
+          onNavigateProduction: project ? () => navigate("production") : void 0,
+          onNavigateHome: () => navigate("home"),
+          children: [
+            currentPage === "home" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              HomePage,
+              {
+                onCreate: handleCreateProject,
+                onOpen: handleOpenProject,
+                onNavigate: (p2) => navigate(p2)
+              }
+            ),
+            currentPage === "input" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              InputPage,
+              {
+                project,
+                onUpdateInputs: updateInputs,
+                onScanMedia: handleScanMedia,
+                isScanning,
+                onNavigate: (p2) => navigate(p2)
+              }
+            ),
+            currentPage === "production" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              ProductionPage,
+              {
+                project,
+                onNavigate: (p2) => navigate(p2)
+              }
+            ),
+            currentPage === "transcribe" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              TranscriptionPage,
+              {
+                project,
+                transcript,
+                isTranscribing,
+                transcribeProgress,
+                onStartTranscription: handleTranscribe
+              }
+            ),
+            currentPage === "planning" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(PlanningPage, { project }),
+            currentPage === "captions" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(CaptionsPage, { projectDir: project.projectDir }),
+            currentPage === "stock" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              StockPage,
+              {
+                project,
+                review: stockReview,
+                isRunning: isStockRunning,
+                progress: stockProgress,
+                onRun: () => runStockSearch(project.projectDir),
+                onReplace: (idx, q2) => stockReplace(project.projectDir, idx, q2),
+                onLock: (idx, locked) => stockLock(project.projectDir, idx, locked),
+                onUpload: (idx) => stockUpload(project.projectDir, idx),
+                onLoad: () => loadStockReview(project.projectDir)
+              }
+            ),
+            currentPage === "audio" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              AudioDirectorPage,
+              {
+                project,
+                audioDirector
+              }
+            ),
+            currentPage === "settings" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(SettingsPage, { project, onUpdateSettings: updateSettings }),
+            currentPage === "analysis" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(AnalysisPage, { project, scanResult }),
+            currentPage === "render" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              RenderPage,
+              {
+                project,
+                onNavigate: (p2) => navigate(p2)
+              }
+            ),
+            currentPage === "qa" && /* @__PURE__ */ jsxRuntimeExports.jsx(QAPage, {}),
+            currentPage === "youtube-research" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              YouTubeResearchPage,
+              {
+                project,
+                onNavigate: (p2) => navigate(p2)
+              }
+            ),
+            currentPage === "thumbnails" && project && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              ThumbnailStudioPage,
+              {
+                project,
+                onNavigate: (p2) => navigate(p2)
+              }
+            ),
+            currentPage === "thumbnail-library" && /* @__PURE__ */ jsxRuntimeExports.jsx(
+              ThumbnailPromptLibraryPage,
+              {
+                onBack: () => navigate(project ? "thumbnails" : "home")
+              }
+            )
+          ]
+        },
+        currentPage
+      ) })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(ProgressLog, { logs: activeLogs, scanProgress: activeProgress })
   ] });
 }
-typeof window !== "undefined" && (!window.api || window.location.search.includes("preview="));
+const mockProject = {
+  id: "mock-proj-1",
+  name: "History of Artificial Intelligence",
+  projectDir: "/Users/macbook/Documents/Projects/AI-History",
+  status: "idle",
+  settings: {
+    resolution: "1080p",
+    aspectRatio: "16:9",
+    language: "vi"
+  },
+  inputs: {
+    scriptPath: "/mock/script.txt",
+    voiceoverPath: "/mock/voice.mp3",
+    imagesFolder: "/mock/images",
+    videosFolder: "/mock/videos",
+    musicFolder: "/mock/music",
+    sfxFolder: "/mock/sfx"
+  },
+  stats: {
+    totalImages: 12,
+    totalVideos: 28,
+    totalMusic: 4,
+    totalSfx: 16,
+    voiceDurationSeconds: 480,
+    estimatedScenes: 95,
+    estimatedChapters: 6
+  },
+  createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+  updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+  lastOperation: null,
+  error: null
+};
+function getMockState(mode) {
+  if (mode === "stock-search") {
+    return {
+      schemaVersion: 1,
+      version: 18,
+      runId: "run-stock-search-demo",
+      projectDir: mockProject.projectDir,
+      currentStage: "stock-search",
+      overallStatus: "running",
+      startedAt: new Date(Date.now() - 48e3).toISOString(),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      inputFingerprint: { scriptPath: "/mock/script.txt", voiceoverPath: "/mock/voice.mp3" },
+      options: { videoDimensions: { width: 1920, height: 1080 } },
+      stages: {
+        validating: { status: "completed", progress: 1, durationMs: 2400 },
+        transcribing: { status: "completed", progress: 1, durationMs: 14200 },
+        planning: { status: "completed", progress: 1, durationMs: 18500 },
+        captions: { status: "completed", progress: 1, durationMs: 8200 },
+        "global-context": { status: "completed", progress: 1, durationMs: 11800, artifactPath: "/mock/artifacts/global-context.json" },
+        "stock-search": {
+          status: "running",
+          progress: 0.83,
+          message: "Searching Pexels/Pixabay [79/95 scenes matched]",
+          startedAt: new Date(Date.now() - 15e3).toISOString(),
+          stats: { totalScenes: 95, processedScenes: 79, assignedScenes: 79, downloadedScenes: 65 }
+        },
+        "audio-search": { status: "pending", progress: 0 },
+        preflight: { status: "pending", progress: 0 },
+        rendering: { status: "pending", progress: 0 },
+        postflight: { status: "pending", progress: 0 }
+      },
+      warnings: [],
+      fatalErrors: []
+    };
+  }
+  if (mode === "rendering") {
+    return {
+      schemaVersion: 1,
+      version: 42,
+      runId: "run-rendering-demo",
+      projectDir: mockProject.projectDir,
+      currentStage: "rendering",
+      overallStatus: "running",
+      startedAt: new Date(Date.now() - 145e3).toISOString(),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      inputFingerprint: { scriptPath: "/mock/script.txt", voiceoverPath: "/mock/voice.mp3" },
+      options: { videoDimensions: { width: 1920, height: 1080 } },
+      stages: {
+        validating: { status: "completed", progress: 1, durationMs: 2400 },
+        transcribing: { status: "completed", progress: 1, durationMs: 14200 },
+        planning: { status: "completed", progress: 1, durationMs: 18500 },
+        captions: { status: "completed", progress: 1, durationMs: 8200 },
+        "global-context": { status: "completed", progress: 1, durationMs: 11800 },
+        "stock-search": { status: "completed", progress: 1, durationMs: 52e3, stats: { totalScenes: 95, assignedScenes: 95 } },
+        "audio-search": { status: "completed", progress: 1, durationMs: 16e3 },
+        preflight: { status: "completed", progress: 1, durationMs: 4100, artifactPath: "/mock/artifacts/preflight-report.json" },
+        rendering: {
+          status: "running",
+          progress: 0.62,
+          message: "Compositing frame 1302/2100 (Captions + Audio Ducking)",
+          startedAt: new Date(Date.now() - 18e3).toISOString(),
+          stats: { currentFrame: 1302, totalFrames: 2100, fps: 30 }
+        },
+        postflight: { status: "pending", progress: 0 }
+      },
+      warnings: [],
+      fatalErrors: []
+    };
+  }
+  return {
+    schemaVersion: 1,
+    version: 35,
+    runId: "run-recovery-demo",
+    projectDir: mockProject.projectDir,
+    currentStage: "rendering",
+    overallStatus: "interrupted",
+    startedAt: new Date(Date.now() - 165e3).toISOString(),
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    inputFingerprint: { scriptPath: "/mock/script.txt", voiceoverPath: "/mock/voice.mp3" },
+    options: { videoDimensions: { width: 1920, height: 1080 } },
+    stages: {
+      validating: { status: "completed", progress: 1, durationMs: 2400 },
+      transcribing: { status: "completed", progress: 1, durationMs: 14200 },
+      planning: { status: "completed", progress: 1, durationMs: 18500 },
+      captions: { status: "completed", progress: 1, durationMs: 8200 },
+      "global-context": { status: "completed", progress: 1, durationMs: 11800 },
+      "stock-search": { status: "completed", progress: 1, durationMs: 52e3 },
+      "audio-search": { status: "completed", progress: 1, durationMs: 16e3 },
+      preflight: { status: "completed", progress: 1, durationMs: 4100 },
+      rendering: {
+        status: "interrupted",
+        progress: 0.45,
+        message: "Application closed — ready to resume",
+        durationMs: 9500
+      },
+      postflight: { status: "pending", progress: 0 }
+    },
+    warnings: [],
+    fatalErrors: []
+  };
+}
+function PreviewApp() {
+  const urlParams = typeof window !== "undefined" ? new URLSearchParams(window.location.search) : null;
+  const initialMode = urlParams?.get("preview") || "stock-search";
+  const [activeScenario, setActiveScenario] = reactExports.useState(
+    initialMode === "rendering" || initialMode === "recovery" ? initialMode : "stock-search"
+  );
+  const currentState = getMockState(activeScenario);
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { minHeight: "100vh", background: "var(--bg-void, #12121c)", color: "#fff" }, children: [
+    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+      "div",
+      {
+        style: {
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          padding: "8px 24px",
+          background: "rgba(0,0,0,0.6)",
+          borderBottom: "1px solid rgba(255,255,255,0.1)",
+          position: "sticky",
+          top: 0,
+          zIndex: 100
+        },
+        children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--brand-accent, #a78bfa)" }, children: "QA Preview Scenarios:" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                className: `btn btn-sm ${activeScenario === "stock-search" ? "btn-primary" : "btn-secondary"}`,
+                onClick: () => setActiveScenario("stock-search"),
+                id: "scenario-stock",
+                children: "1. Stock Search (Running)"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                className: `btn btn-sm ${activeScenario === "rendering" ? "btn-primary" : "btn-secondary"}`,
+                onClick: () => setActiveScenario("rendering"),
+                id: "scenario-render",
+                children: "2. Rendering Video (Running)"
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "button",
+              {
+                type: "button",
+                className: `btn btn-sm ${activeScenario === "recovery" ? "btn-primary" : "btn-secondary"}`,
+                onClick: () => setActiveScenario("recovery"),
+                id: "scenario-recovery",
+                children: "3. Recovery State (Paused Safely)"
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--text-muted, #9ca3af)" }, children: [
+            "Mode: ",
+            activeScenario,
+            " · Elapsed: ",
+            activeScenario === "recovery" ? "02:07" : "00:48+"
+          ] })
+        ]
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { padding: "24px 20px 80px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ClientPipelineDashboard,
+      {
+        project: mockProject,
+        pipelineState: currentState,
+        isRunning: activeScenario !== "recovery",
+        onCancel: async () => {
+          alert("Cancel clicked");
+          return true;
+        },
+        onResume: async () => {
+          alert("Resume Production clicked");
+          return true;
+        },
+        onRetryStage: async (stg) => {
+          alert(`Retry stage: ${stg}`);
+          return true;
+        },
+        onNavigate: (page) => {
+          alert(`Navigate called with target page: "${page}"`);
+        }
+      }
+    ) })
+  ] });
+}
+if (typeof window !== "undefined") {
+  window.addEventListener("error", (event) => {
+    console.error("[Renderer Global Error]:", event.error || event.message);
+  });
+  window.addEventListener("unhandledrejection", (event) => {
+    console.error("[Renderer Unhandled Rejection]:", event.reason);
+  });
+}
+const isPreviewMode = typeof window !== "undefined" && (!window.api || window.location.search.includes("preview="));
 client.createRoot(document.getElementById("root")).render(
-  /* @__PURE__ */ jsxRuntimeExports.jsx(React.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(App, {}) })
+  /* @__PURE__ */ jsxRuntimeExports.jsx(React.StrictMode, { children: /* @__PURE__ */ jsxRuntimeExports.jsx(
+    AppErrorBoundary,
+    {
+      fallbackTitle: "Application Interface Error",
+      fallbackMessage: "A critical user interface error occurred. Your video assets, project state, and rendered files are preserved.",
+      children: isPreviewMode ? /* @__PURE__ */ jsxRuntimeExports.jsx(PreviewApp, {}) : /* @__PURE__ */ jsxRuntimeExports.jsx(App, {})
+    }
+  ) })
 );

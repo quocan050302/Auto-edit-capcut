@@ -33193,6 +33193,47 @@ function createWindow() {
     mainWindow.show();
     logger.info("Main window shown");
   });
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    logger.error("[Electron] Renderer process terminated unexpectedly:", {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  });
+  mainWindow.on("unresponsive", () => {
+    logger.warn("[Electron] Main window became unresponsive");
+  });
+  mainWindow.on("responsive", () => {
+    logger.info("[Electron] Main window became responsive again");
+  });
+  mainWindow.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedURL) => {
+    if (errorCode !== -3) {
+      logger.error("[Electron] Failed to load renderer URL:", {
+        errorCode,
+        errorDescription,
+        url: validatedURL
+      });
+    }
+  });
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (level === 2) {
+      logger.error("[Renderer Console Error]", { message, line, sourceId });
+    } else if (level === 1 && utils.is.dev) {
+      logger.warn("[Renderer Console Warn]", { message, line, sourceId });
+    }
+  });
+  if (utils.is.dev) {
+    mainWindow.webContents.on("before-input-event", (event, input) => {
+      if (input.type === "keyDown" && input.key === "F12") {
+        event.preventDefault();
+        if (mainWindow.webContents.isDevToolsOpened()) {
+          mainWindow.webContents.closeDevTools();
+        } else {
+          mainWindow.webContents.openDevTools({ mode: "detach" });
+        }
+      }
+    });
+  }
   mainWindow.webContents.setWindowOpenHandler((details) => {
     electron.shell.openExternal(details.url);
     return { action: "deny" };

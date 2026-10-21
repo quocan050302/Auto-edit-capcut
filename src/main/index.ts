@@ -55,6 +55,58 @@ function createWindow(): BrowserWindow {
     logger.info('Main window shown')
   })
 
+  // ── Renderer Crash & Health Diagnostics ─────────────────────────────────
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logger.error('[Electron] Renderer process terminated unexpectedly:', {
+      reason: details.reason,
+      exitCode: details.exitCode,
+      timestamp: new Date().toISOString()
+    })
+  })
+
+  mainWindow.on('unresponsive', () => {
+    logger.warn('[Electron] Main window became unresponsive')
+  })
+
+  mainWindow.on('responsive', () => {
+    logger.info('[Electron] Main window became responsive again')
+  })
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    // Error code -3 is ERR_ABORTED (normal during user navigation or reload)
+    if (errorCode !== -3) {
+      logger.error('[Electron] Failed to load renderer URL:', {
+        errorCode,
+        errorDescription,
+        url: validatedURL
+      })
+    }
+  })
+
+  // Forward renderer console warnings & errors to Electron logger
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    // level: 0 = log/info, 1 = warning, 2 = error
+    if (level === 2) {
+      logger.error('[Renderer Console Error]', { message, line, sourceId })
+    } else if (level === 1 && is.dev) {
+      logger.warn('[Renderer Console Warn]', { message, line, sourceId })
+    }
+  })
+
+  // In development mode, allow F12 to toggle DevTools
+  if (is.dev) {
+    mainWindow.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.key === 'F12') {
+        event.preventDefault()
+        if (mainWindow.webContents.isDevToolsOpened()) {
+          mainWindow.webContents.closeDevTools()
+        } else {
+          mainWindow.webContents.openDevTools({ mode: 'detach' })
+        }
+      }
+    })
+  }
+
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }

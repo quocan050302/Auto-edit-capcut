@@ -711,7 +711,7 @@ function StoryboardSceneCard({
                 }}
               >
                 <img
-                  src={`file://${asset.localPath}`}
+                  src={`app-media:///${encodeURIComponent(asset.localPath.replace(/\\/g, '/'))}`}
                   alt="AI Still Preview"
                   style={{
                     width: '160px',
@@ -1409,7 +1409,7 @@ export function StockPage({
                 <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>CONTRADICTED</div>
               </div>
               <div style={{ background: 'var(--bg-void)', padding: '8px', borderRadius: '4px', textAlign: 'center' }}>
-                <div style={{ fontSize: '15px', fontWeight: 700, color: claimLedger.summary.coveragePct >= 70 ? '#22c55e' : '#f59e0b' }}>{claimLedger.summary.coveragePct}%</div>
+                <div style={{ fontSize: '15px', fontWeight: 700, color: (claimLedger.summary?.coveragePct ?? 0) >= 70 ? '#22c55e' : '#f59e0b' }}>{claimLedger.summary?.coveragePct ?? 0}%</div>
                 <div style={{ fontSize: '9px', color: 'var(--text-muted)' }}>COVERAGE</div>
               </div>
             </div>

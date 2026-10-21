@@ -1130,7 +1130,8 @@ export interface StoryboardSummary {
   approvedScenes: number
   needsReviewScenes: number
   missingScenes: number
-  averageRelevanceScore: number
+  averageRelevanceScore?: number
+  averageScore?: number
   duplicateAssetsAvoided: number
 }
 
