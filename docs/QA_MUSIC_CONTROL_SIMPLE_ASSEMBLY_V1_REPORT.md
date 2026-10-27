@@ -223,3 +223,14 @@ Benchmark measured on a 30.0-second 1080p @ 30 FPS timeline consisting of 6 scen
 
 - Simple Assembly is intentionally designed **not** to generate subtitle captions, transitions, or graphic overlays. Users who need dynamic captions or visual grammar overlays should choose **Full Production** or **Source Only** mode.
 - Shorter imported video clips default to freezing the last frame (`freeze-last-frame`) to fill remaining scene duration; speed-ramping or looping is intentionally omitted to avoid visual distortion without user input.
+
+---
+
+## 9. Git Operations & Pull Request Details
+
+- **Base Branch:** `QA` (HEAD: `4c74cb8e05f0afebd719013e0a1cfd630d794716`)
+- **Feature Branch:** `feature/qa-music-toggle-simple-assembly-v1`
+- **Initial Commit SHA:** `b8202d41d3da970def4b895dfe4f7fd21408a1fb`
+- **Pull Request Target URL:** [Create Pull Request on GitHub](https://github.com/quocan050302/Auto-edit-capcut/compare/QA...feature/qa-music-toggle-simple-assembly-v1?expand=1)
+- **Direct PR Target:** Base: `QA` ← Compare: `feature/qa-music-toggle-simple-assembly-v1`
+
