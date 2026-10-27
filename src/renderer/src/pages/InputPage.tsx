@@ -10,7 +10,9 @@ import type {
   AiImageOutputResolution,
   AiFailureBehavior,
   AiImageMode,
-  EditorialGenerationSettings
+  EditorialGenerationSettings,
+  VideoProductionModeSettings,
+  SimpleAssemblyProgressPayload
 } from '../../../../shared/types'
 import {
   resolveVisualMixConfig,
@@ -22,7 +24,10 @@ import {
 import { usePipeline } from '../hooks/usePipeline'
 import { useUiPreferences } from '../hooks/useUiPreferences'
 import { useEditorialSettings } from '../hooks/useEditorialSettings'
+import { useProductionModeSettings } from '../hooks/useProductionModeSettings'
 import { EditorialSetupControls } from '../components/EditorialSetupControls'
+import { AssemblyModeControls } from '../components/AssemblyModeControls'
+import { SimpleAssemblyProgress } from '../components/SimpleAssemblyProgress'
 import { PipelineTimeline } from '../components/PipelineTimeline'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -144,6 +149,12 @@ interface VisualSourceSectionProps {
   isSavingEditorial: boolean
   editorialError?: string | null
   onUpdateEditorialSettings: (patch: Partial<EditorialGenerationSettings>) => Promise<boolean | void>
+  productionSettings: VideoProductionModeSettings
+  isSavingProduction: boolean
+  productionError?: string | null
+  onUpdateProductionSettings: (patch: Partial<VideoProductionModeSettings>) => Promise<boolean | void>
+  onSelectSceneFolder?: () => Promise<void>
+  onClearSceneFolder?: () => void
 }
 
 function VisualSourceSection({
@@ -166,7 +177,13 @@ function VisualSourceSection({
   editorialSettings,
   isSavingEditorial,
   editorialError,
-  onUpdateEditorialSettings
+  onUpdateEditorialSettings,
+  productionSettings,
+  isSavingProduction,
+  productionError,
+  onUpdateProductionSettings,
+  onSelectSceneFolder,
+  onClearSceneFolder
 }: VisualSourceSectionProps): React.ReactElement {
   const containerClass = isAdvanced ? 'panel' : 'setup-section'
   const idSuffix = isAdvanced ? '-adv' : ''
@@ -675,6 +692,21 @@ function VisualSourceSection({
             />
           </div>
         )}
+
+        {/* PRODUCTION & AUDIO CONTROLS (Assembly Mode & True Music Toggle) */}
+        <AssemblyModeControls
+          assemblyMode={productionSettings.assemblyMode}
+          backgroundMusicMode={productionSettings.backgroundMusicMode}
+          sceneFolder={productionSettings.sceneFolder}
+          disabled={isRunning}
+          saving={isSavingProduction}
+          error={productionError}
+          onAssemblyModeChange={(mode) => void onUpdateProductionSettings({ assemblyMode: mode })}
+          onMusicModeChange={(mode) => void onUpdateProductionSettings({ backgroundMusicMode: mode })}
+          onSelectSceneFolder={onSelectSceneFolder}
+          onClearSceneFolder={onClearSceneFolder}
+          idSuffix={idSuffix}
+        />
       </div>
     </div>
   )
@@ -712,6 +744,53 @@ export function InputPage({
     updateSettings: updateEditorialSettings,
     waitForPendingSaves: waitForPendingEditorialSaves
   } = useEditorialSettings(project.projectDir)
+
+  // Video Production Mode Settings (Assembly Mode & True Music Toggle)
+  const {
+    settings: productionSettings,
+    isSaving: isSavingProduction,
+    error: productionError,
+    updateSettings: updateProductionSettings,
+    waitForPendingSaves: waitForPendingProductionSaves
+  } = useProductionModeSettings(project.projectDir)
+
+  const [simpleAssemblyProgress, setSimpleAssemblyProgress] = useState<SimpleAssemblyProgressPayload | null>(null)
+  const [isAssemblingSimple, setIsAssemblingSimple] = useState(false)
+  const [simpleAssemblyError, setSimpleAssemblyError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!window.api?.simpleAssembly?.onProgress) return
+    const cleanup = window.api.simpleAssembly.onProgress((payload) => {
+      setSimpleAssemblyProgress(payload)
+      if (payload.status === 'completed' || payload.status === 'failed') {
+        setIsAssemblingSimple(false)
+        if (payload.status === 'failed' && payload.error) {
+          setSimpleAssemblyError(payload.error)
+        }
+      }
+    })
+    return () => {
+      cleanup?.()
+    }
+  }, [])
+
+  async function handleSelectSceneFolder(): Promise<void> {
+    if (!window.api?.simpleAssembly?.selectSceneFolder) return
+    const folder = await window.api.simpleAssembly.selectSceneFolder()
+    if (folder) {
+      await updateProductionSettings({ sceneFolder: folder })
+    }
+  }
+
+  function handleClearSceneFolder(): void {
+    void updateProductionSettings({ sceneFolder: undefined })
+  }
+
+  async function handleCancelSimpleAssembly(): Promise<void> {
+    if (!window.api?.simpleAssembly?.cancel) return
+    await window.api.simpleAssembly.cancel(project.projectDir)
+    setIsAssemblingSimple(false)
+  }
 
   // Flow health check for Custom Mix with AI ratio > 0
   const [flowHealth, setFlowHealth] = useState<{
@@ -896,7 +975,10 @@ export function InputPage({
     (runningInputsSnapshotRef.current.script !== inputs.scriptPath ||
       runningInputsSnapshotRef.current.voiceover !== inputs.voiceoverPath)
 
-  const isAutoReady = !!(inputs.scriptPath && inputs.voiceoverPath)
+  const isSimpleAssembly = productionSettings.assemblyMode === 'simple-assembly'
+  const isAutoReady = isSimpleAssembly
+    ? !!inputs.voiceoverPath
+    : !!(inputs.scriptPath && inputs.voiceoverPath)
 
   // Auto-start trigger with debounce and fingerprint guard
   useEffect(() => {
@@ -905,7 +987,7 @@ export function InputPage({
     }
 
     const currentProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
-    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}:${productionSettings.assemblyMode}:${productionSettings.backgroundMusicMode}`
     if (lastAutoStartedFingerprintRef.current === currentFp) {
       return
     }
@@ -936,15 +1018,24 @@ export function InputPage({
     inputs.contentProfileMode,
     effectiveMix.mode,
     effectiveMix.aiImageRatio,
+    productionSettings.assemblyMode,
+    productionSettings.backgroundMusicMode,
     isRunning
   ])
 
   async function handleStartAutoPipeline(): Promise<void> {
-    if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return
+    if (isRunning || isStarting || isAssemblingSimple) return
+    if (isSimpleAssembly && !inputs.voiceoverPath) return
+    if (!isSimpleAssembly && (!inputs.scriptPath || !inputs.voiceoverPath)) return
+
     setIsStarting(true)
+    setSimpleAssemblyError(null)
     try {
       // 1. Await pending saves to prevent last-click race condition
-      await waitForPendingEditorialSaves()
+      await Promise.all([
+        waitForPendingEditorialSaves(),
+        waitForPendingProductionSaves()
+      ])
 
       // 2. Authoritative backend readback before starting pipeline
       let confirmedEditorial = editorialSettings
@@ -959,6 +1050,37 @@ export function InputPage({
         }
       }
 
+      let confirmedProduction = productionSettings
+      if (window.api?.productionModeSettings?.get) {
+        try {
+          const prodRes = await window.api.productionModeSettings.get(project.projectDir)
+          if (prodRes.success && prodRes.settings) {
+            confirmedProduction = prodRes.settings
+          }
+        } catch (prodErr) {
+          console.warn('[Setup] Error reading confirmed production settings:', prodErr)
+        }
+      }
+
+      const effectiveAssemblyMode = confirmedProduction.assemblyMode
+      const effectiveMusicMode = confirmedProduction.backgroundMusicMode
+
+      if (effectiveAssemblyMode === 'simple-assembly') {
+        setIsAssemblingSimple(true)
+        const res = await window.api.simpleAssembly.start({
+          projectDir: project.projectDir,
+          voiceoverPath: inputs.voiceoverPath!,
+          sceneFolder: confirmedProduction.sceneFolder,
+          backgroundMusicMode: effectiveMusicMode,
+          shortClipPolicy: confirmedProduction.shortClipPolicy || 'freeze-last-frame'
+        })
+        if (!res.success) {
+          setIsAssemblingSimple(false)
+          setSimpleAssemblyError(res.error || 'Failed to start Simple Assembly')
+        }
+        return
+      }
+
       const resolvedMix = resolveVisualMixConfig({
         visualSourceMode: inputs.visualSourceMode,
         visualMixConfig: inputs.visualMixConfig,
@@ -967,15 +1089,17 @@ export function InputPage({
       const resolvedProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs)
 
       console.log(
-        `[Setup] Starting pipeline:\nprofileMode=${resolvedProfileMode}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}\neditorialMode=${confirmedEditorial.promptMode}\nrenderMode=${confirmedEditorial.renderOverlayMode}`
+        `[Setup] Starting pipeline:\nprofileMode=${resolvedProfileMode}\nvisualSource=${resolvedMix.mode}\nAI=${Math.round(resolvedMix.aiImageRatio * 100)}%\nStock=${Math.round(resolvedMix.stockFootageRatio * 100)}%\nresolution=${resolvedMix.imageOutputResolution}\neditorialMode=${confirmedEditorial.promptMode}\nrenderMode=${confirmedEditorial.renderOverlayMode}\nmusicMode=${effectiveMusicMode}`
       )
 
       const ok = await startPipeline({
         projectDir: project.projectDir,
-        scriptPath: inputs.scriptPath,
-        voiceoverPath: inputs.voiceoverPath,
+        scriptPath: inputs.scriptPath!,
+        voiceoverPath: inputs.voiceoverPath!,
         whisperModel,
         requireBackgroundMusic: requireBgMusic,
+        backgroundMusicMode: effectiveMusicMode,
+        assemblyMode: 'full-production',
         autoStartOnReady,
         contentType: inputs.contentType ?? (resolvedProfileMode === 'health' ? 'health' : 'default'),
         contentProfileMode: resolvedProfileMode,
@@ -1106,6 +1230,12 @@ export function InputPage({
           isSavingEditorial={isSavingEditorial}
           editorialError={editorialError}
           onUpdateEditorialSettings={updateEditorialSettings}
+          productionSettings={productionSettings}
+          isSavingProduction={isSavingProduction}
+          productionError={productionError}
+          onUpdateProductionSettings={updateProductionSettings}
+          onSelectSceneFolder={handleSelectSceneFolder}
+          onClearSceneFolder={handleClearSceneFolder}
         />
 
         {/* Required Inputs Section */}
@@ -1334,15 +1464,35 @@ export function InputPage({
           />
         </div>
 
+        {/* Simple Assembly Progress (Visible during or after simple assembly) */}
+        {(isAssemblingSimple || simpleAssemblyProgress || simpleAssemblyError) && (
+          <SimpleAssemblyProgress
+            progress={simpleAssemblyProgress}
+            isRunning={isAssemblingSimple}
+            onCancel={() => void handleCancelSimpleAssembly()}
+            error={simpleAssemblyError}
+          />
+        )}
+
         {/* Sticky Action Bar */}
         <div className="sticky-action-bar">
           <div className="sticky-action-bar__info">
             <div className="sticky-action-bar__title">
-              {isAutoReady ? 'Ready to create' : 'Select a script and voiceover to continue'}
+              {isAutoReady
+                ? isSimpleAssembly
+                  ? 'Ready for Simple Assembly'
+                  : 'Ready to create'
+                : isSimpleAssembly
+                ? 'Select voiceover to continue'
+                : 'Select a script and voiceover to continue'}
             </div>
             <div className="sticky-action-bar__subtitle">
               {isAutoReady
-                ? 'All prerequisites met. Click to generate the complete video.'
+                ? isSimpleAssembly
+                  ? 'Voiceover ready. Click to assemble imported scenes into final MP4.'
+                  : 'All prerequisites met. Click to generate the complete video.'
+                : isSimpleAssembly
+                ? 'Audio voiceover is required for Simple Assembly.'
                 : 'Both a narration script and audio voiceover are required for Auto Production.'}
             </div>
           </div>
@@ -1352,31 +1502,43 @@ export function InputPage({
               type="button"
               className="btn btn-secondary"
               onClick={handleSwitchToManual}
-              disabled={isRunning}
+              disabled={isRunning || isAssemblingSimple}
             >
               Run steps manually
             </button>
 
-            {isRunning ? (
+            {isRunning || isAssemblingSimple ? (
               <button
                 type="button"
                 className="btn btn-secondary"
                 style={{ color: '#ef4444', borderColor: '#ef4444' }}
-                onClick={() => setShowCancelPipelineDialog(true)}
+                onClick={() => {
+                  if (isAssemblingSimple) {
+                    void handleCancelSimpleAssembly()
+                  } else {
+                    setShowCancelPipelineDialog(true)
+                  }
+                }}
                 id="btn-cancel-auto-pipeline"
               >
-                Cancel Run
+                {isAssemblingSimple ? 'Cancel Assembly' : 'Cancel Run'}
               </button>
             ) : (
               <button
                 type="button"
                 className="btn btn-primary btn-lg"
                 onClick={handleStartAutoPipeline}
-                disabled={!isAutoReady || isRunning || isStarting}
+                disabled={!isAutoReady || isRunning || isStarting || isAssemblingSimple}
                 id="btn-start-auto-production"
                 style={{ minHeight: '44px', padding: '0 24px', fontWeight: 700 }}
               >
-                {isStarting ? 'Starting Pipeline...' : '⚡ Start Auto Production'}
+                {isStarting
+                  ? 'Starting Pipeline...'
+                  : isAssemblingSimple
+                  ? 'Assembling...'
+                  : isSimpleAssembly
+                  ? '⚡ Start Simple Assembly'
+                  : '⚡ Start Auto Production'}
               </button>
             )}
           </div>
@@ -1588,6 +1750,12 @@ export function InputPage({
         isSavingEditorial={isSavingEditorial}
         editorialError={editorialError}
         onUpdateEditorialSettings={updateEditorialSettings}
+        productionSettings={productionSettings}
+        isSavingProduction={isSavingProduction}
+        productionError={productionError}
+        onUpdateProductionSettings={updateProductionSettings}
+        onSelectSceneFolder={handleSelectSceneFolder}
+        onClearSceneFolder={handleClearSceneFolder}
       />
 
       {/* Required Source Files */}
@@ -1696,7 +1864,7 @@ export function InputPage({
             </div>
             {isAutoReady && (
               <span className="panel-badge badge-success">
-                Ready for Auto Production
+                {isSimpleAssembly ? 'Ready for Simple Assembly' : 'Ready for Auto Production'}
               </span>
             )}
           </div>
@@ -1756,33 +1924,51 @@ export function InputPage({
             >
               <div style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
                 {!isAutoReady
-                  ? 'Select both Script and Voiceover audio above to enable Auto Production'
+                  ? isSimpleAssembly
+                    ? 'Select Voiceover audio above to enable Simple Assembly'
+                    : 'Select both Script and Voiceover audio above to enable Auto Production'
                   : isRunning
                   ? 'Pipeline is currently executing autonomously...'
+                  : isAssemblingSimple
+                  ? 'Simple Assembly is concatenating scenes...'
+                  : isSimpleAssembly
+                  ? 'Voiceover ready. Click to assemble scenes into final MP4.'
                   : 'All prerequisites met. Click to run the entire pipeline from start to finish.'}
               </div>
 
               <div style={{ display: 'flex', gap: '10px' }}>
-                {isRunning ? (
+                {isRunning || isAssemblingSimple ? (
                   <button
                     type="button"
                     className="btn btn-secondary"
-                    onClick={() => setShowCancelPipelineDialog(true)}
+                    onClick={() => {
+                      if (isAssemblingSimple) {
+                        void handleCancelSimpleAssembly()
+                      } else {
+                        setShowCancelPipelineDialog(true)
+                      }
+                    }}
                     style={{ borderColor: '#ef4444', color: '#ef4444' }}
                     id="btn-cancel-auto-pipeline"
                   >
-                    Cancel Run
+                    {isAssemblingSimple ? 'Cancel Assembly' : 'Cancel Run'}
                   </button>
                 ) : (
                   <button
                     type="button"
                     className="btn btn-primary"
                     onClick={handleStartAutoPipeline}
-                    disabled={!isAutoReady || isRunning || isStarting}
+                    disabled={!isAutoReady || isRunning || isStarting || isAssemblingSimple}
                     id="btn-start-auto-production"
                     style={{ padding: '8px 20px', fontWeight: 600 }}
                   >
-                    {isStarting ? 'Starting...' : '⚡ Start Auto Production'}
+                    {isStarting
+                      ? 'Starting...'
+                      : isAssemblingSimple
+                      ? 'Assembling...'
+                      : isSimpleAssembly
+                      ? '⚡ Start Simple Assembly'
+                      : '⚡ Start Auto Production'}
                   </button>
                 )}
               </div>
@@ -1840,6 +2026,16 @@ export function InputPage({
             </div>
           </div>
         </div>
+      )}
+
+      {/* SIMPLE ASSEMBLY PROGRESS */}
+      {(isAssemblingSimple || simpleAssemblyProgress || simpleAssemblyError) && (
+        <SimpleAssemblyProgress
+          progress={simpleAssemblyProgress}
+          isRunning={isAssemblingSimple}
+          onCancel={() => void handleCancelSimpleAssembly()}
+          error={simpleAssemblyError}
+        />
       )}
 
       {/* PIPELINE PROGRESS TIMELINE */}

@@ -3,7 +3,7 @@ import * as os from 'os'
 import * as path from 'path'
 import { logger } from './logger'
 import { renderCaptionsOverlay } from './captions/remotion-renderer'
-import type { AudioPlan, CaptionPlan, RenderTransitionSettings, VisualGrammarDecision, RenderQaReport } from '../../shared/types'
+import type { AudioPlan, CaptionPlan, RenderTransitionSettings, VisualGrammarDecision, RenderQaReport, BackgroundMusicMode } from '../../shared/types'
 import {
   concatSceneClipsWithTransitions,
   validateTransitionSettings,
@@ -659,6 +659,7 @@ export interface PreparedRenderPlan {
   assemblyFingerprint: string
   totalDurationSecs: number
   editorialSettings?: EditorialGenerationSettings
+  backgroundMusicMode?: BackgroundMusicMode
 }
 
 export function encoderKeyFor(mode: VideoEncoderMode | string | undefined, resolution: { width: number; height: number }, fps: number): string {
@@ -681,6 +682,7 @@ export function prepareRenderPlan(params: {
   transitionSettings?: RenderTransitionSettings
   encoderKey: string
   editorialSettings?: EditorialGenerationSettings
+  backgroundMusicMode?: BackgroundMusicMode
 }): PreparedRenderPlan {
   const outputName = params.outputName ?? 'final_output'
   const resolution = params.resolution ?? { width: 1920, height: 1080 }
@@ -1002,7 +1004,8 @@ export function prepareRenderPlan(params: {
     // block fingerprint (overlayPropsHash) instead, which invalidates overlays correctly.
     visualGrammarSettings: { prod: hashes.productionSettings },
     sceneFingerprints: sceneJobs.map((j) => j.fingerprint),
-    renderOverlayMode: editorialSettings.renderOverlayMode
+    renderOverlayMode: editorialSettings.renderOverlayMode,
+    backgroundMusicMode: params.backgroundMusicMode ?? 'auto'
   })
 
   return {
@@ -1031,7 +1034,8 @@ export function prepareRenderPlan(params: {
     renderFingerprint,
     assemblyFingerprint,
     totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0),
-    editorialSettings
+    editorialSettings,
+    backgroundMusicMode: params.backgroundMusicMode
   }
 }
 
@@ -1045,6 +1049,7 @@ export function computeRenderRequestKey(params: {
   transitionSettings?: RenderTransitionSettings
   captionPlan?: CaptionPlan
   editorialSettings?: EditorialGenerationSettings
+  backgroundMusicMode?: BackgroundMusicMode
 }): string {
   const projectDir = normalizePathForFFmpeg(params.projectDir)
   const analysis = path.join(projectDir, 'analysis')
@@ -1061,7 +1066,8 @@ export function computeRenderRequestKey(params: {
     stock: hashFileContent(path.join(analysis, 'stock-assignments.json')),
     editorial: params.editorialSettings
       ? hashJsonValue(params.editorialSettings)
-      : hashFileContent(path.join(analysis, 'editorial-focus-settings.v1.json'))
+      : hashFileContent(path.join(analysis, 'editorial-focus-settings.v1.json')),
+    backgroundMusicMode: params.backgroundMusicMode ?? 'auto'
   })
 }
 
@@ -1077,6 +1083,7 @@ export interface RenderVideoParams {
   transitionSettings?: RenderTransitionSettings
   onProgress?: (p: RenderProgress) => void
   editorialSettings?: EditorialGenerationSettings
+  backgroundMusicMode?: BackgroundMusicMode
   // ── Resumable Render Engine V2 (all optional — defaults keep legacy behaviour) ──
   signal?: AbortSignal
   resourceProfile?: RenderResourceProfile
@@ -1610,18 +1617,21 @@ async function renderVideoV2(
       }
     }
 
-    const approvedMusic = audioPlan?.sections.filter(
-      (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
-    ) ?? []
+    const effectiveMusicMode = params.backgroundMusicMode ?? 'auto'
+    const approvedMusic = effectiveMusicMode === 'off'
+      ? []
+      : (audioPlan?.sections.filter(
+          (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
+        ) ?? [])
 
     const approvedSfx = audioPlan?.sfxAssignments.filter(
       (s) => s.approved && s.approvedLocalPath && fs.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
     ) ?? []
 
     const hasAudio = fs.existsSync(voiceoverPath)
-    const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0
+    const hasMusicOrSfx = (effectiveMusicMode !== 'off' && approvedMusic.length > 0) || approvedSfx.length > 0
 
-    logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`)
+    logger.info(`[RENDER] Audio: musicMode=${effectiveMusicMode}, voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`)
 
     // ── 8. Mix voiceover + music + SFX (checkpoint) ───────────────────────────
     manifest.status = 'mixing-audio'
@@ -1629,9 +1639,12 @@ async function renderVideoV2(
     const audioFingerprint = computeAudioFingerprint({
       assemblyFingerprint: prepared.assemblyFingerprint,
       voiceover: hasAudio ? fileSignature(voiceoverPath) : null,
-      audioPlanHash: hasMusicOrSfx ? prepared.hashes.audioPlan : 'none',
-      musicSignatures: approvedMusic.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath!))),
-      sfxSignatures: approvedSfx.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath!)))
+      audioPlanHash: (hasMusicOrSfx && effectiveMusicMode !== 'off')
+        ? prepared.hashes.audioPlan
+        : (effectiveMusicMode === 'off' ? `no-music:${prepared.hashes.audioPlan}` : 'none'),
+      musicSignatures: effectiveMusicMode === 'off' ? [] : approvedMusic.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath!))),
+      sfxSignatures: approvedSfx.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath!))),
+      backgroundMusicMode: effectiveMusicMode
     })
     const mixedVideo = workspace.mixedVideoPath
     const mixExpect: ArtifactExpectation = {

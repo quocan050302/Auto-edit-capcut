@@ -565,6 +565,108 @@ export interface ProjectInputs {
   }
   visualSourceMode?: VisualSourceMode
   visualMixConfig?: VisualMixConfig
+  backgroundMusicMode?: BackgroundMusicMode
+  assemblyMode?: VideoAssemblyMode
+  sceneFolder?: string | null
+  shortClipPolicy?: ShortClipPolicy
+}
+
+// ─── Video Production & Simple Assembly Modes ─────────────────────────────────
+
+export type BackgroundMusicMode = 'auto' | 'off'
+
+export function resolveBackgroundMusicMode(options?: {
+  backgroundMusicMode?: BackgroundMusicMode
+} | BackgroundMusicMode | null): BackgroundMusicMode {
+  if (typeof options === 'string') {
+    return options === 'off' ? 'off' : 'auto'
+  }
+  return options?.backgroundMusicMode === 'off' ? 'off' : 'auto'
+}
+
+export type VideoAssemblyMode = 'full-production' | 'simple-assembly'
+
+export function resolveVideoAssemblyMode(options?: {
+  assemblyMode?: VideoAssemblyMode
+} | VideoAssemblyMode | null): VideoAssemblyMode {
+  if (typeof options === 'string') {
+    return options === 'simple-assembly' ? 'simple-assembly' : 'full-production'
+  }
+  return options?.assemblyMode === 'simple-assembly' ? 'simple-assembly' : 'full-production'
+}
+
+export type ShortClipPolicy = 'freeze-last-frame'
+
+export interface VideoProductionModeSettings {
+  schemaVersion: 1
+  assemblyMode: VideoAssemblyMode
+  backgroundMusicMode: BackgroundMusicMode
+  shortClipPolicy?: ShortClipPolicy
+}
+
+export const DEFAULT_PRODUCTION_MODE_SETTINGS: VideoProductionModeSettings = {
+  schemaVersion: 1,
+  assemblyMode: 'full-production',
+  backgroundMusicMode: 'auto',
+  shortClipPolicy: 'freeze-last-frame'
+}
+
+export type SimpleAssemblyStatus =
+  | 'validating-voiceover'
+  | 'validating-scenes'
+  | 'resolving-timing'
+  | 'normalizing-scenes'
+  | 'joining-scenes'
+  | 'mixing-audio'
+  | 'validating-output'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+
+export interface SimpleAssemblyProgressPayload {
+  stage: string
+  phase: SimpleAssemblyStatus
+  status?: SimpleAssemblyStatus
+  percent?: number
+  progress: number
+  sceneIndex?: number
+  totalScenes?: number
+  message?: string
+  error?: string
+  outputPath?: string
+  duration?: number
+}
+
+export interface SimpleAssemblyResult {
+  success: boolean
+  outputPath?: string
+  durationSecs?: number
+  fileSizeBytes?: number
+  sceneCount?: number
+  fastPathUsed?: boolean
+  error?: string
+  cancelled?: boolean
+}
+
+export interface SimpleAssemblySceneInput {
+  sceneIndex: number
+  filePath: string
+  fileName: string
+  mediaType: 'video' | 'image'
+  duration?: number
+}
+
+export interface SimpleAssemblySceneInfo {
+  sceneIndex: number
+  sourcePath: string
+  mediaType: 'video' | 'image'
+  durationSecs: number
+  targetFrames: number
+  startFrame: number
+  originalDurationSecs?: number
+  originalWidth?: number
+  originalHeight?: number
+  originalFps?: number
 }
 
 export type MediaItemType = 'image' | 'video' | 'audio'
@@ -1526,6 +1628,15 @@ export const IPC_CHANNELS = {
   MANUAL_AI_GET_EDITORIAL_VERIFICATION: 'manual-ai:get-editorial-verification',
   MANUAL_AI_RECORD_EDITORIAL_VERIFICATION: 'manual-ai:record-editorial-verification',
 
+  // Simple Scene Assembly & Production Mode Settings
+  SIMPLE_ASSEMBLY_START: 'simple-assembly:start',
+  SIMPLE_ASSEMBLY_CANCEL: 'simple-assembly:cancel',
+  SIMPLE_ASSEMBLY_PROGRESS: 'simple-assembly:progress',
+  SIMPLE_ASSEMBLY_STATUS_GET: 'simple-assembly:status-get',
+  SIMPLE_ASSEMBLY_SELECT_SCENE_FOLDER: 'simple-assembly:select-scene-folder',
+  PRODUCTION_MODE_SETTINGS_GET: 'production-mode-settings:get',
+  PRODUCTION_MODE_SETTINGS_UPDATE: 'production-mode-settings:update',
+
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: 'research:sidecar-status',
   RESEARCH_SIDECAR_RESTART: 'research:sidecar-restart',
@@ -1772,6 +1883,10 @@ export interface AutoPipelineOptions {
   visualMixConfig?: VisualMixConfig
   healthVisualConfig?: HealthVisualConfig
   editorialSettings?: EditorialGenerationSettings
+  assemblyMode?: VideoAssemblyMode
+  backgroundMusicMode?: BackgroundMusicMode
+  shortClipPolicy?: ShortClipPolicy
+  sceneFolder?: string
 }
 
 export type PipelineOverallStatus =

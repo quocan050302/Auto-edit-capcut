@@ -616,8 +616,93 @@ export async function runAudioSearchStage(
     ? profileArtifact.resolvedProfile === 'health'
     : (options.contentProfileMode === 'health' || options.contentType === 'health')
 
+  const isNoMusic = options.backgroundMusicMode === 'off'
+  if (isNoMusic) {
+    onProgress('No Background Music selected: skipping music search...', 0.10)
+    checkAborted(signal)
+
+    let plan = loadAudioPlan(options.projectDir)
+    if (!plan) {
+      plan = {
+        generatedAt: new Date().toISOString(),
+        sections: [],
+        sfxAssignments: []
+      }
+    } else {
+      plan = {
+        ...plan,
+        sections: plan.sections.map((s) => ({ ...s, approved: false })),
+        sfxAssignments: plan.sfxAssignments || []
+      }
+    }
+
+    if (isHealthAudio) {
+      const healthPlanPath = path.join(options.projectDir, 'analysis', 'health-visual-plan.json')
+      if (fs.existsSync(healthPlanPath)) {
+        try {
+          const healthPlan = JSON.parse(fs.readFileSync(healthPlanPath, 'utf-8'))
+          const sfxCues = new Map<number, HealthSfxCuePlan>()
+          const sfxScenes: SfxDirectorSceneInput[] = []
+          for (const sc of healthPlan.scenes || []) {
+            if (sc.sfxCue) {
+              sfxCues.set(sc.sceneIndex, sc.sfxCue)
+              sfxScenes.push({
+                sceneIndex: sc.sceneIndex,
+                startTime: sc.startTime,
+                endTime: sc.endTime,
+                duration: sc.duration,
+                category: sc.category,
+                narration: sc.narration,
+                visualIntent: sc.visualIntent,
+                motionPreset: sc.motionPreset
+              })
+            }
+          }
+          if (sfxCues.size > 0) {
+            onProgress('Planning and resolving Health cinematic SFX...', 0.50)
+            let retentionPlan: any = null
+            try {
+              retentionPlan = ensureRetentionPlan(options.projectDir)
+            } catch {
+              // ignore
+            }
+            await HealthSfxDirector.preloadStandardOpeningSfx(options.projectDir, options.openverseToken)
+            await HealthSfxDirector.applyHealthSfxToAudioPlan(
+              options.projectDir,
+              sfxCues,
+              sfxScenes,
+              options.openverseToken,
+              retentionPlan
+            )
+            plan = loadAudioPlan(options.projectDir) || plan
+          }
+        } catch (err) {
+          logger.warn(`[HealthSFX] Failed to apply Health SFX in No Music mode: ${err}`)
+        }
+      }
+    } else {
+      saveAudioPlan(options.projectDir, plan)
+    }
+
+    const downloadedSfxCount = plan?.sfxAssignments?.filter(
+      (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
+    ).length ?? 0
+
+    onProgress(`Audio plan ready: Voiceover only (${downloadedSfxCount} SFX, 0 music tracks)`, 1.0)
+    return {
+      success: true,
+      artifactPath: audioPlanPath,
+      data: plan,
+      stats: {
+        sectionsCount: 0,
+        downloadedMusicCount: 0,
+        sfxCount: downloadedSfxCount
+      }
+    }
+  }
+
   // Check cache nếu audio plan đã tồn tại và hợp lệ
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? 'health' : 'default')) {
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? 'health' : 'default', options.backgroundMusicMode)) {
     const cachedPlan = loadAudioPlan(options.projectDir)
     if (cachedPlan) {
       const downloadedMusicCount = cachedPlan.sections.filter(
@@ -919,7 +1004,8 @@ export async function runRenderStage(
           fps: options.fps,
           transitionSettings: options.transitionSettings,
           captionPlan,
-          editorialSettings: options.editorialSettings
+          editorialSettings: options.editorialSettings,
+          backgroundMusicMode: options.backgroundMusicMode
         })
 
         const activeParams = activeRecord?.params as (RenderResumeParams & { editorialSettings?: EditorialGenerationSettings }) | undefined
@@ -990,6 +1076,7 @@ export async function runRenderStage(
     transitionSettings: options.transitionSettings,
     captionPlan,
     editorialSettings: options.editorialSettings,
+    backgroundMusicMode: options.backgroundMusicMode,
     source: 'pipeline',
     externalSignal: signal,
     onProgress: (p) => {

@@ -9,7 +9,8 @@ import type {
   StockSceneAssignment,
   AutoPipelineOptions,
   ContentType,
-  RenderRecoveryInfo
+  RenderRecoveryInfo,
+  BackgroundMusicMode
 } from '../../../shared/types'
 import { computeHealthMotionHash } from '../health/health-visual-cache'
 import { inspectRenderRecovery } from '../render-cache/render-recovery'
@@ -244,14 +245,19 @@ export function checkVisualCompletion(projectDir: string): StockCompletionResult
   return checkStockCompletion(projectDir)
 }
 
-export function isAudioValid(projectDir: string, requireMusic?: boolean, contentType?: ContentType): boolean {
+export function isAudioValid(
+  projectDir: string,
+  requireMusic?: boolean,
+  contentType?: ContentType,
+  backgroundMusicMode?: BackgroundMusicMode
+): boolean {
   const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
   if (!fs.existsSync(audioPlanPath)) return false
 
   try {
     const plan = JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8')) as AudioPlan
     if (!plan || !Array.isArray(plan.sections)) return false
-    if (requireMusic) {
+    if (requireMusic && backgroundMusicMode !== 'off') {
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
       )
@@ -331,7 +337,7 @@ export function reconcileProjectArtifacts(
   const captionsValid = isCaptionsValid(projectDir)
   const globalContextValid = isGlobalContextValid(projectDir, sourceHash)
   const stockCompletion = checkStockCompletion(projectDir)
-  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic)
+  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic, options?.contentType, options?.backgroundMusicMode)
   const preflightValid = isPreflightValid(projectDir)
 
   // Render valid: kiểm tra output mp4 hoàn chỉnh (không phải .partial.mp4)

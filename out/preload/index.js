@@ -120,6 +120,14 @@ const IPC_CHANNELS = {
   MANUAL_AI_UPDATE_EDITORIAL_SETTINGS: "manual-ai:update-editorial-settings",
   MANUAL_AI_GET_EDITORIAL_VERIFICATION: "manual-ai:get-editorial-verification",
   MANUAL_AI_RECORD_EDITORIAL_VERIFICATION: "manual-ai:record-editorial-verification",
+  // Simple Scene Assembly & Production Mode Settings
+  SIMPLE_ASSEMBLY_START: "simple-assembly:start",
+  SIMPLE_ASSEMBLY_CANCEL: "simple-assembly:cancel",
+  SIMPLE_ASSEMBLY_PROGRESS: "simple-assembly:progress",
+  SIMPLE_ASSEMBLY_STATUS_GET: "simple-assembly:status-get",
+  SIMPLE_ASSEMBLY_SELECT_SCENE_FOLDER: "simple-assembly:select-scene-folder",
+  PRODUCTION_MODE_SETTINGS_GET: "production-mode-settings:get",
+  PRODUCTION_MODE_SETTINGS_UPDATE: "production-mode-settings:update",
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
@@ -356,6 +364,25 @@ const api = {
         electron.ipcRenderer.off(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler);
       };
     }
+  },
+  simpleAssembly: {
+    start: (request) => electron.ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_START, request),
+    cancel: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_CANCEL, { projectDir }),
+    getStatus: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_STATUS_GET, { projectDir }),
+    selectSceneFolder: () => electron.ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_SELECT_SCENE_FOLDER),
+    onProgress: (callback) => {
+      const handler = (_event, payload) => {
+        callback(payload);
+      };
+      electron.ipcRenderer.on(IPC_CHANNELS.SIMPLE_ASSEMBLY_PROGRESS, handler);
+      return () => {
+        electron.ipcRenderer.off(IPC_CHANNELS.SIMPLE_ASSEMBLY_PROGRESS, handler);
+      };
+    }
+  },
+  productionModeSettings: {
+    get: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_MODE_SETTINGS_GET, { projectDir }),
+    update: (projectDir, patch) => electron.ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_MODE_SETTINGS_UPDATE, { projectDir, patch })
   },
   research: {
     getStatus: () => electron.ipcRenderer.invoke(IPC_CHANNELS.RESEARCH_SIDECAR_STATUS),

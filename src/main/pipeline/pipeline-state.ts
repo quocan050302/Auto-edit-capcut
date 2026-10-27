@@ -516,8 +516,22 @@ export function determineInvalidatedStages(
   }
 
   // Audio settings thay đổi
-  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
+  const oldMusicMode = oldState.options.backgroundMusicMode ?? 'auto'
+  const newMusicMode = newOptions.backgroundMusicMode ?? 'auto'
+  if (
+    oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic ||
+    oldMusicMode !== newMusicMode
+  ) {
     invalidated.add('audio-search')
+    invalidated.add('preflight')
+    invalidated.add('rendering')
+    invalidated.add('postflight')
+  }
+
+  // Assembly mode thay đổi
+  const oldAssemblyMode = oldState.options.assemblyMode ?? 'full-production'
+  const newAssemblyMode = newOptions.assemblyMode ?? 'full-production'
+  if (oldAssemblyMode !== newAssemblyMode) {
     invalidated.add('preflight')
     invalidated.add('rendering')
     invalidated.add('postflight')
