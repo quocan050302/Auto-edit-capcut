@@ -11261,7 +11261,7 @@ function loadAudioPlan(projectDir) {
     return null;
   }
 }
-function saveAudioPlan$1(projectDir, plan) {
+function saveAudioPlan(projectDir, plan) {
   const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
   fs__namespace.writeFileSync(audioPlanPath, JSON.stringify(plan, null, 2), "utf-8");
 }
@@ -14156,6 +14156,21 @@ function resolveSceneMediaWithSource(scene, mediaIndex, projectDir) {
   } catch {
   }
   try {
+    const manualAiPath = path__namespace.join(projectDir, "analysis", "manual-ai-assets.json");
+    if (fs__namespace.existsSync(manualAiPath)) {
+      const manualAi = JSON.parse(fs__namespace.readFileSync(manualAiPath, "utf-8"));
+      const record = manualAi?.scenes?.[String(scene.sceneIndex)];
+      if (record?.localPath) {
+        const p = path__namespace.isAbsolute(record.localPath) ? normalizePathForFFmpeg(record.localPath) : normalizePathForFFmpeg(path__namespace.join(projectDir, record.localPath));
+        if (fs__namespace.existsSync(p)) {
+          scene.mediaType = detectMediaKind(p, record.mediaType ?? scene.mediaType);
+          return { sceneIndex: scene.sceneIndex, mediaPath: p, source: "manualAi" };
+        }
+      }
+    }
+  } catch {
+  }
+  try {
     const stockDir = path__namespace.join(projectDir, "assets", "stock");
     if (fs__namespace.existsSync(stockDir)) {
       const files = fs__namespace.readdirSync(stockDir);
@@ -14670,7 +14685,8 @@ function computeRenderRequestKey(params) {
     audio: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
     stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json")),
     editorial: params.editorialSettings ? hashJsonValue(params.editorialSettings) : hashFileContent(path__namespace.join(analysis, "editorial-focus-settings.v1.json")),
-    backgroundMusicMode: params.backgroundMusicMode ?? "auto"
+    backgroundMusicMode: params.backgroundMusicMode ?? "auto",
+    assemblyMode: params.assemblyMode ?? "full-production"
   });
 }
 async function renderVideo(params) {
@@ -16336,6 +16352,34 @@ function computeSourceFingerprint(scriptText) {
   const normalized = scriptText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   return crypto.createHash("sha256").update(normalized, "utf8").digest("hex");
 }
+function getRenderProvenancePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "render-provenance.json");
+}
+function readRenderProvenance(projectDir) {
+  const p = getRenderProvenancePath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(p, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.schemaVersion === 1 && parsed.status === "completed" && parsed.outputPath) {
+      return parsed;
+    }
+  } catch (err) {
+    logger.warn(`[RenderProvenance] Failed to read ${p}: ${err}`);
+  }
+  return null;
+}
+function writeRenderProvenance(projectDir, provenance) {
+  const p = getRenderProvenancePath(projectDir);
+  const dir = path__namespace.dirname(p);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${p}.tmp.${process.pid}.${Date.now()}`;
+  fs__namespace.writeFileSync(tmp, JSON.stringify(provenance, null, 2), "utf-8");
+  fs__namespace.renameSync(tmp, p);
+  logger.info(
+    `[RenderProvenance] Recorded completed output provenance: mode=${provenance.assemblyMode}, music=${provenance.backgroundMusicMode}, output=${path__namespace.basename(provenance.outputPath)}`
+  );
+}
 function isTranscriptionValid(projectDir, voiceoverPath) {
   const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
   const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
@@ -16512,7 +16556,7 @@ function checkStockCompletion(projectDir) {
 function checkVisualCompletion(projectDir) {
   return checkStockCompletion(projectDir);
 }
-function isAudioValid(projectDir, requireMusic, contentType, backgroundMusicMode) {
+function isAudioValid(projectDir, requireMusic, contentType, backgroundMusicMode, assemblyMode) {
   const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
   if (!fs__namespace.existsSync(audioPlanPath)) return false;
   try {
@@ -16524,7 +16568,7 @@ function isAudioValid(projectDir, requireMusic, contentType, backgroundMusicMode
       );
       if (!hasDownloadedMusic) return false;
     }
-    if (contentType === "health") {
+    if (assemblyMode !== "simple-assembly" && contentType === "health") {
       const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
       if (fs__namespace.existsSync(healthPlanPath)) {
         try {
@@ -16569,24 +16613,52 @@ function reconcileProjectArtifacts(projectDir, options) {
   const captionsValid = isCaptionsValid(projectDir);
   const globalContextValid = isGlobalContextValid(projectDir, sourceHash);
   const stockCompletion = checkStockCompletion(projectDir);
-  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic, options?.contentType, options?.backgroundMusicMode);
+  const audioValid = isAudioValid(
+    projectDir,
+    options?.requireBackgroundMusic,
+    options?.contentType,
+    options?.backgroundMusicMode,
+    options?.assemblyMode
+  );
   const preflightValid = isPreflightValid(projectDir);
   const outputDir = path__namespace.join(projectDir, "output");
   let renderValid = false;
-  if (fs__namespace.existsSync(outputDir)) {
-    try {
-      const files = fs__namespace.readdirSync(outputDir).filter(
-        (f) => f.endsWith(".mp4") && !f.startsWith("_") && !f.includes(".partial") && !f.includes(".working")
-      );
-      if (files.length > 0) {
-        const stat = fs__namespace.statSync(path__namespace.join(outputDir, files[0]));
+  const requestedAssemblyMode = options?.assemblyMode ?? "full-production";
+  const requestedMusicMode = options?.backgroundMusicMode ?? "auto";
+  const provenance = readRenderProvenance(projectDir);
+  if (provenance && provenance.status === "completed" && provenance.outputPath) {
+    const modeMatches = provenance.assemblyMode === requestedAssemblyMode;
+    const musicMatches = requestedAssemblyMode === "simple-assembly" ? provenance.backgroundMusicMode === requestedMusicMode : true;
+    if (modeMatches && musicMatches && fs__namespace.existsSync(provenance.outputPath)) {
+      try {
+        const stat = fs__namespace.statSync(provenance.outputPath);
         if (stat.size > 1024) renderValid = true;
+      } catch {
       }
-    } catch {
+    }
+  } else if (!provenance && fs__namespace.existsSync(outputDir)) {
+    if (requestedAssemblyMode === "full-production") {
+      const defaultFull = path__namespace.join(outputDir, `${options?.outputName || "final_output"}.mp4`);
+      if (fs__namespace.existsSync(defaultFull)) {
+        try {
+          const stat = fs__namespace.statSync(defaultFull);
+          if (stat.size > 1024) renderValid = true;
+        } catch {
+        }
+      }
+    } else if (requestedAssemblyMode === "simple-assembly") {
+      const defaultSimple = path__namespace.join(outputDir, `${options?.outputName || "simple_assembly"}.mp4`);
+      if (fs__namespace.existsSync(defaultSimple)) {
+        try {
+          const stat = fs__namespace.statSync(defaultSimple);
+          if (stat.size > 1024) renderValid = true;
+        } catch {
+        }
+      }
     }
   }
   const qaPath = path__namespace.join(projectDir, "analysis", "render-qa.json");
-  const postflightValid = renderValid && fs__namespace.existsSync(qaPath);
+  const postflightValid = renderValid && (requestedAssemblyMode === "simple-assembly" || fs__namespace.existsSync(qaPath));
   let renderRecovery;
   if (!renderValid) {
     try {
@@ -23244,6 +23316,1148 @@ async function validatePipelinePrerequisites(options) {
     detectedVoiceoverDuration: duration ?? void 0
   };
 }
+const AI_PROVIDERS = /* @__PURE__ */ new Set(["google-flow", "manual-ai"]);
+function isAiProvider(provider) {
+  return !!provider && AI_PROVIDERS.has(provider);
+}
+class VisualAssignmentStore {
+  assignments = /* @__PURE__ */ new Map();
+  filePath;
+  lockPromise = Promise.resolve();
+  constructor(projectDir) {
+    this.filePath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+    this.load();
+  }
+  load() {
+    if (fs__namespace.existsSync(this.filePath)) {
+      try {
+        const raw = fs__namespace.readFileSync(this.filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.assignments.clear();
+          for (const a of parsed) {
+            if (a && typeof a.sceneIndex === "number") {
+              this.assignments.set(a.sceneIndex, a);
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[VisualAssignmentStore] Failed to load ${this.filePath}: ${err}`);
+      }
+    }
+  }
+  get(sceneIndex) {
+    return this.assignments.get(sceneIndex);
+  }
+  has(sceneIndex) {
+    return this.assignments.has(sceneIndex);
+  }
+  /**
+   * Sets or updates an assignment.
+   * If called by the stock engine, enforces Section 29:
+   * never overwrites a valid Google Flow AI assignment.
+   */
+  set(sceneIndex, assignment, isStockCaller = false) {
+    const existing = this.assignments.get(sceneIndex);
+    if ((isStockCaller || assignment.asset && !isAiProvider(assignment.asset.provider)) && isAiProvider(existing?.asset?.provider) && existing?.status === "assigned") {
+      if (existing.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
+        logger.info(
+          `[VisualAssignmentStore] Preserving valid ${existing.asset.provider} AI assignment for scene ${sceneIndex} against stock overwrite.`
+        );
+        return false;
+      }
+    }
+    this.assignments.set(sceneIndex, assignment);
+    return true;
+  }
+  setMany(assignments, isStockCaller = false) {
+    for (const a of assignments) {
+      this.set(a.sceneIndex, a, isStockCaller);
+    }
+  }
+  delete(sceneIndex) {
+    return this.assignments.delete(sceneIndex);
+  }
+  getAll() {
+    return Array.from(this.assignments.values()).sort((a, b) => a.sceneIndex - b.sceneIndex);
+  }
+  /**
+   * Thread-safe atomic disk flush using a mutex queue and temporary file rename.
+   */
+  async flushAtomic() {
+    const previousLock = this.lockPromise;
+    let releaseLock = () => {
+    };
+    this.lockPromise = new Promise((resolve) => {
+      releaseLock = resolve;
+    });
+    await previousLock;
+    try {
+      const items = this.getAll();
+      const dir = path__namespace.dirname(this.filePath);
+      if (!fs__namespace.existsSync(dir)) {
+        fs__namespace.mkdirSync(dir, { recursive: true });
+      }
+      const tmpPath = `${this.filePath}.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      fs__namespace.writeFileSync(tmpPath, JSON.stringify(items, null, 2), "utf-8");
+      fs__namespace.renameSync(tmpPath, this.filePath);
+    } finally {
+      releaseLock();
+    }
+  }
+}
+const SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".mp4",
+  ".mov",
+  ".webm",
+  ".mkv",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp"
+]);
+const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".webp"]);
+function extractSceneNumber(filename) {
+  const base = path__namespace.parse(filename).name.trim();
+  const prefixMatch = base.match(/^(?:scene|shot|clip|part|s)[-_\s]*0*(\d+)(?:[-_\s].*)?$/i);
+  if (prefixMatch) {
+    const num = parseInt(prefixMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  const leadingMatch = base.match(/^0*(\d+)(?:[-_\s].*)?$/);
+  if (leadingMatch) {
+    const num = parseInt(leadingMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  const embeddedMatch = base.match(/(?:^|[-_\s])(?:scene|shot|s)[-_\s]*0*(\d+)(?:[-_\s]|$)/i);
+  if (embeddedMatch) {
+    const num = parseInt(embeddedMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  const trailingMatch = base.match(/[-_\s]0*(\d+)$/);
+  if (trailingMatch) {
+    const num = parseInt(trailingMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+function detectMediaType(filePath) {
+  const ext = path__namespace.extname(filePath).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext) ? "image" : "video";
+}
+function resolveDirectFolderScenes(folderPath) {
+  if (!fs__namespace.existsSync(folderPath)) {
+    throw new Error(`Scene folder does not exist: ${folderPath}`);
+  }
+  const entries = fs__namespace.readdirSync(folderPath, { withFileTypes: true });
+  const validFiles = entries.filter((ent) => ent.isFile() && !ent.name.startsWith(".")).filter((ent) => SUPPORTED_EXTENSIONS.has(path__namespace.extname(ent.name).toLowerCase()));
+  if (validFiles.length === 0) {
+    throw new Error(
+      `No supported video or image files found in folder: ${folderPath}. Supported formats: MP4, MOV, WEBM, MKV, PNG, JPG, WEBP.`
+    );
+  }
+  const scenes = [];
+  const ambiguousFiles = [];
+  const seenIndices = /* @__PURE__ */ new Map();
+  for (const ent of validFiles) {
+    const sceneIndex = extractSceneNumber(ent.name);
+    if (sceneIndex === null) {
+      ambiguousFiles.push(ent.name);
+      continue;
+    }
+    if (seenIndices.has(sceneIndex)) {
+      const existingName = seenIndices.get(sceneIndex);
+      throw new Error(
+        `Duplicate scene number ${sceneIndex} detected in scene folder: "${existingName}" and "${ent.name}". Each scene number must be unique.`
+      );
+    }
+    seenIndices.set(sceneIndex, ent.name);
+    const fullPath = path__namespace.join(folderPath, ent.name);
+    scenes.push({
+      sceneIndex,
+      filePath: fullPath,
+      fileName: ent.name,
+      mediaType: detectMediaType(fullPath)
+    });
+  }
+  if (ambiguousFiles.length > 0) {
+    throw new Error(
+      `Could not determine scene order for ${ambiguousFiles.length} file(s): ${ambiguousFiles.slice(0, 5).join(", ")}${ambiguousFiles.length > 5 ? "..." : ""}. Please name files with scene numbers (e.g. "Scene 1.mp4", "Scene 2.mp4" or "001.mp4").`
+    );
+  }
+  scenes.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  logger.info(`[SimpleAssemblyInputResolver] Resolved ${scenes.length} scenes from direct folder: ${folderPath}`);
+  return scenes;
+}
+function resolvePreparedProductionScenes(projectDir) {
+  const planCandidates = [
+    path__namespace.join(projectDir, "analysis", "master-edit-plan.json"),
+    path__namespace.join(projectDir, "analysis", "edit-plan.json"),
+    path__namespace.join(projectDir, "master-edit-plan.json"),
+    path__namespace.join(projectDir, "edit-plan.json")
+  ];
+  const targetPlanPath = planCandidates.find((p) => fs__namespace.existsSync(p));
+  if (!targetPlanPath) {
+    throw new Error("Master edit plan not found. AI Planning must be executed before final assembly.");
+  }
+  let editPlan = null;
+  try {
+    editPlan = JSON.parse(fs__namespace.readFileSync(targetPlanPath, "utf-8"));
+  } catch (err) {
+    throw new Error(`Failed to parse master-edit-plan.json: ${err}`);
+  }
+  const planScenes = [];
+  if (editPlan && Array.isArray(editPlan.chapters)) {
+    for (const ch of editPlan.chapters) {
+      const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+      for (const seq of seqs) {
+        for (const sc of seq.scenes ?? []) {
+          planScenes.push(sc);
+        }
+      }
+    }
+  }
+  if (planScenes.length === 0) {
+    throw new Error("Edit plan contains 0 planned scenes. AI Planning must be executed before final assembly.");
+  }
+  const manualAiManifest = loadManualAiManifest(projectDir);
+  const store = new VisualAssignmentStore(projectDir);
+  const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
+  let mediaIndex = [];
+  if (fs__namespace.existsSync(mediaIndexPath)) {
+    try {
+      mediaIndex = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
+    } catch {
+    }
+  }
+  const scenes = [];
+  const missingSceneIndices = [];
+  for (const sc of planScenes) {
+    const scIdx = sc.sceneIndex;
+    let resolvedPath = null;
+    const manualRecord = manualAiManifest?.scenes?.[String(scIdx)];
+    if (manualRecord?.localPath) {
+      const candidate = resolveManualAiAssetPath(projectDir, manualRecord.localPath);
+      if (fs__namespace.existsSync(candidate) && fs__namespace.statSync(candidate).size > 0) {
+        resolvedPath = candidate;
+      }
+    }
+    if (!resolvedPath) {
+      const assignment = store.get(scIdx);
+      if (assignment?.asset?.localPath) {
+        const candidate = path__namespace.isAbsolute(assignment.asset.localPath) ? assignment.asset.localPath : path__namespace.join(projectDir, assignment.asset.localPath);
+        if (fs__namespace.existsSync(candidate) && fs__namespace.statSync(candidate).size > 0) {
+          resolvedPath = candidate;
+        }
+      }
+    }
+    if (!resolvedPath) {
+      const r = resolveSceneMediaWithSource(sc, mediaIndex, projectDir);
+      if (r.mediaPath && fs__namespace.existsSync(r.mediaPath) && fs__namespace.statSync(r.mediaPath).size > 0) {
+        resolvedPath = r.mediaPath;
+      }
+    }
+    if (!resolvedPath && sc.localPath) {
+      const p = path__namespace.isAbsolute(sc.localPath) ? sc.localPath : path__namespace.join(projectDir, sc.localPath);
+      if (fs__namespace.existsSync(p) && fs__namespace.statSync(p).size > 0) {
+        resolvedPath = p;
+      }
+    }
+    if (!resolvedPath && sc.localAsset) {
+      const p = path__namespace.isAbsolute(sc.localAsset) ? sc.localAsset : path__namespace.join(projectDir, sc.localAsset);
+      if (fs__namespace.existsSync(p) && fs__namespace.statSync(p).size > 0) {
+        resolvedPath = p;
+      }
+    }
+    if (resolvedPath) {
+      scenes.push({
+        sceneIndex: scIdx,
+        sceneId: sc.sceneId,
+        filePath: resolvedPath,
+        fileName: path__namespace.basename(resolvedPath),
+        mediaType: detectMediaType(resolvedPath),
+        duration: typeof sc.duration === "number" && sc.duration > 0 ? sc.duration : typeof sc.endTime === "number" && typeof sc.startTime === "number" && sc.endTime > sc.startTime ? sc.endTime - sc.startTime : void 0
+      });
+    } else {
+      missingSceneIndices.push(scIdx);
+    }
+  }
+  return {
+    scenes,
+    missingSceneIndices,
+    missingScenes: missingSceneIndices,
+    expectedCount: planScenes.length,
+    expectedScenes: planScenes.length,
+    resolvedValidScenes: scenes.length,
+    hasEditPlanTimings: scenes.length > 0 && scenes.every((s) => typeof s.duration === "number" && s.duration > 0)
+  };
+}
+function assertAllProductionScenesReady(result) {
+  const expected = result.expectedScenes ?? result.expectedCount ?? 0;
+  const missing = result.missingScenes ?? result.missingSceneIndices ?? [];
+  if (expected === 0) {
+    throw new Error("Master edit plan contains 0 planned scenes. AI Planning must complete first.");
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Cannot begin Simple Assembly: Missing ${missing.length} of ${expected} required production scene assets. Missing scene indices: [${missing.slice(0, 10).join(", ")}${missing.length > 10 ? "..." : ""}]. All scenes must be ready before final render.`
+    );
+  }
+  if (result.scenes.length !== expected) {
+    throw new Error(
+      `Scene count mismatch: expected ${expected} scenes from edit plan, but resolved ${result.scenes.length} valid scenes.`
+    );
+  }
+}
+function resolveProjectScenes(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  const rootPlan = path__namespace.join(projectDir, "master-edit-plan.json");
+  if (fs__namespace.existsSync(planPath) || fs__namespace.existsSync(rootPlan)) {
+    try {
+      const prodRes = resolvePreparedProductionScenes(projectDir);
+      return {
+        scenes: prodRes.scenes,
+        missingSceneIndices: prodRes.missingSceneIndices,
+        hasEditPlanTimings: prodRes.hasEditPlanTimings
+      };
+    } catch (err) {
+      logger.warn(`[SimpleAssemblyInputResolver] resolvePreparedProductionScenes notice: ${err}`);
+    }
+  }
+  const manualAiManifest = loadManualAiManifest(projectDir);
+  if (manualAiManifest?.scenes && Object.keys(manualAiManifest.scenes).length > 0) {
+    const rawKeys = Object.keys(manualAiManifest.scenes).map((k) => parseInt(k, 10)).sort((a, b) => a - b);
+    const scenes = [];
+    const missingSceneIndices = [];
+    for (const scIdx of rawKeys) {
+      const rec = manualAiManifest.scenes[String(scIdx)];
+      if (rec?.localPath) {
+        const fullPath = resolveManualAiAssetPath(projectDir, rec.localPath);
+        if (fs__namespace.existsSync(fullPath)) {
+          scenes.push({
+            sceneIndex: scIdx,
+            filePath: fullPath,
+            fileName: path__namespace.basename(fullPath),
+            mediaType: detectMediaType(fullPath)
+          });
+          continue;
+        }
+      }
+      missingSceneIndices.push(scIdx);
+    }
+    return { scenes, missingSceneIndices, hasEditPlanTimings: false };
+  }
+  return { scenes: [], missingSceneIndices: [], hasEditPlanTimings: false };
+}
+function resolveSimpleAssemblyInputs(projectDir, sceneFolder) {
+  if (sceneFolder && sceneFolder.trim().length > 0) {
+    const resolved = resolveDirectFolderScenes(sceneFolder);
+    return {
+      scenes: resolved,
+      source: "direct-folder",
+      hasEditPlanTimings: false
+    };
+  }
+  const projectRes = resolveProjectScenes(projectDir);
+  if (projectRes.missingSceneIndices.length > 0 && projectRes.scenes.length === 0) {
+    throw new Error(
+      `Import your scenes to begin Simple Assembly. Missing ${projectRes.missingSceneIndices.length} required scenes.`
+    );
+  }
+  if (projectRes.scenes.length > 0) {
+    if (projectRes.missingSceneIndices.length > 0) {
+      throw new Error(
+        `Simple Assembly blocked: Scene(s) ${projectRes.missingSceneIndices.slice(0, 10).join(", ")} are missing imported media. Please import all scenes or select a Scene Video Folder.`
+      );
+    }
+    return {
+      scenes: projectRes.scenes,
+      source: "project-plan",
+      hasEditPlanTimings: projectRes.hasEditPlanTimings
+    };
+  }
+  const fallbackDirs = [
+    path__namespace.join(projectDir, "assets", "manual-ai"),
+    path__namespace.join(projectDir, "assets", "videos")
+  ];
+  for (const fDir of fallbackDirs) {
+    if (fs__namespace.existsSync(fDir)) {
+      try {
+        const resolved = resolveDirectFolderScenes(fDir);
+        if (resolved.length > 0) {
+          return {
+            scenes: resolved,
+            source: "direct-folder",
+            hasEditPlanTimings: false
+          };
+        }
+      } catch {
+      }
+    }
+  }
+  throw new Error("Import your scenes to begin Simple Assembly. No scene media found.");
+}
+async function resolveAssemblyTimeline(params) {
+  const { scenes, voiceoverPath, fps, signal } = params;
+  if (scenes.length === 0) {
+    throw new Error("Cannot resolve timeline for zero scenes.");
+  }
+  const probe = await probeMedia$1(voiceoverPath, { signal });
+  if (!probe || !probe.duration || probe.duration <= 0) {
+    throw new Error(`Failed to probe voiceover audio at ${voiceoverPath}. Ensure file exists and contains a valid audio stream.`);
+  }
+  const voiceoverDuration = probe.duration;
+  const targetTotalFrames = Math.max(1, Math.round(voiceoverDuration * fps));
+  const numScenes = scenes.length;
+  logger.info(
+    `[SimpleAssemblyTimeline] Probed voiceover: duration=${voiceoverDuration.toFixed(3)}s targetFrames=${targetTotalFrames} (fps=${fps}) scenes=${numScenes}`
+  );
+  const hasPlanTimings = scenes.every((s) => typeof s.duration === "number" && s.duration > 0);
+  if (hasPlanTimings) {
+    const sumPlanDuration = scenes.reduce((acc, s) => acc + s.duration, 0);
+    if (sumPlanDuration > 0) {
+      const diff = Math.abs(sumPlanDuration - voiceoverDuration);
+      if (diff > Math.max(10, voiceoverDuration * 0.3)) {
+        logger.warn(
+          `[SimpleAssemblyTimeline] Noticeable planned duration discrepancy: planned ${sumPlanDuration.toFixed(2)}s vs voiceover ${voiceoverDuration.toFixed(2)}s. Proportionally aligning scenes to voiceover.`
+        );
+      } else {
+        logger.info(
+          `[SimpleAssemblyTimeline] Using edit plan scene timings (sum=${sumPlanDuration.toFixed(2)}s, voiceover=${voiceoverDuration.toFixed(2)}s, diff=${diff.toFixed(2)}s)`
+        );
+      }
+      const rawAllocations = scenes.map((s, idx) => {
+        const ratio = s.duration / sumPlanDuration;
+        const idealFrames = targetTotalFrames * ratio;
+        const baseFrames2 = Math.max(1, Math.floor(idealFrames));
+        const fractional = idealFrames - baseFrames2;
+        return { idx, scene: s, baseFrames: baseFrames2, fractional };
+      });
+      const currentAllocated = rawAllocations.reduce((acc, item) => acc + item.baseFrames, 0);
+      const remainder2 = targetTotalFrames - currentAllocated;
+      if (remainder2 > 0) {
+        const sortedByFractional = [...rawAllocations].sort((a, b) => b.fractional - a.fractional);
+        for (let i = 0; i < remainder2 && i < sortedByFractional.length; i++) {
+          sortedByFractional[i].baseFrames += 1;
+        }
+      } else if (remainder2 < 0) {
+        const sortedByLargest = [...rawAllocations].sort((a, b) => b.baseFrames - a.baseFrames);
+        for (let i = 0; i < Math.abs(remainder2) && i < sortedByLargest.length; i++) {
+          if (sortedByLargest[i].baseFrames > 1) {
+            sortedByLargest[i].baseFrames -= 1;
+          }
+        }
+      }
+      let currentStartFrame2 = 0;
+      const resolvedScenes2 = rawAllocations.map((item) => {
+        const targetFrames = item.baseFrames;
+        const startFrame = currentStartFrame2;
+        currentStartFrame2 += targetFrames;
+        return {
+          sceneIndex: item.scene.sceneIndex,
+          sourcePath: item.scene.filePath,
+          mediaType: item.scene.mediaType,
+          durationSecs: targetFrames / fps,
+          targetFrames,
+          startFrame
+        };
+      });
+      const totalAllocated = resolvedScenes2.reduce((acc, s) => acc + s.targetFrames, 0);
+      if (totalAllocated !== targetTotalFrames) {
+        const delta = targetTotalFrames - totalAllocated;
+        resolvedScenes2[resolvedScenes2.length - 1].targetFrames += delta;
+        resolvedScenes2[resolvedScenes2.length - 1].durationSecs = resolvedScenes2[resolvedScenes2.length - 1].targetFrames / fps;
+      }
+      return {
+        scenes: resolvedScenes2,
+        voiceoverDuration,
+        targetTotalFrames,
+        fps,
+        allocationMethod: "edit-plan",
+        toleranceSecs: 1 / fps
+      };
+    }
+  }
+  const baseFrames = Math.floor(targetTotalFrames / numScenes);
+  const remainder = targetTotalFrames % numScenes;
+  let currentStartFrame = 0;
+  const resolvedScenes = scenes.map((s, idx) => {
+    const sceneFrames = Math.max(1, baseFrames + (idx < remainder ? 1 : 0));
+    const startFrame = currentStartFrame;
+    currentStartFrame += sceneFrames;
+    return {
+      sceneIndex: s.sceneIndex,
+      sourcePath: s.filePath,
+      mediaType: s.mediaType,
+      durationSecs: sceneFrames / fps,
+      targetFrames: sceneFrames,
+      startFrame
+    };
+  });
+  const totalAllocatedFrames = resolvedScenes.reduce((a, s) => a + s.targetFrames, 0);
+  if (totalAllocatedFrames !== targetTotalFrames) {
+    const adjust = targetTotalFrames - totalAllocatedFrames;
+    resolvedScenes[resolvedScenes.length - 1].targetFrames += adjust;
+    resolvedScenes[resolvedScenes.length - 1].durationSecs = resolvedScenes[resolvedScenes.length - 1].targetFrames / fps;
+  }
+  logger.info(
+    `[SimpleAssemblyTimeline] Equal distribution complete: ${resolvedScenes.length} scenes, baseFrames=${baseFrames}, remainder=${remainder}, sumFrames=${targetTotalFrames}`
+  );
+  return {
+    scenes: resolvedScenes,
+    voiceoverDuration,
+    targetTotalFrames,
+    fps,
+    allocationMethod: "equal-distribution",
+    toleranceSecs: 1 / fps
+  };
+}
+const SIMPLE_ASSEMBLY_ENGINE_VERSION = 1;
+function computeSceneClipFingerprint(params) {
+  return fingerprintOf({
+    v: SIMPLE_ASSEMBLY_ENGINE_VERSION,
+    kind: "scene-clip",
+    source: params.sourceSig,
+    w: params.targetWidth,
+    h: params.targetHeight,
+    fps: params.targetFps,
+    frames: params.targetFrames,
+    dur: Math.round(params.targetDurationSecs * 1e3) / 1e3,
+    policy: params.shortClipPolicy
+  });
+}
+function computeAssemblyVideoFingerprint(params) {
+  return fingerprintOf({
+    v: SIMPLE_ASSEMBLY_ENGINE_VERSION,
+    kind: "assembled-video",
+    scenes: params.sceneFingerprints,
+    w: params.width,
+    h: params.height,
+    fps: params.fps
+  });
+}
+class SimpleAssemblyCacheManager {
+  constructor(projectDir) {
+    this.projectDir = projectDir;
+    this.cacheDir = path__namespace.join(projectDir, ".cache", "simple-assembly");
+    this.clipsDir = path__namespace.join(this.cacheDir, "clips");
+  }
+  cacheDir;
+  clipsDir;
+  ensureDirs() {
+    if (!fs__namespace.existsSync(this.clipsDir)) {
+      fs__namespace.mkdirSync(this.clipsDir, { recursive: true });
+    }
+  }
+  getClipPath(fingerprint) {
+    return path__namespace.join(this.clipsDir, `clip_${fingerprint.slice(0, 16)}.mp4`);
+  }
+  getAssembledVideoPath(assemblyFingerprint) {
+    return path__namespace.join(this.cacheDir, `assembled_${assemblyFingerprint.slice(0, 16)}.mp4`);
+  }
+  async isClipValid(clipPath, expectedFrames, fps, signal) {
+    if (!fs__namespace.existsSync(clipPath)) return false;
+    try {
+      const stat = fs__namespace.statSync(clipPath);
+      if (stat.size < 1024) return false;
+      const probe = await probeMedia$1(clipPath, { signal });
+      if (!probe || !probe.duration || probe.duration <= 0) return false;
+      const expectedDur = expectedFrames / fps;
+      const diff = Math.abs(probe.duration - expectedDur);
+      return diff <= Math.max(0.1, 2 / fps);
+    } catch {
+      return false;
+    }
+  }
+  async isAssembledVideoValid(videoPath, expectedTotalFrames, fps, signal) {
+    if (!fs__namespace.existsSync(videoPath)) return false;
+    try {
+      const stat = fs__namespace.statSync(videoPath);
+      if (stat.size < 1024) return false;
+      const probe = await probeMedia$1(videoPath, { signal });
+      if (!probe || !probe.duration || probe.duration <= 0) return false;
+      const expectedDur = expectedTotalFrames / fps;
+      const diff = Math.abs(probe.duration - expectedDur);
+      return diff <= Math.max(0.2, 3 / fps);
+    } catch {
+      return false;
+    }
+  }
+}
+function safeUnlink(filePath) {
+  try {
+    if (fs__namespace.existsSync(filePath)) fs__namespace.unlinkSync(filePath);
+  } catch {
+  }
+}
+function escapeConcatPath(p) {
+  return p.replace(/\\/g, "/").replace(/'/g, "'\\''");
+}
+async function executeSimpleAssembly(request) {
+  const {
+    projectDir,
+    voiceoverPath,
+    sceneFolder,
+    backgroundMusicMode,
+    musicFilePath,
+    outputName = "simple_assembly",
+    width = 1920,
+    height = 1080,
+    fps = 30,
+    shortClipPolicy = "freeze-last-frame",
+    signal,
+    onProgress
+  } = request;
+  const reportProgress = (phase, progress, stage, extra) => {
+    const clampedProgress = Math.max(0, Math.min(1, progress));
+    onProgress?.({
+      stage,
+      phase,
+      status: phase,
+      progress: clampedProgress,
+      percent: Math.round(clampedProgress * 100),
+      sceneIndex: extra?.sceneIndex,
+      totalScenes: extra?.totalScenes,
+      message: extra?.message ?? stage,
+      error: extra?.error,
+      outputPath: extra?.outputPath,
+      duration: extra?.duration
+    });
+  };
+  const cache = new SimpleAssemblyCacheManager(projectDir);
+  cache.ensureDirs();
+  const outputDir = path__namespace.join(projectDir, "output");
+  if (!fs__namespace.existsSync(outputDir)) fs__namespace.mkdirSync(outputDir, { recursive: true });
+  const finalOutputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
+  const partialOutputPath = path__namespace.join(outputDir, `${outputName}.partial.mp4`);
+  safeUnlink(partialOutputPath);
+  try {
+    throwIfAborted(signal);
+    reportProgress("validating-voiceover", 0.05, "[1/8] Validating input voiceover audio...");
+    if (!voiceoverPath || !fs__namespace.existsSync(voiceoverPath)) {
+      throw new Error(`Voiceover audio file does not exist: ${voiceoverPath}`);
+    }
+    const voProbe = await probeMedia$1(voiceoverPath, { signal });
+    if (!voProbe || !voProbe.duration || voProbe.duration <= 0) {
+      throw new Error(`Invalid or unreadable voiceover audio: ${voiceoverPath}`);
+    }
+    const voiceoverDuration = voProbe.duration;
+    logger.info(`[SimpleAssembly] Voiceover duration: ${voiceoverDuration.toFixed(3)}s`);
+    reportProgress("validating-scenes", 0.12, "[2/8] Validating imported scene media...");
+    let sceneInputs = request.sceneSources;
+    if (!sceneInputs || sceneInputs.length === 0) {
+      const resolved = resolveSimpleAssemblyInputs(projectDir, sceneFolder);
+      sceneInputs = resolved.scenes;
+    }
+    if (sceneInputs.length === 0) {
+      throw new Error("Import your scenes to begin Simple Assembly. No valid scene media found.");
+    }
+    for (const sc of sceneInputs) {
+      throwIfAborted(signal);
+      if (!fs__namespace.existsSync(sc.filePath)) {
+        throw new Error(`Scene ${sc.sceneIndex} file not found: ${sc.filePath}`);
+      }
+      const st = fs__namespace.statSync(sc.filePath);
+      if (st.size === 0) {
+        throw new Error(`Scene ${sc.sceneIndex} file is empty (0 bytes): ${sc.filePath}`);
+      }
+    }
+    logger.info(`[SimpleAssembly] Validated ${sceneInputs.length} scene source files`);
+    reportProgress("resolving-timing", 0.18, "[3/8] Resolving scene timing and frame allocation...");
+    const timeline = await resolveAssemblyTimeline({
+      scenes: sceneInputs,
+      voiceoverPath,
+      fps,
+      signal
+    });
+    logger.info(
+      `[SimpleAssembly] Timeline resolved: ${timeline.scenes.length} scenes, totalFrames=${timeline.targetTotalFrames}, method=${timeline.allocationMethod}`
+    );
+    reportProgress("normalizing-scenes", 0.22, `[4/8] Normalizing scene clips (0/${timeline.scenes.length})...`);
+    const sceneProbes = [];
+    for (let i = 0; i < timeline.scenes.length; i++) {
+      throwIfAborted(signal);
+      const sc = timeline.scenes[i];
+      const probe = await probeMedia$1(sc.sourcePath, { signal });
+      sceneProbes.push({ scene: sc, probe });
+    }
+    let canUseFastPath = true;
+    for (const item of sceneProbes) {
+      if (!item.probe || item.scene.mediaType !== "video") {
+        canUseFastPath = false;
+        break;
+      }
+      const durDiff2 = Math.abs(item.probe.duration - item.scene.durationSecs);
+      const isExactFormat = item.probe.width === width && item.probe.height === height && Math.abs(item.probe.fps - fps) < 0.1 && durDiff2 <= 0.05;
+      if (!isExactFormat) {
+        canUseFastPath = false;
+        break;
+      }
+    }
+    const normalizedClipPaths = [];
+    const sceneFingerprints = [];
+    if (canUseFastPath) {
+      logger.info("[SimpleAssembly] Fast Path eligible: all source clips match target format. Skipping normalization.");
+      for (const item of sceneProbes) {
+        normalizedClipPaths.push(item.scene.sourcePath);
+        sceneFingerprints.push(fileSignature(item.scene.sourcePath)?.hash || path__namespace.basename(item.scene.sourcePath));
+      }
+    } else {
+      logger.info("[SimpleAssembly] Normalizing scene clips with compatibility pipeline...");
+      const totalScenes = timeline.scenes.length;
+      for (let i = 0; i < totalScenes; i++) {
+        throwIfAborted(signal);
+        const sc = timeline.scenes[i];
+        const probe = sceneProbes[i].probe;
+        const sourceSig = fileSignature(sc.sourcePath);
+        const clipFp = computeSceneClipFingerprint({
+          sourcePath: sc.sourcePath,
+          sourceSig,
+          targetWidth: width,
+          targetHeight: height,
+          targetFps: fps,
+          targetFrames: sc.targetFrames,
+          targetDurationSecs: sc.durationSecs,
+          shortClipPolicy
+        });
+        sceneFingerprints.push(clipFp);
+        const clipPath = cache.getClipPath(clipFp);
+        normalizedClipPaths.push(clipPath);
+        const isCached = await cache.isClipValid(clipPath, sc.targetFrames, fps, signal);
+        if (isCached) {
+          const pct2 = 0.22 + (i + 1) / totalScenes * 0.38;
+          reportProgress("normalizing-scenes", pct2, `[4/8] Normalized scene ${i + 1}/${totalScenes} (cached)`, {
+            sceneIndex: sc.sceneIndex,
+            totalScenes
+          });
+          continue;
+        }
+        const pct = 0.22 + (i + 1) / totalScenes * 0.38;
+        reportProgress("normalizing-scenes", pct, `[4/8] Normalizing scene ${i + 1}/${totalScenes}...`, {
+          sceneIndex: sc.sceneIndex,
+          totalScenes
+        });
+        const workingClip = clipPath + ".partial.mp4";
+        safeUnlink(workingClip);
+        const allocatedDurationStr = sc.durationSecs.toFixed(3);
+        if (sc.mediaType === "image") {
+          const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
+          await ffmpegRun$4(
+            [
+              "-y",
+              "-loop",
+              "1",
+              "-t",
+              allocatedDurationStr,
+              "-i",
+              sc.sourcePath,
+              "-vf",
+              vf,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "veryfast",
+              "-crf",
+              "20",
+              "-movflags",
+              "+faststart",
+              workingClip
+            ],
+            { signal, threads: 2 }
+          );
+        } else {
+          const srcDur = probe?.duration ?? sc.durationSecs;
+          if (srcDur >= sc.durationSecs - 0.05) {
+            const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
+            await ffmpegRun$4(
+              [
+                "-y",
+                "-ss",
+                "0",
+                "-t",
+                allocatedDurationStr,
+                "-i",
+                sc.sourcePath,
+                "-an",
+                // strictly mute source audio!
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-movflags",
+                "+faststart",
+                workingClip
+              ],
+              { signal, threads: 2 }
+            );
+          } else {
+            const missingSecs = Math.max(0.01, sc.durationSecs - srcDur);
+            const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},tpad=stop_mode=clone:stop_duration=${missingSecs.toFixed(3)},trim=0:${allocatedDurationStr},setpts=PTS-STARTPTS,format=yuv420p`;
+            await ffmpegRun$4(
+              [
+                "-y",
+                "-i",
+                sc.sourcePath,
+                "-an",
+                // strictly mute source audio!
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-movflags",
+                "+faststart",
+                workingClip
+              ],
+              { signal, threads: 2 }
+            );
+          }
+        }
+        if (fs__namespace.existsSync(workingClip)) {
+          fs__namespace.renameSync(workingClip, clipPath);
+        }
+      }
+    }
+    reportProgress("joining-scenes", 0.65, `[5/8] Concatenating ${normalizedClipPaths.length} scene clips...`);
+    throwIfAborted(signal);
+    const assemblyFingerprint = computeAssemblyVideoFingerprint({
+      sceneFingerprints,
+      width,
+      height,
+      fps
+    });
+    const assembledVideoPath = cache.getAssembledVideoPath(assemblyFingerprint);
+    const isAssembledCached = await cache.isAssembledVideoValid(
+      assembledVideoPath,
+      timeline.targetTotalFrames,
+      fps,
+      signal
+    );
+    if (isAssembledCached) {
+      logger.info(`[SimpleAssembly] Reusing cached assembled video: ${assembledVideoPath}`);
+    } else {
+      const concatListPath = path__namespace.join(projectDir, ".cache", "simple-assembly", `concat_${Date.now()}.txt`);
+      const concatContent = normalizedClipPaths.map((p) => `file '${escapeConcatPath(p)}'`).join("\n");
+      fs__namespace.writeFileSync(concatListPath, concatContent, "utf-8");
+      const workingAssembled = assembledVideoPath + ".partial.mp4";
+      safeUnlink(workingAssembled);
+      try {
+        await ffmpegRun$4(
+          [
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concatListPath,
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            workingAssembled
+          ],
+          { signal }
+        );
+      } finally {
+        safeUnlink(concatListPath);
+      }
+      if (fs__namespace.existsSync(workingAssembled)) {
+        fs__namespace.renameSync(workingAssembled, assembledVideoPath);
+      }
+    }
+    reportProgress("mixing-audio", 0.78, "[6/8] Attaching voiceover and configuring soundtrack...");
+    throwIfAborted(signal);
+    let effectiveMusicPath = null;
+    if (backgroundMusicMode === "auto") {
+      if (musicFilePath && fs__namespace.existsSync(musicFilePath)) {
+        effectiveMusicPath = musicFilePath;
+      } else {
+        const audioDir = path__namespace.join(projectDir, "assets", "audio");
+        if (fs__namespace.existsSync(audioDir)) {
+          const files = fs__namespace.readdirSync(audioDir).filter((f) => /\.(mp3|wav|m4a|aac|flac|ogg)$/i.test(f));
+          if (files.length > 0) {
+            effectiveMusicPath = path__namespace.join(audioDir, files[0]);
+          }
+        }
+      }
+      if (!effectiveMusicPath) {
+        throw new Error(
+          "Add Background Music was enabled, but no background music track was found. Please select a music file or choose No Background Music."
+        );
+      }
+      logger.info(`[SimpleAssembly] Using background music track: ${effectiveMusicPath}`);
+    } else {
+      logger.info("[SimpleAssembly] True No Music mode active: final output will contain input voiceover ONLY.");
+    }
+    const finalDurationStr = voiceoverDuration.toFixed(3);
+    if (backgroundMusicMode === "off" || !effectiveMusicPath) {
+      await ffmpegRun$4(
+        [
+          "-y",
+          "-i",
+          assembledVideoPath,
+          "-i",
+          voiceoverPath,
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-t",
+          finalDurationStr,
+          "-movflags",
+          "+faststart",
+          partialOutputPath
+        ],
+        { signal }
+      );
+    } else {
+      const filterComplex = `[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo];[2:a]volume=0.035,afade=t=in:ss=0:d=2,afade=t=out:st=${Math.max(0, voiceoverDuration - 3).toFixed(3)}:d=3,apad[bgm];[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2[a]`;
+      await ffmpegRun$4(
+        [
+          "-y",
+          "-i",
+          assembledVideoPath,
+          "-i",
+          voiceoverPath,
+          "-i",
+          effectiveMusicPath,
+          "-filter_complex",
+          filterComplex,
+          "-map",
+          "0:v:0",
+          "-map",
+          "[a]",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-t",
+          finalDurationStr,
+          "-movflags",
+          "+faststart",
+          partialOutputPath
+        ],
+        { signal }
+      );
+    }
+    reportProgress("validating-output", 0.92, "[7/8] Validating final output MP4...");
+    throwIfAborted(signal);
+    if (!fs__namespace.existsSync(partialOutputPath)) {
+      throw new Error("Final output file was not produced by FFmpeg.");
+    }
+    const outProbe = await probeMedia$1(partialOutputPath, { signal });
+    if (!outProbe || !outProbe.duration || outProbe.duration <= 0) {
+      throw new Error("Produced MP4 failed probe validation (zero duration or invalid media).");
+    }
+    const durDiff = Math.abs(outProbe.duration - voiceoverDuration);
+    if (durDiff > 0.5) {
+      logger.warn(
+        `[SimpleAssembly] Output duration (${outProbe.duration.toFixed(2)}s) differs from voiceover (${voiceoverDuration.toFixed(2)}s) by ${durDiff.toFixed(2)}s`
+      );
+    }
+    const stat = fs__namespace.statSync(partialOutputPath);
+    if (stat.size < 1024) {
+      throw new Error(`Produced MP4 is corrupt or too small (${stat.size} bytes).`);
+    }
+    safeUnlink(finalOutputPath);
+    fs__namespace.renameSync(partialOutputPath, finalOutputPath);
+    logger.info(
+      `[SimpleAssembly] Complete! Published ${finalOutputPath} (size=${stat.size} bytes, duration=${outProbe.duration.toFixed(2)}s)`
+    );
+    reportProgress("completed", 1, "[8/8] Simple Assembly complete!", {
+      outputPath: finalOutputPath,
+      duration: outProbe.duration
+    });
+    return {
+      success: true,
+      outputPath: finalOutputPath,
+      durationSecs: outProbe.duration,
+      fileSizeBytes: stat.size,
+      sceneCount: timeline.scenes.length,
+      fastPathUsed: canUseFastPath
+    };
+  } catch (err) {
+    safeUnlink(partialOutputPath);
+    if (isRenderCancelledError(err)) {
+      logger.info("[SimpleAssembly] Assembly cancelled by user.");
+      reportProgress("cancelled", 0, "Simple Assembly cancelled.");
+      return { success: false, cancelled: true, error: "Simple Assembly cancelled" };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[SimpleAssembly] Failed: ${msg}`);
+    reportProgress("failed", 0, `Simple Assembly failed: ${msg}`, { message: msg });
+    return { success: false, error: msg };
+  }
+}
+async function runSimpleAssemblyRenderStage(options, onProgress, signal) {
+  throwIfAborted(signal);
+  const projectDir = options.projectDir;
+  const outputDir = path__namespace.join(projectDir, "output");
+  fs__namespace.mkdirSync(outputDir, { recursive: true });
+  if (!renderJobCoordinator.isActive(projectDir)) {
+    try {
+      for (const removed of cleanupOrphanOutputPartials(projectDir)) {
+        logger.info(`[SimpleAssemblyAdapter] Cleaned stale partial file: ${path__namespace.basename(removed)}`);
+      }
+    } catch {
+    }
+  }
+  onProgress("Resolving finalized production scenes and edit plan order...", 0.05);
+  const resolved = resolvePreparedProductionScenes(projectDir);
+  assertAllProductionScenesReady(resolved);
+  logger.info(
+    `[SimpleAssemblyAdapter] All ${resolved.scenes.length} planned scenes verified ready in authoritative timeline order`
+  );
+  const effectiveMusicMode = options.backgroundMusicMode ?? "off";
+  const baseTargetName = options.outputName || "simple_assembly";
+  const candidateOutputPath = path__namespace.join(outputDir, `${baseTargetName}.mp4`);
+  const existingProvenance = readRenderProvenance(projectDir);
+  if (existingProvenance && existingProvenance.assemblyMode === "simple-assembly" && existingProvenance.backgroundMusicMode === effectiveMusicMode && fs__namespace.existsSync(candidateOutputPath)) {
+    try {
+      const stat2 = fs__namespace.statSync(candidateOutputPath);
+      if (stat2.size > 1024) {
+        const probe = await probeMedia$1(candidateOutputPath, { signal });
+        if (probe && probe.hasVideo && probe.duration > 0) {
+          logger.info(`[SimpleAssemblyAdapter] Reusing verified existing output: ${candidateOutputPath}`);
+          onProgress("Found verified completed Simple Assembly output matching settings, skipping render", 1);
+          return {
+            success: true,
+            cached: true,
+            artifactPath: candidateOutputPath,
+            data: {
+              outputPath: candidateOutputPath,
+              durationSecs: probe.duration,
+              fileSizeBytes: stat2.size,
+              reused: true
+            },
+            stats: {
+              outputPath: candidateOutputPath,
+              fileSizeBytes: stat2.size,
+              reused: true,
+              assemblyMode: "simple-assembly"
+            }
+          };
+        }
+      }
+    } catch {
+    }
+  }
+  let musicFilePath;
+  if (effectiveMusicMode !== "off") {
+    const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+    if (fs__namespace.existsSync(audioPlanPath)) {
+      try {
+        const plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+        const approvedTrack = plan.sections?.find(
+          (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+        );
+        if (approvedTrack?.approvedLocalPath) {
+          musicFilePath = approvedTrack.approvedLocalPath;
+          logger.info(`[SimpleAssemblyAdapter] Using approved music track: ${musicFilePath}`);
+        }
+      } catch {
+      }
+    }
+  }
+  let targetName = baseTargetName;
+  let targetPath = path__namespace.join(outputDir, `${targetName}.mp4`);
+  let counter = 1;
+  while (fs__namespace.existsSync(targetPath) && (!existingProvenance || existingProvenance.assemblyMode !== "simple-assembly")) {
+    targetName = `${baseTargetName}_${counter}`;
+    targetPath = path__namespace.join(outputDir, `${targetName}.mp4`);
+    counter++;
+  }
+  onProgress(`Starting Simple Assembly render (${targetName}.mp4)...`, 0.08);
+  throwIfAborted(signal);
+  const requestKey = `simple-assembly-pipeline:${projectDir}:${effectiveMusicMode}:${targetName}`;
+  const { promise } = renderJobCoordinator.run({
+    projectDir,
+    requestKey,
+    source: "pipeline",
+    externalSignal: signal,
+    starter: async (jobSignal) => {
+      return await executeSimpleAssembly({
+        projectDir,
+        voiceoverPath: options.voiceoverPath,
+        sceneSources: resolved.scenes,
+        backgroundMusicMode: effectiveMusicMode,
+        musicFilePath,
+        outputName: targetName,
+        width: options.resolution?.width ?? 1920,
+        height: options.resolution?.height ?? 1080,
+        fps: options.fps ?? 30,
+        shortClipPolicy: options.shortClipPolicy ?? "freeze-last-frame",
+        signal: jobSignal,
+        onProgress: (p) => {
+          if (signal?.aborted) return;
+          onProgress(p.message || p.stage, p.progress);
+        }
+      });
+    }
+  });
+  const result = await promise;
+  throwIfAborted(signal);
+  if (!result.success || !result.outputPath || !fs__namespace.existsSync(result.outputPath)) {
+    throw new Error(result.error || "Simple Assembly failed to produce valid MP4.");
+  }
+  const finalProbe = await probeMedia$1(result.outputPath, { signal });
+  if (!finalProbe || !finalProbe.hasVideo || finalProbe.duration <= 0) {
+    throw new Error("Produced MP4 failed media probe inspection (invalid streams or zero duration).");
+  }
+  const stat = fs__namespace.statSync(result.outputPath);
+  writeRenderProvenance(projectDir, {
+    schemaVersion: 1,
+    assemblyMode: "simple-assembly",
+    backgroundMusicMode: effectiveMusicMode,
+    renderRequestFingerprint: requestKey,
+    outputPath: result.outputPath,
+    status: "completed",
+    completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    durationSecs: finalProbe.duration,
+    fileSizeBytes: stat.size,
+    resolution: {
+      width: options.resolution?.width ?? 1920,
+      height: options.resolution?.height ?? 1080
+    },
+    fps: options.fps ?? 30,
+    engineVersion: "simple-assembly-v2.0"
+  });
+  onProgress("Simple Assembly completed successfully", 1);
+  return {
+    success: true,
+    artifactPath: result.outputPath,
+    data: {
+      outputPath: result.outputPath,
+      durationSecs: finalProbe.duration,
+      fileSizeBytes: stat.size
+    },
+    stats: {
+      outputPath: result.outputPath,
+      durationSecs: finalProbe.duration,
+      fileSizeBytes: stat.size,
+      sceneCount: resolved.scenes.length,
+      assemblyMode: "simple-assembly",
+      backgroundMusicMode: effectiveMusicMode,
+      remotionUsed: false
+    }
+  };
+}
 const VISUAL_MIX_SCHEMA_VERSION = 1;
 function getGeneralManifestPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "generated-visual-assets.json");
@@ -24143,96 +25357,6 @@ class FlowImagePool {
   }
 }
 const flowImagePool = new FlowImagePool();
-const AI_PROVIDERS = /* @__PURE__ */ new Set(["google-flow", "manual-ai"]);
-function isAiProvider(provider) {
-  return !!provider && AI_PROVIDERS.has(provider);
-}
-class VisualAssignmentStore {
-  assignments = /* @__PURE__ */ new Map();
-  filePath;
-  lockPromise = Promise.resolve();
-  constructor(projectDir) {
-    this.filePath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
-    this.load();
-  }
-  load() {
-    if (fs__namespace.existsSync(this.filePath)) {
-      try {
-        const raw = fs__namespace.readFileSync(this.filePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.assignments.clear();
-          for (const a of parsed) {
-            if (a && typeof a.sceneIndex === "number") {
-              this.assignments.set(a.sceneIndex, a);
-            }
-          }
-        }
-      } catch (err) {
-        logger.warn(`[VisualAssignmentStore] Failed to load ${this.filePath}: ${err}`);
-      }
-    }
-  }
-  get(sceneIndex) {
-    return this.assignments.get(sceneIndex);
-  }
-  has(sceneIndex) {
-    return this.assignments.has(sceneIndex);
-  }
-  /**
-   * Sets or updates an assignment.
-   * If called by the stock engine, enforces Section 29:
-   * never overwrites a valid Google Flow AI assignment.
-   */
-  set(sceneIndex, assignment, isStockCaller = false) {
-    const existing = this.assignments.get(sceneIndex);
-    if ((isStockCaller || assignment.asset && !isAiProvider(assignment.asset.provider)) && isAiProvider(existing?.asset?.provider) && existing?.status === "assigned") {
-      if (existing.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
-        logger.info(
-          `[VisualAssignmentStore] Preserving valid ${existing.asset.provider} AI assignment for scene ${sceneIndex} against stock overwrite.`
-        );
-        return false;
-      }
-    }
-    this.assignments.set(sceneIndex, assignment);
-    return true;
-  }
-  setMany(assignments, isStockCaller = false) {
-    for (const a of assignments) {
-      this.set(a.sceneIndex, a, isStockCaller);
-    }
-  }
-  delete(sceneIndex) {
-    return this.assignments.delete(sceneIndex);
-  }
-  getAll() {
-    return Array.from(this.assignments.values()).sort((a, b) => a.sceneIndex - b.sceneIndex);
-  }
-  /**
-   * Thread-safe atomic disk flush using a mutex queue and temporary file rename.
-   */
-  async flushAtomic() {
-    const previousLock = this.lockPromise;
-    let releaseLock = () => {
-    };
-    this.lockPromise = new Promise((resolve) => {
-      releaseLock = resolve;
-    });
-    await previousLock;
-    try {
-      const items = this.getAll();
-      const dir = path__namespace.dirname(this.filePath);
-      if (!fs__namespace.existsSync(dir)) {
-        fs__namespace.mkdirSync(dir, { recursive: true });
-      }
-      const tmpPath = `${this.filePath}.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      fs__namespace.writeFileSync(tmpPath, JSON.stringify(items, null, 2), "utf-8");
-      fs__namespace.renameSync(tmpPath, this.filePath);
-    } finally {
-      releaseLock();
-    }
-  }
-}
 function resolveAiFailureBehavior(config) {
   return config?.aiFailureBehavior === "stock-fallback" ? "stock-fallback" : "strict";
 }
@@ -26621,9 +27745,34 @@ async function runStockSearchStage(options, onProgress, signal) {
 async function runAudioSearchStage(options, onProgress, signal) {
   checkAborted(signal);
   const audioPlanPath = path__namespace.join(options.projectDir, "analysis", "audio-plan.json");
-  const profileArtifact = loadContentProfileArtifact(options.projectDir);
-  const isHealthAudio = profileArtifact ? profileArtifact.resolvedProfile === "health" : options.contentProfileMode === "health" || options.contentType === "health";
+  const isSimpleAssembly = options.assemblyMode === "simple-assembly";
   const isNoMusic = options.backgroundMusicMode === "off";
+  if (isSimpleAssembly && isNoMusic) {
+    onProgress("Simple Assembly + No Music: Voiceover only, zero background music and zero SFX", 1);
+    let plan2 = loadAudioPlan(options.projectDir);
+    if (!plan2) {
+      plan2 = {
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        sections: [],
+        sfxAssignments: []
+      };
+      saveAudioPlan(options.projectDir, plan2);
+    }
+    return {
+      success: true,
+      artifactPath: audioPlanPath,
+      data: plan2,
+      stats: {
+        sectionsCount: 0,
+        downloadedMusicCount: 0,
+        sfxCount: 0,
+        assemblyMode: "simple-assembly",
+        backgroundMusicMode: "off"
+      }
+    };
+  }
+  const profileArtifact = loadContentProfileArtifact(options.projectDir);
+  const isHealthAudio = isSimpleAssembly ? false : profileArtifact ? profileArtifact.resolvedProfile === "health" : options.contentProfileMode === "health" || options.contentType === "health";
   if (isNoMusic) {
     onProgress("No Background Music selected: skipping music search...", 0.1);
     checkAborted(signal);
@@ -26871,19 +28020,40 @@ async function runAudioSearchStage(options, onProgress, signal) {
 async function runPreflightStage(options, onProgress, signal) {
   checkAborted(signal);
   onProgress("Running render preflight inspection...", 0.1);
-  let captionPlan;
-  try {
-    const loaded = loadCaptionPlan(options.projectDir);
-    if (loaded?.enabled && loaded.phrases.length > 0) {
-      captionPlan = loaded;
+  const isSimpleAssembly = options.assemblyMode === "simple-assembly";
+  if (isSimpleAssembly) {
+    try {
+      const resolved = resolvePreparedProductionScenes(options.projectDir);
+      assertAllProductionScenesReady(resolved);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[PreflightStage] Simple Assembly scene readiness preflight failed: ${msg}`);
+      return {
+        success: false,
+        needsAttention: true,
+        error: `Preflight checks failed: ${msg}`,
+        artifactPath: path__namespace.join(options.projectDir, "analysis", "render-preflight.json")
+      };
     }
-  } catch {
+  }
+  let captionPlan;
+  if (!isSimpleAssembly) {
+    try {
+      const loaded = loadCaptionPlan(options.projectDir);
+      if (loaded?.enabled && loaded.phrases.length > 0) {
+        captionPlan = loaded;
+      }
+    } catch {
+    }
   }
   checkAborted(signal);
   const report = await runRenderPreflight({
     projectDir: options.projectDir,
     voiceoverPath: options.voiceoverPath,
-    captionPlan
+    captionPlan,
+    strictMissingMedia: isSimpleAssembly ? true : void 0,
+    resolution: options.resolution,
+    fps: options.fps
   });
   checkAborted(signal);
   const preflightPath = path__namespace.join(options.projectDir, "analysis", "render-preflight.json");
@@ -26914,6 +28084,13 @@ async function runPreflightStage(options, onProgress, signal) {
 }
 async function runRenderStage(options, onProgress, signal) {
   checkAborted(signal);
+  if (options.assemblyMode === "simple-assembly") {
+    return runSimpleAssemblyRenderStage(options, onProgress, signal);
+  }
+  return runExistingFullRenderStage(options, onProgress, signal);
+}
+async function runExistingFullRenderStage(options, onProgress, signal) {
+  checkAborted(signal);
   const outputDir = path__namespace.join(options.projectDir, "output");
   fs__namespace.mkdirSync(outputDir, { recursive: true });
   if (!renderJobCoordinator.isActive(options.projectDir)) {
@@ -26938,49 +28115,57 @@ async function runRenderStage(options, onProgress, signal) {
     try {
       const stat = fs__namespace.statSync(defaultCompletedVideo);
       if (stat.size > 1024 * 1024) {
-        const activeRecord = readActiveRender(options.projectDir);
-        const expectedRequestKey = computeRenderRequestKey({
-          projectDir: options.projectDir,
-          voiceoverPath: options.voiceoverPath,
-          outputName: baseTargetName,
-          resolution: options.resolution,
-          fps: options.fps,
-          transitionSettings: options.transitionSettings,
-          captionPlan,
-          editorialSettings: options.editorialSettings,
-          backgroundMusicMode: options.backgroundMusicMode
-        });
-        const activeParams = activeRecord?.params;
-        const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? "full";
-        const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? "full";
-        const isExactMatch = activeRecord && activeRecord.status === "completed" && activeRecord.renderFingerprint === expectedRequestKey && requestedOverlayMode === cachedOverlayMode;
-        if (isExactMatch) {
-          const probe = await probeMedia$1(defaultCompletedVideo, { signal });
-          if (probe && probe.hasVideo && probe.duration > 0) {
-            logger.info(
-              `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
-            );
-            onProgress("Found verified completed video output matching settings, skipping render", 1);
-            return {
-              success: true,
-              cached: true,
-              artifactPath: defaultCompletedVideo,
-              data: {
-                outputPath: defaultCompletedVideo,
-                durationSecs: probe.duration,
-                fileSizeBytes: stat.size
-              },
-              stats: {
-                outputPath: defaultCompletedVideo,
-                fileSizeBytes: stat.size,
-                reused: true
-              }
-            };
-          }
-        } else {
+        const provenance = readRenderProvenance(options.projectDir);
+        if (provenance && provenance.assemblyMode !== "full-production") {
           logger.info(
-            `[RenderStage] Existing output ${path__namespace.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+            `[RenderStage] Output exists but provenance is ${provenance.assemblyMode} (expected full-production). Generating fresh Full output.`
           );
+        } else {
+          const activeRecord = readActiveRender(options.projectDir);
+          const expectedRequestKey = computeRenderRequestKey({
+            projectDir: options.projectDir,
+            voiceoverPath: options.voiceoverPath,
+            outputName: baseTargetName,
+            resolution: options.resolution,
+            fps: options.fps,
+            transitionSettings: options.transitionSettings,
+            captionPlan,
+            editorialSettings: options.editorialSettings,
+            backgroundMusicMode: options.backgroundMusicMode,
+            assemblyMode: "full-production"
+          });
+          const activeParams = activeRecord?.params;
+          const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? "full";
+          const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? "full";
+          const isExactMatch = activeRecord && activeRecord.status === "completed" && activeRecord.renderFingerprint === expectedRequestKey && requestedOverlayMode === cachedOverlayMode;
+          if (isExactMatch) {
+            const probe = await probeMedia$1(defaultCompletedVideo, { signal });
+            if (probe && probe.hasVideo && probe.duration > 0) {
+              logger.info(
+                `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
+              );
+              onProgress("Found verified completed video output matching settings, skipping render", 1);
+              return {
+                success: true,
+                cached: true,
+                artifactPath: defaultCompletedVideo,
+                data: {
+                  outputPath: defaultCompletedVideo,
+                  durationSecs: probe.duration,
+                  fileSizeBytes: stat.size
+                },
+                stats: {
+                  outputPath: defaultCompletedVideo,
+                  fileSizeBytes: stat.size,
+                  reused: true
+                }
+              };
+            }
+          } else {
+            logger.info(
+              `[RenderStage] Existing output ${path__namespace.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+            );
+          }
         }
       }
     } catch {
@@ -27015,6 +28200,31 @@ async function runRenderStage(options, onProgress, signal) {
   });
   const result = await promise;
   checkAborted(signal);
+  try {
+    writeRenderProvenance(options.projectDir, {
+      schemaVersion: 1,
+      assemblyMode: "full-production",
+      backgroundMusicMode: options.backgroundMusicMode ?? "auto",
+      renderRequestFingerprint: computeRenderRequestKey({
+        projectDir: options.projectDir,
+        voiceoverPath: options.voiceoverPath,
+        outputName: targetName,
+        resolution: options.resolution,
+        fps: options.fps,
+        transitionSettings: options.transitionSettings,
+        captionPlan,
+        editorialSettings: options.editorialSettings,
+        backgroundMusicMode: options.backgroundMusicMode,
+        assemblyMode: "full-production"
+      }),
+      outputPath: result.outputPath,
+      durationSecs: result.durationSecs,
+      fileSizeBytes: result.fileSizeBytes,
+      status: "completed",
+      completedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  } catch {
+  }
   return {
     success: true,
     artifactPath: result.outputPath,
@@ -29206,7 +30416,7 @@ function registerAudioHandlers(ipcMain) {
     IPC_CHANNELS.AUDIO_PLAN_SAVE,
     (_event, params) => {
       try {
-        saveAudioPlan$1(params.projectDir, params.plan);
+        saveAudioPlan(params.projectDir, params.plan);
         return { success: true };
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
@@ -29225,7 +30435,7 @@ function registerAudioHandlers(ipcMain) {
       if (params.volumeDb !== void 0) section.volumeDb = params.volumeDb;
       if (params.fadeInSecs !== void 0) section.fadeInSecs = params.fadeInSecs;
       if (params.fadeOutSecs !== void 0) section.fadeOutSecs = params.fadeOutSecs;
-      saveAudioPlan$1(params.projectDir, plan);
+      saveAudioPlan(params.projectDir, plan);
       return { success: true, plan };
     }
   );
@@ -29238,7 +30448,7 @@ function registerAudioHandlers(ipcMain) {
       if (!sfx) return { success: false, error: "SFX assignment not found" };
       sfx.approved = params.approved;
       if (params.volumeDb !== void 0) sfx.volumeDb = params.volumeDb;
-      saveAudioPlan$1(params.projectDir, plan);
+      saveAudioPlan(params.projectDir, plan);
       return { success: true, plan };
     }
   );
@@ -32419,844 +33629,6 @@ function registerManualAiHandlers(ipcMain) {
       }
     }
   );
-}
-const SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([
-  ".mp4",
-  ".mov",
-  ".webm",
-  ".mkv",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".webp"
-]);
-const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".webp"]);
-function extractSceneNumber(filename) {
-  const base = path__namespace.parse(filename).name.trim();
-  const prefixMatch = base.match(/^(?:scene|shot|clip|part|s)[-_\s]*0*(\d+)(?:[-_\s].*)?$/i);
-  if (prefixMatch) {
-    const num = parseInt(prefixMatch[1], 10);
-    if (Number.isFinite(num)) return num;
-  }
-  const leadingMatch = base.match(/^0*(\d+)(?:[-_\s].*)?$/);
-  if (leadingMatch) {
-    const num = parseInt(leadingMatch[1], 10);
-    if (Number.isFinite(num)) return num;
-  }
-  const embeddedMatch = base.match(/(?:^|[-_\s])(?:scene|shot|s)[-_\s]*0*(\d+)(?:[-_\s]|$)/i);
-  if (embeddedMatch) {
-    const num = parseInt(embeddedMatch[1], 10);
-    if (Number.isFinite(num)) return num;
-  }
-  const trailingMatch = base.match(/[-_\s]0*(\d+)$/);
-  if (trailingMatch) {
-    const num = parseInt(trailingMatch[1], 10);
-    if (Number.isFinite(num)) return num;
-  }
-  return null;
-}
-function detectMediaType(filePath) {
-  const ext = path__namespace.extname(filePath).toLowerCase();
-  return IMAGE_EXTENSIONS.has(ext) ? "image" : "video";
-}
-function resolveDirectFolderScenes(folderPath) {
-  if (!fs__namespace.existsSync(folderPath)) {
-    throw new Error(`Scene folder does not exist: ${folderPath}`);
-  }
-  const entries = fs__namespace.readdirSync(folderPath, { withFileTypes: true });
-  const validFiles = entries.filter((ent) => ent.isFile() && !ent.name.startsWith(".")).filter((ent) => SUPPORTED_EXTENSIONS.has(path__namespace.extname(ent.name).toLowerCase()));
-  if (validFiles.length === 0) {
-    throw new Error(
-      `No supported video or image files found in folder: ${folderPath}. Supported formats: MP4, MOV, WEBM, MKV, PNG, JPG, WEBP.`
-    );
-  }
-  const scenes = [];
-  const ambiguousFiles = [];
-  const seenIndices = /* @__PURE__ */ new Map();
-  for (const ent of validFiles) {
-    const sceneIndex = extractSceneNumber(ent.name);
-    if (sceneIndex === null) {
-      ambiguousFiles.push(ent.name);
-      continue;
-    }
-    if (seenIndices.has(sceneIndex)) {
-      const existingName = seenIndices.get(sceneIndex);
-      throw new Error(
-        `Duplicate scene number ${sceneIndex} detected in scene folder: "${existingName}" and "${ent.name}". Each scene number must be unique.`
-      );
-    }
-    seenIndices.set(sceneIndex, ent.name);
-    const fullPath = path__namespace.join(folderPath, ent.name);
-    scenes.push({
-      sceneIndex,
-      filePath: fullPath,
-      fileName: ent.name,
-      mediaType: detectMediaType(fullPath)
-    });
-  }
-  if (ambiguousFiles.length > 0) {
-    throw new Error(
-      `Could not determine scene order for ${ambiguousFiles.length} file(s): ${ambiguousFiles.slice(0, 5).join(", ")}${ambiguousFiles.length > 5 ? "..." : ""}. Please name files with scene numbers (e.g. "Scene 1.mp4", "Scene 2.mp4" or "001.mp4").`
-    );
-  }
-  scenes.sort((a, b) => a.sceneIndex - b.sceneIndex);
-  logger.info(`[SimpleAssemblyInputResolver] Resolved ${scenes.length} scenes from direct folder: ${folderPath}`);
-  return scenes;
-}
-function resolveProjectScenes(projectDir) {
-  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
-  const manualAiPath = path__namespace.join(projectDir, "analysis", "manual-ai-assets.json");
-  const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
-  const stockAssignmentsPath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
-  let editPlan = null;
-  if (fs__namespace.existsSync(planPath)) {
-    try {
-      editPlan = JSON.parse(fs__namespace.readFileSync(planPath, "utf-8"));
-    } catch (err) {
-      logger.warn(`[SimpleAssemblyInputResolver] Could not read master-edit-plan.json: ${err}`);
-    }
-  }
-  let manualAiManifest = null;
-  if (fs__namespace.existsSync(manualAiPath)) {
-    try {
-      manualAiManifest = JSON.parse(fs__namespace.readFileSync(manualAiPath, "utf-8"));
-    } catch {
-    }
-  }
-  let stockAssignments = null;
-  if (fs__namespace.existsSync(stockAssignmentsPath)) {
-    try {
-      stockAssignments = JSON.parse(fs__namespace.readFileSync(stockAssignmentsPath, "utf-8"));
-    } catch {
-    }
-  }
-  let mediaIndex = [];
-  if (fs__namespace.existsSync(mediaIndexPath)) {
-    try {
-      mediaIndex = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
-    } catch {
-    }
-  }
-  const planScenes = [];
-  if (editPlan && Array.isArray(editPlan.chapters)) {
-    for (const ch of editPlan.chapters) {
-      const seqs = ch.sequences ?? ch.chapters_seq ?? [];
-      for (const seq of seqs) {
-        for (const sc of seq.scenes ?? []) {
-          planScenes.push(sc);
-        }
-      }
-    }
-  }
-  const scenes = [];
-  const missingSceneIndices = [];
-  if (planScenes.length > 0) {
-    for (const sc of planScenes) {
-      const scIdx = sc.sceneIndex;
-      let resolvedPath = null;
-      if (manualAiManifest?.scenes?.[String(scIdx)]?.localPath) {
-        const candidate = manualAiManifest.scenes[String(scIdx)].localPath;
-        if (fs__namespace.existsSync(candidate)) resolvedPath = candidate;
-      }
-      if (!resolvedPath && stockAssignments?.scenes?.[String(scIdx)]) {
-        const item = stockAssignments.scenes[String(scIdx)];
-        const candidate = item.downloadedPath || item.localPath;
-        if (candidate && fs__namespace.existsSync(candidate)) resolvedPath = candidate;
-      }
-      if (!resolvedPath && sc.localPath && fs__namespace.existsSync(sc.localPath)) {
-        resolvedPath = sc.localPath;
-      }
-      if (!resolvedPath && sc.mediaFile) {
-        const hit = mediaIndex.find((m) => m.filename === sc.mediaFile || path__namespace.basename(m.path) === sc.mediaFile);
-        if (hit && fs__namespace.existsSync(hit.path)) resolvedPath = hit.path;
-      }
-      if (!resolvedPath && sc.mediaFile) {
-        const searchDirs = [
-          path__namespace.join(projectDir, "assets", "manual-ai"),
-          path__namespace.join(projectDir, "assets", "videos"),
-          path__namespace.join(projectDir, "assets", "images"),
-          path__namespace.join(projectDir, "assets", "stock")
-        ];
-        for (const dir of searchDirs) {
-          const candidate = path__namespace.join(dir, sc.mediaFile);
-          if (fs__namespace.existsSync(candidate)) {
-            resolvedPath = candidate;
-            break;
-          }
-        }
-      }
-      if (resolvedPath && fs__namespace.existsSync(resolvedPath)) {
-        scenes.push({
-          sceneIndex: scIdx,
-          filePath: resolvedPath,
-          fileName: path__namespace.basename(resolvedPath),
-          mediaType: detectMediaType(resolvedPath),
-          duration: typeof sc.duration === "number" && sc.duration > 0 ? sc.duration : void 0
-        });
-      } else {
-        missingSceneIndices.push(scIdx);
-      }
-    }
-    scenes.sort((a, b) => a.sceneIndex - b.sceneIndex);
-    return {
-      scenes,
-      missingSceneIndices,
-      hasEditPlanTimings: scenes.length > 0 && scenes.every((s) => typeof s.duration === "number" && s.duration > 0)
-    };
-  }
-  if (manualAiManifest?.scenes && Object.keys(manualAiManifest.scenes).length > 0) {
-    const rawKeys = Object.keys(manualAiManifest.scenes).map((k) => parseInt(k, 10)).sort((a, b) => a - b);
-    for (const scIdx of rawKeys) {
-      const rec = manualAiManifest.scenes[String(scIdx)];
-      if (rec?.localPath && fs__namespace.existsSync(rec.localPath)) {
-        scenes.push({
-          sceneIndex: scIdx,
-          filePath: rec.localPath,
-          fileName: path__namespace.basename(rec.localPath),
-          mediaType: detectMediaType(rec.localPath)
-        });
-      } else {
-        missingSceneIndices.push(scIdx);
-      }
-    }
-    return { scenes, missingSceneIndices, hasEditPlanTimings: false };
-  }
-  return { scenes: [], missingSceneIndices: [], hasEditPlanTimings: false };
-}
-function resolveSimpleAssemblyInputs(projectDir, sceneFolder) {
-  if (sceneFolder && sceneFolder.trim().length > 0) {
-    const resolved = resolveDirectFolderScenes(sceneFolder);
-    return {
-      scenes: resolved,
-      source: "direct-folder",
-      hasEditPlanTimings: false
-    };
-  }
-  const projectRes = resolveProjectScenes(projectDir);
-  if (projectRes.missingSceneIndices.length > 0 && projectRes.scenes.length === 0) {
-    throw new Error(
-      `Import your scenes to begin Simple Assembly. Missing ${projectRes.missingSceneIndices.length} required scenes.`
-    );
-  }
-  if (projectRes.scenes.length > 0) {
-    if (projectRes.missingSceneIndices.length > 0) {
-      throw new Error(
-        `Simple Assembly blocked: Scene(s) ${projectRes.missingSceneIndices.slice(0, 10).join(", ")} are missing imported media. Please import all scenes or select a Scene Video Folder.`
-      );
-    }
-    return {
-      scenes: projectRes.scenes,
-      source: "project-plan",
-      hasEditPlanTimings: projectRes.hasEditPlanTimings
-    };
-  }
-  const fallbackDirs = [
-    path__namespace.join(projectDir, "assets", "manual-ai"),
-    path__namespace.join(projectDir, "assets", "videos")
-  ];
-  for (const fDir of fallbackDirs) {
-    if (fs__namespace.existsSync(fDir)) {
-      try {
-        const resolved = resolveDirectFolderScenes(fDir);
-        if (resolved.length > 0) {
-          return {
-            scenes: resolved,
-            source: "direct-folder",
-            hasEditPlanTimings: false
-          };
-        }
-      } catch {
-      }
-    }
-  }
-  throw new Error("Import your scenes to begin Simple Assembly. No scene media found.");
-}
-async function resolveAssemblyTimeline(params) {
-  const { scenes, voiceoverPath, fps, signal } = params;
-  if (scenes.length === 0) {
-    throw new Error("Cannot resolve timeline for zero scenes.");
-  }
-  const probe = await probeMedia$1(voiceoverPath, { signal });
-  if (!probe || !probe.duration || probe.duration <= 0) {
-    throw new Error(`Failed to probe voiceover audio at ${voiceoverPath}. Ensure file exists and contains a valid audio stream.`);
-  }
-  const voiceoverDuration = probe.duration;
-  const targetTotalFrames = Math.max(1, Math.round(voiceoverDuration * fps));
-  const numScenes = scenes.length;
-  logger.info(
-    `[SimpleAssemblyTimeline] Probed voiceover: duration=${voiceoverDuration.toFixed(3)}s targetFrames=${targetTotalFrames} (fps=${fps}) scenes=${numScenes}`
-  );
-  const hasPlanTimings = scenes.every((s) => typeof s.duration === "number" && s.duration > 0);
-  if (hasPlanTimings) {
-    const sumPlanDuration = scenes.reduce((acc, s) => acc + s.duration, 0);
-    const diff = Math.abs(sumPlanDuration - voiceoverDuration);
-    const isAligned = diff <= Math.max(0.5, voiceoverDuration * 0.02);
-    if (isAligned) {
-      let allocatedFramesSum = 0;
-      const sceneFrameAllocations = scenes.map((s) => {
-        const f = Math.max(1, Math.round(s.duration * fps));
-        allocatedFramesSum += f;
-        return f;
-      });
-      const frameDelta = targetTotalFrames - allocatedFramesSum;
-      if (frameDelta !== 0) {
-        const lastIdx = sceneFrameAllocations.length - 1;
-        sceneFrameAllocations[lastIdx] = Math.max(1, sceneFrameAllocations[lastIdx] + frameDelta);
-      }
-      let currentStartFrame2 = 0;
-      const resolvedScenes2 = scenes.map((s, idx) => {
-        const targetFrames = sceneFrameAllocations[idx];
-        const startFrame = currentStartFrame2;
-        currentStartFrame2 += targetFrames;
-        return {
-          sceneIndex: s.sceneIndex,
-          sourcePath: s.filePath,
-          mediaType: s.mediaType,
-          durationSecs: targetFrames / fps,
-          targetFrames,
-          startFrame
-        };
-      });
-      return {
-        scenes: resolvedScenes2,
-        voiceoverDuration,
-        targetTotalFrames,
-        fps,
-        allocationMethod: "edit-plan",
-        toleranceSecs: 1 / fps
-      };
-    } else {
-      logger.info(
-        `[SimpleAssemblyTimeline] Edit plan duration (${sumPlanDuration.toFixed(2)}s) differs from voiceover (${voiceoverDuration.toFixed(2)}s) by ${diff.toFixed(2)}s. Using equal distribution.`
-      );
-    }
-  }
-  const baseFrames = Math.floor(targetTotalFrames / numScenes);
-  const remainder = targetTotalFrames % numScenes;
-  let currentStartFrame = 0;
-  const resolvedScenes = scenes.map((s, idx) => {
-    const sceneFrames = Math.max(1, baseFrames + (idx < remainder ? 1 : 0));
-    const startFrame = currentStartFrame;
-    currentStartFrame += sceneFrames;
-    return {
-      sceneIndex: s.sceneIndex,
-      sourcePath: s.filePath,
-      mediaType: s.mediaType,
-      durationSecs: sceneFrames / fps,
-      targetFrames: sceneFrames,
-      startFrame
-    };
-  });
-  const totalAllocatedFrames = resolvedScenes.reduce((a, s) => a + s.targetFrames, 0);
-  if (totalAllocatedFrames !== targetTotalFrames) {
-    const adjust = targetTotalFrames - totalAllocatedFrames;
-    resolvedScenes[resolvedScenes.length - 1].targetFrames += adjust;
-    resolvedScenes[resolvedScenes.length - 1].durationSecs = resolvedScenes[resolvedScenes.length - 1].targetFrames / fps;
-  }
-  logger.info(
-    `[SimpleAssemblyTimeline] Equal distribution complete: ${resolvedScenes.length} scenes, baseFrames=${baseFrames}, remainder=${remainder}, sumFrames=${targetTotalFrames}`
-  );
-  return {
-    scenes: resolvedScenes,
-    voiceoverDuration,
-    targetTotalFrames,
-    fps,
-    allocationMethod: "equal-distribution",
-    toleranceSecs: 1 / fps
-  };
-}
-const SIMPLE_ASSEMBLY_ENGINE_VERSION = 1;
-function computeSceneClipFingerprint(params) {
-  return fingerprintOf({
-    v: SIMPLE_ASSEMBLY_ENGINE_VERSION,
-    kind: "scene-clip",
-    source: params.sourceSig,
-    w: params.targetWidth,
-    h: params.targetHeight,
-    fps: params.targetFps,
-    frames: params.targetFrames,
-    dur: Math.round(params.targetDurationSecs * 1e3) / 1e3,
-    policy: params.shortClipPolicy
-  });
-}
-function computeAssemblyVideoFingerprint(params) {
-  return fingerprintOf({
-    v: SIMPLE_ASSEMBLY_ENGINE_VERSION,
-    kind: "assembled-video",
-    scenes: params.sceneFingerprints,
-    w: params.width,
-    h: params.height,
-    fps: params.fps
-  });
-}
-class SimpleAssemblyCacheManager {
-  constructor(projectDir) {
-    this.projectDir = projectDir;
-    this.cacheDir = path__namespace.join(projectDir, ".cache", "simple-assembly");
-    this.clipsDir = path__namespace.join(this.cacheDir, "clips");
-  }
-  cacheDir;
-  clipsDir;
-  ensureDirs() {
-    if (!fs__namespace.existsSync(this.clipsDir)) {
-      fs__namespace.mkdirSync(this.clipsDir, { recursive: true });
-    }
-  }
-  getClipPath(fingerprint) {
-    return path__namespace.join(this.clipsDir, `clip_${fingerprint.slice(0, 16)}.mp4`);
-  }
-  getAssembledVideoPath(assemblyFingerprint) {
-    return path__namespace.join(this.cacheDir, `assembled_${assemblyFingerprint.slice(0, 16)}.mp4`);
-  }
-  async isClipValid(clipPath, expectedFrames, fps, signal) {
-    if (!fs__namespace.existsSync(clipPath)) return false;
-    try {
-      const stat = fs__namespace.statSync(clipPath);
-      if (stat.size < 1024) return false;
-      const probe = await probeMedia$1(clipPath, { signal });
-      if (!probe || !probe.duration || probe.duration <= 0) return false;
-      const expectedDur = expectedFrames / fps;
-      const diff = Math.abs(probe.duration - expectedDur);
-      return diff <= Math.max(0.1, 2 / fps);
-    } catch {
-      return false;
-    }
-  }
-  async isAssembledVideoValid(videoPath, expectedTotalFrames, fps, signal) {
-    if (!fs__namespace.existsSync(videoPath)) return false;
-    try {
-      const stat = fs__namespace.statSync(videoPath);
-      if (stat.size < 1024) return false;
-      const probe = await probeMedia$1(videoPath, { signal });
-      if (!probe || !probe.duration || probe.duration <= 0) return false;
-      const expectedDur = expectedTotalFrames / fps;
-      const diff = Math.abs(probe.duration - expectedDur);
-      return diff <= Math.max(0.2, 3 / fps);
-    } catch {
-      return false;
-    }
-  }
-}
-function safeUnlink(filePath) {
-  try {
-    if (fs__namespace.existsSync(filePath)) fs__namespace.unlinkSync(filePath);
-  } catch {
-  }
-}
-function escapeConcatPath(p) {
-  return p.replace(/\\/g, "/").replace(/'/g, "'\\''");
-}
-async function executeSimpleAssembly(request) {
-  const {
-    projectDir,
-    voiceoverPath,
-    sceneFolder,
-    backgroundMusicMode,
-    musicFilePath,
-    outputName = "simple_assembly",
-    width = 1920,
-    height = 1080,
-    fps = 30,
-    shortClipPolicy = "freeze-last-frame",
-    signal,
-    onProgress
-  } = request;
-  const reportProgress = (phase, progress, stage, extra) => {
-    const clampedProgress = Math.max(0, Math.min(1, progress));
-    onProgress?.({
-      stage,
-      phase,
-      status: phase,
-      progress: clampedProgress,
-      percent: Math.round(clampedProgress * 100),
-      sceneIndex: extra?.sceneIndex,
-      totalScenes: extra?.totalScenes,
-      message: extra?.message ?? stage,
-      error: extra?.error,
-      outputPath: extra?.outputPath,
-      duration: extra?.duration
-    });
-  };
-  const cache = new SimpleAssemblyCacheManager(projectDir);
-  cache.ensureDirs();
-  const outputDir = path__namespace.join(projectDir, "output");
-  if (!fs__namespace.existsSync(outputDir)) fs__namespace.mkdirSync(outputDir, { recursive: true });
-  const finalOutputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
-  const partialOutputPath = path__namespace.join(outputDir, `${outputName}.partial.mp4`);
-  safeUnlink(partialOutputPath);
-  try {
-    throwIfAborted(signal);
-    reportProgress("validating-voiceover", 0.05, "[1/8] Validating input voiceover audio...");
-    if (!voiceoverPath || !fs__namespace.existsSync(voiceoverPath)) {
-      throw new Error(`Voiceover audio file does not exist: ${voiceoverPath}`);
-    }
-    const voProbe = await probeMedia$1(voiceoverPath, { signal });
-    if (!voProbe || !voProbe.duration || voProbe.duration <= 0) {
-      throw new Error(`Invalid or unreadable voiceover audio: ${voiceoverPath}`);
-    }
-    const voiceoverDuration = voProbe.duration;
-    logger.info(`[SimpleAssembly] Voiceover duration: ${voiceoverDuration.toFixed(3)}s`);
-    reportProgress("validating-scenes", 0.12, "[2/8] Validating imported scene media...");
-    let sceneInputs = request.sceneSources;
-    if (!sceneInputs || sceneInputs.length === 0) {
-      const resolved = resolveSimpleAssemblyInputs(projectDir, sceneFolder);
-      sceneInputs = resolved.scenes;
-    }
-    if (sceneInputs.length === 0) {
-      throw new Error("Import your scenes to begin Simple Assembly. No valid scene media found.");
-    }
-    for (const sc of sceneInputs) {
-      throwIfAborted(signal);
-      if (!fs__namespace.existsSync(sc.filePath)) {
-        throw new Error(`Scene ${sc.sceneIndex} file not found: ${sc.filePath}`);
-      }
-      const st = fs__namespace.statSync(sc.filePath);
-      if (st.size === 0) {
-        throw new Error(`Scene ${sc.sceneIndex} file is empty (0 bytes): ${sc.filePath}`);
-      }
-    }
-    logger.info(`[SimpleAssembly] Validated ${sceneInputs.length} scene source files`);
-    reportProgress("resolving-timing", 0.18, "[3/8] Resolving scene timing and frame allocation...");
-    const timeline = await resolveAssemblyTimeline({
-      scenes: sceneInputs,
-      voiceoverPath,
-      fps,
-      signal
-    });
-    logger.info(
-      `[SimpleAssembly] Timeline resolved: ${timeline.scenes.length} scenes, totalFrames=${timeline.targetTotalFrames}, method=${timeline.allocationMethod}`
-    );
-    reportProgress("normalizing-scenes", 0.22, `[4/8] Normalizing scene clips (0/${timeline.scenes.length})...`);
-    const sceneProbes = [];
-    for (let i = 0; i < timeline.scenes.length; i++) {
-      throwIfAborted(signal);
-      const sc = timeline.scenes[i];
-      const probe = await probeMedia$1(sc.sourcePath, { signal });
-      sceneProbes.push({ scene: sc, probe });
-    }
-    let canUseFastPath = true;
-    for (const item of sceneProbes) {
-      if (!item.probe || item.scene.mediaType !== "video") {
-        canUseFastPath = false;
-        break;
-      }
-      const durDiff2 = Math.abs(item.probe.duration - item.scene.durationSecs);
-      const isExactFormat = item.probe.width === width && item.probe.height === height && Math.abs(item.probe.fps - fps) < 0.1 && durDiff2 <= 0.05;
-      if (!isExactFormat) {
-        canUseFastPath = false;
-        break;
-      }
-    }
-    const normalizedClipPaths = [];
-    const sceneFingerprints = [];
-    if (canUseFastPath) {
-      logger.info("[SimpleAssembly] Fast Path eligible: all source clips match target format. Skipping normalization.");
-      for (const item of sceneProbes) {
-        normalizedClipPaths.push(item.scene.sourcePath);
-        sceneFingerprints.push(fileSignature(item.scene.sourcePath)?.hash || path__namespace.basename(item.scene.sourcePath));
-      }
-    } else {
-      logger.info("[SimpleAssembly] Normalizing scene clips with compatibility pipeline...");
-      const totalScenes = timeline.scenes.length;
-      for (let i = 0; i < totalScenes; i++) {
-        throwIfAborted(signal);
-        const sc = timeline.scenes[i];
-        const probe = sceneProbes[i].probe;
-        const sourceSig = fileSignature(sc.sourcePath);
-        const clipFp = computeSceneClipFingerprint({
-          sourcePath: sc.sourcePath,
-          sourceSig,
-          targetWidth: width,
-          targetHeight: height,
-          targetFps: fps,
-          targetFrames: sc.targetFrames,
-          targetDurationSecs: sc.durationSecs,
-          shortClipPolicy
-        });
-        sceneFingerprints.push(clipFp);
-        const clipPath = cache.getClipPath(clipFp);
-        normalizedClipPaths.push(clipPath);
-        const isCached = await cache.isClipValid(clipPath, sc.targetFrames, fps, signal);
-        if (isCached) {
-          const pct2 = 0.22 + (i + 1) / totalScenes * 0.38;
-          reportProgress("normalizing-scenes", pct2, `[4/8] Normalized scene ${i + 1}/${totalScenes} (cached)`, {
-            sceneIndex: sc.sceneIndex,
-            totalScenes
-          });
-          continue;
-        }
-        const pct = 0.22 + (i + 1) / totalScenes * 0.38;
-        reportProgress("normalizing-scenes", pct, `[4/8] Normalizing scene ${i + 1}/${totalScenes}...`, {
-          sceneIndex: sc.sceneIndex,
-          totalScenes
-        });
-        const workingClip = clipPath + ".partial.mp4";
-        safeUnlink(workingClip);
-        const allocatedDurationStr = sc.durationSecs.toFixed(3);
-        if (sc.mediaType === "image") {
-          const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
-          await ffmpegRun$4(
-            [
-              "-y",
-              "-loop",
-              "1",
-              "-t",
-              allocatedDurationStr,
-              "-i",
-              sc.sourcePath,
-              "-vf",
-              vf,
-              "-c:v",
-              "libx264",
-              "-preset",
-              "veryfast",
-              "-crf",
-              "20",
-              "-movflags",
-              "+faststart",
-              workingClip
-            ],
-            { signal, threads: 2 }
-          );
-        } else {
-          const srcDur = probe?.duration ?? sc.durationSecs;
-          if (srcDur >= sc.durationSecs - 0.05) {
-            const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
-            await ffmpegRun$4(
-              [
-                "-y",
-                "-ss",
-                "0",
-                "-t",
-                allocatedDurationStr,
-                "-i",
-                sc.sourcePath,
-                "-an",
-                // strictly mute source audio!
-                "-vf",
-                vf,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-movflags",
-                "+faststart",
-                workingClip
-              ],
-              { signal, threads: 2 }
-            );
-          } else {
-            const missingSecs = Math.max(0.01, sc.durationSecs - srcDur);
-            const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},tpad=stop_mode=clone:stop_duration=${missingSecs.toFixed(3)},trim=0:${allocatedDurationStr},setpts=PTS-STARTPTS,format=yuv420p`;
-            await ffmpegRun$4(
-              [
-                "-y",
-                "-i",
-                sc.sourcePath,
-                "-an",
-                // strictly mute source audio!
-                "-vf",
-                vf,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "veryfast",
-                "-crf",
-                "20",
-                "-movflags",
-                "+faststart",
-                workingClip
-              ],
-              { signal, threads: 2 }
-            );
-          }
-        }
-        if (fs__namespace.existsSync(workingClip)) {
-          fs__namespace.renameSync(workingClip, clipPath);
-        }
-      }
-    }
-    reportProgress("joining-scenes", 0.65, `[5/8] Concatenating ${normalizedClipPaths.length} scene clips...`);
-    throwIfAborted(signal);
-    const assemblyFingerprint = computeAssemblyVideoFingerprint({
-      sceneFingerprints,
-      width,
-      height,
-      fps
-    });
-    const assembledVideoPath = cache.getAssembledVideoPath(assemblyFingerprint);
-    const isAssembledCached = await cache.isAssembledVideoValid(
-      assembledVideoPath,
-      timeline.targetTotalFrames,
-      fps,
-      signal
-    );
-    if (isAssembledCached) {
-      logger.info(`[SimpleAssembly] Reusing cached assembled video: ${assembledVideoPath}`);
-    } else {
-      const concatListPath = path__namespace.join(projectDir, ".cache", "simple-assembly", `concat_${Date.now()}.txt`);
-      const concatContent = normalizedClipPaths.map((p) => `file '${escapeConcatPath(p)}'`).join("\n");
-      fs__namespace.writeFileSync(concatListPath, concatContent, "utf-8");
-      const workingAssembled = assembledVideoPath + ".partial.mp4";
-      safeUnlink(workingAssembled);
-      try {
-        await ffmpegRun$4(
-          [
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            concatListPath,
-            "-c",
-            "copy",
-            "-movflags",
-            "+faststart",
-            workingAssembled
-          ],
-          { signal }
-        );
-      } finally {
-        safeUnlink(concatListPath);
-      }
-      if (fs__namespace.existsSync(workingAssembled)) {
-        fs__namespace.renameSync(workingAssembled, assembledVideoPath);
-      }
-    }
-    reportProgress("mixing-audio", 0.78, "[6/8] Attaching voiceover and configuring soundtrack...");
-    throwIfAborted(signal);
-    let effectiveMusicPath = null;
-    if (backgroundMusicMode === "auto") {
-      if (musicFilePath && fs__namespace.existsSync(musicFilePath)) {
-        effectiveMusicPath = musicFilePath;
-      } else {
-        const audioDir = path__namespace.join(projectDir, "assets", "audio");
-        if (fs__namespace.existsSync(audioDir)) {
-          const files = fs__namespace.readdirSync(audioDir).filter((f) => /\.(mp3|wav|m4a|aac|flac|ogg)$/i.test(f));
-          if (files.length > 0) {
-            effectiveMusicPath = path__namespace.join(audioDir, files[0]);
-          }
-        }
-      }
-      if (!effectiveMusicPath) {
-        throw new Error(
-          "Add Background Music was enabled, but no background music track was found. Please select a music file or choose No Background Music."
-        );
-      }
-      logger.info(`[SimpleAssembly] Using background music track: ${effectiveMusicPath}`);
-    } else {
-      logger.info("[SimpleAssembly] True No Music mode active: final output will contain input voiceover ONLY.");
-    }
-    const finalDurationStr = voiceoverDuration.toFixed(3);
-    if (backgroundMusicMode === "off" || !effectiveMusicPath) {
-      await ffmpegRun$4(
-        [
-          "-y",
-          "-i",
-          assembledVideoPath,
-          "-i",
-          voiceoverPath,
-          "-map",
-          "0:v:0",
-          "-map",
-          "1:a:0",
-          "-c:v",
-          "copy",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "192k",
-          "-t",
-          finalDurationStr,
-          "-movflags",
-          "+faststart",
-          partialOutputPath
-        ],
-        { signal }
-      );
-    } else {
-      const filterComplex = `[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo];[2:a]volume=0.035,afade=t=in:ss=0:d=2,afade=t=out:st=${Math.max(0, voiceoverDuration - 3).toFixed(3)}:d=3,apad[bgm];[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2[a]`;
-      await ffmpegRun$4(
-        [
-          "-y",
-          "-i",
-          assembledVideoPath,
-          "-i",
-          voiceoverPath,
-          "-i",
-          effectiveMusicPath,
-          "-filter_complex",
-          filterComplex,
-          "-map",
-          "0:v:0",
-          "-map",
-          "[a]",
-          "-c:v",
-          "copy",
-          "-c:a",
-          "aac",
-          "-b:a",
-          "192k",
-          "-t",
-          finalDurationStr,
-          "-movflags",
-          "+faststart",
-          partialOutputPath
-        ],
-        { signal }
-      );
-    }
-    reportProgress("validating-output", 0.92, "[7/8] Validating final output MP4...");
-    throwIfAborted(signal);
-    if (!fs__namespace.existsSync(partialOutputPath)) {
-      throw new Error("Final output file was not produced by FFmpeg.");
-    }
-    const outProbe = await probeMedia$1(partialOutputPath, { signal });
-    if (!outProbe || !outProbe.duration || outProbe.duration <= 0) {
-      throw new Error("Produced MP4 failed probe validation (zero duration or invalid media).");
-    }
-    const durDiff = Math.abs(outProbe.duration - voiceoverDuration);
-    if (durDiff > 0.5) {
-      logger.warn(
-        `[SimpleAssembly] Output duration (${outProbe.duration.toFixed(2)}s) differs from voiceover (${voiceoverDuration.toFixed(2)}s) by ${durDiff.toFixed(2)}s`
-      );
-    }
-    const stat = fs__namespace.statSync(partialOutputPath);
-    if (stat.size < 1024) {
-      throw new Error(`Produced MP4 is corrupt or too small (${stat.size} bytes).`);
-    }
-    safeUnlink(finalOutputPath);
-    fs__namespace.renameSync(partialOutputPath, finalOutputPath);
-    logger.info(
-      `[SimpleAssembly] Complete! Published ${finalOutputPath} (size=${stat.size} bytes, duration=${outProbe.duration.toFixed(2)}s)`
-    );
-    reportProgress("completed", 1, "[8/8] Simple Assembly complete!", {
-      outputPath: finalOutputPath,
-      duration: outProbe.duration
-    });
-    return {
-      success: true,
-      outputPath: finalOutputPath,
-      durationSecs: outProbe.duration,
-      fileSizeBytes: stat.size,
-      sceneCount: timeline.scenes.length,
-      fastPathUsed: canUseFastPath
-    };
-  } catch (err) {
-    safeUnlink(partialOutputPath);
-    if (isRenderCancelledError(err)) {
-      logger.info("[SimpleAssembly] Assembly cancelled by user.");
-      reportProgress("cancelled", 0, "Simple Assembly cancelled.");
-      return { success: false, cancelled: true, error: "Simple Assembly cancelled" };
-    }
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.error(`[SimpleAssembly] Failed: ${msg}`);
-    reportProgress("failed", 0, `Simple Assembly failed: ${msg}`, { message: msg });
-    return { success: false, error: msg };
-  }
 }
 class SimpleAssemblyController {
   activeJobs = /* @__PURE__ */ new Map();

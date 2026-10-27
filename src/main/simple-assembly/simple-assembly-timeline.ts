@@ -49,40 +49,68 @@ export async function resolveAssemblyTimeline(params: {
   const hasPlanTimings = scenes.every((s) => typeof s.duration === 'number' && s.duration > 0)
   if (hasPlanTimings) {
     const sumPlanDuration = scenes.reduce((acc, s) => acc + s.duration!, 0)
-    // If edit plan aligns with voiceover within 0.5s or 2% of duration
-    const diff = Math.abs(sumPlanDuration - voiceoverDuration)
-    const isAligned = diff <= Math.max(0.5, voiceoverDuration * 0.02)
+    if (sumPlanDuration > 0) {
+      const diff = Math.abs(sumPlanDuration - voiceoverDuration)
+      if (diff > Math.max(10, voiceoverDuration * 0.3)) {
+        logger.warn(
+          `[SimpleAssemblyTimeline] Noticeable planned duration discrepancy: planned ${sumPlanDuration.toFixed(2)}s vs voiceover ${voiceoverDuration.toFixed(2)}s. Proportionally aligning scenes to voiceover.`
+        )
+      } else {
+        logger.info(
+          `[SimpleAssemblyTimeline] Using edit plan scene timings (sum=${sumPlanDuration.toFixed(2)}s, voiceover=${voiceoverDuration.toFixed(2)}s, diff=${diff.toFixed(2)}s)`
+        )
+      }
 
-    if (isAligned) {
-      let allocatedFramesSum = 0
-      const sceneFrameAllocations = scenes.map((s) => {
-        const f = Math.max(1, Math.round(s.duration! * fps))
-        allocatedFramesSum += f
-        return f
+      // Proportional frame allocation preserving scene ratios
+      const rawAllocations = scenes.map((s, idx) => {
+        const ratio = s.duration! / sumPlanDuration
+        const idealFrames = targetTotalFrames * ratio
+        const baseFrames = Math.max(1, Math.floor(idealFrames))
+        const fractional = idealFrames - baseFrames
+        return { idx, scene: s, baseFrames, fractional }
       })
 
-      // Distribute any frame difference deterministically to match targetTotalFrames
-      const frameDelta = targetTotalFrames - allocatedFramesSum
-      if (frameDelta !== 0) {
-        // Adjust the last scene or distribute across scenes if delta is larger
-        const lastIdx = sceneFrameAllocations.length - 1
-        sceneFrameAllocations[lastIdx] = Math.max(1, sceneFrameAllocations[lastIdx] + frameDelta)
+      const currentAllocated = rawAllocations.reduce((acc, item) => acc + item.baseFrames, 0)
+      const remainder = targetTotalFrames - currentAllocated
+
+      // Distribute frame remainders deterministically to scenes with highest fractional parts
+      if (remainder > 0) {
+        const sortedByFractional = [...rawAllocations].sort((a, b) => b.fractional - a.fractional)
+        for (let i = 0; i < remainder && i < sortedByFractional.length; i++) {
+          sortedByFractional[i].baseFrames += 1
+        }
+      } else if (remainder < 0) {
+        const sortedByLargest = [...rawAllocations].sort((a, b) => b.baseFrames - a.baseFrames)
+        for (let i = 0; i < Math.abs(remainder) && i < sortedByLargest.length; i++) {
+          if (sortedByLargest[i].baseFrames > 1) {
+            sortedByLargest[i].baseFrames -= 1
+          }
+        }
       }
 
       let currentStartFrame = 0
-      const resolvedScenes: SimpleAssemblySceneInfo[] = scenes.map((s, idx) => {
-        const targetFrames = sceneFrameAllocations[idx]
+      const resolvedScenes: SimpleAssemblySceneInfo[] = rawAllocations.map((item) => {
+        const targetFrames = item.baseFrames
         const startFrame = currentStartFrame
         currentStartFrame += targetFrames
         return {
-          sceneIndex: s.sceneIndex,
-          sourcePath: s.filePath,
-          mediaType: s.mediaType,
+          sceneIndex: item.scene.sceneIndex,
+          sourcePath: item.scene.filePath,
+          mediaType: item.scene.mediaType,
           durationSecs: targetFrames / fps,
           targetFrames,
           startFrame
         }
       })
+
+      // Final invariant check: sum(sceneFrames) === targetTotalFrames
+      const totalAllocated = resolvedScenes.reduce((acc, s) => acc + s.targetFrames, 0)
+      if (totalAllocated !== targetTotalFrames) {
+        const delta = targetTotalFrames - totalAllocated
+        resolvedScenes[resolvedScenes.length - 1].targetFrames += delta
+        resolvedScenes[resolvedScenes.length - 1].durationSecs =
+          resolvedScenes[resolvedScenes.length - 1].targetFrames / fps
+      }
 
       return {
         scenes: resolvedScenes,
@@ -92,10 +120,6 @@ export async function resolveAssemblyTimeline(params: {
         allocationMethod: 'edit-plan',
         toleranceSecs: 1 / fps
       }
-    } else {
-      logger.info(
-        `[SimpleAssemblyTimeline] Edit plan duration (${sumPlanDuration.toFixed(2)}s) differs from voiceover (${voiceoverDuration.toFixed(2)}s) by ${diff.toFixed(2)}s. Using equal distribution.`
-      )
     }
   }
 

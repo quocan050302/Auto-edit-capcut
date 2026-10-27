@@ -9156,10 +9156,10 @@ function AssemblyModeControls({
                 },
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: !isSimpleAssembly ? "#c7d2fe" : "var(--text-primary)" }, children: "🚀 Full Production" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: !isSimpleAssembly ? "#c7d2fe" : "var(--text-primary)" }, children: "🚀 Full Smart Render" }),
                     !isSimpleAssembly && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "#4f46e5", color: "#fff", padding: "2px 6px", borderRadius: "4px", fontWeight: 600 }, children: "ACTIVE" })
                   ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", lineHeight: "1.4" }, children: "Smart editing, AI Planning, Retention, Transitions, Dynamic Captions, Remotion, and visual enhancement overlays." })
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", lineHeight: "1.4" }, children: "Runs the same intelligent production stages, then applies the existing final editing, Retention, transitions, Remotion captions and overlays." })
                 ]
               }
             ),
@@ -9181,10 +9181,10 @@ function AssemblyModeControls({
                 },
                 children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: isSimpleAssembly ? "#bae6fd" : "var(--text-primary)" }, children: "⚡ Simple Assembly" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: isSimpleAssembly ? "#bae6fd" : "var(--text-primary)" }, children: "⚡ Simple Assembly (After Full AI Production)" }),
                     isSimpleAssembly && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "#0284c7", color: "#fff", padding: "2px 6px", borderRadius: "4px", fontWeight: 600 }, children: "ACTIVE" })
                   ] }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", lineHeight: "1.4" }, children: "Imported scenes + Input Voiceover → MP4. Preserves source visuals with hard cuts. Zero Remotion, captions, or creative re-editing." })
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", lineHeight: "1.4" }, children: "Runs all AI Planning, Visual Director, prompt generation, Stock and manual import stages normally. After every scene is ready, the final render only joins the completed scenes with your voiceover. No Remotion, captions, transitions, or extra editing." })
                 ]
               }
             )
@@ -9207,11 +9207,11 @@ function AssemblyModeControls({
                 /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "#38bdf8" }, children: "Simple Assembly Media Source:" }),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
                   /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: sceneFolder ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-                    "Direct Scene Folder: ",
+                    "Direct Scene Folder (Manual Utility): ",
                     /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: sceneFolder.split(/[/\\]/).pop() })
                   ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-                    "Using project imported scenes (",
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "Edit Plan / Manual AI Assets" }),
+                    "Using project planned scenes (",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "AI Planning & Imported Assets" }),
                     ")"
                   ] }) }),
                   /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
@@ -9264,6 +9264,71 @@ function AssemblyModeControls({
             children: [
               /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em" }, children: "Mode Summary" }),
               /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", fontSize: "11px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "AI Planning: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Visual Director: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Prompt Generation: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Manual AI Import: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Scene Readiness Gate: ON"
+                  }
+                ),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs(
                   "span",
                   {
@@ -9275,8 +9340,8 @@ function AssemblyModeControls({
                       fontWeight: 600
                     },
                     children: [
-                      "Assembly: ",
-                      isSimpleAssembly ? "Simple" : "Full Production"
+                      "Final Render: ",
+                      isSimpleAssembly ? "Simple Assembly" : "Full Smart Render"
                     ]
                   }
                 ),
@@ -9292,7 +9357,7 @@ function AssemblyModeControls({
                     },
                     children: [
                       "Music: ",
-                      backgroundMusicMode === "auto" ? "On (Auto)" : "Off (None)"
+                      backgroundMusicMode === "auto" ? "ON (Auto)" : "OFF (None)"
                     ]
                   }
                 ),
@@ -9305,7 +9370,7 @@ function AssemblyModeControls({
                       background: "rgba(255, 255, 255, 0.06)",
                       color: "var(--text-primary)"
                     },
-                    children: "Voiceover: Included"
+                    children: "Voiceover: ON"
                   }
                 ),
                 /* @__PURE__ */ jsxRuntimeExports.jsxs(
@@ -9318,8 +9383,8 @@ function AssemblyModeControls({
                       color: isSimpleAssembly ? "var(--text-secondary)" : "#c084fc"
                     },
                     children: [
-                      "Captions: ",
-                      isSimpleAssembly ? "Off" : "On (Remotion)"
+                      "Remotion: ",
+                      isSimpleAssembly ? "OFF (Final Render Only)" : "ON (Dynamic Captions)"
                     ]
                   }
                 ),
@@ -9334,227 +9399,11 @@ function AssemblyModeControls({
                     },
                     children: [
                       "Transitions: ",
-                      isSimpleAssembly ? "Off (Hard Cuts)" : "On"
-                    ]
-                  }
-                ),
-                /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                  "span",
-                  {
-                    style: {
-                      padding: "2px 8px",
-                      borderRadius: "4px",
-                      background: isSimpleAssembly ? "rgba(16, 185, 129, 0.15)" : "rgba(245, 158, 11, 0.15)",
-                      color: isSimpleAssembly ? "#34d399" : "#fbbf24",
-                      fontWeight: 600
-                    },
-                    children: [
-                      "Remotion: ",
-                      isSimpleAssembly ? "Not Used (0 RAM)" : "Full Compositor"
+                      isSimpleAssembly ? "Hard Cuts" : "Cinematic / Smart"
                     ]
                   }
                 )
               ] })
-            ]
-          }
-        )
-      ]
-    }
-  );
-}
-const STAGES = [
-  { status: "validating-voiceover", label: "1. Validate Voiceover", step: 1 },
-  { status: "validating-scenes", label: "2. Validate Scenes", step: 2 },
-  { status: "resolving-timing", label: "3. Resolve Timing", step: 3 },
-  { status: "normalizing-scenes", label: "4. Normalize Media", step: 4 },
-  { status: "joining-scenes", label: "5. Join Scenes", step: 5 },
-  { status: "mixing-audio", label: "6. Attach Audio", step: 6 },
-  { status: "validating-output", label: "7. Validate MP4", step: 7 },
-  { status: "completed", label: "8. Complete", step: 8 }
-];
-function getStageIndex(status) {
-  if (!status) return 0;
-  const idx = STAGES.findIndex((s) => s.status === status);
-  return idx >= 0 ? idx : 0;
-}
-function SimpleAssemblyProgress({
-  progress,
-  isRunning,
-  onCancel,
-  error
-}) {
-  if (!isRunning && !progress && !error) {
-    return null;
-  }
-  const currentStatus = progress?.status ?? "validating-voiceover";
-  const currentStageIdx = getStageIndex(currentStatus);
-  const isCompleted = currentStatus === "completed";
-  const isFailed = currentStatus === "failed" || Boolean(error);
-  const pct2 = Math.max(0, Math.min(100, Math.round(progress?.percent ?? 0)));
-  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-    "div",
-    {
-      id: "simple-assembly-progress-panel",
-      style: {
-        marginTop: "16px",
-        padding: "16px",
-        borderRadius: "var(--radius-lg, 12px)",
-        border: `1px solid ${isFailed ? "rgba(239, 68, 68, 0.4)" : isCompleted ? "rgba(16, 185, 129, 0.4)" : "rgba(56, 189, 248, 0.4)"}`,
-        background: "linear-gradient(135deg, rgba(15, 23, 42, 0.95), rgba(30, 41, 59, 0.95))",
-        display: "flex",
-        flexDirection: "column",
-        gap: "12px"
-      },
-      children: [
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", letterSpacing: "0.02em" }, children: "⚡ SIMPLE SCENE ASSEMBLY" }),
-            isRunning && !isCompleted && !isFailed && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "#38bdf8", display: "inline-flex", alignItems: "center", gap: "4px" }, children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "spinner-sm", style: { width: "10px", height: "10px" } }),
-              " Assembling..."
-            ] }),
-            isCompleted && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "#34d399", fontWeight: 600 }, children: "✓ Assembly Finished Successfully" }),
-            isFailed && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "11px", color: "#f87171", fontWeight: 600 }, children: "⚠️ Assembly Failed" })
-          ] }),
-          isRunning && /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "button",
-            {
-              type: "button",
-              className: "btn btn-secondary btn-sm",
-              onClick: onCancel,
-              style: { color: "#ef4444", borderColor: "#ef4444", fontSize: "11px", padding: "3px 8px" },
-              children: "Cancel Assembly"
-            }
-          )
-        ] }),
-        /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "div",
-          {
-            style: {
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
-              gap: "6px"
-            },
-            children: STAGES.map((s, idx) => {
-              const isDone = isCompleted || idx < currentStageIdx;
-              const isCurrent = !isCompleted && !isFailed && idx === currentStageIdx;
-              let bg2 = "rgba(255, 255, 255, 0.04)";
-              let border = "rgba(255, 255, 255, 0.08)";
-              let text = "var(--text-secondary)";
-              if (isDone) {
-                bg2 = "rgba(16, 185, 129, 0.12)";
-                border = "rgba(16, 185, 129, 0.3)";
-                text = "#34d399";
-              } else if (isCurrent) {
-                bg2 = "rgba(56, 189, 248, 0.15)";
-                border = "#38bdf8";
-                text = "#38bdf8";
-              }
-              return /* @__PURE__ */ jsxRuntimeExports.jsxs(
-                "div",
-                {
-                  style: {
-                    padding: "6px 8px",
-                    borderRadius: "6px",
-                    background: bg2,
-                    border: `1px solid ${border}`,
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px",
-                    fontSize: "11px",
-                    color: text,
-                    fontWeight: isCurrent ? 700 : 500
-                  },
-                  children: [
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: isDone ? "✓" : isCurrent ? "●" : "○" }),
-                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, children: s.label })
-                  ]
-                },
-                s.status
-              );
-            })
-          }
-        ),
-        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "4px" }, children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", fontSize: "11px", color: "var(--text-secondary)" }, children: [
-            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: progress?.message || (isRunning ? "Processing scenes..." : "") }),
-            /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-              pct2,
-              "%"
-            ] })
-          ] }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx(
-            "div",
-            {
-              style: {
-                height: "6px",
-                borderRadius: "3px",
-                background: "rgba(255, 255, 255, 0.1)",
-                overflow: "hidden"
-              },
-              children: /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "div",
-                {
-                  style: {
-                    height: "100%",
-                    width: `${pct2}%`,
-                    background: isFailed ? "#ef4444" : isCompleted ? "#10b981" : "linear-gradient(90deg, #0284c7, #38bdf8)",
-                    transition: "width 0.3s ease"
-                  }
-                }
-              )
-            }
-          )
-        ] }),
-        (error || progress?.error) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-          "div",
-          {
-            style: {
-              padding: "8px 12px",
-              borderRadius: "6px",
-              background: "rgba(239, 68, 68, 0.15)",
-              border: "1px solid rgba(239, 68, 68, 0.3)",
-              color: "#f87171",
-              fontSize: "12px"
-            },
-            children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
-              "⚠️ ",
-              error || progress?.error
-            ] })
-          }
-        ),
-        isCompleted && progress?.outputPath && /* @__PURE__ */ jsxRuntimeExports.jsxs(
-          "div",
-          {
-            style: {
-              padding: "10px 12px",
-              borderRadius: "6px",
-              background: "rgba(16, 185, 129, 0.1)",
-              border: "1px solid rgba(16, 185, 129, 0.3)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              flexWrap: "wrap",
-              gap: "8px"
-            },
-            children: [
-              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { fontSize: "12px", color: "var(--text-primary)" }, children: [
-                "🎉 ",
-                /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { children: "MP4 Exported:" }),
-                " ",
-                progress.outputPath.split(/[/\\]/).pop(),
-                progress.duration !== void 0 && ` (${progress.duration.toFixed(1)}s)`
-              ] }),
-              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "6px" }, children: window.api?.openPath && /* @__PURE__ */ jsxRuntimeExports.jsx(
-                "button",
-                {
-                  type: "button",
-                  className: "btn btn-secondary btn-sm",
-                  style: { fontSize: "11px", padding: "4px 10px" },
-                  onClick: () => window.api.openPath(progress.outputPath),
-                  children: "Open Video"
-                }
-              ) })
             ]
           }
         )
@@ -11220,24 +11069,6 @@ function InputPage({
     updateSettings: updateProductionSettings,
     waitForPendingSaves: waitForPendingProductionSaves
   } = useProductionModeSettings(project.projectDir);
-  const [simpleAssemblyProgress, setSimpleAssemblyProgress] = reactExports.useState(null);
-  const [isAssemblingSimple, setIsAssemblingSimple] = reactExports.useState(false);
-  const [simpleAssemblyError, setSimpleAssemblyError] = reactExports.useState(null);
-  reactExports.useEffect(() => {
-    if (!window.api?.simpleAssembly?.onProgress) return;
-    const cleanup = window.api.simpleAssembly.onProgress((payload) => {
-      setSimpleAssemblyProgress(payload);
-      if (payload.status === "completed" || payload.status === "failed") {
-        setIsAssemblingSimple(false);
-        if (payload.status === "failed" && payload.error) {
-          setSimpleAssemblyError(payload.error);
-        }
-      }
-    });
-    return () => {
-      cleanup?.();
-    };
-  }, []);
   async function handleSelectSceneFolder() {
     if (!window.api?.simpleAssembly?.selectSceneFolder) return;
     const folder = await window.api.simpleAssembly.selectSceneFolder();
@@ -11247,11 +11078,6 @@ function InputPage({
   }
   function handleClearSceneFolder() {
     void updateProductionSettings({ sceneFolder: void 0 });
-  }
-  async function handleCancelSimpleAssembly() {
-    if (!window.api?.simpleAssembly?.cancel) return;
-    await window.api.simpleAssembly.cancel(project.projectDir);
-    setIsAssemblingSimple(false);
   }
   const [flowHealth, setFlowHealth] = reactExports.useState({ checking: false });
   reactExports.useEffect(() => {
@@ -11394,7 +11220,7 @@ function InputPage({
   }, [isRunning, inputs.scriptPath, inputs.voiceoverPath]);
   const inputChangedWhileRunning = isRunning && runningInputsSnapshotRef.current !== null && (runningInputsSnapshotRef.current.script !== inputs.scriptPath || runningInputsSnapshotRef.current.voiceover !== inputs.voiceoverPath);
   const isSimpleAssembly = productionSettings.assemblyMode === "simple-assembly";
-  const isAutoReady = isSimpleAssembly ? !!inputs.voiceoverPath : !!(inputs.scriptPath && inputs.voiceoverPath);
+  const isAutoReady = !!(inputs.scriptPath && inputs.voiceoverPath);
   reactExports.useEffect(() => {
     if (workflowMode !== "auto" || !autoStartOnReady || !isAutoReady || isRunning) {
       return;
@@ -11433,11 +11259,9 @@ function InputPage({
     isRunning
   ]);
   async function handleStartAutoPipeline() {
-    if (isRunning || isStarting || isAssemblingSimple) return;
-    if (isSimpleAssembly && !inputs.voiceoverPath) return;
-    if (!isSimpleAssembly && (!inputs.scriptPath || !inputs.voiceoverPath)) return;
+    if (isRunning || isStarting) return;
+    if (!inputs.scriptPath || !inputs.voiceoverPath) return;
     setIsStarting(true);
-    setSimpleAssemblyError(null);
     try {
       await Promise.all([
         waitForPendingEditorialSaves(),
@@ -11467,21 +11291,6 @@ function InputPage({
       }
       const effectiveAssemblyMode = confirmedProduction.assemblyMode;
       const effectiveMusicMode = confirmedProduction.backgroundMusicMode;
-      if (effectiveAssemblyMode === "simple-assembly") {
-        setIsAssemblingSimple(true);
-        const res = await window.api.simpleAssembly.start({
-          projectDir: project.projectDir,
-          voiceoverPath: inputs.voiceoverPath,
-          sceneFolder: confirmedProduction.sceneFolder,
-          backgroundMusicMode: effectiveMusicMode,
-          shortClipPolicy: confirmedProduction.shortClipPolicy || "freeze-last-frame"
-        });
-        if (!res.success) {
-          setIsAssemblingSimple(false);
-          setSimpleAssemblyError(res.error || "Failed to start Simple Assembly");
-        }
-        return;
-      }
       const resolvedMix = resolveVisualMixConfig({
         visualSourceMode: inputs.visualSourceMode,
         visualMixConfig: inputs.visualMixConfig,
@@ -11497,6 +11306,7 @@ Stock=${Math.round(resolvedMix.stockFootageRatio * 100)}%
 resolution=${resolvedMix.imageOutputResolution}
 editorialMode=${confirmedEditorial.promptMode}
 renderMode=${confirmedEditorial.renderOverlayMode}
+assemblyMode=${effectiveAssemblyMode}
 musicMode=${effectiveMusicMode}`
       );
       const ok2 = await startPipeline({
@@ -11504,9 +11314,9 @@ musicMode=${effectiveMusicMode}`
         scriptPath: inputs.scriptPath,
         voiceoverPath: inputs.voiceoverPath,
         whisperModel,
-        requireBackgroundMusic: requireBgMusic,
+        requireBackgroundMusic: effectiveMusicMode === "off" ? false : requireBgMusic,
         backgroundMusicMode: effectiveMusicMode,
-        assemblyMode: "full-production",
+        assemblyMode: effectiveAssemblyMode,
         autoStartOnReady,
         contentType: inputs.contentType ?? (resolvedProfileMode === "health" ? "health" : "default"),
         contentProfileMode: resolvedProfileMode,
@@ -11825,19 +11635,10 @@ musicMode=${effectiveMusicMode}`
           disabled: isRunning
         }
       ) }),
-      (isAssemblingSimple || simpleAssemblyProgress || simpleAssemblyError) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-        SimpleAssemblyProgress,
-        {
-          progress: simpleAssemblyProgress,
-          isRunning: isAssemblingSimple,
-          onCancel: () => void handleCancelSimpleAssembly(),
-          error: simpleAssemblyError
-        }
-      ),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sticky-action-bar", children: [
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sticky-action-bar__info", children: [
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sticky-action-bar__title", children: isAutoReady ? isSimpleAssembly ? "Ready for Simple Assembly" : "Ready to create" : isSimpleAssembly ? "Select voiceover to continue" : "Select a script and voiceover to continue" }),
-          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sticky-action-bar__subtitle", children: isAutoReady ? isSimpleAssembly ? "Voiceover ready. Click to assemble imported scenes into final MP4." : "All prerequisites met. Click to generate the complete video." : isSimpleAssembly ? "Audio voiceover is required for Simple Assembly." : "Both a narration script and audio voiceover are required for Auto Production." })
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sticky-action-bar__title", children: isAutoReady ? "Ready to create" : "Select a script and voiceover to continue" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "sticky-action-bar__subtitle", children: isAutoReady ? "All prerequisites met. Click to generate the complete video." : "Both a narration script and audio voiceover are required for Auto Production." })
         ] }),
         /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "sticky-action-bar__actions", children: [
           /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -11846,25 +11647,21 @@ musicMode=${effectiveMusicMode}`
               type: "button",
               className: "btn btn-secondary",
               onClick: handleSwitchToManual,
-              disabled: isRunning || isAssemblingSimple,
+              disabled: isRunning,
               children: "Run steps manually"
             }
           ),
-          isRunning || isAssemblingSimple ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+          isRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
             {
               type: "button",
               className: "btn btn-secondary",
               style: { color: "#ef4444", borderColor: "#ef4444" },
               onClick: () => {
-                if (isAssemblingSimple) {
-                  void handleCancelSimpleAssembly();
-                } else {
-                  setShowCancelPipelineDialog(true);
-                }
+                setShowCancelPipelineDialog(true);
               },
               id: "btn-cancel-auto-pipeline",
-              children: isAssemblingSimple ? "Cancel Assembly" : "Cancel Run"
+              children: "Cancel Run"
             }
           ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
             "button",
@@ -11872,10 +11669,10 @@ musicMode=${effectiveMusicMode}`
               type: "button",
               className: "btn btn-primary btn-lg",
               onClick: handleStartAutoPipeline,
-              disabled: !isAutoReady || isRunning || isStarting || isAssemblingSimple,
+              disabled: !isAutoReady || isRunning || isStarting,
               id: "btn-start-auto-production",
               style: { minHeight: "44px", padding: "0 24px", fontWeight: 700 },
-              children: isStarting ? "Starting Pipeline..." : isAssemblingSimple ? "Assembling..." : isSimpleAssembly ? "⚡ Start Simple Assembly" : "⚡ Start Auto Production"
+              children: isStarting ? "Starting Pipeline..." : "⚡ Start Auto Production"
             }
           )
         ] })
@@ -12256,22 +12053,18 @@ musicMode=${effectiveMusicMode}`
                   borderTop: "1px solid rgba(255,255,255,0.08)"
                 },
                 children: [
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: !isAutoReady ? isSimpleAssembly ? "Select Voiceover audio above to enable Simple Assembly" : "Select both Script and Voiceover audio above to enable Auto Production" : isRunning ? "Pipeline is currently executing autonomously..." : isAssemblingSimple ? "Simple Assembly is concatenating scenes..." : isSimpleAssembly ? "Voiceover ready. Click to assemble scenes into final MP4." : "All prerequisites met. Click to run the entire pipeline from start to finish." }),
-                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "10px" }, children: isRunning || isAssemblingSimple ? /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", color: "var(--text-secondary)" }, children: !isAutoReady ? "Select both Script and Voiceover audio above to enable Auto Production" : isRunning ? "Pipeline is currently executing autonomously..." : "All prerequisites met. Click to run the entire pipeline from start to finish." }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", gap: "10px" }, children: isRunning ? /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "button",
                     {
                       type: "button",
                       className: "btn btn-secondary",
                       onClick: () => {
-                        if (isAssemblingSimple) {
-                          void handleCancelSimpleAssembly();
-                        } else {
-                          setShowCancelPipelineDialog(true);
-                        }
+                        setShowCancelPipelineDialog(true);
                       },
                       style: { borderColor: "#ef4444", color: "#ef4444" },
                       id: "btn-cancel-auto-pipeline",
-                      children: isAssemblingSimple ? "Cancel Assembly" : "Cancel Run"
+                      children: "Cancel Run"
                     }
                   ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
                     "button",
@@ -12279,10 +12072,10 @@ musicMode=${effectiveMusicMode}`
                       type: "button",
                       className: "btn btn-primary",
                       onClick: handleStartAutoPipeline,
-                      disabled: !isAutoReady || isRunning || isStarting || isAssemblingSimple,
+                      disabled: !isAutoReady || isRunning || isStarting,
                       id: "btn-start-auto-production",
                       style: { padding: "8px 20px", fontWeight: 600 },
-                      children: isStarting ? "Starting..." : isAssemblingSimple ? "Assembling..." : isSimpleAssembly ? "⚡ Start Simple Assembly" : "⚡ Start Auto Production"
+                      children: isStarting ? "Starting..." : "⚡ Start Auto Production"
                     }
                   ) })
                 ]
@@ -12336,15 +12129,6 @@ musicMode=${effectiveMusicMode}`
             ]
           }
         ) })
-      }
-    ),
-    (isAssemblingSimple || simpleAssemblyProgress || simpleAssemblyError) && /* @__PURE__ */ jsxRuntimeExports.jsx(
-      SimpleAssemblyProgress,
-      {
-        progress: simpleAssemblyProgress,
-        isRunning: isAssemblingSimple,
-        onCancel: () => void handleCancelSimpleAssembly(),
-        error: simpleAssemblyError
       }
     ),
     pipelineState && /* @__PURE__ */ jsxRuntimeExports.jsx(
@@ -12549,7 +12333,7 @@ function computePhaseState(phase, pipelineState) {
         summary = "Background music and sound effects matched";
         break;
       case "build":
-        summary = "Render preflight passed and video rendered";
+        summary = pipelineState?.options?.assemblyMode === "simple-assembly" ? "Render preflight passed and scenes concatenated with voiceover" : "Render preflight passed and video rendered";
         break;
       case "final-check":
         summary = "Postflight quality check completed";
@@ -12579,7 +12363,7 @@ function computePhaseState(phase, pipelineState) {
         summary = "Selects and blends background soundtrack";
         break;
       case "build":
-        summary = "Automated QA check and final video rendering";
+        summary = pipelineState?.options?.assemblyMode === "simple-assembly" ? "Render Preflight QA & Simple Assembly concatenation" : "Automated QA check and final video rendering";
         break;
       case "final-check":
         summary = "Final output verification and validation";

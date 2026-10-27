@@ -10,7 +10,7 @@ import { generateCaptionPlan, loadCaptionPlan } from '../captions/caption-planne
 import { analyzeGlobalContext } from '../stock/global-context-analyzer'
 import { runContextAwareStockEngine } from '../stock/context-stock-engine'
 import { runStockEngine } from '../stock/stock-engine'
-import { runAudioDirector, loadAudioPlan } from '../audio/audio-director'
+import { runAudioDirector, loadAudioPlan, saveAudioPlan } from '../audio/audio-director'
 import { runRenderPreflight } from '../qa/render-preflight'
 import { renderVideo, computeRenderRequestKey } from '../renderer'
 import { runHealthVisualEngine } from '../health/health-visual-engine'
@@ -24,6 +24,12 @@ import { cleanupOrphanOutputPartials, readActiveRender, type RenderResumeParams 
 import { probeMedia } from '../render-cache/ffmpeg-process'
 import { ensureRetentionPlan } from '../retention/retention-director'
 import { resolveGeminiApiKey, validatePipelinePrerequisites } from './pipeline-validator'
+import { runSimpleAssemblyRenderStage } from '../simple-assembly/simple-assembly-pipeline-adapter'
+import {
+  resolvePreparedProductionScenes,
+  assertAllProductionScenesReady
+} from '../simple-assembly/simple-assembly-input-resolver'
+import { writeRenderProvenance, readRenderProvenance } from './render-provenance'
 import {
   isTranscriptionValid,
   isPlanningValid,
@@ -611,12 +617,42 @@ export async function runAudioSearchStage(
   checkAborted(signal)
   const audioPlanPath = path.join(options.projectDir, 'analysis', 'audio-plan.json')
 
+  const isSimpleAssembly = options.assemblyMode === 'simple-assembly'
+  const isNoMusic = options.backgroundMusicMode === 'off'
+
+  // Requirement 14 & 15: For Simple Assembly + No Music, genuine voiceover-only without Health SFX acquisition
+  if (isSimpleAssembly && isNoMusic) {
+    onProgress('Simple Assembly + No Music: Voiceover only, zero background music and zero SFX', 1.0)
+    let plan = loadAudioPlan(options.projectDir)
+    if (!plan) {
+      plan = {
+        generatedAt: new Date().toISOString(),
+        sections: [],
+        sfxAssignments: []
+      }
+      saveAudioPlan(options.projectDir, plan)
+    }
+    return {
+      success: true,
+      artifactPath: audioPlanPath,
+      data: plan,
+      stats: {
+        sectionsCount: 0,
+        downloadedMusicCount: 0,
+        sfxCount: 0,
+        assemblyMode: 'simple-assembly',
+        backgroundMusicMode: 'off'
+      }
+    }
+  }
+
   const profileArtifact = loadContentProfileArtifact(options.projectDir)
-  const isHealthAudio = profileArtifact
+  const isHealthAudio = isSimpleAssembly
+    ? false
+    : profileArtifact
     ? profileArtifact.resolvedProfile === 'health'
     : (options.contentProfileMode === 'health' || options.contentType === 'health')
 
-  const isNoMusic = options.backgroundMusicMode === 'off'
   if (isNoMusic) {
     onProgress('No Background Music selected: skipping music search...', 0.10)
     checkAborted(signal)
@@ -901,14 +937,35 @@ export async function runPreflightStage(
   checkAborted(signal)
   onProgress('Running render preflight inspection...', 0.1)
 
-  let captionPlan: CaptionPlan | undefined
-  try {
-    const loaded = loadCaptionPlan(options.projectDir)
-    if (loaded?.enabled && loaded.phrases.length > 0) {
-      captionPlan = loaded
+  const isSimpleAssembly = options.assemblyMode === 'simple-assembly'
+
+  // Requirement 16: For Simple Assembly, verify all planned scenes are ready before proceeding to render
+  if (isSimpleAssembly) {
+    try {
+      const resolved = resolvePreparedProductionScenes(options.projectDir)
+      assertAllProductionScenesReady(resolved)
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err)
+      logger.warn(`[PreflightStage] Simple Assembly scene readiness preflight failed: ${msg}`)
+      return {
+        success: false,
+        needsAttention: true,
+        error: `Preflight checks failed: ${msg}`,
+        artifactPath: path.join(options.projectDir, 'analysis', 'render-preflight.json')
+      }
     }
-  } catch {
-    /* ignore */
+  }
+
+  let captionPlan: CaptionPlan | undefined
+  if (!isSimpleAssembly) {
+    try {
+      const loaded = loadCaptionPlan(options.projectDir)
+      if (loaded?.enabled && loaded.phrases.length > 0) {
+        captionPlan = loaded
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   checkAborted(signal)
@@ -916,7 +973,10 @@ export async function runPreflightStage(
   const report = await runRenderPreflight({
     projectDir: options.projectDir,
     voiceoverPath: options.voiceoverPath,
-    captionPlan
+    captionPlan,
+    strictMissingMedia: isSimpleAssembly ? true : undefined,
+    resolution: options.resolution,
+    fps: options.fps
   })
 
   checkAborted(signal)
@@ -959,6 +1019,18 @@ export async function runRenderStage(
   signal?: AbortSignal
 ): Promise<StageRunResult<{ outputPath: string; durationSecs: number; fileSizeBytes: number }>> {
   checkAborted(signal)
+  if (options.assemblyMode === 'simple-assembly') {
+    return runSimpleAssemblyRenderStage(options, onProgress, signal)
+  }
+  return runExistingFullRenderStage(options, onProgress, signal)
+}
+
+export async function runExistingFullRenderStage(
+  options: AutoPipelineOptions,
+  onProgress: StageProgressCallback,
+  signal?: AbortSignal
+): Promise<StageRunResult<{ outputPath: string; durationSecs: number; fileSizeBytes: number }>> {
+  checkAborted(signal)
 
   const outputDir = path.join(options.projectDir, 'output')
   fs.mkdirSync(outputDir, { recursive: true })
@@ -995,56 +1067,65 @@ export async function runRenderStage(
     try {
       const stat = fs.statSync(defaultCompletedVideo)
       if (stat.size > 1024 * 1024) {
-        const activeRecord = readActiveRender(options.projectDir)
-        const expectedRequestKey = computeRenderRequestKey({
-          projectDir: options.projectDir,
-          voiceoverPath: options.voiceoverPath,
-          outputName: baseTargetName,
-          resolution: options.resolution,
-          fps: options.fps,
-          transitionSettings: options.transitionSettings,
-          captionPlan,
-          editorialSettings: options.editorialSettings,
-          backgroundMusicMode: options.backgroundMusicMode
-        })
+        // Mode-aware provenance check: do not reuse if output was produced by simple-assembly
+        const provenance = readRenderProvenance(options.projectDir)
+        if (provenance && provenance.assemblyMode !== 'full-production') {
+          logger.info(
+            `[RenderStage] Output exists but provenance is ${provenance.assemblyMode} (expected full-production). Generating fresh Full output.`
+          )
+        } else {
+          const activeRecord = readActiveRender(options.projectDir)
+          const expectedRequestKey = computeRenderRequestKey({
+            projectDir: options.projectDir,
+            voiceoverPath: options.voiceoverPath,
+            outputName: baseTargetName,
+            resolution: options.resolution,
+            fps: options.fps,
+            transitionSettings: options.transitionSettings,
+            captionPlan,
+            editorialSettings: options.editorialSettings,
+            backgroundMusicMode: options.backgroundMusicMode,
+            assemblyMode: 'full-production'
+          })
 
-        const activeParams = activeRecord?.params as (RenderResumeParams & { editorialSettings?: EditorialGenerationSettings }) | undefined
-        const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? 'full'
-        const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? 'full'
+          const activeParams = activeRecord?.params as (RenderResumeParams & { editorialSettings?: EditorialGenerationSettings }) | undefined
+          const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? 'full'
+          const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? 'full'
 
-        const isExactMatch =
-          activeRecord &&
-          activeRecord.status === 'completed' &&
-          activeRecord.renderFingerprint === expectedRequestKey &&
-          requestedOverlayMode === cachedOverlayMode
+          const isExactMatch =
+            activeRecord &&
+            activeRecord.status === 'completed' &&
+            activeRecord.renderFingerprint === expectedRequestKey &&
+            requestedOverlayMode === cachedOverlayMode
 
-        if (isExactMatch) {
-          const probe = await probeMedia(defaultCompletedVideo, { signal })
-          if (probe && probe.hasVideo && probe.duration > 0) {
-            logger.info(
-              `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
-            )
-            onProgress('Found verified completed video output matching settings, skipping render', 1.0)
-            return {
-              success: true,
-              cached: true,
-              artifactPath: defaultCompletedVideo,
-              data: {
-                outputPath: defaultCompletedVideo,
-                durationSecs: probe.duration,
-                fileSizeBytes: stat.size
-              },
-              stats: {
-                outputPath: defaultCompletedVideo,
-                fileSizeBytes: stat.size,
-                reused: true
+          if (isExactMatch) {
+            const probe = await probeMedia(defaultCompletedVideo, { signal })
+            if (probe && probe.hasVideo && probe.duration > 0) {
+              logger.info(
+                `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
+              )
+              onProgress('Found verified completed video output matching settings, skipping render', 1.0)
+              return {
+                success: true,
+                cached: true,
+                artifactPath: defaultCompletedVideo,
+                data: {
+                  outputPath: defaultCompletedVideo,
+                  durationSecs: probe.duration,
+                  fileSizeBytes: stat.size
+                },
+                stats: {
+                  outputPath: defaultCompletedVideo,
+                  fileSizeBytes: stat.size,
+                  reused: true
+                }
               }
             }
+          } else {
+            logger.info(
+              `[RenderStage] Existing output ${path.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+            )
           }
-        } else {
-          logger.info(
-            `[RenderStage] Existing output ${path.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
-          )
         }
       }
     } catch {
@@ -1087,6 +1168,33 @@ export async function runRenderStage(
   const result = await promise
 
   checkAborted(signal)
+
+  try {
+    writeRenderProvenance(options.projectDir, {
+      schemaVersion: 1,
+      assemblyMode: 'full-production',
+      backgroundMusicMode: options.backgroundMusicMode ?? 'auto',
+      renderRequestFingerprint: computeRenderRequestKey({
+        projectDir: options.projectDir,
+        voiceoverPath: options.voiceoverPath,
+        outputName: targetName,
+        resolution: options.resolution,
+        fps: options.fps,
+        transitionSettings: options.transitionSettings,
+        captionPlan,
+        editorialSettings: options.editorialSettings,
+        backgroundMusicMode: options.backgroundMusicMode,
+        assemblyMode: 'full-production'
+      }),
+      outputPath: result.outputPath,
+      durationSecs: result.durationSecs,
+      fileSizeBytes: result.fileSizeBytes,
+      status: 'completed',
+      completedAt: new Date().toISOString()
+    })
+  } catch {
+    /* ignore */
+  }
 
   return {
     success: true,

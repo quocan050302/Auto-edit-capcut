@@ -237,6 +237,7 @@ export interface RenderFingerprintInput {
   sceneFingerprints: string[]
   renderOverlayMode?: string
   backgroundMusicMode?: string
+  assemblyMode?: string
 }
 
 /**

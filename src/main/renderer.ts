@@ -403,6 +403,24 @@ export function resolveSceneMediaWithSource(
     }
   } catch { /* ignore */ }
 
+  // 4.5. manual-ai-assets.json (Manual AI prompt mode assets)
+  try {
+    const manualAiPath = path.join(projectDir, 'analysis', 'manual-ai-assets.json')
+    if (fs.existsSync(manualAiPath)) {
+      const manualAi = JSON.parse(fs.readFileSync(manualAiPath, 'utf-8'))
+      const record = manualAi?.scenes?.[String(scene.sceneIndex)]
+      if (record?.localPath) {
+        const p = path.isAbsolute(record.localPath)
+          ? normalizePathForFFmpeg(record.localPath)
+          : normalizePathForFFmpeg(path.join(projectDir, record.localPath))
+        if (fs.existsSync(p)) {
+          scene.mediaType = detectMediaKind(p, record.mediaType ?? scene.mediaType)
+          return { sceneIndex: scene.sceneIndex, mediaPath: p, source: 'manualAi' }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
   // 5. assets/stock folder by scene prefix (e.g. S001_, S010_)
   try {
     const stockDir = path.join(projectDir, 'assets', 'stock')
@@ -1050,6 +1068,7 @@ export function computeRenderRequestKey(params: {
   captionPlan?: CaptionPlan
   editorialSettings?: EditorialGenerationSettings
   backgroundMusicMode?: BackgroundMusicMode
+  assemblyMode?: VideoAssemblyMode
 }): string {
   const projectDir = normalizePathForFFmpeg(params.projectDir)
   const analysis = path.join(projectDir, 'analysis')
@@ -1067,7 +1086,8 @@ export function computeRenderRequestKey(params: {
     editorial: params.editorialSettings
       ? hashJsonValue(params.editorialSettings)
       : hashFileContent(path.join(analysis, 'editorial-focus-settings.v1.json')),
-    backgroundMusicMode: params.backgroundMusicMode ?? 'auto'
+    backgroundMusicMode: params.backgroundMusicMode ?? 'auto',
+    assemblyMode: params.assemblyMode ?? 'full-production'
   })
 }
 
@@ -1084,6 +1104,7 @@ export interface RenderVideoParams {
   onProgress?: (p: RenderProgress) => void
   editorialSettings?: EditorialGenerationSettings
   backgroundMusicMode?: BackgroundMusicMode
+  assemblyMode?: VideoAssemblyMode
   // ── Resumable Render Engine V2 (all optional — defaults keep legacy behaviour) ──
   signal?: AbortSignal
   resourceProfile?: RenderResourceProfile

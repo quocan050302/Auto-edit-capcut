@@ -1,6 +1,9 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import { logger } from '../logger'
+import { resolveSceneMediaWithSource } from '../renderer'
+import { loadManualAiManifest, resolveManualAiAssetPath } from '../visual-mix/manual-ai/manual-ai-asset-store'
+import { VisualAssignmentStore } from '../visual-mix/visual-assignment-store'
 import type { SimpleAssemblySceneInput } from './simple-assembly-types'
 
 const SUPPORTED_EXTENSIONS = new Set([
@@ -145,55 +148,38 @@ export function resolveDirectFolderScenes(folderPath: string): SimpleAssemblySce
 }
 
 /**
- * Resolves scenes from an existing project's edit plan and media manifests.
+ * Resolves authoritative production scenes from an existing project's master edit plan
+ * and canonical asset stores (Manual AI manifest, VisualAssignmentStore, renderer media resolver).
+ * Strictly preserves the edit plan's chapter -> sequence -> scene timeline order.
  */
-export function resolveProjectScenes(projectDir: string): {
+export function resolvePreparedProductionScenes(projectDir: string): {
   scenes: SimpleAssemblySceneInput[]
   missingSceneIndices: number[]
+  missingScenes: number[]
+  expectedCount: number
+  expectedScenes: number
+  resolvedValidScenes: number
   hasEditPlanTimings: boolean
 } {
-  const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
-  const manualAiPath = path.join(projectDir, 'analysis', 'manual-ai-assets.json')
-  const mediaIndexPath = path.join(projectDir, 'analysis', 'media-index.json')
-  const stockAssignmentsPath = path.join(projectDir, 'analysis', 'stock-assignments.json')
+  const planCandidates = [
+    path.join(projectDir, 'analysis', 'master-edit-plan.json'),
+    path.join(projectDir, 'analysis', 'edit-plan.json'),
+    path.join(projectDir, 'master-edit-plan.json'),
+    path.join(projectDir, 'edit-plan.json')
+  ]
+  const targetPlanPath = planCandidates.find((p) => fs.existsSync(p))
+
+  if (!targetPlanPath) {
+    throw new Error('Master edit plan not found. AI Planning must be executed before final assembly.')
+  }
 
   let editPlan: any = null
-  if (fs.existsSync(planPath)) {
-    try {
-      editPlan = JSON.parse(fs.readFileSync(planPath, 'utf-8'))
-    } catch (err) {
-      logger.warn(`[SimpleAssemblyInputResolver] Could not read master-edit-plan.json: ${err}`)
-    }
+  try {
+    editPlan = JSON.parse(fs.readFileSync(targetPlanPath, 'utf-8'))
+  } catch (err) {
+    throw new Error(`Failed to parse master-edit-plan.json: ${err}`)
   }
 
-  let manualAiManifest: any = null
-  if (fs.existsSync(manualAiPath)) {
-    try {
-      manualAiManifest = JSON.parse(fs.readFileSync(manualAiPath, 'utf-8'))
-    } catch {
-      /* ignore */
-    }
-  }
-
-  let stockAssignments: any = null
-  if (fs.existsSync(stockAssignmentsPath)) {
-    try {
-      stockAssignments = JSON.parse(fs.readFileSync(stockAssignmentsPath, 'utf-8'))
-    } catch {
-      /* ignore */
-    }
-  }
-
-  let mediaIndex: Array<{ filename: string; path: string }> = []
-  if (fs.existsSync(mediaIndexPath)) {
-    try {
-      mediaIndex = JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8'))
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // Flatten scenes from edit plan if available
   const planScenes: any[] = []
   if (editPlan && Array.isArray(editPlan.chapters)) {
     for (const ch of editPlan.chapters) {
@@ -206,91 +192,176 @@ export function resolveProjectScenes(projectDir: string): {
     }
   }
 
+  if (planScenes.length === 0) {
+    throw new Error('Edit plan contains 0 planned scenes. AI Planning must be executed before final assembly.')
+  }
+
+  const manualAiManifest = loadManualAiManifest(projectDir)
+  const store = new VisualAssignmentStore(projectDir)
+  const mediaIndexPath = path.join(projectDir, 'analysis', 'media-index.json')
+  let mediaIndex: Array<{ filename: string; path: string }> = []
+  if (fs.existsSync(mediaIndexPath)) {
+    try {
+      mediaIndex = JSON.parse(fs.readFileSync(mediaIndexPath, 'utf-8'))
+    } catch {
+      /* ignore */
+    }
+  }
+
   const scenes: SimpleAssemblySceneInput[] = []
   const missingSceneIndices: number[] = []
 
-  if (planScenes.length > 0) {
-    for (const sc of planScenes) {
-      const scIdx = sc.sceneIndex
-      let resolvedPath: string | null = null
+  for (const sc of planScenes) {
+    const scIdx = sc.sceneIndex
+    let resolvedPath: string | null = null
 
-      // Check manual AI assets manifest
-      if (manualAiManifest?.scenes?.[String(scIdx)]?.localPath) {
-        const candidate = manualAiManifest.scenes[String(scIdx)].localPath
-        if (fs.existsSync(candidate)) resolvedPath = candidate
-      }
-
-      // Check stock assignments
-      if (!resolvedPath && stockAssignments?.scenes?.[String(scIdx)]) {
-        const item = stockAssignments.scenes[String(scIdx)]
-        const candidate = item.downloadedPath || item.localPath
-        if (candidate && fs.existsSync(candidate)) resolvedPath = candidate
-      }
-
-      // Check direct localPath in scene plan
-      if (!resolvedPath && sc.localPath && fs.existsSync(sc.localPath)) {
-        resolvedPath = sc.localPath
-      }
-
-      // Check media index by filename
-      if (!resolvedPath && sc.mediaFile) {
-        const hit = mediaIndex.find((m) => m.filename === sc.mediaFile || path.basename(m.path) === sc.mediaFile)
-        if (hit && fs.existsSync(hit.path)) resolvedPath = hit.path
-      }
-
-      // Check standard assets directories
-      if (!resolvedPath && sc.mediaFile) {
-        const searchDirs = [
-          path.join(projectDir, 'assets', 'manual-ai'),
-          path.join(projectDir, 'assets', 'videos'),
-          path.join(projectDir, 'assets', 'images'),
-          path.join(projectDir, 'assets', 'stock')
-        ]
-        for (const dir of searchDirs) {
-          const candidate = path.join(dir, sc.mediaFile)
-          if (fs.existsSync(candidate)) {
-            resolvedPath = candidate
-            break
-          }
-        }
-      }
-
-      if (resolvedPath && fs.existsSync(resolvedPath)) {
-        scenes.push({
-          sceneIndex: scIdx,
-          filePath: resolvedPath,
-          fileName: path.basename(resolvedPath),
-          mediaType: detectMediaType(resolvedPath),
-          duration: typeof sc.duration === 'number' && sc.duration > 0 ? sc.duration : undefined
-        })
-      } else {
-        missingSceneIndices.push(scIdx)
+    // 1. Check Manual AI manifest first (authoritative for prompt/manual AI mode)
+    const manualRecord = manualAiManifest?.scenes?.[String(scIdx)]
+    if (manualRecord?.localPath) {
+      const candidate = resolveManualAiAssetPath(projectDir, manualRecord.localPath)
+      if (fs.existsSync(candidate) && fs.statSync(candidate).size > 0) {
+        resolvedPath = candidate
       }
     }
 
-    scenes.sort((a, b) => a.sceneIndex - b.sceneIndex)
-    return {
-      scenes,
-      missingSceneIndices,
-      hasEditPlanTimings: scenes.length > 0 && scenes.every((s) => typeof s.duration === 'number' && s.duration > 0)
+    // 2. Check VisualAssignmentStore (sole writer for unified Stock and AI assignments)
+    if (!resolvedPath) {
+      const assignment = store.get(scIdx)
+      if (assignment?.asset?.localPath) {
+        const candidate = path.isAbsolute(assignment.asset.localPath)
+          ? assignment.asset.localPath
+          : path.join(projectDir, assignment.asset.localPath)
+        if (fs.existsSync(candidate) && fs.statSync(candidate).size > 0) {
+          resolvedPath = candidate
+        }
+      }
+    }
+
+    // 3. Check renderer's canonical resolveSceneMediaWithSource
+    if (!resolvedPath) {
+      const r = resolveSceneMediaWithSource(sc, mediaIndex, projectDir)
+      if (r.mediaPath && fs.existsSync(r.mediaPath) && fs.statSync(r.mediaPath).size > 0) {
+        resolvedPath = r.mediaPath
+      }
+    }
+
+    // 4. Fallback: check sc.localPath or sc.localAsset
+    if (!resolvedPath && sc.localPath) {
+      const p = path.isAbsolute(sc.localPath) ? sc.localPath : path.join(projectDir, sc.localPath)
+      if (fs.existsSync(p) && fs.statSync(p).size > 0) {
+        resolvedPath = p
+      }
+    }
+    if (!resolvedPath && sc.localAsset) {
+      const p = path.isAbsolute(sc.localAsset) ? sc.localAsset : path.join(projectDir, sc.localAsset)
+      if (fs.existsSync(p) && fs.statSync(p).size > 0) {
+        resolvedPath = p
+      }
+    }
+
+    if (resolvedPath) {
+      scenes.push({
+        sceneIndex: scIdx,
+        sceneId: sc.sceneId,
+        filePath: resolvedPath,
+        fileName: path.basename(resolvedPath),
+        mediaType: detectMediaType(resolvedPath),
+        duration: typeof sc.duration === 'number' && sc.duration > 0
+          ? sc.duration
+          : typeof sc.endTime === 'number' && typeof sc.startTime === 'number' && sc.endTime > sc.startTime
+          ? sc.endTime - sc.startTime
+          : undefined
+      })
+    } else {
+      missingSceneIndices.push(scIdx)
+    }
+  }
+
+  // NOTE: PRESERVE authoritative timeline order! Do NOT re-order by sorting sceneIndex!
+  return {
+    scenes,
+    missingSceneIndices,
+    missingScenes: missingSceneIndices,
+    expectedCount: planScenes.length,
+    expectedScenes: planScenes.length,
+    resolvedValidScenes: scenes.length,
+    hasEditPlanTimings: scenes.length > 0 && scenes.every((s) => typeof s.duration === 'number' && s.duration > 0)
+  }
+}
+
+/**
+ * Asserts all planned scenes are ready before rendering.
+ * Throws explicit descriptive error if any scene is missing.
+ */
+export function assertAllProductionScenesReady(result: {
+  scenes: SimpleAssemblySceneInput[]
+  missingSceneIndices?: number[]
+  missingScenes?: number[]
+  expectedCount?: number
+  expectedScenes?: number
+}): void {
+  const expected = result.expectedScenes ?? result.expectedCount ?? 0
+  const missing = result.missingScenes ?? result.missingSceneIndices ?? []
+
+  if (expected === 0) {
+    throw new Error('Master edit plan contains 0 planned scenes. AI Planning must complete first.')
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Cannot begin Simple Assembly: Missing ${missing.length} of ${expected} required production scene assets. Missing scene indices: [${missing.slice(0, 10).join(', ')}${missing.length > 10 ? '...' : ''}]. All scenes must be ready before final render.`
+    )
+  }
+  if (result.scenes.length !== expected) {
+    throw new Error(
+      `Scene count mismatch: expected ${expected} scenes from edit plan, but resolved ${result.scenes.length} valid scenes.`
+    )
+  }
+}
+
+/**
+ * Resolves scenes from an existing project's edit plan and media manifests.
+ */
+export function resolveProjectScenes(projectDir: string): {
+  scenes: SimpleAssemblySceneInput[]
+  missingSceneIndices: number[]
+  hasEditPlanTimings: boolean
+} {
+  const planPath = path.join(projectDir, 'analysis', 'master-edit-plan.json')
+  const rootPlan = path.join(projectDir, 'master-edit-plan.json')
+  if (fs.existsSync(planPath) || fs.existsSync(rootPlan)) {
+    try {
+      const prodRes = resolvePreparedProductionScenes(projectDir)
+      return {
+        scenes: prodRes.scenes,
+        missingSceneIndices: prodRes.missingSceneIndices,
+        hasEditPlanTimings: prodRes.hasEditPlanTimings
+      }
+    } catch (err) {
+      logger.warn(`[SimpleAssemblyInputResolver] resolvePreparedProductionScenes notice: ${err}`)
     }
   }
 
   // If no edit plan scenes, check if manual AI manifest alone has ready scenes
+  const manualAiManifest = loadManualAiManifest(projectDir)
   if (manualAiManifest?.scenes && Object.keys(manualAiManifest.scenes).length > 0) {
     const rawKeys = Object.keys(manualAiManifest.scenes).map((k) => parseInt(k, 10)).sort((a, b) => a - b)
+    const scenes: SimpleAssemblySceneInput[] = []
+    const missingSceneIndices: number[] = []
     for (const scIdx of rawKeys) {
       const rec = manualAiManifest.scenes[String(scIdx)]
-      if (rec?.localPath && fs.existsSync(rec.localPath)) {
-        scenes.push({
-          sceneIndex: scIdx,
-          filePath: rec.localPath,
-          fileName: path.basename(rec.localPath),
-          mediaType: detectMediaType(rec.localPath)
-        })
-      } else {
-        missingSceneIndices.push(scIdx)
+      if (rec?.localPath) {
+        const fullPath = resolveManualAiAssetPath(projectDir, rec.localPath)
+        if (fs.existsSync(fullPath)) {
+          scenes.push({
+            sceneIndex: scIdx,
+            filePath: fullPath,
+            fileName: path.basename(fullPath),
+            mediaType: detectMediaType(fullPath)
+          })
+          continue
+        }
       }
+      missingSceneIndices.push(scIdx)
     }
     return { scenes, missingSceneIndices, hasEditPlanTimings: false }
   }

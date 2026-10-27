@@ -130,7 +130,7 @@ export function AssemblyModeControls({
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span style={{ fontSize: '13px', fontWeight: 700, color: !isSimpleAssembly ? '#c7d2fe' : 'var(--text-primary)' }}>
-                🚀 Full Production
+                🚀 Full Smart Render
               </span>
               {!isSimpleAssembly && (
                 <span style={{ fontSize: '10px', background: '#4f46e5', color: '#fff', padding: '2px 6px', borderRadius: '4px', fontWeight: 600 }}>
@@ -139,7 +139,7 @@ export function AssemblyModeControls({
               )}
             </div>
             <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
-              Smart editing, AI Planning, Retention, Transitions, Dynamic Captions, Remotion, and visual enhancement overlays.
+              Runs the same intelligent production stages, then applies the existing final editing, Retention, transitions, Remotion captions and overlays.
             </div>
           </div>
 
@@ -161,7 +161,7 @@ export function AssemblyModeControls({
           >
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
               <span style={{ fontSize: '13px', fontWeight: 700, color: isSimpleAssembly ? '#bae6fd' : 'var(--text-primary)' }}>
-                ⚡ Simple Assembly
+                ⚡ Simple Assembly (After Full AI Production)
               </span>
               {isSimpleAssembly && (
                 <span style={{ fontSize: '10px', background: '#0284c7', color: '#fff', padding: '2px 6px', borderRadius: '4px', fontWeight: 600 }}>
@@ -170,7 +170,7 @@ export function AssemblyModeControls({
               )}
             </div>
             <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
-              Imported scenes + Input Voiceover → MP4. Preserves source visuals with hard cuts. Zero Remotion, captions, or creative re-editing.
+              Runs all AI Planning, Visual Director, prompt generation, Stock and manual import stages normally. After every scene is ready, the final render only joins the completed scenes with your voiceover. No Remotion, captions, transitions, or extra editing.
             </div>
           </div>
         </div>
@@ -197,11 +197,11 @@ export function AssemblyModeControls({
               <div style={{ fontSize: '11px', color: 'var(--text-secondary)' }}>
                 {sceneFolder ? (
                   <span>
-                    Direct Scene Folder: <strong style={{ color: 'var(--text-primary)' }}>{sceneFolder.split(/[/\\]/).pop()}</strong>
+                    Direct Scene Folder (Manual Utility): <strong style={{ color: 'var(--text-primary)' }}>{sceneFolder.split(/[/\\]/).pop()}</strong>
                   </span>
                 ) : (
                   <span>
-                    Using project imported scenes (<strong style={{ color: 'var(--text-primary)' }}>Edit Plan / Manual AI Assets</strong>)
+                    Using project planned scenes (<strong style={{ color: 'var(--text-primary)' }}>AI Planning &amp; Imported Assets</strong>)
                   </span>
                 )}
               </div>
@@ -257,12 +257,67 @@ export function AssemblyModeControls({
             style={{
               padding: '2px 8px',
               borderRadius: '4px',
+              background: 'rgba(16, 185, 129, 0.15)',
+              color: '#34d399',
+              fontWeight: 600
+            }}
+          >
+            AI Planning: ON
+          </span>
+          <span
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              background: 'rgba(16, 185, 129, 0.15)',
+              color: '#34d399',
+              fontWeight: 600
+            }}
+          >
+            Visual Director: ON
+          </span>
+          <span
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              background: 'rgba(16, 185, 129, 0.15)',
+              color: '#34d399',
+              fontWeight: 600
+            }}
+          >
+            Prompt Generation: ON
+          </span>
+          <span
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              background: 'rgba(16, 185, 129, 0.15)',
+              color: '#34d399',
+              fontWeight: 600
+            }}
+          >
+            Manual AI Import: ON
+          </span>
+          <span
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
+              background: 'rgba(16, 185, 129, 0.15)',
+              color: '#34d399',
+              fontWeight: 600
+            }}
+          >
+            Scene Readiness Gate: ON
+          </span>
+          <span
+            style={{
+              padding: '2px 8px',
+              borderRadius: '4px',
               background: isSimpleAssembly ? 'rgba(56, 189, 248, 0.2)' : 'rgba(99, 102, 241, 0.2)',
               color: isSimpleAssembly ? '#38bdf8' : '#a5b4fc',
               fontWeight: 600
             }}
           >
-            Assembly: {isSimpleAssembly ? 'Simple' : 'Full Production'}
+            Final Render: {isSimpleAssembly ? 'Simple Assembly' : 'Full Smart Render'}
           </span>
           <span
             style={{
@@ -273,7 +328,7 @@ export function AssemblyModeControls({
               fontWeight: 600
             }}
           >
-            Music: {backgroundMusicMode === 'auto' ? 'On (Auto)' : 'Off (None)'}
+            Music: {backgroundMusicMode === 'auto' ? 'ON (Auto)' : 'OFF (None)'}
           </span>
           <span
             style={{
@@ -283,7 +338,7 @@ export function AssemblyModeControls({
               color: 'var(--text-primary)'
             }}
           >
-            Voiceover: Included
+            Voiceover: ON
           </span>
           <span
             style={{
@@ -293,7 +348,7 @@ export function AssemblyModeControls({
               color: isSimpleAssembly ? 'var(--text-secondary)' : '#c084fc'
             }}
           >
-            Captions: {isSimpleAssembly ? 'Off' : 'On (Remotion)'}
+            Remotion: {isSimpleAssembly ? 'OFF (Final Render Only)' : 'ON (Dynamic Captions)'}
           </span>
           <span
             style={{
@@ -303,18 +358,7 @@ export function AssemblyModeControls({
               color: isSimpleAssembly ? 'var(--text-secondary)' : '#38bdf8'
             }}
           >
-            Transitions: {isSimpleAssembly ? 'Off (Hard Cuts)' : 'On'}
-          </span>
-          <span
-            style={{
-              padding: '2px 8px',
-              borderRadius: '4px',
-              background: isSimpleAssembly ? 'rgba(16, 185, 129, 0.15)' : 'rgba(245, 158, 11, 0.15)',
-              color: isSimpleAssembly ? '#34d399' : '#fbbf24',
-              fontWeight: 600
-            }}
-          >
-            Remotion: {isSimpleAssembly ? 'Not Used (0 RAM)' : 'Full Compositor'}
+            Transitions: {isSimpleAssembly ? 'Hard Cuts' : 'Cinematic / Smart'}
           </span>
         </div>
       </div>

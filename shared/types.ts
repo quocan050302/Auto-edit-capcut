@@ -650,6 +650,7 @@ export interface SimpleAssemblyResult {
 
 export interface SimpleAssemblySceneInput {
   sceneIndex: number
+  sceneId?: string
   filePath: string
   fileName: string
   mediaType: 'video' | 'image'
