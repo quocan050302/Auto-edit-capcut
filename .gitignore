@@ -19,6 +19,7 @@ cache/
 research-temp/
 __pycache__/
 # Test artifacts & temporary caches
+test/fixtures/
 contact_sheet_*/
 .cache/
 tools/hyperframes-sidecar/.cache/

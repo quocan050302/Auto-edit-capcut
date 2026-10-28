@@ -9,11 +9,26 @@ import type {
   StockSceneAssignment,
   AutoPipelineOptions,
   ContentType,
-  RenderRecoveryInfo
+  RenderRecoveryInfo,
+  BackgroundMusicMode,
+  VideoAssemblyMode
 } from '../../../shared/types'
 import { computeHealthMotionHash } from '../health/health-visual-cache'
 import { inspectRenderRecovery } from '../render-cache/render-recovery'
 import { computeSourceFingerprint } from './source-fingerprint'
+import {
+  readRenderProvenance,
+  writeRenderProvenance,
+  getRenderProvenancePath,
+  type RenderOutputProvenance
+} from './render-provenance'
+
+export {
+  readRenderProvenance,
+  writeRenderProvenance,
+  getRenderProvenancePath,
+  type RenderOutputProvenance
+}
 
 export interface StockCompletionResult {
   totalScenes: number
@@ -244,21 +259,27 @@ export function checkVisualCompletion(projectDir: string): StockCompletionResult
   return checkStockCompletion(projectDir)
 }
 
-export function isAudioValid(projectDir: string, requireMusic?: boolean, contentType?: ContentType): boolean {
+export function isAudioValid(
+  projectDir: string,
+  requireMusic?: boolean,
+  contentType?: ContentType,
+  backgroundMusicMode?: BackgroundMusicMode,
+  assemblyMode?: VideoAssemblyMode
+): boolean {
   const audioPlanPath = path.join(projectDir, 'analysis', 'audio-plan.json')
   if (!fs.existsSync(audioPlanPath)) return false
 
   try {
     const plan = JSON.parse(fs.readFileSync(audioPlanPath, 'utf-8')) as AudioPlan
     if (!plan || !Array.isArray(plan.sections)) return false
-    if (requireMusic) {
+    if (requireMusic && backgroundMusicMode !== 'off') {
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs.existsSync(s.approvedLocalPath)
       )
       if (!hasDownloadedMusic) return false
     }
 
-    if (contentType === 'health') {
+    if (assemblyMode !== 'simple-assembly' && contentType === 'health') {
       const healthPlanPath = path.join(projectDir, 'analysis', 'health-visual-plan.json')
       if (fs.existsSync(healthPlanPath)) {
         try {
@@ -314,7 +335,7 @@ export interface ArtifactReconciliationSummary {
 }
 
 /**
- * Reconcile toàn bộ artifact thực tế của project qua từng stage.
+ * Reconcile toàn bộ artifact thực tế của project qua từng stage với nhận diện AssemblyMode.
  */
 export function reconcileProjectArtifacts(
   projectDir: string,
@@ -331,28 +352,63 @@ export function reconcileProjectArtifacts(
   const captionsValid = isCaptionsValid(projectDir)
   const globalContextValid = isGlobalContextValid(projectDir, sourceHash)
   const stockCompletion = checkStockCompletion(projectDir)
-  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic)
+  const audioValid = isAudioValid(
+    projectDir,
+    options?.requireBackgroundMusic,
+    options?.contentType,
+    options?.backgroundMusicMode,
+    options?.assemblyMode
+  )
   const preflightValid = isPreflightValid(projectDir)
 
-  // Render valid: kiểm tra output mp4 hoàn chỉnh (không phải .partial.mp4)
+  // Render valid: mode-aware validation via render provenance and output media inspection
   const outputDir = path.join(projectDir, 'output')
   let renderValid = false
-  if (fs.existsSync(outputDir)) {
-    try {
-      const files = fs.readdirSync(outputDir).filter(
-        (f) => f.endsWith('.mp4') && !f.startsWith('_') && !f.includes('.partial') && !f.includes('.working')
-      )
-      if (files.length > 0) {
-        const stat = fs.statSync(path.join(outputDir, files[0]))
+  const requestedAssemblyMode = options?.assemblyMode ?? 'full-production'
+  const requestedMusicMode = options?.backgroundMusicMode ?? 'auto'
+
+  const provenance = readRenderProvenance(projectDir)
+  if (provenance && provenance.status === 'completed' && provenance.outputPath) {
+    const modeMatches = provenance.assemblyMode === requestedAssemblyMode
+    const musicMatches = requestedAssemblyMode === 'simple-assembly'
+      ? provenance.backgroundMusicMode === requestedMusicMode
+      : true
+
+    if (modeMatches && musicMatches && fs.existsSync(provenance.outputPath)) {
+      try {
+        const stat = fs.statSync(provenance.outputPath)
         if (stat.size > 1024) renderValid = true
+      } catch {
+        /* ignore */
       }
-    } catch {
-      /* ignore */
+    }
+  } else if (!provenance && fs.existsSync(outputDir)) {
+    // Legacy fallback only if requested mode matches expected file naming
+    if (requestedAssemblyMode === 'full-production') {
+      const defaultFull = path.join(outputDir, `${options?.outputName || 'final_output'}.mp4`)
+      if (fs.existsSync(defaultFull)) {
+        try {
+          const stat = fs.statSync(defaultFull)
+          if (stat.size > 1024) renderValid = true
+        } catch {
+          /* ignore */
+        }
+      }
+    } else if (requestedAssemblyMode === 'simple-assembly') {
+      const defaultSimple = path.join(outputDir, `${options?.outputName || 'simple_assembly'}.mp4`)
+      if (fs.existsSync(defaultSimple)) {
+        try {
+          const stat = fs.statSync(defaultSimple)
+          if (stat.size > 1024) renderValid = true
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 
   const qaPath = path.join(projectDir, 'analysis', 'render-qa.json')
-  const postflightValid = renderValid && fs.existsSync(qaPath)
+  const postflightValid = renderValid && (requestedAssemblyMode === 'simple-assembly' || fs.existsSync(qaPath))
 
   // Render cache recovery: when the final MP4 is not there yet, report what the
   // interrupted render already completed so it can resume from the last checkpoint.

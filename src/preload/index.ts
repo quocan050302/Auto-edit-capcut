@@ -46,7 +46,10 @@ import type {
   EmbeddedEditorialVerificationRecord,
   EmbeddedEditorialVerificationStatus,
   RenderRecoveryInfo,
-  RenderPreferencesDTO
+  RenderPreferencesDTO,
+  VideoProductionModeSettings,
+  SimpleAssemblyProgressPayload,
+  SimpleAssemblyResult
 } from '../../shared/types'
 import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
@@ -554,6 +557,41 @@ const api = {
         ipcRenderer.off(IPC_CHANNELS.MANUAL_AI_STATUS_UPDATED, handler)
       }
     }
+  },
+
+  simpleAssembly: {
+    start: (request: any): Promise<SimpleAssemblyResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_START, request),
+
+    cancel: (projectDir: string): Promise<{ success: boolean; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_CANCEL, { projectDir }),
+
+    getStatus: (projectDir: string): Promise<any> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_STATUS_GET, { projectDir }),
+
+    selectSceneFolder: (): Promise<string | null> =>
+      ipcRenderer.invoke(IPC_CHANNELS.SIMPLE_ASSEMBLY_SELECT_SCENE_FOLDER),
+
+    onProgress: (callback: (payload: SimpleAssemblyProgressPayload) => void): (() => void) => {
+      const handler = (_event: Electron.IpcRendererEvent, payload: SimpleAssemblyProgressPayload): void => {
+        callback(payload)
+      }
+      ipcRenderer.on(IPC_CHANNELS.SIMPLE_ASSEMBLY_PROGRESS, handler)
+      return () => {
+        ipcRenderer.off(IPC_CHANNELS.SIMPLE_ASSEMBLY_PROGRESS, handler)
+      }
+    }
+  },
+
+  productionModeSettings: {
+    get: (projectDir: string): Promise<{ success: boolean; settings?: VideoProductionModeSettings; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_MODE_SETTINGS_GET, { projectDir }),
+
+    update: (
+      projectDir: string,
+      patch: Partial<VideoProductionModeSettings>
+    ): Promise<{ success: boolean; settings?: VideoProductionModeSettings; error?: string }> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PRODUCTION_MODE_SETTINGS_UPDATE, { projectDir, patch })
   },
 
   research: {

@@ -171,6 +171,7 @@ export interface AudioFingerprintInput {
   audioPlanHash: string
   musicSignatures: Array<FileSignature | null>
   sfxSignatures: Array<FileSignature | null>
+  backgroundMusicMode?: string
 }
 
 export function computeAudioFingerprint(input: AudioFingerprintInput): string {
@@ -235,6 +236,8 @@ export interface RenderFingerprintInput {
   visualGrammarSettings: unknown
   sceneFingerprints: string[]
   renderOverlayMode?: string
+  backgroundMusicMode?: string
+  assemblyMode?: string
 }
 
 /**

@@ -170,7 +170,9 @@ export function computePhaseState(
         summary = 'Background music and sound effects matched'
         break
       case 'build':
-        summary = 'Render preflight passed and video rendered'
+        summary = pipelineState?.options?.assemblyMode === 'simple-assembly'
+          ? 'Render preflight passed and scenes concatenated with voiceover'
+          : 'Render preflight passed and video rendered'
         break
       case 'final-check':
         summary = 'Postflight quality check completed'
@@ -203,7 +205,9 @@ export function computePhaseState(
         summary = 'Selects and blends background soundtrack'
         break
       case 'build':
-        summary = 'Automated QA check and final video rendering'
+        summary = pipelineState?.options?.assemblyMode === 'simple-assembly'
+          ? 'Render Preflight QA & Simple Assembly concatenation'
+          : 'Automated QA check and final video rendering'
         break
       case 'final-check':
         summary = 'Final output verification and validation'

@@ -7927,6 +7927,12 @@ function resolveVisualMixConfig(options) {
   }
   return { ...DEFAULT_VISUAL_MIX_CONFIG };
 }
+const DEFAULT_PRODUCTION_MODE_SETTINGS = {
+  schemaVersion: 1,
+  assemblyMode: "full-production",
+  backgroundMusicMode: "auto",
+  shortClipPolicy: "freeze-last-frame"
+};
 const THUMBNAIL_CATEGORIES = [
   "US Grocery",
   "Preparedness",
@@ -8311,6 +8317,157 @@ function useEditorialSettings(projectDir) {
             return true;
           } else {
             const msg = res.error || "Failed to persist editorial settings.";
+            setError(msg);
+            optimisticSettingsRef.current = confirmedSettingsRef.current;
+            setSettings(confirmedSettingsRef.current);
+            return false;
+          }
+        } catch (err) {
+          if (isMountedRef.current && currentProjectDirRef.current === targetDir) {
+            const msg = err instanceof Error ? err.message : String(err);
+            setError(msg);
+            optimisticSettingsRef.current = confirmedSettingsRef.current;
+            setSettings(confirmedSettingsRef.current);
+          }
+          return false;
+        } finally {
+          pendingCountRef.current = Math.max(0, pendingCountRef.current - 1);
+          if (isMountedRef.current && pendingCountRef.current === 0) {
+            setIsSaving(false);
+          }
+        }
+      });
+      saveQueueRef.current = queuedOperation.catch(() => false);
+      return queuedOperation;
+    },
+    []
+  );
+  const waitForPendingSaves = reactExports.useCallback(async () => {
+    await saveQueueRef.current;
+    return confirmedSettingsRef.current;
+  }, []);
+  return {
+    settings,
+    isLoading,
+    isSaving,
+    error,
+    updateSettings,
+    reloadSettings,
+    waitForPendingSaves,
+    hasPendingSaves: pendingCountRef.current > 0
+  };
+}
+function useProductionModeSettings(projectDir) {
+  const [settings, setSettings] = reactExports.useState(DEFAULT_PRODUCTION_MODE_SETTINGS);
+  const [isLoading, setIsLoading] = reactExports.useState(false);
+  const [isSaving, setIsSaving] = reactExports.useState(false);
+  const [error, setError] = reactExports.useState(null);
+  const isMountedRef = reactExports.useRef(true);
+  const currentProjectDirRef = reactExports.useRef(projectDir ?? null);
+  const confirmedSettingsRef = reactExports.useRef(DEFAULT_PRODUCTION_MODE_SETTINGS);
+  const optimisticSettingsRef = reactExports.useRef(DEFAULT_PRODUCTION_MODE_SETTINGS);
+  const saveQueueRef = reactExports.useRef(Promise.resolve(true));
+  const pendingCountRef = reactExports.useRef(0);
+  reactExports.useEffect(() => {
+    isMountedRef.current = true;
+    currentProjectDirRef.current = projectDir ?? null;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, [projectDir]);
+  const reloadSettings = reactExports.useCallback(async () => {
+    if (!projectDir) {
+      if (isMountedRef.current) {
+        setSettings(DEFAULT_PRODUCTION_MODE_SETTINGS);
+        confirmedSettingsRef.current = DEFAULT_PRODUCTION_MODE_SETTINGS;
+        optimisticSettingsRef.current = DEFAULT_PRODUCTION_MODE_SETTINGS;
+        setError(null);
+      }
+      return;
+    }
+    if (!window.api?.productionModeSettings?.get) {
+      if (isMountedRef.current) {
+        setError("Production mode settings bridge unavailable.");
+      }
+      return;
+    }
+    const requestedDir = projectDir;
+    if (isMountedRef.current) {
+      setIsLoading(true);
+      setError(null);
+    }
+    try {
+      const res = await window.api.productionModeSettings.get(requestedDir);
+      if (!isMountedRef.current || currentProjectDirRef.current !== requestedDir) {
+        return;
+      }
+      if (res.success && res.settings) {
+        setSettings(res.settings);
+        confirmedSettingsRef.current = res.settings;
+        optimisticSettingsRef.current = res.settings;
+        setError(null);
+      } else {
+        const errMsg = res.error || "Failed to load production mode settings.";
+        setError(errMsg);
+      }
+    } catch (err) {
+      if (!isMountedRef.current || currentProjectDirRef.current !== requestedDir) {
+        return;
+      }
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(msg);
+    } finally {
+      if (isMountedRef.current && currentProjectDirRef.current === requestedDir) {
+        setIsLoading(false);
+      }
+    }
+  }, [projectDir]);
+  reactExports.useEffect(() => {
+    void reloadSettings();
+  }, [projectDir, reloadSettings]);
+  const updateSettings = reactExports.useCallback(
+    async (patch) => {
+      const targetDir = currentProjectDirRef.current;
+      if (!targetDir) {
+        setError("No active project directory.");
+        return false;
+      }
+      if (!window.api?.productionModeSettings?.update) {
+        setError("Production mode settings update API unavailable.");
+        return false;
+      }
+      const nextOptimistic = {
+        ...optimisticSettingsRef.current,
+        ...patch,
+        schemaVersion: 1
+      };
+      optimisticSettingsRef.current = nextOptimistic;
+      if (isMountedRef.current) {
+        setSettings(nextOptimistic);
+        setError(null);
+      }
+      pendingCountRef.current += 1;
+      if (isMountedRef.current) {
+        setIsSaving(true);
+      }
+      const queuedOperation = saveQueueRef.current.then(async () => {
+        try {
+          if (currentProjectDirRef.current !== targetDir) {
+            return false;
+          }
+          const res = await window.api.productionModeSettings.update(targetDir, patch);
+          if (!isMountedRef.current || currentProjectDirRef.current !== targetDir) {
+            return res.success;
+          }
+          if (res.success && res.settings) {
+            confirmedSettingsRef.current = res.settings;
+            if (pendingCountRef.current <= 1) {
+              optimisticSettingsRef.current = res.settings;
+              setSettings(res.settings);
+            }
+            return true;
+          } else {
+            const msg = res.error || "Failed to persist production mode settings.";
             setError(msg);
             optimisticSettingsRef.current = confirmedSettingsRef.current;
             setSettings(confirmedSettingsRef.current);
@@ -8813,6 +8970,441 @@ Recommended when:
               void onChange({ renderOverlayMode: "source-only" });
             },
             onCancel: () => setShowSourceOnlyConfirm(false)
+          }
+        )
+      ]
+    }
+  );
+}
+function MusicModeControls({
+  mode,
+  disabled = false,
+  onChange,
+  idSuffix = ""
+}) {
+  const isMusicOn = mode === "auto";
+  return /* @__PURE__ */ jsxRuntimeExports.jsx(
+    "div",
+    {
+      id: `music-mode-controls${idSuffix}`,
+      style: {
+        padding: "12px 14px",
+        borderRadius: "8px",
+        background: "rgba(0, 0, 0, 0.25)",
+        border: "1px solid rgba(255, 255, 255, 0.08)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px"
+      },
+      children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "6px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "12px", fontWeight: 700, color: "var(--text-primary)" }, children: "🎵 Background Music:" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx(
+              "span",
+              {
+                style: {
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  color: isMusicOn ? "#38bdf8" : "#a3e635"
+                },
+                children: isMusicOn ? "Add Background Music" : "No Music (Muted/Off)"
+              }
+            )
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", marginTop: "2px" }, children: isMusicOn ? "Finds and mixes mood-appropriate background music ducked under the voiceover." : "True No Music: zero background music or soundtrack tracks will enter the final MP4." })
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              id: `music-mode-auto${idSuffix}`,
+              className: `btn btn-sm ${isMusicOn ? "btn-primary" : "btn-secondary"}`,
+              style: { fontSize: "11px", padding: "5px 12px", display: "flex", alignItems: "center", gap: "4px" },
+              onClick: () => onChange("auto"),
+              disabled,
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🎵" }),
+                " Add Background Music"
+              ]
+            }
+          ),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "button",
+            {
+              type: "button",
+              id: `music-mode-off${idSuffix}`,
+              className: `btn btn-sm ${!isMusicOn ? "btn-primary" : "btn-secondary"}`,
+              style: {
+                fontSize: "11px",
+                padding: "5px 12px",
+                display: "flex",
+                alignItems: "center",
+                gap: "4px",
+                background: !isMusicOn ? "rgba(239, 68, 68, 0.2)" : void 0,
+                borderColor: !isMusicOn ? "#ef4444" : void 0,
+                color: !isMusicOn ? "#fca5a5" : void 0
+              },
+              onClick: () => onChange("off"),
+              disabled,
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "🔇" }),
+                " No Music"
+              ]
+            }
+          )
+        ] })
+      ] })
+    }
+  );
+}
+function AssemblyModeControls({
+  assemblyMode,
+  backgroundMusicMode,
+  sceneFolder,
+  disabled = false,
+  saving = false,
+  error = null,
+  onAssemblyModeChange,
+  onMusicModeChange,
+  onSelectSceneFolder,
+  onClearSceneFolder,
+  idSuffix = ""
+}) {
+  const isSimpleAssembly = assemblyMode === "simple-assembly";
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      id: `production-mode-setup-controls${idSuffix}`,
+      style: {
+        marginTop: "12px",
+        padding: "16px",
+        borderRadius: "var(--radius-lg, 12px)",
+        border: "1px solid rgba(14, 165, 233, 0.28)",
+        background: "linear-gradient(135deg, rgba(14, 165, 233, 0.06), rgba(99, 102, 241, 0.04))",
+        display: "flex",
+        flexDirection: "column",
+        gap: "12px"
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: "8px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: "var(--text-primary)", letterSpacing: "0.02em" }, children: "⚡ PRODUCTION & AUDIO CONTROLS" }),
+            saving && /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { style: { fontSize: "11px", color: "var(--color-brand, #818cf8)", display: "inline-flex", alignItems: "center", gap: "4px" }, children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "spinner-sm", style: { width: "10px", height: "10px" } }),
+              " Saving..."
+            ] })
+          ] }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Step 2 Output & Assembly Strategy" })
+        ] }),
+        error && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            id: `production-mode-error${idSuffix}`,
+            style: {
+              padding: "8px 12px",
+              borderRadius: "6px",
+              background: "rgba(239, 68, 68, 0.15)",
+              border: "1px solid rgba(239, 68, 68, 0.3)",
+              color: "#f87171",
+              fontSize: "12px",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between"
+            },
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+              "⚠️ ",
+              error
+            ] })
+          }
+        ),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "6px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }, children: "AUDIO SETTINGS" }),
+          /* @__PURE__ */ jsxRuntimeExports.jsx(
+            MusicModeControls,
+            {
+              mode: backgroundMusicMode,
+              disabled,
+              onChange: onMusicModeChange,
+              idSuffix
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { height: "1px", background: "rgba(255, 255, 255, 0.08)", margin: "4px 0" } }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: "8px" }, children: [
+          /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "12px", fontWeight: 600, color: "var(--text-primary)" }, children: "VIDEO ASSEMBLY MODE" }),
+            /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: "Choose between full smart production and lightweight direct scene concatenation." })
+          ] }) }),
+          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: "10px" }, children: [
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                id: `assembly-mode-full-card${idSuffix}`,
+                onClick: () => !disabled && onAssemblyModeChange("full-production"),
+                style: {
+                  padding: "12px",
+                  borderRadius: "8px",
+                  border: `2px solid ${!isSimpleAssembly ? "#818cf8" : "rgba(255, 255, 255, 0.08)"}`,
+                  background: !isSimpleAssembly ? "rgba(99, 102, 241, 0.12)" : "rgba(0, 0, 0, 0.2)",
+                  cursor: disabled ? "default" : "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
+                  transition: "all 0.2s ease"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: !isSimpleAssembly ? "#c7d2fe" : "var(--text-primary)" }, children: "🚀 Full Smart Render" }),
+                    !isSimpleAssembly && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "#4f46e5", color: "#fff", padding: "2px 6px", borderRadius: "4px", fontWeight: 600 }, children: "ACTIVE" })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", lineHeight: "1.4" }, children: "Runs the same intelligent production stages, then applies the existing final editing, Retention, transitions, Remotion captions and overlays." })
+                ]
+              }
+            ),
+            /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                id: `assembly-mode-simple-card${idSuffix}`,
+                onClick: () => !disabled && onAssemblyModeChange("simple-assembly"),
+                style: {
+                  padding: "12px",
+                  borderRadius: "8px",
+                  border: `2px solid ${isSimpleAssembly ? "#38bdf8" : "rgba(255, 255, 255, 0.08)"}`,
+                  background: isSimpleAssembly ? "rgba(14, 165, 233, 0.12)" : "rgba(0, 0, 0, 0.2)",
+                  cursor: disabled ? "default" : "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: "6px",
+                  transition: "all 0.2s ease"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "13px", fontWeight: 700, color: isSimpleAssembly ? "#bae6fd" : "var(--text-primary)" }, children: "⚡ Simple Assembly (After Full AI Production)" }),
+                    isSimpleAssembly && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: "10px", background: "#0284c7", color: "#fff", padding: "2px 6px", borderRadius: "4px", fontWeight: 600 }, children: "ACTIVE" })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)", lineHeight: "1.4" }, children: "Runs all AI Planning, Visual Director, prompt generation, Stock and manual import stages normally. After every scene is ready, the final render only joins the completed scenes with your voiceover. No Remotion, captions, transitions, or extra editing." })
+                ]
+              }
+            )
+          ] }),
+          isSimpleAssembly && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+            "div",
+            {
+              id: `simple-assembly-options${idSuffix}`,
+              style: {
+                marginTop: "4px",
+                padding: "10px 12px",
+                borderRadius: "8px",
+                background: "rgba(0, 0, 0, 0.25)",
+                border: "1px solid rgba(56, 189, 248, 0.2)",
+                display: "flex",
+                flexDirection: "column",
+                gap: "8px"
+              },
+              children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 600, color: "#38bdf8" }, children: "Simple Assembly Media Source:" }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "8px" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", color: "var(--text-secondary)" }, children: sceneFolder ? /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                    "Direct Scene Folder (Manual Utility): ",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: sceneFolder.split(/[/\\]/).pop() })
+                  ] }) : /* @__PURE__ */ jsxRuntimeExports.jsxs("span", { children: [
+                    "Using project planned scenes (",
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { style: { color: "var(--text-primary)" }, children: "AI Planning & Imported Assets" }),
+                    ")"
+                  ] }) }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "6px" }, children: [
+                    onSelectSceneFolder && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary btn-sm",
+                        style: { fontSize: "11px", padding: "3px 8px" },
+                        onClick: () => void onSelectSceneFolder(),
+                        disabled,
+                        children: [
+                          "📁 ",
+                          sceneFolder ? "Change Scene Folder" : "Select Scene Video Folder"
+                        ]
+                      }
+                    ),
+                    sceneFolder && onClearSceneFolder && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        className: "btn btn-secondary btn-sm",
+                        style: { fontSize: "11px", padding: "3px 8px", color: "#f87171" },
+                        onClick: onClearSceneFolder,
+                        disabled,
+                        title: "Revert to project imported scenes",
+                        children: "Use Project Scenes"
+                      }
+                    )
+                  ] })
+                ] })
+              ]
+            }
+          )
+        ] }),
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            id: `production-mode-summary${idSuffix}`,
+            style: {
+              marginTop: "4px",
+              padding: "10px 14px",
+              borderRadius: "6px",
+              background: "rgba(0, 0, 0, 0.3)",
+              border: "1px solid rgba(255, 255, 255, 0.06)",
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px"
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: "11px", fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: "0.05em" }, children: "Mode Summary" }),
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", gap: "8px", flexWrap: "wrap", fontSize: "11px" }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "AI Planning: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Visual Director: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Prompt Generation: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Manual AI Import: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(16, 185, 129, 0.15)",
+                      color: "#34d399",
+                      fontWeight: 600
+                    },
+                    children: "Scene Readiness Gate: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: isSimpleAssembly ? "rgba(56, 189, 248, 0.2)" : "rgba(99, 102, 241, 0.2)",
+                      color: isSimpleAssembly ? "#38bdf8" : "#a5b4fc",
+                      fontWeight: 600
+                    },
+                    children: [
+                      "Final Render: ",
+                      isSimpleAssembly ? "Simple Assembly" : "Full Smart Render"
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: backgroundMusicMode === "auto" ? "rgba(163, 230, 53, 0.15)" : "rgba(239, 68, 68, 0.15)",
+                      color: backgroundMusicMode === "auto" ? "#a3e635" : "#fca5a5",
+                      fontWeight: 600
+                    },
+                    children: [
+                      "Music: ",
+                      backgroundMusicMode === "auto" ? "ON (Auto)" : "OFF (None)"
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsx(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: "rgba(255, 255, 255, 0.06)",
+                      color: "var(--text-primary)"
+                    },
+                    children: "Voiceover: ON"
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: isSimpleAssembly ? "rgba(255, 255, 255, 0.05)" : "rgba(168, 85, 247, 0.15)",
+                      color: isSimpleAssembly ? "var(--text-secondary)" : "#c084fc"
+                    },
+                    children: [
+                      "Remotion: ",
+                      isSimpleAssembly ? "OFF (Final Render Only)" : "ON (Dynamic Captions)"
+                    ]
+                  }
+                ),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "span",
+                  {
+                    style: {
+                      padding: "2px 8px",
+                      borderRadius: "4px",
+                      background: isSimpleAssembly ? "rgba(255, 255, 255, 0.05)" : "rgba(56, 189, 248, 0.15)",
+                      color: isSimpleAssembly ? "var(--text-secondary)" : "#38bdf8"
+                    },
+                    children: [
+                      "Transitions: ",
+                      isSimpleAssembly ? "Hard Cuts" : "Cinematic / Smart"
+                    ]
+                  }
+                )
+              ] })
+            ]
           }
         )
       ]
@@ -9888,7 +10480,13 @@ function VisualSourceSection({
   editorialSettings,
   isSavingEditorial,
   editorialError,
-  onUpdateEditorialSettings
+  onUpdateEditorialSettings,
+  productionSettings,
+  isSavingProduction,
+  productionError,
+  onUpdateProductionSettings,
+  onSelectSceneFolder,
+  onClearSceneFolder
 }) {
   const containerClass = isAdvanced ? "panel" : "setup-section";
   const idSuffix = isAdvanced ? "-adv" : "";
@@ -10418,7 +11016,23 @@ function VisualSourceSection({
           onChange: onUpdateEditorialSettings,
           idSuffix
         }
-      ) })
+      ) }),
+      /* @__PURE__ */ jsxRuntimeExports.jsx(
+        AssemblyModeControls,
+        {
+          assemblyMode: productionSettings.assemblyMode,
+          backgroundMusicMode: productionSettings.backgroundMusicMode,
+          sceneFolder: productionSettings.sceneFolder,
+          disabled: isRunning,
+          saving: isSavingProduction,
+          error: productionError,
+          onAssemblyModeChange: (mode) => void onUpdateProductionSettings({ assemblyMode: mode }),
+          onMusicModeChange: (mode) => void onUpdateProductionSettings({ backgroundMusicMode: mode }),
+          onSelectSceneFolder,
+          onClearSceneFolder,
+          idSuffix
+        }
+      )
     ] })
   ] });
 }
@@ -10448,6 +11062,23 @@ function InputPage({
     updateSettings: updateEditorialSettings,
     waitForPendingSaves: waitForPendingEditorialSaves
   } = useEditorialSettings(project.projectDir);
+  const {
+    settings: productionSettings,
+    isSaving: isSavingProduction,
+    error: productionError,
+    updateSettings: updateProductionSettings,
+    waitForPendingSaves: waitForPendingProductionSaves
+  } = useProductionModeSettings(project.projectDir);
+  async function handleSelectSceneFolder() {
+    if (!window.api?.simpleAssembly?.selectSceneFolder) return;
+    const folder = await window.api.simpleAssembly.selectSceneFolder();
+    if (folder) {
+      await updateProductionSettings({ sceneFolder: folder });
+    }
+  }
+  function handleClearSceneFolder() {
+    void updateProductionSettings({ sceneFolder: void 0 });
+  }
   const [flowHealth, setFlowHealth] = reactExports.useState({ checking: false });
   reactExports.useEffect(() => {
     let cancelled = false;
@@ -10588,13 +11219,14 @@ function InputPage({
     }
   }, [isRunning, inputs.scriptPath, inputs.voiceoverPath]);
   const inputChangedWhileRunning = isRunning && runningInputsSnapshotRef.current !== null && (runningInputsSnapshotRef.current.script !== inputs.scriptPath || runningInputsSnapshotRef.current.voiceover !== inputs.voiceoverPath);
+  const isSimpleAssembly = productionSettings.assemblyMode === "simple-assembly";
   const isAutoReady = !!(inputs.scriptPath && inputs.voiceoverPath);
   reactExports.useEffect(() => {
     if (workflowMode !== "auto" || !autoStartOnReady || !isAutoReady || isRunning) {
       return;
     }
     const currentProfileMode = inputs.contentProfileMode ?? resolveContentProfileMode(inputs);
-    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}`;
+    const currentFp = `${inputs.scriptPath}:${inputs.voiceoverPath}:${currentProfileMode}:${effectiveMix.mode}:${effectiveMix.aiImageRatio}:${productionSettings.assemblyMode}:${productionSettings.backgroundMusicMode}`;
     if (lastAutoStartedFingerprintRef.current === currentFp) {
       return;
     }
@@ -10622,13 +11254,19 @@ function InputPage({
     inputs.contentProfileMode,
     effectiveMix.mode,
     effectiveMix.aiImageRatio,
+    productionSettings.assemblyMode,
+    productionSettings.backgroundMusicMode,
     isRunning
   ]);
   async function handleStartAutoPipeline() {
-    if (!inputs.scriptPath || !inputs.voiceoverPath || isRunning || isStarting) return;
+    if (isRunning || isStarting) return;
+    if (!inputs.scriptPath || !inputs.voiceoverPath) return;
     setIsStarting(true);
     try {
-      await waitForPendingEditorialSaves();
+      await Promise.all([
+        waitForPendingEditorialSaves(),
+        waitForPendingProductionSaves()
+      ]);
       let confirmedEditorial = editorialSettings;
       if (window.api?.manualAi?.getEditorialSettings) {
         try {
@@ -10640,6 +11278,19 @@ function InputPage({
           console.warn("[Setup] Error reading confirmed editorial settings:", edErr);
         }
       }
+      let confirmedProduction = productionSettings;
+      if (window.api?.productionModeSettings?.get) {
+        try {
+          const prodRes = await window.api.productionModeSettings.get(project.projectDir);
+          if (prodRes.success && prodRes.settings) {
+            confirmedProduction = prodRes.settings;
+          }
+        } catch (prodErr) {
+          console.warn("[Setup] Error reading confirmed production settings:", prodErr);
+        }
+      }
+      const effectiveAssemblyMode = confirmedProduction.assemblyMode;
+      const effectiveMusicMode = confirmedProduction.backgroundMusicMode;
       const resolvedMix = resolveVisualMixConfig({
         visualSourceMode: inputs.visualSourceMode,
         visualMixConfig: inputs.visualMixConfig,
@@ -10654,14 +11305,18 @@ AI=${Math.round(resolvedMix.aiImageRatio * 100)}%
 Stock=${Math.round(resolvedMix.stockFootageRatio * 100)}%
 resolution=${resolvedMix.imageOutputResolution}
 editorialMode=${confirmedEditorial.promptMode}
-renderMode=${confirmedEditorial.renderOverlayMode}`
+renderMode=${confirmedEditorial.renderOverlayMode}
+assemblyMode=${effectiveAssemblyMode}
+musicMode=${effectiveMusicMode}`
       );
       const ok2 = await startPipeline({
         projectDir: project.projectDir,
         scriptPath: inputs.scriptPath,
         voiceoverPath: inputs.voiceoverPath,
         whisperModel,
-        requireBackgroundMusic: requireBgMusic,
+        requireBackgroundMusic: effectiveMusicMode === "off" ? false : requireBgMusic,
+        backgroundMusicMode: effectiveMusicMode,
+        assemblyMode: effectiveAssemblyMode,
         autoStartOnReady,
         contentType: inputs.contentType ?? (resolvedProfileMode === "health" ? "health" : "default"),
         contentProfileMode: resolvedProfileMode,
@@ -10766,7 +11421,13 @@ renderMode=${confirmedEditorial.renderOverlayMode}`
           editorialSettings,
           isSavingEditorial,
           editorialError,
-          onUpdateEditorialSettings: updateEditorialSettings
+          onUpdateEditorialSettings: updateEditorialSettings,
+          productionSettings,
+          isSavingProduction,
+          productionError,
+          onUpdateProductionSettings: updateProductionSettings,
+          onSelectSceneFolder: handleSelectSceneFolder,
+          onClearSceneFolder: handleClearSceneFolder
         }
       ),
       /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "setup-section", children: [
@@ -10996,7 +11657,9 @@ renderMode=${confirmedEditorial.renderOverlayMode}`
               type: "button",
               className: "btn btn-secondary",
               style: { color: "#ef4444", borderColor: "#ef4444" },
-              onClick: () => setShowCancelPipelineDialog(true),
+              onClick: () => {
+                setShowCancelPipelineDialog(true);
+              },
               id: "btn-cancel-auto-pipeline",
               children: "Cancel Run"
             }
@@ -11214,7 +11877,13 @@ renderMode=${confirmedEditorial.renderOverlayMode}`
         editorialSettings,
         isSavingEditorial,
         editorialError,
-        onUpdateEditorialSettings: updateEditorialSettings
+        onUpdateEditorialSettings: updateEditorialSettings,
+        productionSettings,
+        isSavingProduction,
+        productionError,
+        onUpdateProductionSettings: updateProductionSettings,
+        onSelectSceneFolder: handleSelectSceneFolder,
+        onClearSceneFolder: handleClearSceneFolder
       }
     ),
     /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel", children: [
@@ -11323,7 +11992,7 @@ renderMode=${confirmedEditorial.renderOverlayMode}`
         children: [
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-header", style: { display: "flex", alignItems: "center", justifyContent: "space-between" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsx("div", { className: "panel-title", children: "⚡ Auto Production Engine" }),
-            isAutoReady && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-success", children: "Ready for Auto Production" })
+            isAutoReady && /* @__PURE__ */ jsxRuntimeExports.jsx("span", { className: "panel-badge badge-success", children: isSimpleAssembly ? "Ready for Simple Assembly" : "Ready for Auto Production" })
           ] }),
           /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { className: "panel-body", style: { display: "flex", flexDirection: "column", gap: "14px" }, children: [
             /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: "12px" }, children: [
@@ -11390,7 +12059,9 @@ renderMode=${confirmedEditorial.renderOverlayMode}`
                     {
                       type: "button",
                       className: "btn btn-secondary",
-                      onClick: () => setShowCancelPipelineDialog(true),
+                      onClick: () => {
+                        setShowCancelPipelineDialog(true);
+                      },
                       style: { borderColor: "#ef4444", color: "#ef4444" },
                       id: "btn-cancel-auto-pipeline",
                       children: "Cancel Run"
@@ -11662,7 +12333,7 @@ function computePhaseState(phase, pipelineState) {
         summary = "Background music and sound effects matched";
         break;
       case "build":
-        summary = "Render preflight passed and video rendered";
+        summary = pipelineState?.options?.assemblyMode === "simple-assembly" ? "Render preflight passed and scenes concatenated with voiceover" : "Render preflight passed and video rendered";
         break;
       case "final-check":
         summary = "Postflight quality check completed";
@@ -11692,7 +12363,7 @@ function computePhaseState(phase, pipelineState) {
         summary = "Selects and blends background soundtrack";
         break;
       case "build":
-        summary = "Automated QA check and final video rendering";
+        summary = pipelineState?.options?.assemblyMode === "simple-assembly" ? "Render Preflight QA & Simple Assembly concatenation" : "Automated QA check and final video rendering";
         break;
       case "final-check":
         summary = "Final output verification and validation";

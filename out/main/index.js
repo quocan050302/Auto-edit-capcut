@@ -243,6 +243,12 @@ function resolveVisualMixConfig(options) {
   }
   return { ...DEFAULT_VISUAL_MIX_CONFIG };
 }
+const DEFAULT_PRODUCTION_MODE_SETTINGS = {
+  schemaVersion: 1,
+  assemblyMode: "full-production",
+  backgroundMusicMode: "auto",
+  shortClipPolicy: "freeze-last-frame"
+};
 const DEFAULT_VISUAL_TRUTH_WEIGHTS = {
   metadataRelevance: 0.25,
   visualVerification: 0.3,
@@ -401,6 +407,14 @@ const IPC_CHANNELS = {
   MANUAL_AI_UPDATE_EDITORIAL_SETTINGS: "manual-ai:update-editorial-settings",
   MANUAL_AI_GET_EDITORIAL_VERIFICATION: "manual-ai:get-editorial-verification",
   MANUAL_AI_RECORD_EDITORIAL_VERIFICATION: "manual-ai:record-editorial-verification",
+  // Simple Scene Assembly & Production Mode Settings
+  SIMPLE_ASSEMBLY_START: "simple-assembly:start",
+  SIMPLE_ASSEMBLY_CANCEL: "simple-assembly:cancel",
+  SIMPLE_ASSEMBLY_PROGRESS: "simple-assembly:progress",
+  SIMPLE_ASSEMBLY_STATUS_GET: "simple-assembly:status-get",
+  SIMPLE_ASSEMBLY_SELECT_SCENE_FOLDER: "simple-assembly:select-scene-folder",
+  PRODUCTION_MODE_SETTINGS_GET: "production-mode-settings:get",
+  PRODUCTION_MODE_SETTINGS_UPDATE: "production-mode-settings:update",
   // YouTube Foreign Market Researcher (Isolated Module)
   RESEARCH_SIDECAR_STATUS: "research:sidecar-status",
   RESEARCH_SIDECAR_RESTART: "research:sidecar-restart",
@@ -4390,8 +4404,17 @@ function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
     invalidated.add("rendering");
     invalidated.add("postflight");
   }
-  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic) {
+  const oldMusicMode = oldState.options.backgroundMusicMode ?? "auto";
+  const newMusicMode = newOptions.backgroundMusicMode ?? "auto";
+  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic || oldMusicMode !== newMusicMode) {
     invalidated.add("audio-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldAssemblyMode = oldState.options.assemblyMode ?? "full-production";
+  const newAssemblyMode = newOptions.assemblyMode ?? "full-production";
+  if (oldAssemblyMode !== newAssemblyMode) {
     invalidated.add("preflight");
     invalidated.add("rendering");
     invalidated.add("postflight");
@@ -6880,7 +6903,7 @@ const RETENTION_PLAN_SCHEMA_VERSION = 1;
 function sha256$4(text) {
   return crypto__namespace.createHash("sha256").update(text).digest("hex");
 }
-function writeFileAtomic$5(filePath, content) {
+function writeFileAtomic$6(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -7301,7 +7324,7 @@ function loadRetentionPlan(projectDir) {
 }
 function saveRetentionPlan(projectDir, plan) {
   const p = getRetentionPlanPath(projectDir);
-  writeFileAtomic$5(p, JSON.stringify(plan, null, 2));
+  writeFileAtomic$6(p, JSON.stringify(plan, null, 2));
   logger.info(
     `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
   );
@@ -12731,7 +12754,7 @@ function formatManualAiPromptText(pack) {
   const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   return sorted.map((e) => `${formatSceneLabel(e.sceneIndex)} | ${sanitizePromptLine(e.prompt)}`).join("\n\n");
 }
-function writeFileAtomic$4(filePath, content) {
+function writeFileAtomic$5(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -12751,8 +12774,8 @@ function loadManualAiPromptPack(projectDir) {
   }
 }
 function saveManualAiPromptPackFiles(projectDir, pack) {
-  writeFileAtomic$4(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic$4(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
+  writeFileAtomic$5(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$5(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
 }
 function readManualAiPromptText(projectDir) {
   const pack = loadManualAiPromptPack(projectDir);
@@ -13012,7 +13035,7 @@ const DEFAULT_EDITORIAL_SETTINGS = {
 function getEditorialFocusSettingsPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "editorial-focus-settings.v1.json");
 }
-function writeFileAtomic$3(filePath, content) {
+function writeFileAtomic$4(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -13059,7 +13082,7 @@ function saveEditorialFocusSettings(projectDir, settings) {
     ...settings
   });
   const settingsPath = getEditorialFocusSettingsPath(projectDir);
-  writeFileAtomic$3(settingsPath, JSON.stringify(merged, null, 2));
+  writeFileAtomic$4(settingsPath, JSON.stringify(merged, null, 2));
   logger.info(`[EditorialSettings] Saved project editorial settings to ${settingsPath}`);
   return merged;
 }
@@ -13996,7 +14019,7 @@ async function encodeRun(args, ctx) {
 function vcodec(ctx, crf) {
   return ctx.encoder.videoArgs(crf, "fast");
 }
-function safeUnlink(filePath) {
+function safeUnlink$1(filePath) {
   if (!filePath) return;
   try {
     if (fs__namespace.existsSync(filePath)) {
@@ -14014,7 +14037,7 @@ function moveFile(src, dst) {
   } catch (err) {
     if (err.code !== "EXDEV") throw err;
     fs__namespace.copyFileSync(src, dst);
-    safeUnlink(src);
+    safeUnlink$1(src);
   }
 }
 function concatListLine(f) {
@@ -14040,14 +14063,14 @@ async function concatSceneClipsLegacy(sceneClips, tmpDir, rawVideoPath, ctx) {
     "copy",
     rawVideoPath
   ], ctx);
-  safeUnlink(concatList);
+  safeUnlink$1(concatList);
 }
 function normalizePathForFFmpeg(p) {
   if (!p) return p;
   if (p.startsWith("/")) return p;
   return path__namespace.resolve(p);
 }
-const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([
+const IMAGE_EXTENSIONS$1 = /* @__PURE__ */ new Set([
   ".jpg",
   ".jpeg",
   ".png",
@@ -14071,7 +14094,7 @@ function detectMediaKind(mediaPath, declaredType) {
   if (VIDEO_EXTENSIONS.has(extension)) {
     return "video";
   }
-  if (IMAGE_EXTENSIONS.has(extension)) {
+  if (IMAGE_EXTENSIONS$1.has(extension)) {
     return "image";
   }
   if (declaredType === "image") {
@@ -14133,6 +14156,21 @@ function resolveSceneMediaWithSource(scene, mediaIndex, projectDir) {
   } catch {
   }
   try {
+    const manualAiPath = path__namespace.join(projectDir, "analysis", "manual-ai-assets.json");
+    if (fs__namespace.existsSync(manualAiPath)) {
+      const manualAi = JSON.parse(fs__namespace.readFileSync(manualAiPath, "utf-8"));
+      const record = manualAi?.scenes?.[String(scene.sceneIndex)];
+      if (record?.localPath) {
+        const p = path__namespace.isAbsolute(record.localPath) ? normalizePathForFFmpeg(record.localPath) : normalizePathForFFmpeg(path__namespace.join(projectDir, record.localPath));
+        if (fs__namespace.existsSync(p)) {
+          scene.mediaType = detectMediaKind(p, record.mediaType ?? scene.mediaType);
+          return { sceneIndex: scene.sceneIndex, mediaPath: p, source: "manualAi" };
+        }
+      }
+    }
+  } catch {
+  }
+  try {
     const stockDir = path__namespace.join(projectDir, "assets", "stock");
     if (fs__namespace.existsSync(stockDir)) {
       const files = fs__namespace.readdirSync(stockDir);
@@ -14172,7 +14210,7 @@ async function renderVisualBeatsToClip(params) {
   let isImage;
   if (VIDEO_EXTENSIONS.has(cleanExt)) {
     isImage = false;
-  } else if (IMAGE_EXTENSIONS.has(cleanExt)) {
+  } else if (IMAGE_EXTENSIONS$1.has(cleanExt)) {
     isImage = true;
   } else {
     isImage = params.isImage;
@@ -14238,7 +14276,7 @@ async function renderVisualBeatsToClip(params) {
       beatClips.push(beatClip);
     }
     if (beatClips.length === 1) {
-      safeUnlink(outClip);
+      safeUnlink$1(outClip);
       moveFile(beatClips[0], outClip);
     } else {
       const beatConcatList = path__namespace.join(tmpDir, `beat_concat_${sceneIndex}.txt`);
@@ -14259,13 +14297,13 @@ async function renderVisualBeatsToClip(params) {
         "copy",
         outClip
       ], ctx);
-      for (const bc of beatClips) safeUnlink(bc);
-      safeUnlink(beatConcatList);
+      for (const bc of beatClips) safeUnlink$1(bc);
+      safeUnlink$1(beatConcatList);
     }
     logger.info(`[RetentionEngine] scene ${sceneIndex}: ${beats.length} beats rendered and concatenated`);
   } catch (err) {
     if (isRenderCancelledError(err) || err instanceof HardwareEncoderError) {
-      for (const bc of beatClips) safeUnlink(bc);
+      for (const bc of beatClips) safeUnlink$1(bc);
       throw err;
     }
     const errMsg = String(err);
@@ -14274,7 +14312,7 @@ async function renderVisualBeatsToClip(params) {
     }
     logger.warn(`[RetentionEngine] scene ${sceneIndex}: beat render failed (${errMsg}), falling back to legacy`);
     for (const bc of beatClips) {
-      safeUnlink(bc);
+      safeUnlink$1(bc);
     }
     const baseFilt = scaleFilt;
     const fallbackDur = beats.reduce((a, b) => a + (b.relativeEnd - b.relativeStart), 0);
@@ -14599,7 +14637,8 @@ function prepareRenderPlan(params) {
     // block fingerprint (overlayPropsHash) instead, which invalidates overlays correctly.
     visualGrammarSettings: { prod: hashes.productionSettings },
     sceneFingerprints: sceneJobs.map((j) => j.fingerprint),
-    renderOverlayMode: editorialSettings.renderOverlayMode
+    renderOverlayMode: editorialSettings.renderOverlayMode,
+    backgroundMusicMode: params.backgroundMusicMode ?? "auto"
   });
   return {
     projectDir,
@@ -14627,7 +14666,8 @@ function prepareRenderPlan(params) {
     renderFingerprint,
     assemblyFingerprint,
     totalDurationSecs: scenes.reduce((a, s) => a + s.duration, 0),
-    editorialSettings
+    editorialSettings,
+    backgroundMusicMode: params.backgroundMusicMode
   };
 }
 function computeRenderRequestKey(params) {
@@ -14644,7 +14684,9 @@ function computeRenderRequestKey(params) {
     plan: hashFileContent(path__namespace.join(analysis, "master-edit-plan.json")),
     audio: hashFileContent(path__namespace.join(analysis, "audio-plan.json")),
     stock: hashFileContent(path__namespace.join(analysis, "stock-assignments.json")),
-    editorial: params.editorialSettings ? hashJsonValue(params.editorialSettings) : hashFileContent(path__namespace.join(analysis, "editorial-focus-settings.v1.json"))
+    editorial: params.editorialSettings ? hashJsonValue(params.editorialSettings) : hashFileContent(path__namespace.join(analysis, "editorial-focus-settings.v1.json")),
+    backgroundMusicMode: params.backgroundMusicMode ?? "auto",
+    assemblyMode: params.assemblyMode ?? "full-production"
   });
 }
 async function renderVideo(params) {
@@ -14906,7 +14948,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       cp2.startedAt = (/* @__PURE__ */ new Date()).toISOString();
       workspace.saveManifest(manifest);
       const partial = outClip.replace(/\.mp4$/, ".partial.mp4");
-      safeUnlink(partial);
+      safeUnlink$1(partial);
       await renderSceneClip({
         job,
         outClip: partial,
@@ -14976,7 +15018,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
       manifest.assembly = { status: "running", fingerprint: prepared.assemblyFingerprint, startedAt: (/* @__PURE__ */ new Date()).toISOString(), artifactPath: rawVideo };
       workspace.saveManifest(manifest);
       const rawPartial = rawVideo.replace(/\.mp4$/, ".partial.mp4");
-      safeUnlink(rawPartial);
+      safeUnlink$1(rawPartial);
       const validSettings = prepared.validTransitionSettings;
       const shouldAttemptTransitions = validSettings && validSettings.enabled && sceneEntries.length > 1;
       let rawVideoCreated = false;
@@ -15015,7 +15057,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
               }
               await throttle.beforeNextJob(signal);
               const segPartial = segPath.replace(/\.mp4$/, ".partial.mp4");
-              safeUnlink(segPartial);
+              safeUnlink$1(segPartial);
               try {
                 await render(segPartial);
               } catch (err) {
@@ -15036,7 +15078,7 @@ async function renderVideoV2(params, encoderOverride, carriedWarnings = []) {
             `[Transitions] Transition render failed, falling back to legacy concat: ${String(err)}`
           );
           setPct("Transitions failed — using standard cuts...", 0.79);
-          safeUnlink(rawPartial);
+          safeUnlink$1(rawPartial);
           rawVideoCreated = false;
         }
       }
@@ -15103,23 +15145,25 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         }
       }
     }
-    const approvedMusic = audioPlan?.sections.filter(
+    const effectiveMusicMode = params.backgroundMusicMode ?? "auto";
+    const approvedMusic = effectiveMusicMode === "off" ? [] : audioPlan?.sections.filter(
       (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
     ) ?? [];
     const approvedSfx = audioPlan?.sfxAssignments.filter(
       (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(normalizePathForFFmpeg(s.approvedLocalPath))
     ) ?? [];
     const hasAudio = fs__namespace.existsSync(voiceoverPath);
-    const hasMusicOrSfx = approvedMusic.length > 0 || approvedSfx.length > 0;
-    logger.info(`[RENDER] Audio: voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`);
+    const hasMusicOrSfx = effectiveMusicMode !== "off" && approvedMusic.length > 0 || approvedSfx.length > 0;
+    logger.info(`[RENDER] Audio: musicMode=${effectiveMusicMode}, voiceover=${hasAudio}, music=${approvedMusic.length}, sfx=${approvedSfx.length}`);
     manifest.status = "mixing-audio";
     manifest.progress.currentPhase = "mixing-audio";
     const audioFingerprint = computeAudioFingerprint({
       assemblyFingerprint: prepared.assemblyFingerprint,
       voiceover: hasAudio ? fileSignature(voiceoverPath) : null,
-      audioPlanHash: hasMusicOrSfx ? prepared.hashes.audioPlan : "none",
-      musicSignatures: approvedMusic.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath))),
-      sfxSignatures: approvedSfx.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath)))
+      audioPlanHash: hasMusicOrSfx && effectiveMusicMode !== "off" ? prepared.hashes.audioPlan : effectiveMusicMode === "off" ? `no-music:${prepared.hashes.audioPlan}` : "none",
+      musicSignatures: effectiveMusicMode === "off" ? [] : approvedMusic.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath))),
+      sfxSignatures: approvedSfx.map((s) => fileSignature(normalizePathForFFmpeg(s.approvedLocalPath))),
+      backgroundMusicMode: effectiveMusicMode
     });
     const mixedVideo = workspace.mixedVideoPath;
     const mixExpect = {
@@ -15141,7 +15185,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       manifest.audioMix = { status: "running", fingerprint: audioFingerprint, startedAt: (/* @__PURE__ */ new Date()).toISOString(), artifactPath: mixedVideo };
       workspace.saveManifest(manifest);
       const workingOutputPath = mixedVideo.replace(/\.mp4$/, ".partial.mp4");
-      safeUnlink(workingOutputPath);
+      safeUnlink$1(workingOutputPath);
       if (!hasAudio && !hasMusicOrSfx) {
         fs__namespace.copyFileSync(rawVideo, workingOutputPath);
       } else if (!hasMusicOrSfx && hasAudio) {
@@ -15442,7 +15486,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         blk.startedAt = (/* @__PURE__ */ new Date()).toISOString();
         workspace.saveManifest(manifest);
         const blockPartial = blockPath.replace(/\.mp4$/, ".partial.mp4");
-        safeUnlink(blockPartial);
+        safeUnlink$1(blockPartial);
         const t0 = Date.now();
         const blockProps = selectOverlayPropsForBlock({
           captionPlan: captionPlanForOverlay,
@@ -15520,14 +15564,14 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       const fullReuse = await workspace.tryReuse(overlayFull, overlayFullExpect, signal);
       if (!fullReuse.ok) {
         const fullPartial = overlayFull.replace(/\.mp4$/, ".partial.mp4");
-        safeUnlink(fullPartial);
+        safeUnlink$1(fullPartial);
         if (blockFiles.length === 1) {
           fs__namespace.copyFileSync(blockFiles[0], fullPartial, fs__namespace.constants.COPYFILE_FICLONE);
         } else {
           const listPath = path__namespace.join(tmpDir, "overlay-concat.txt");
           fs__namespace.writeFileSync(listPath, blockFiles.map(concatListLine).join("\n"), "utf-8");
           await ffmpegRun$2(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", fullPartial], ctx);
-          safeUnlink(listPath);
+          safeUnlink$1(listPath);
         }
         await workspace.commitPartial(fullPartial, overlayFull, overlayFullExpect, { signal });
       }
@@ -15558,7 +15602,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
         manifest.composite = { status: "running", fingerprint: compositeFingerprint, startedAt: (/* @__PURE__ */ new Date()).toISOString(), artifactPath: compositePath };
         workspace.saveManifest(manifest);
         const captionedPath = compositePath.replace(/\.mp4$/, ".partial.mp4");
-        safeUnlink(captionedPath);
+        safeUnlink$1(captionedPath);
         logger.info(`[RENDER] Overlay merge: ${overlayFull} -> ${mixedVideo} (${params.captionPlan?.phrases?.length ?? 0} phrases, ${proofVisuals.length} proofs)`);
         await encodeRun([
           "-y",
@@ -15617,7 +15661,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
     fs__namespace.mkdirSync(outputDir, { recursive: true });
     const outputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
     publishPartial = path__namespace.join(outputDir, `${outputName}.partial.mp4`);
-    safeUnlink(publishPartial);
+    safeUnlink$1(publishPartial);
     fs__namespace.copyFileSync(finalWorkingPath, publishPartial, fs__namespace.constants.COPYFILE_FICLONE);
     manifest.status = "postflight";
     manifest.progress.currentPhase = "postflight";
@@ -15650,7 +15694,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
       throw new Error("Final output does not contain a valid video stream.");
     }
     throwIfAborted(signal);
-    safeUnlink(outputPath);
+    safeUnlink$1(outputPath);
     fs__namespace.renameSync(publishPartial, outputPath);
     publishPartial = void 0;
     setPct("Cleaning up...", 0.98);
@@ -15747,7 +15791,7 @@ sizeBytes=${fs__namespace.statSync(rawVideo).size}`
   } finally {
     if (heartbeat) clearInterval(heartbeat);
     throttle.stop();
-    if (publishPartial) safeUnlink(publishPartial);
+    if (publishPartial) safeUnlink$1(publishPartial);
     if (tmpDir && fs__namespace.existsSync(tmpDir)) {
       try {
         fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
@@ -15794,7 +15838,7 @@ async function renderSceneClip(p) {
   const isImage = mediaKind === "image";
   const declaredType = scene.mediaType;
   const cleanExt = path__namespace.extname(mediaPath.split("?")[0].split("#")[0]).toLowerCase();
-  const extensionType = VIDEO_EXTENSIONS.has(cleanExt) ? "video" : IMAGE_EXTENSIONS.has(cleanExt) ? "image" : void 0;
+  const extensionType = VIDEO_EXTENSIONS.has(cleanExt) ? "video" : IMAGE_EXTENSIONS$1.has(cleanExt) ? "image" : void 0;
   if (declaredType && extensionType && declaredType !== extensionType) {
     logger.warn(
       `[RENDER] Scene ${scene.sceneIndex}: mediaType mismatch. Plan says ${declaredType}, but file extension indicates ${extensionType}. Using ${extensionType}.`
@@ -15811,7 +15855,7 @@ async function renderSceneClip(p) {
       `Media classification error: video file was about to be rendered as image: ${mediaPath}`
     );
   }
-  if (!isImage && IMAGE_EXTENSIONS.has(cleanExt)) {
+  if (!isImage && IMAGE_EXTENSIONS$1.has(cleanExt)) {
     throw new Error(
       `Media classification error: image file was about to be rendered as video: ${mediaPath}`
     );
@@ -16308,6 +16352,34 @@ function computeSourceFingerprint(scriptText) {
   const normalized = scriptText.replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
   return crypto.createHash("sha256").update(normalized, "utf8").digest("hex");
 }
+function getRenderProvenancePath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "render-provenance.json");
+}
+function readRenderProvenance(projectDir) {
+  const p = getRenderProvenancePath(projectDir);
+  if (!fs__namespace.existsSync(p)) return null;
+  try {
+    const raw = fs__namespace.readFileSync(p, "utf-8");
+    const parsed = JSON.parse(raw);
+    if (parsed && parsed.schemaVersion === 1 && parsed.status === "completed" && parsed.outputPath) {
+      return parsed;
+    }
+  } catch (err) {
+    logger.warn(`[RenderProvenance] Failed to read ${p}: ${err}`);
+  }
+  return null;
+}
+function writeRenderProvenance(projectDir, provenance) {
+  const p = getRenderProvenancePath(projectDir);
+  const dir = path__namespace.dirname(p);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${p}.tmp.${process.pid}.${Date.now()}`;
+  fs__namespace.writeFileSync(tmp, JSON.stringify(provenance, null, 2), "utf-8");
+  fs__namespace.renameSync(tmp, p);
+  logger.info(
+    `[RenderProvenance] Recorded completed output provenance: mode=${provenance.assemblyMode}, music=${provenance.backgroundMusicMode}, output=${path__namespace.basename(provenance.outputPath)}`
+  );
+}
 function isTranscriptionValid(projectDir, voiceoverPath) {
   const transcriptPath = path__namespace.join(projectDir, "analysis", "transcript.json");
   const cacheMetaPath = path__namespace.join(projectDir, "analysis", "transcript-meta.json");
@@ -16484,19 +16556,19 @@ function checkStockCompletion(projectDir) {
 function checkVisualCompletion(projectDir) {
   return checkStockCompletion(projectDir);
 }
-function isAudioValid(projectDir, requireMusic, contentType) {
+function isAudioValid(projectDir, requireMusic, contentType, backgroundMusicMode, assemblyMode) {
   const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
   if (!fs__namespace.existsSync(audioPlanPath)) return false;
   try {
     const plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
     if (!plan || !Array.isArray(plan.sections)) return false;
-    if (requireMusic) {
+    if (requireMusic && backgroundMusicMode !== "off") {
       const hasDownloadedMusic = plan.sections.some(
         (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
       );
       if (!hasDownloadedMusic) return false;
     }
-    if (contentType === "health") {
+    if (assemblyMode !== "simple-assembly" && contentType === "health") {
       const healthPlanPath = path__namespace.join(projectDir, "analysis", "health-visual-plan.json");
       if (fs__namespace.existsSync(healthPlanPath)) {
         try {
@@ -16541,24 +16613,52 @@ function reconcileProjectArtifacts(projectDir, options) {
   const captionsValid = isCaptionsValid(projectDir);
   const globalContextValid = isGlobalContextValid(projectDir, sourceHash);
   const stockCompletion = checkStockCompletion(projectDir);
-  const audioValid = isAudioValid(projectDir, options?.requireBackgroundMusic);
+  const audioValid = isAudioValid(
+    projectDir,
+    options?.requireBackgroundMusic,
+    options?.contentType,
+    options?.backgroundMusicMode,
+    options?.assemblyMode
+  );
   const preflightValid = isPreflightValid(projectDir);
   const outputDir = path__namespace.join(projectDir, "output");
   let renderValid = false;
-  if (fs__namespace.existsSync(outputDir)) {
-    try {
-      const files = fs__namespace.readdirSync(outputDir).filter(
-        (f) => f.endsWith(".mp4") && !f.startsWith("_") && !f.includes(".partial") && !f.includes(".working")
-      );
-      if (files.length > 0) {
-        const stat = fs__namespace.statSync(path__namespace.join(outputDir, files[0]));
+  const requestedAssemblyMode = options?.assemblyMode ?? "full-production";
+  const requestedMusicMode = options?.backgroundMusicMode ?? "auto";
+  const provenance = readRenderProvenance(projectDir);
+  if (provenance && provenance.status === "completed" && provenance.outputPath) {
+    const modeMatches = provenance.assemblyMode === requestedAssemblyMode;
+    const musicMatches = requestedAssemblyMode === "simple-assembly" ? provenance.backgroundMusicMode === requestedMusicMode : true;
+    if (modeMatches && musicMatches && fs__namespace.existsSync(provenance.outputPath)) {
+      try {
+        const stat = fs__namespace.statSync(provenance.outputPath);
         if (stat.size > 1024) renderValid = true;
+      } catch {
       }
-    } catch {
+    }
+  } else if (!provenance && fs__namespace.existsSync(outputDir)) {
+    if (requestedAssemblyMode === "full-production") {
+      const defaultFull = path__namespace.join(outputDir, `${options?.outputName || "final_output"}.mp4`);
+      if (fs__namespace.existsSync(defaultFull)) {
+        try {
+          const stat = fs__namespace.statSync(defaultFull);
+          if (stat.size > 1024) renderValid = true;
+        } catch {
+        }
+      }
+    } else if (requestedAssemblyMode === "simple-assembly") {
+      const defaultSimple = path__namespace.join(outputDir, `${options?.outputName || "simple_assembly"}.mp4`);
+      if (fs__namespace.existsSync(defaultSimple)) {
+        try {
+          const stat = fs__namespace.statSync(defaultSimple);
+          if (stat.size > 1024) renderValid = true;
+        } catch {
+        }
+      }
     }
   }
   const qaPath = path__namespace.join(projectDir, "analysis", "render-qa.json");
-  const postflightValid = renderValid && fs__namespace.existsSync(qaPath);
+  const postflightValid = renderValid && (requestedAssemblyMode === "simple-assembly" || fs__namespace.existsSync(qaPath));
   let renderRecovery;
   if (!renderValid) {
     try {
@@ -23216,6 +23316,1148 @@ async function validatePipelinePrerequisites(options) {
     detectedVoiceoverDuration: duration ?? void 0
   };
 }
+const AI_PROVIDERS = /* @__PURE__ */ new Set(["google-flow", "manual-ai"]);
+function isAiProvider(provider) {
+  return !!provider && AI_PROVIDERS.has(provider);
+}
+class VisualAssignmentStore {
+  assignments = /* @__PURE__ */ new Map();
+  filePath;
+  lockPromise = Promise.resolve();
+  constructor(projectDir) {
+    this.filePath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
+    this.load();
+  }
+  load() {
+    if (fs__namespace.existsSync(this.filePath)) {
+      try {
+        const raw = fs__namespace.readFileSync(this.filePath, "utf-8");
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.assignments.clear();
+          for (const a of parsed) {
+            if (a && typeof a.sceneIndex === "number") {
+              this.assignments.set(a.sceneIndex, a);
+            }
+          }
+        }
+      } catch (err) {
+        logger.warn(`[VisualAssignmentStore] Failed to load ${this.filePath}: ${err}`);
+      }
+    }
+  }
+  get(sceneIndex) {
+    return this.assignments.get(sceneIndex);
+  }
+  has(sceneIndex) {
+    return this.assignments.has(sceneIndex);
+  }
+  /**
+   * Sets or updates an assignment.
+   * If called by the stock engine, enforces Section 29:
+   * never overwrites a valid Google Flow AI assignment.
+   */
+  set(sceneIndex, assignment, isStockCaller = false) {
+    const existing = this.assignments.get(sceneIndex);
+    if ((isStockCaller || assignment.asset && !isAiProvider(assignment.asset.provider)) && isAiProvider(existing?.asset?.provider) && existing?.status === "assigned") {
+      if (existing.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
+        logger.info(
+          `[VisualAssignmentStore] Preserving valid ${existing.asset.provider} AI assignment for scene ${sceneIndex} against stock overwrite.`
+        );
+        return false;
+      }
+    }
+    this.assignments.set(sceneIndex, assignment);
+    return true;
+  }
+  setMany(assignments, isStockCaller = false) {
+    for (const a of assignments) {
+      this.set(a.sceneIndex, a, isStockCaller);
+    }
+  }
+  delete(sceneIndex) {
+    return this.assignments.delete(sceneIndex);
+  }
+  getAll() {
+    return Array.from(this.assignments.values()).sort((a, b) => a.sceneIndex - b.sceneIndex);
+  }
+  /**
+   * Thread-safe atomic disk flush using a mutex queue and temporary file rename.
+   */
+  async flushAtomic() {
+    const previousLock = this.lockPromise;
+    let releaseLock = () => {
+    };
+    this.lockPromise = new Promise((resolve) => {
+      releaseLock = resolve;
+    });
+    await previousLock;
+    try {
+      const items = this.getAll();
+      const dir = path__namespace.dirname(this.filePath);
+      if (!fs__namespace.existsSync(dir)) {
+        fs__namespace.mkdirSync(dir, { recursive: true });
+      }
+      const tmpPath = `${this.filePath}.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`;
+      fs__namespace.writeFileSync(tmpPath, JSON.stringify(items, null, 2), "utf-8");
+      fs__namespace.renameSync(tmpPath, this.filePath);
+    } finally {
+      releaseLock();
+    }
+  }
+}
+const SUPPORTED_EXTENSIONS = /* @__PURE__ */ new Set([
+  ".mp4",
+  ".mov",
+  ".webm",
+  ".mkv",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp"
+]);
+const IMAGE_EXTENSIONS = /* @__PURE__ */ new Set([".png", ".jpg", ".jpeg", ".webp"]);
+function extractSceneNumber(filename) {
+  const base = path__namespace.parse(filename).name.trim();
+  const prefixMatch = base.match(/^(?:scene|shot|clip|part|s)[-_\s]*0*(\d+)(?:[-_\s].*)?$/i);
+  if (prefixMatch) {
+    const num = parseInt(prefixMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  const leadingMatch = base.match(/^0*(\d+)(?:[-_\s].*)?$/);
+  if (leadingMatch) {
+    const num = parseInt(leadingMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  const embeddedMatch = base.match(/(?:^|[-_\s])(?:scene|shot|s)[-_\s]*0*(\d+)(?:[-_\s]|$)/i);
+  if (embeddedMatch) {
+    const num = parseInt(embeddedMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  const trailingMatch = base.match(/[-_\s]0*(\d+)$/);
+  if (trailingMatch) {
+    const num = parseInt(trailingMatch[1], 10);
+    if (Number.isFinite(num)) return num;
+  }
+  return null;
+}
+function detectMediaType(filePath) {
+  const ext = path__namespace.extname(filePath).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext) ? "image" : "video";
+}
+function resolveDirectFolderScenes(folderPath) {
+  if (!fs__namespace.existsSync(folderPath)) {
+    throw new Error(`Scene folder does not exist: ${folderPath}`);
+  }
+  const entries = fs__namespace.readdirSync(folderPath, { withFileTypes: true });
+  const validFiles = entries.filter((ent) => ent.isFile() && !ent.name.startsWith(".")).filter((ent) => SUPPORTED_EXTENSIONS.has(path__namespace.extname(ent.name).toLowerCase()));
+  if (validFiles.length === 0) {
+    throw new Error(
+      `No supported video or image files found in folder: ${folderPath}. Supported formats: MP4, MOV, WEBM, MKV, PNG, JPG, WEBP.`
+    );
+  }
+  const scenes = [];
+  const ambiguousFiles = [];
+  const seenIndices = /* @__PURE__ */ new Map();
+  for (const ent of validFiles) {
+    const sceneIndex = extractSceneNumber(ent.name);
+    if (sceneIndex === null) {
+      ambiguousFiles.push(ent.name);
+      continue;
+    }
+    if (seenIndices.has(sceneIndex)) {
+      const existingName = seenIndices.get(sceneIndex);
+      throw new Error(
+        `Duplicate scene number ${sceneIndex} detected in scene folder: "${existingName}" and "${ent.name}". Each scene number must be unique.`
+      );
+    }
+    seenIndices.set(sceneIndex, ent.name);
+    const fullPath = path__namespace.join(folderPath, ent.name);
+    scenes.push({
+      sceneIndex,
+      filePath: fullPath,
+      fileName: ent.name,
+      mediaType: detectMediaType(fullPath)
+    });
+  }
+  if (ambiguousFiles.length > 0) {
+    throw new Error(
+      `Could not determine scene order for ${ambiguousFiles.length} file(s): ${ambiguousFiles.slice(0, 5).join(", ")}${ambiguousFiles.length > 5 ? "..." : ""}. Please name files with scene numbers (e.g. "Scene 1.mp4", "Scene 2.mp4" or "001.mp4").`
+    );
+  }
+  scenes.sort((a, b) => a.sceneIndex - b.sceneIndex);
+  logger.info(`[SimpleAssemblyInputResolver] Resolved ${scenes.length} scenes from direct folder: ${folderPath}`);
+  return scenes;
+}
+function resolvePreparedProductionScenes(projectDir) {
+  const planCandidates = [
+    path__namespace.join(projectDir, "analysis", "master-edit-plan.json"),
+    path__namespace.join(projectDir, "analysis", "edit-plan.json"),
+    path__namespace.join(projectDir, "master-edit-plan.json"),
+    path__namespace.join(projectDir, "edit-plan.json")
+  ];
+  const targetPlanPath = planCandidates.find((p) => fs__namespace.existsSync(p));
+  if (!targetPlanPath) {
+    throw new Error("Master edit plan not found. AI Planning must be executed before final assembly.");
+  }
+  let editPlan = null;
+  try {
+    editPlan = JSON.parse(fs__namespace.readFileSync(targetPlanPath, "utf-8"));
+  } catch (err) {
+    throw new Error(`Failed to parse master-edit-plan.json: ${err}`);
+  }
+  const planScenes = [];
+  if (editPlan && Array.isArray(editPlan.chapters)) {
+    for (const ch of editPlan.chapters) {
+      const seqs = ch.sequences ?? ch.chapters_seq ?? [];
+      for (const seq of seqs) {
+        for (const sc of seq.scenes ?? []) {
+          planScenes.push(sc);
+        }
+      }
+    }
+  }
+  if (planScenes.length === 0) {
+    throw new Error("Edit plan contains 0 planned scenes. AI Planning must be executed before final assembly.");
+  }
+  const manualAiManifest = loadManualAiManifest(projectDir);
+  const store = new VisualAssignmentStore(projectDir);
+  const mediaIndexPath = path__namespace.join(projectDir, "analysis", "media-index.json");
+  let mediaIndex = [];
+  if (fs__namespace.existsSync(mediaIndexPath)) {
+    try {
+      mediaIndex = JSON.parse(fs__namespace.readFileSync(mediaIndexPath, "utf-8"));
+    } catch {
+    }
+  }
+  const scenes = [];
+  const missingSceneIndices = [];
+  for (const sc of planScenes) {
+    const scIdx = sc.sceneIndex;
+    let resolvedPath = null;
+    const manualRecord = manualAiManifest?.scenes?.[String(scIdx)];
+    if (manualRecord?.localPath) {
+      const candidate = resolveManualAiAssetPath(projectDir, manualRecord.localPath);
+      if (fs__namespace.existsSync(candidate) && fs__namespace.statSync(candidate).size > 0) {
+        resolvedPath = candidate;
+      }
+    }
+    if (!resolvedPath) {
+      const assignment = store.get(scIdx);
+      if (assignment?.asset?.localPath) {
+        const candidate = path__namespace.isAbsolute(assignment.asset.localPath) ? assignment.asset.localPath : path__namespace.join(projectDir, assignment.asset.localPath);
+        if (fs__namespace.existsSync(candidate) && fs__namespace.statSync(candidate).size > 0) {
+          resolvedPath = candidate;
+        }
+      }
+    }
+    if (!resolvedPath) {
+      const r = resolveSceneMediaWithSource(sc, mediaIndex, projectDir);
+      if (r.mediaPath && fs__namespace.existsSync(r.mediaPath) && fs__namespace.statSync(r.mediaPath).size > 0) {
+        resolvedPath = r.mediaPath;
+      }
+    }
+    if (!resolvedPath && sc.localPath) {
+      const p = path__namespace.isAbsolute(sc.localPath) ? sc.localPath : path__namespace.join(projectDir, sc.localPath);
+      if (fs__namespace.existsSync(p) && fs__namespace.statSync(p).size > 0) {
+        resolvedPath = p;
+      }
+    }
+    if (!resolvedPath && sc.localAsset) {
+      const p = path__namespace.isAbsolute(sc.localAsset) ? sc.localAsset : path__namespace.join(projectDir, sc.localAsset);
+      if (fs__namespace.existsSync(p) && fs__namespace.statSync(p).size > 0) {
+        resolvedPath = p;
+      }
+    }
+    if (resolvedPath) {
+      scenes.push({
+        sceneIndex: scIdx,
+        sceneId: sc.sceneId,
+        filePath: resolvedPath,
+        fileName: path__namespace.basename(resolvedPath),
+        mediaType: detectMediaType(resolvedPath),
+        duration: typeof sc.duration === "number" && sc.duration > 0 ? sc.duration : typeof sc.endTime === "number" && typeof sc.startTime === "number" && sc.endTime > sc.startTime ? sc.endTime - sc.startTime : void 0
+      });
+    } else {
+      missingSceneIndices.push(scIdx);
+    }
+  }
+  return {
+    scenes,
+    missingSceneIndices,
+    missingScenes: missingSceneIndices,
+    expectedCount: planScenes.length,
+    expectedScenes: planScenes.length,
+    resolvedValidScenes: scenes.length,
+    hasEditPlanTimings: scenes.length > 0 && scenes.every((s) => typeof s.duration === "number" && s.duration > 0)
+  };
+}
+function assertAllProductionScenesReady(result) {
+  const expected = result.expectedScenes ?? result.expectedCount ?? 0;
+  const missing = result.missingScenes ?? result.missingSceneIndices ?? [];
+  if (expected === 0) {
+    throw new Error("Master edit plan contains 0 planned scenes. AI Planning must complete first.");
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `Cannot begin Simple Assembly: Missing ${missing.length} of ${expected} required production scene assets. Missing scene indices: [${missing.slice(0, 10).join(", ")}${missing.length > 10 ? "..." : ""}]. All scenes must be ready before final render.`
+    );
+  }
+  if (result.scenes.length !== expected) {
+    throw new Error(
+      `Scene count mismatch: expected ${expected} scenes from edit plan, but resolved ${result.scenes.length} valid scenes.`
+    );
+  }
+}
+function resolveProjectScenes(projectDir) {
+  const planPath = path__namespace.join(projectDir, "analysis", "master-edit-plan.json");
+  const rootPlan = path__namespace.join(projectDir, "master-edit-plan.json");
+  if (fs__namespace.existsSync(planPath) || fs__namespace.existsSync(rootPlan)) {
+    try {
+      const prodRes = resolvePreparedProductionScenes(projectDir);
+      return {
+        scenes: prodRes.scenes,
+        missingSceneIndices: prodRes.missingSceneIndices,
+        hasEditPlanTimings: prodRes.hasEditPlanTimings
+      };
+    } catch (err) {
+      logger.warn(`[SimpleAssemblyInputResolver] resolvePreparedProductionScenes notice: ${err}`);
+    }
+  }
+  const manualAiManifest = loadManualAiManifest(projectDir);
+  if (manualAiManifest?.scenes && Object.keys(manualAiManifest.scenes).length > 0) {
+    const rawKeys = Object.keys(manualAiManifest.scenes).map((k) => parseInt(k, 10)).sort((a, b) => a - b);
+    const scenes = [];
+    const missingSceneIndices = [];
+    for (const scIdx of rawKeys) {
+      const rec = manualAiManifest.scenes[String(scIdx)];
+      if (rec?.localPath) {
+        const fullPath = resolveManualAiAssetPath(projectDir, rec.localPath);
+        if (fs__namespace.existsSync(fullPath)) {
+          scenes.push({
+            sceneIndex: scIdx,
+            filePath: fullPath,
+            fileName: path__namespace.basename(fullPath),
+            mediaType: detectMediaType(fullPath)
+          });
+          continue;
+        }
+      }
+      missingSceneIndices.push(scIdx);
+    }
+    return { scenes, missingSceneIndices, hasEditPlanTimings: false };
+  }
+  return { scenes: [], missingSceneIndices: [], hasEditPlanTimings: false };
+}
+function resolveSimpleAssemblyInputs(projectDir, sceneFolder) {
+  if (sceneFolder && sceneFolder.trim().length > 0) {
+    const resolved = resolveDirectFolderScenes(sceneFolder);
+    return {
+      scenes: resolved,
+      source: "direct-folder",
+      hasEditPlanTimings: false
+    };
+  }
+  const projectRes = resolveProjectScenes(projectDir);
+  if (projectRes.missingSceneIndices.length > 0 && projectRes.scenes.length === 0) {
+    throw new Error(
+      `Import your scenes to begin Simple Assembly. Missing ${projectRes.missingSceneIndices.length} required scenes.`
+    );
+  }
+  if (projectRes.scenes.length > 0) {
+    if (projectRes.missingSceneIndices.length > 0) {
+      throw new Error(
+        `Simple Assembly blocked: Scene(s) ${projectRes.missingSceneIndices.slice(0, 10).join(", ")} are missing imported media. Please import all scenes or select a Scene Video Folder.`
+      );
+    }
+    return {
+      scenes: projectRes.scenes,
+      source: "project-plan",
+      hasEditPlanTimings: projectRes.hasEditPlanTimings
+    };
+  }
+  const fallbackDirs = [
+    path__namespace.join(projectDir, "assets", "manual-ai"),
+    path__namespace.join(projectDir, "assets", "videos")
+  ];
+  for (const fDir of fallbackDirs) {
+    if (fs__namespace.existsSync(fDir)) {
+      try {
+        const resolved = resolveDirectFolderScenes(fDir);
+        if (resolved.length > 0) {
+          return {
+            scenes: resolved,
+            source: "direct-folder",
+            hasEditPlanTimings: false
+          };
+        }
+      } catch {
+      }
+    }
+  }
+  throw new Error("Import your scenes to begin Simple Assembly. No scene media found.");
+}
+async function resolveAssemblyTimeline(params) {
+  const { scenes, voiceoverPath, fps, signal } = params;
+  if (scenes.length === 0) {
+    throw new Error("Cannot resolve timeline for zero scenes.");
+  }
+  const probe = await probeMedia$1(voiceoverPath, { signal });
+  if (!probe || !probe.duration || probe.duration <= 0) {
+    throw new Error(`Failed to probe voiceover audio at ${voiceoverPath}. Ensure file exists and contains a valid audio stream.`);
+  }
+  const voiceoverDuration = probe.duration;
+  const targetTotalFrames = Math.max(1, Math.round(voiceoverDuration * fps));
+  const numScenes = scenes.length;
+  logger.info(
+    `[SimpleAssemblyTimeline] Probed voiceover: duration=${voiceoverDuration.toFixed(3)}s targetFrames=${targetTotalFrames} (fps=${fps}) scenes=${numScenes}`
+  );
+  const hasPlanTimings = scenes.every((s) => typeof s.duration === "number" && s.duration > 0);
+  if (hasPlanTimings) {
+    const sumPlanDuration = scenes.reduce((acc, s) => acc + s.duration, 0);
+    if (sumPlanDuration > 0) {
+      const diff = Math.abs(sumPlanDuration - voiceoverDuration);
+      if (diff > Math.max(10, voiceoverDuration * 0.3)) {
+        logger.warn(
+          `[SimpleAssemblyTimeline] Noticeable planned duration discrepancy: planned ${sumPlanDuration.toFixed(2)}s vs voiceover ${voiceoverDuration.toFixed(2)}s. Proportionally aligning scenes to voiceover.`
+        );
+      } else {
+        logger.info(
+          `[SimpleAssemblyTimeline] Using edit plan scene timings (sum=${sumPlanDuration.toFixed(2)}s, voiceover=${voiceoverDuration.toFixed(2)}s, diff=${diff.toFixed(2)}s)`
+        );
+      }
+      const rawAllocations = scenes.map((s, idx) => {
+        const ratio = s.duration / sumPlanDuration;
+        const idealFrames = targetTotalFrames * ratio;
+        const baseFrames2 = Math.max(1, Math.floor(idealFrames));
+        const fractional = idealFrames - baseFrames2;
+        return { idx, scene: s, baseFrames: baseFrames2, fractional };
+      });
+      const currentAllocated = rawAllocations.reduce((acc, item) => acc + item.baseFrames, 0);
+      const remainder2 = targetTotalFrames - currentAllocated;
+      if (remainder2 > 0) {
+        const sortedByFractional = [...rawAllocations].sort((a, b) => b.fractional - a.fractional);
+        for (let i = 0; i < remainder2 && i < sortedByFractional.length; i++) {
+          sortedByFractional[i].baseFrames += 1;
+        }
+      } else if (remainder2 < 0) {
+        const sortedByLargest = [...rawAllocations].sort((a, b) => b.baseFrames - a.baseFrames);
+        for (let i = 0; i < Math.abs(remainder2) && i < sortedByLargest.length; i++) {
+          if (sortedByLargest[i].baseFrames > 1) {
+            sortedByLargest[i].baseFrames -= 1;
+          }
+        }
+      }
+      let currentStartFrame2 = 0;
+      const resolvedScenes2 = rawAllocations.map((item) => {
+        const targetFrames = item.baseFrames;
+        const startFrame = currentStartFrame2;
+        currentStartFrame2 += targetFrames;
+        return {
+          sceneIndex: item.scene.sceneIndex,
+          sourcePath: item.scene.filePath,
+          mediaType: item.scene.mediaType,
+          durationSecs: targetFrames / fps,
+          targetFrames,
+          startFrame
+        };
+      });
+      const totalAllocated = resolvedScenes2.reduce((acc, s) => acc + s.targetFrames, 0);
+      if (totalAllocated !== targetTotalFrames) {
+        const delta = targetTotalFrames - totalAllocated;
+        resolvedScenes2[resolvedScenes2.length - 1].targetFrames += delta;
+        resolvedScenes2[resolvedScenes2.length - 1].durationSecs = resolvedScenes2[resolvedScenes2.length - 1].targetFrames / fps;
+      }
+      return {
+        scenes: resolvedScenes2,
+        voiceoverDuration,
+        targetTotalFrames,
+        fps,
+        allocationMethod: "edit-plan",
+        toleranceSecs: 1 / fps
+      };
+    }
+  }
+  const baseFrames = Math.floor(targetTotalFrames / numScenes);
+  const remainder = targetTotalFrames % numScenes;
+  let currentStartFrame = 0;
+  const resolvedScenes = scenes.map((s, idx) => {
+    const sceneFrames = Math.max(1, baseFrames + (idx < remainder ? 1 : 0));
+    const startFrame = currentStartFrame;
+    currentStartFrame += sceneFrames;
+    return {
+      sceneIndex: s.sceneIndex,
+      sourcePath: s.filePath,
+      mediaType: s.mediaType,
+      durationSecs: sceneFrames / fps,
+      targetFrames: sceneFrames,
+      startFrame
+    };
+  });
+  const totalAllocatedFrames = resolvedScenes.reduce((a, s) => a + s.targetFrames, 0);
+  if (totalAllocatedFrames !== targetTotalFrames) {
+    const adjust = targetTotalFrames - totalAllocatedFrames;
+    resolvedScenes[resolvedScenes.length - 1].targetFrames += adjust;
+    resolvedScenes[resolvedScenes.length - 1].durationSecs = resolvedScenes[resolvedScenes.length - 1].targetFrames / fps;
+  }
+  logger.info(
+    `[SimpleAssemblyTimeline] Equal distribution complete: ${resolvedScenes.length} scenes, baseFrames=${baseFrames}, remainder=${remainder}, sumFrames=${targetTotalFrames}`
+  );
+  return {
+    scenes: resolvedScenes,
+    voiceoverDuration,
+    targetTotalFrames,
+    fps,
+    allocationMethod: "equal-distribution",
+    toleranceSecs: 1 / fps
+  };
+}
+const SIMPLE_ASSEMBLY_ENGINE_VERSION = 1;
+function computeSceneClipFingerprint(params) {
+  return fingerprintOf({
+    v: SIMPLE_ASSEMBLY_ENGINE_VERSION,
+    kind: "scene-clip",
+    source: params.sourceSig,
+    w: params.targetWidth,
+    h: params.targetHeight,
+    fps: params.targetFps,
+    frames: params.targetFrames,
+    dur: Math.round(params.targetDurationSecs * 1e3) / 1e3,
+    policy: params.shortClipPolicy
+  });
+}
+function computeAssemblyVideoFingerprint(params) {
+  return fingerprintOf({
+    v: SIMPLE_ASSEMBLY_ENGINE_VERSION,
+    kind: "assembled-video",
+    scenes: params.sceneFingerprints,
+    w: params.width,
+    h: params.height,
+    fps: params.fps
+  });
+}
+class SimpleAssemblyCacheManager {
+  constructor(projectDir) {
+    this.projectDir = projectDir;
+    this.cacheDir = path__namespace.join(projectDir, ".cache", "simple-assembly");
+    this.clipsDir = path__namespace.join(this.cacheDir, "clips");
+  }
+  cacheDir;
+  clipsDir;
+  ensureDirs() {
+    if (!fs__namespace.existsSync(this.clipsDir)) {
+      fs__namespace.mkdirSync(this.clipsDir, { recursive: true });
+    }
+  }
+  getClipPath(fingerprint) {
+    return path__namespace.join(this.clipsDir, `clip_${fingerprint.slice(0, 16)}.mp4`);
+  }
+  getAssembledVideoPath(assemblyFingerprint) {
+    return path__namespace.join(this.cacheDir, `assembled_${assemblyFingerprint.slice(0, 16)}.mp4`);
+  }
+  async isClipValid(clipPath, expectedFrames, fps, signal) {
+    if (!fs__namespace.existsSync(clipPath)) return false;
+    try {
+      const stat = fs__namespace.statSync(clipPath);
+      if (stat.size < 1024) return false;
+      const probe = await probeMedia$1(clipPath, { signal });
+      if (!probe || !probe.duration || probe.duration <= 0) return false;
+      const expectedDur = expectedFrames / fps;
+      const diff = Math.abs(probe.duration - expectedDur);
+      return diff <= Math.max(0.1, 2 / fps);
+    } catch {
+      return false;
+    }
+  }
+  async isAssembledVideoValid(videoPath, expectedTotalFrames, fps, signal) {
+    if (!fs__namespace.existsSync(videoPath)) return false;
+    try {
+      const stat = fs__namespace.statSync(videoPath);
+      if (stat.size < 1024) return false;
+      const probe = await probeMedia$1(videoPath, { signal });
+      if (!probe || !probe.duration || probe.duration <= 0) return false;
+      const expectedDur = expectedTotalFrames / fps;
+      const diff = Math.abs(probe.duration - expectedDur);
+      return diff <= Math.max(0.2, 3 / fps);
+    } catch {
+      return false;
+    }
+  }
+}
+function safeUnlink(filePath) {
+  try {
+    if (fs__namespace.existsSync(filePath)) fs__namespace.unlinkSync(filePath);
+  } catch {
+  }
+}
+function escapeConcatPath(p) {
+  return p.replace(/\\/g, "/").replace(/'/g, "'\\''");
+}
+async function executeSimpleAssembly(request) {
+  const {
+    projectDir,
+    voiceoverPath,
+    sceneFolder,
+    backgroundMusicMode,
+    musicFilePath,
+    outputName = "simple_assembly",
+    width = 1920,
+    height = 1080,
+    fps = 30,
+    shortClipPolicy = "freeze-last-frame",
+    signal,
+    onProgress
+  } = request;
+  const reportProgress = (phase, progress, stage, extra) => {
+    const clampedProgress = Math.max(0, Math.min(1, progress));
+    onProgress?.({
+      stage,
+      phase,
+      status: phase,
+      progress: clampedProgress,
+      percent: Math.round(clampedProgress * 100),
+      sceneIndex: extra?.sceneIndex,
+      totalScenes: extra?.totalScenes,
+      message: extra?.message ?? stage,
+      error: extra?.error,
+      outputPath: extra?.outputPath,
+      duration: extra?.duration
+    });
+  };
+  const cache = new SimpleAssemblyCacheManager(projectDir);
+  cache.ensureDirs();
+  const outputDir = path__namespace.join(projectDir, "output");
+  if (!fs__namespace.existsSync(outputDir)) fs__namespace.mkdirSync(outputDir, { recursive: true });
+  const finalOutputPath = path__namespace.join(outputDir, `${outputName}.mp4`);
+  const partialOutputPath = path__namespace.join(outputDir, `${outputName}.partial.mp4`);
+  safeUnlink(partialOutputPath);
+  try {
+    throwIfAborted(signal);
+    reportProgress("validating-voiceover", 0.05, "[1/8] Validating input voiceover audio...");
+    if (!voiceoverPath || !fs__namespace.existsSync(voiceoverPath)) {
+      throw new Error(`Voiceover audio file does not exist: ${voiceoverPath}`);
+    }
+    const voProbe = await probeMedia$1(voiceoverPath, { signal });
+    if (!voProbe || !voProbe.duration || voProbe.duration <= 0) {
+      throw new Error(`Invalid or unreadable voiceover audio: ${voiceoverPath}`);
+    }
+    const voiceoverDuration = voProbe.duration;
+    logger.info(`[SimpleAssembly] Voiceover duration: ${voiceoverDuration.toFixed(3)}s`);
+    reportProgress("validating-scenes", 0.12, "[2/8] Validating imported scene media...");
+    let sceneInputs = request.sceneSources;
+    if (!sceneInputs || sceneInputs.length === 0) {
+      const resolved = resolveSimpleAssemblyInputs(projectDir, sceneFolder);
+      sceneInputs = resolved.scenes;
+    }
+    if (sceneInputs.length === 0) {
+      throw new Error("Import your scenes to begin Simple Assembly. No valid scene media found.");
+    }
+    for (const sc of sceneInputs) {
+      throwIfAborted(signal);
+      if (!fs__namespace.existsSync(sc.filePath)) {
+        throw new Error(`Scene ${sc.sceneIndex} file not found: ${sc.filePath}`);
+      }
+      const st = fs__namespace.statSync(sc.filePath);
+      if (st.size === 0) {
+        throw new Error(`Scene ${sc.sceneIndex} file is empty (0 bytes): ${sc.filePath}`);
+      }
+    }
+    logger.info(`[SimpleAssembly] Validated ${sceneInputs.length} scene source files`);
+    reportProgress("resolving-timing", 0.18, "[3/8] Resolving scene timing and frame allocation...");
+    const timeline = await resolveAssemblyTimeline({
+      scenes: sceneInputs,
+      voiceoverPath,
+      fps,
+      signal
+    });
+    logger.info(
+      `[SimpleAssembly] Timeline resolved: ${timeline.scenes.length} scenes, totalFrames=${timeline.targetTotalFrames}, method=${timeline.allocationMethod}`
+    );
+    reportProgress("normalizing-scenes", 0.22, `[4/8] Normalizing scene clips (0/${timeline.scenes.length})...`);
+    const sceneProbes = [];
+    for (let i = 0; i < timeline.scenes.length; i++) {
+      throwIfAborted(signal);
+      const sc = timeline.scenes[i];
+      const probe = await probeMedia$1(sc.sourcePath, { signal });
+      sceneProbes.push({ scene: sc, probe });
+    }
+    let canUseFastPath = true;
+    for (const item of sceneProbes) {
+      if (!item.probe || item.scene.mediaType !== "video") {
+        canUseFastPath = false;
+        break;
+      }
+      const durDiff2 = Math.abs(item.probe.duration - item.scene.durationSecs);
+      const isExactFormat = item.probe.width === width && item.probe.height === height && Math.abs(item.probe.fps - fps) < 0.1 && durDiff2 <= 0.05;
+      if (!isExactFormat) {
+        canUseFastPath = false;
+        break;
+      }
+    }
+    const normalizedClipPaths = [];
+    const sceneFingerprints = [];
+    if (canUseFastPath) {
+      logger.info("[SimpleAssembly] Fast Path eligible: all source clips match target format. Skipping normalization.");
+      for (const item of sceneProbes) {
+        normalizedClipPaths.push(item.scene.sourcePath);
+        sceneFingerprints.push(fileSignature(item.scene.sourcePath)?.hash || path__namespace.basename(item.scene.sourcePath));
+      }
+    } else {
+      logger.info("[SimpleAssembly] Normalizing scene clips with compatibility pipeline...");
+      const totalScenes = timeline.scenes.length;
+      for (let i = 0; i < totalScenes; i++) {
+        throwIfAborted(signal);
+        const sc = timeline.scenes[i];
+        const probe = sceneProbes[i].probe;
+        const sourceSig = fileSignature(sc.sourcePath);
+        const clipFp = computeSceneClipFingerprint({
+          sourcePath: sc.sourcePath,
+          sourceSig,
+          targetWidth: width,
+          targetHeight: height,
+          targetFps: fps,
+          targetFrames: sc.targetFrames,
+          targetDurationSecs: sc.durationSecs,
+          shortClipPolicy
+        });
+        sceneFingerprints.push(clipFp);
+        const clipPath = cache.getClipPath(clipFp);
+        normalizedClipPaths.push(clipPath);
+        const isCached = await cache.isClipValid(clipPath, sc.targetFrames, fps, signal);
+        if (isCached) {
+          const pct2 = 0.22 + (i + 1) / totalScenes * 0.38;
+          reportProgress("normalizing-scenes", pct2, `[4/8] Normalized scene ${i + 1}/${totalScenes} (cached)`, {
+            sceneIndex: sc.sceneIndex,
+            totalScenes
+          });
+          continue;
+        }
+        const pct = 0.22 + (i + 1) / totalScenes * 0.38;
+        reportProgress("normalizing-scenes", pct, `[4/8] Normalizing scene ${i + 1}/${totalScenes}...`, {
+          sceneIndex: sc.sceneIndex,
+          totalScenes
+        });
+        const workingClip = clipPath + ".partial.mp4";
+        safeUnlink(workingClip);
+        const allocatedDurationStr = sc.durationSecs.toFixed(3);
+        if (sc.mediaType === "image") {
+          const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
+          await ffmpegRun$4(
+            [
+              "-y",
+              "-loop",
+              "1",
+              "-t",
+              allocatedDurationStr,
+              "-i",
+              sc.sourcePath,
+              "-vf",
+              vf,
+              "-c:v",
+              "libx264",
+              "-preset",
+              "veryfast",
+              "-crf",
+              "20",
+              "-movflags",
+              "+faststart",
+              workingClip
+            ],
+            { signal, threads: 2 }
+          );
+        } else {
+          const srcDur = probe?.duration ?? sc.durationSecs;
+          if (srcDur >= sc.durationSecs - 0.05) {
+            const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},format=yuv420p`;
+            await ffmpegRun$4(
+              [
+                "-y",
+                "-ss",
+                "0",
+                "-t",
+                allocatedDurationStr,
+                "-i",
+                sc.sourcePath,
+                "-an",
+                // strictly mute source audio!
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-movflags",
+                "+faststart",
+                workingClip
+              ],
+              { signal, threads: 2 }
+            );
+          } else {
+            const missingSecs = Math.max(0.01, sc.durationSecs - srcDur);
+            const vf = `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps=${fps},tpad=stop_mode=clone:stop_duration=${missingSecs.toFixed(3)},trim=0:${allocatedDurationStr},setpts=PTS-STARTPTS,format=yuv420p`;
+            await ffmpegRun$4(
+              [
+                "-y",
+                "-i",
+                sc.sourcePath,
+                "-an",
+                // strictly mute source audio!
+                "-vf",
+                vf,
+                "-c:v",
+                "libx264",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "20",
+                "-movflags",
+                "+faststart",
+                workingClip
+              ],
+              { signal, threads: 2 }
+            );
+          }
+        }
+        if (fs__namespace.existsSync(workingClip)) {
+          fs__namespace.renameSync(workingClip, clipPath);
+        }
+      }
+    }
+    reportProgress("joining-scenes", 0.65, `[5/8] Concatenating ${normalizedClipPaths.length} scene clips...`);
+    throwIfAborted(signal);
+    const assemblyFingerprint = computeAssemblyVideoFingerprint({
+      sceneFingerprints,
+      width,
+      height,
+      fps
+    });
+    const assembledVideoPath = cache.getAssembledVideoPath(assemblyFingerprint);
+    const isAssembledCached = await cache.isAssembledVideoValid(
+      assembledVideoPath,
+      timeline.targetTotalFrames,
+      fps,
+      signal
+    );
+    if (isAssembledCached) {
+      logger.info(`[SimpleAssembly] Reusing cached assembled video: ${assembledVideoPath}`);
+    } else {
+      const concatListPath = path__namespace.join(projectDir, ".cache", "simple-assembly", `concat_${Date.now()}.txt`);
+      const concatContent = normalizedClipPaths.map((p) => `file '${escapeConcatPath(p)}'`).join("\n");
+      fs__namespace.writeFileSync(concatListPath, concatContent, "utf-8");
+      const workingAssembled = assembledVideoPath + ".partial.mp4";
+      safeUnlink(workingAssembled);
+      try {
+        await ffmpegRun$4(
+          [
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            concatListPath,
+            "-c",
+            "copy",
+            "-movflags",
+            "+faststart",
+            workingAssembled
+          ],
+          { signal }
+        );
+      } finally {
+        safeUnlink(concatListPath);
+      }
+      if (fs__namespace.existsSync(workingAssembled)) {
+        fs__namespace.renameSync(workingAssembled, assembledVideoPath);
+      }
+    }
+    reportProgress("mixing-audio", 0.78, "[6/8] Attaching voiceover and configuring soundtrack...");
+    throwIfAborted(signal);
+    let effectiveMusicPath = null;
+    if (backgroundMusicMode === "auto") {
+      if (musicFilePath && fs__namespace.existsSync(musicFilePath)) {
+        effectiveMusicPath = musicFilePath;
+      } else {
+        const audioDir = path__namespace.join(projectDir, "assets", "audio");
+        if (fs__namespace.existsSync(audioDir)) {
+          const files = fs__namespace.readdirSync(audioDir).filter((f) => /\.(mp3|wav|m4a|aac|flac|ogg)$/i.test(f));
+          if (files.length > 0) {
+            effectiveMusicPath = path__namespace.join(audioDir, files[0]);
+          }
+        }
+      }
+      if (!effectiveMusicPath) {
+        throw new Error(
+          "Add Background Music was enabled, but no background music track was found. Please select a music file or choose No Background Music."
+        );
+      }
+      logger.info(`[SimpleAssembly] Using background music track: ${effectiveMusicPath}`);
+    } else {
+      logger.info("[SimpleAssembly] True No Music mode active: final output will contain input voiceover ONLY.");
+    }
+    const finalDurationStr = voiceoverDuration.toFixed(3);
+    if (backgroundMusicMode === "off" || !effectiveMusicPath) {
+      await ffmpegRun$4(
+        [
+          "-y",
+          "-i",
+          assembledVideoPath,
+          "-i",
+          voiceoverPath,
+          "-map",
+          "0:v:0",
+          "-map",
+          "1:a:0",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-t",
+          finalDurationStr,
+          "-movflags",
+          "+faststart",
+          partialOutputPath
+        ],
+        { signal }
+      );
+    } else {
+      const filterComplex = `[1:a]loudnorm=I=-16:TP=-1.5:LRA=11[vo];[2:a]volume=0.035,afade=t=in:ss=0:d=2,afade=t=out:st=${Math.max(0, voiceoverDuration - 3).toFixed(3)}:d=3,apad[bgm];[vo][bgm]amix=inputs=2:duration=first:dropout_transition=2[a]`;
+      await ffmpegRun$4(
+        [
+          "-y",
+          "-i",
+          assembledVideoPath,
+          "-i",
+          voiceoverPath,
+          "-i",
+          effectiveMusicPath,
+          "-filter_complex",
+          filterComplex,
+          "-map",
+          "0:v:0",
+          "-map",
+          "[a]",
+          "-c:v",
+          "copy",
+          "-c:a",
+          "aac",
+          "-b:a",
+          "192k",
+          "-t",
+          finalDurationStr,
+          "-movflags",
+          "+faststart",
+          partialOutputPath
+        ],
+        { signal }
+      );
+    }
+    reportProgress("validating-output", 0.92, "[7/8] Validating final output MP4...");
+    throwIfAborted(signal);
+    if (!fs__namespace.existsSync(partialOutputPath)) {
+      throw new Error("Final output file was not produced by FFmpeg.");
+    }
+    const outProbe = await probeMedia$1(partialOutputPath, { signal });
+    if (!outProbe || !outProbe.duration || outProbe.duration <= 0) {
+      throw new Error("Produced MP4 failed probe validation (zero duration or invalid media).");
+    }
+    const durDiff = Math.abs(outProbe.duration - voiceoverDuration);
+    if (durDiff > 0.5) {
+      logger.warn(
+        `[SimpleAssembly] Output duration (${outProbe.duration.toFixed(2)}s) differs from voiceover (${voiceoverDuration.toFixed(2)}s) by ${durDiff.toFixed(2)}s`
+      );
+    }
+    const stat = fs__namespace.statSync(partialOutputPath);
+    if (stat.size < 1024) {
+      throw new Error(`Produced MP4 is corrupt or too small (${stat.size} bytes).`);
+    }
+    safeUnlink(finalOutputPath);
+    fs__namespace.renameSync(partialOutputPath, finalOutputPath);
+    logger.info(
+      `[SimpleAssembly] Complete! Published ${finalOutputPath} (size=${stat.size} bytes, duration=${outProbe.duration.toFixed(2)}s)`
+    );
+    reportProgress("completed", 1, "[8/8] Simple Assembly complete!", {
+      outputPath: finalOutputPath,
+      duration: outProbe.duration
+    });
+    return {
+      success: true,
+      outputPath: finalOutputPath,
+      durationSecs: outProbe.duration,
+      fileSizeBytes: stat.size,
+      sceneCount: timeline.scenes.length,
+      fastPathUsed: canUseFastPath
+    };
+  } catch (err) {
+    safeUnlink(partialOutputPath);
+    if (isRenderCancelledError(err)) {
+      logger.info("[SimpleAssembly] Assembly cancelled by user.");
+      reportProgress("cancelled", 0, "Simple Assembly cancelled.");
+      return { success: false, cancelled: true, error: "Simple Assembly cancelled" };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[SimpleAssembly] Failed: ${msg}`);
+    reportProgress("failed", 0, `Simple Assembly failed: ${msg}`, { message: msg });
+    return { success: false, error: msg };
+  }
+}
+async function runSimpleAssemblyRenderStage(options, onProgress, signal) {
+  throwIfAborted(signal);
+  const projectDir = options.projectDir;
+  const outputDir = path__namespace.join(projectDir, "output");
+  fs__namespace.mkdirSync(outputDir, { recursive: true });
+  if (!renderJobCoordinator.isActive(projectDir)) {
+    try {
+      for (const removed of cleanupOrphanOutputPartials(projectDir)) {
+        logger.info(`[SimpleAssemblyAdapter] Cleaned stale partial file: ${path__namespace.basename(removed)}`);
+      }
+    } catch {
+    }
+  }
+  onProgress("Resolving finalized production scenes and edit plan order...", 0.05);
+  const resolved = resolvePreparedProductionScenes(projectDir);
+  assertAllProductionScenesReady(resolved);
+  logger.info(
+    `[SimpleAssemblyAdapter] All ${resolved.scenes.length} planned scenes verified ready in authoritative timeline order`
+  );
+  const effectiveMusicMode = options.backgroundMusicMode ?? "off";
+  const baseTargetName = options.outputName || "simple_assembly";
+  const candidateOutputPath = path__namespace.join(outputDir, `${baseTargetName}.mp4`);
+  const existingProvenance = readRenderProvenance(projectDir);
+  if (existingProvenance && existingProvenance.assemblyMode === "simple-assembly" && existingProvenance.backgroundMusicMode === effectiveMusicMode && fs__namespace.existsSync(candidateOutputPath)) {
+    try {
+      const stat2 = fs__namespace.statSync(candidateOutputPath);
+      if (stat2.size > 1024) {
+        const probe = await probeMedia$1(candidateOutputPath, { signal });
+        if (probe && probe.hasVideo && probe.duration > 0) {
+          logger.info(`[SimpleAssemblyAdapter] Reusing verified existing output: ${candidateOutputPath}`);
+          onProgress("Found verified completed Simple Assembly output matching settings, skipping render", 1);
+          return {
+            success: true,
+            cached: true,
+            artifactPath: candidateOutputPath,
+            data: {
+              outputPath: candidateOutputPath,
+              durationSecs: probe.duration,
+              fileSizeBytes: stat2.size,
+              reused: true
+            },
+            stats: {
+              outputPath: candidateOutputPath,
+              fileSizeBytes: stat2.size,
+              reused: true,
+              assemblyMode: "simple-assembly"
+            }
+          };
+        }
+      }
+    } catch {
+    }
+  }
+  let musicFilePath;
+  if (effectiveMusicMode !== "off") {
+    const audioPlanPath = path__namespace.join(projectDir, "analysis", "audio-plan.json");
+    if (fs__namespace.existsSync(audioPlanPath)) {
+      try {
+        const plan = JSON.parse(fs__namespace.readFileSync(audioPlanPath, "utf-8"));
+        const approvedTrack = plan.sections?.find(
+          (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+        );
+        if (approvedTrack?.approvedLocalPath) {
+          musicFilePath = approvedTrack.approvedLocalPath;
+          logger.info(`[SimpleAssemblyAdapter] Using approved music track: ${musicFilePath}`);
+        }
+      } catch {
+      }
+    }
+  }
+  let targetName = baseTargetName;
+  let targetPath = path__namespace.join(outputDir, `${targetName}.mp4`);
+  let counter = 1;
+  while (fs__namespace.existsSync(targetPath) && (!existingProvenance || existingProvenance.assemblyMode !== "simple-assembly")) {
+    targetName = `${baseTargetName}_${counter}`;
+    targetPath = path__namespace.join(outputDir, `${targetName}.mp4`);
+    counter++;
+  }
+  onProgress(`Starting Simple Assembly render (${targetName}.mp4)...`, 0.08);
+  throwIfAborted(signal);
+  const requestKey = `simple-assembly-pipeline:${projectDir}:${effectiveMusicMode}:${targetName}`;
+  const { promise } = renderJobCoordinator.run({
+    projectDir,
+    requestKey,
+    source: "pipeline",
+    externalSignal: signal,
+    starter: async (jobSignal) => {
+      return await executeSimpleAssembly({
+        projectDir,
+        voiceoverPath: options.voiceoverPath,
+        sceneSources: resolved.scenes,
+        backgroundMusicMode: effectiveMusicMode,
+        musicFilePath,
+        outputName: targetName,
+        width: options.resolution?.width ?? 1920,
+        height: options.resolution?.height ?? 1080,
+        fps: options.fps ?? 30,
+        shortClipPolicy: options.shortClipPolicy ?? "freeze-last-frame",
+        signal: jobSignal,
+        onProgress: (p) => {
+          if (signal?.aborted) return;
+          onProgress(p.message || p.stage, p.progress);
+        }
+      });
+    }
+  });
+  const result = await promise;
+  throwIfAborted(signal);
+  if (!result.success || !result.outputPath || !fs__namespace.existsSync(result.outputPath)) {
+    throw new Error(result.error || "Simple Assembly failed to produce valid MP4.");
+  }
+  const finalProbe = await probeMedia$1(result.outputPath, { signal });
+  if (!finalProbe || !finalProbe.hasVideo || finalProbe.duration <= 0) {
+    throw new Error("Produced MP4 failed media probe inspection (invalid streams or zero duration).");
+  }
+  const stat = fs__namespace.statSync(result.outputPath);
+  writeRenderProvenance(projectDir, {
+    schemaVersion: 1,
+    assemblyMode: "simple-assembly",
+    backgroundMusicMode: effectiveMusicMode,
+    renderRequestFingerprint: requestKey,
+    outputPath: result.outputPath,
+    status: "completed",
+    completedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    durationSecs: finalProbe.duration,
+    fileSizeBytes: stat.size,
+    resolution: {
+      width: options.resolution?.width ?? 1920,
+      height: options.resolution?.height ?? 1080
+    },
+    fps: options.fps ?? 30,
+    engineVersion: "simple-assembly-v2.0"
+  });
+  onProgress("Simple Assembly completed successfully", 1);
+  return {
+    success: true,
+    artifactPath: result.outputPath,
+    data: {
+      outputPath: result.outputPath,
+      durationSecs: finalProbe.duration,
+      fileSizeBytes: stat.size
+    },
+    stats: {
+      outputPath: result.outputPath,
+      durationSecs: finalProbe.duration,
+      fileSizeBytes: stat.size,
+      sceneCount: resolved.scenes.length,
+      assemblyMode: "simple-assembly",
+      backgroundMusicMode: effectiveMusicMode,
+      remotionUsed: false
+    }
+  };
+}
 const VISUAL_MIX_SCHEMA_VERSION = 1;
 function getGeneralManifestPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "generated-visual-assets.json");
@@ -24115,96 +25357,6 @@ class FlowImagePool {
   }
 }
 const flowImagePool = new FlowImagePool();
-const AI_PROVIDERS = /* @__PURE__ */ new Set(["google-flow", "manual-ai"]);
-function isAiProvider(provider) {
-  return !!provider && AI_PROVIDERS.has(provider);
-}
-class VisualAssignmentStore {
-  assignments = /* @__PURE__ */ new Map();
-  filePath;
-  lockPromise = Promise.resolve();
-  constructor(projectDir) {
-    this.filePath = path__namespace.join(projectDir, "analysis", "stock-assignments.json");
-    this.load();
-  }
-  load() {
-    if (fs__namespace.existsSync(this.filePath)) {
-      try {
-        const raw = fs__namespace.readFileSync(this.filePath, "utf-8");
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.assignments.clear();
-          for (const a of parsed) {
-            if (a && typeof a.sceneIndex === "number") {
-              this.assignments.set(a.sceneIndex, a);
-            }
-          }
-        }
-      } catch (err) {
-        logger.warn(`[VisualAssignmentStore] Failed to load ${this.filePath}: ${err}`);
-      }
-    }
-  }
-  get(sceneIndex) {
-    return this.assignments.get(sceneIndex);
-  }
-  has(sceneIndex) {
-    return this.assignments.has(sceneIndex);
-  }
-  /**
-   * Sets or updates an assignment.
-   * If called by the stock engine, enforces Section 29:
-   * never overwrites a valid Google Flow AI assignment.
-   */
-  set(sceneIndex, assignment, isStockCaller = false) {
-    const existing = this.assignments.get(sceneIndex);
-    if ((isStockCaller || assignment.asset && !isAiProvider(assignment.asset.provider)) && isAiProvider(existing?.asset?.provider) && existing?.status === "assigned") {
-      if (existing.asset?.localPath && fs__namespace.existsSync(existing.asset.localPath)) {
-        logger.info(
-          `[VisualAssignmentStore] Preserving valid ${existing.asset.provider} AI assignment for scene ${sceneIndex} against stock overwrite.`
-        );
-        return false;
-      }
-    }
-    this.assignments.set(sceneIndex, assignment);
-    return true;
-  }
-  setMany(assignments, isStockCaller = false) {
-    for (const a of assignments) {
-      this.set(a.sceneIndex, a, isStockCaller);
-    }
-  }
-  delete(sceneIndex) {
-    return this.assignments.delete(sceneIndex);
-  }
-  getAll() {
-    return Array.from(this.assignments.values()).sort((a, b) => a.sceneIndex - b.sceneIndex);
-  }
-  /**
-   * Thread-safe atomic disk flush using a mutex queue and temporary file rename.
-   */
-  async flushAtomic() {
-    const previousLock = this.lockPromise;
-    let releaseLock = () => {
-    };
-    this.lockPromise = new Promise((resolve) => {
-      releaseLock = resolve;
-    });
-    await previousLock;
-    try {
-      const items = this.getAll();
-      const dir = path__namespace.dirname(this.filePath);
-      if (!fs__namespace.existsSync(dir)) {
-        fs__namespace.mkdirSync(dir, { recursive: true });
-      }
-      const tmpPath = `${this.filePath}.tmp.${Date.now()}_${Math.random().toString(36).slice(2)}`;
-      fs__namespace.writeFileSync(tmpPath, JSON.stringify(items, null, 2), "utf-8");
-      fs__namespace.renameSync(tmpPath, this.filePath);
-    } finally {
-      releaseLock();
-    }
-  }
-}
 function resolveAiFailureBehavior(config) {
   return config?.aiFailureBehavior === "stock-fallback" ? "stock-fallback" : "strict";
 }
@@ -24527,7 +25679,7 @@ function extractNumbers(text) {
   const matches = text.match(/\b\d+(?:[.,]\d+)?%?\b/g);
   return matches ? matches.map((m) => m.replace(/,/g, "")) : [];
 }
-function writeFileAtomic$2(filePath, content) {
+function writeFileAtomic$3(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -25151,7 +26303,7 @@ async function prepareManualAiVisualDirection(params) {
         aiScenes[0]?.narration
       );
     }
-    writeFileAtomic$2(briefPath, JSON.stringify(brief, null, 2));
+    writeFileAtomic$3(briefPath, JSON.stringify(brief, null, 2));
   }
   const globalMs = Date.now() - globalT0;
   const briefHash = sha256$1([
@@ -25248,7 +26400,7 @@ async function prepareManualAiVisualDirection(params) {
       overlayCount: overlayCount2,
       directions: sceneDirectionsList
     };
-    writeFileAtomic$2(directionsPath, JSON.stringify(artifact, null, 2));
+    writeFileAtomic$3(directionsPath, JSON.stringify(artifact, null, 2));
   } else {
     enrichedCount = sceneDirectionsList.filter((d) => d.confidence > 0.8).length;
     fallbackCount = sceneDirectionsList.length - enrichedCount;
@@ -26593,9 +27745,113 @@ async function runStockSearchStage(options, onProgress, signal) {
 async function runAudioSearchStage(options, onProgress, signal) {
   checkAborted(signal);
   const audioPlanPath = path__namespace.join(options.projectDir, "analysis", "audio-plan.json");
+  const isSimpleAssembly = options.assemblyMode === "simple-assembly";
+  const isNoMusic = options.backgroundMusicMode === "off";
+  if (isSimpleAssembly && isNoMusic) {
+    onProgress("Simple Assembly + No Music: Voiceover only, zero background music and zero SFX", 1);
+    let plan2 = loadAudioPlan(options.projectDir);
+    if (!plan2) {
+      plan2 = {
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        sections: [],
+        sfxAssignments: []
+      };
+      saveAudioPlan(options.projectDir, plan2);
+    }
+    return {
+      success: true,
+      artifactPath: audioPlanPath,
+      data: plan2,
+      stats: {
+        sectionsCount: 0,
+        downloadedMusicCount: 0,
+        sfxCount: 0,
+        assemblyMode: "simple-assembly",
+        backgroundMusicMode: "off"
+      }
+    };
+  }
   const profileArtifact = loadContentProfileArtifact(options.projectDir);
-  const isHealthAudio = profileArtifact ? profileArtifact.resolvedProfile === "health" : options.contentProfileMode === "health" || options.contentType === "health";
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? "health" : "default")) {
+  const isHealthAudio = isSimpleAssembly ? false : profileArtifact ? profileArtifact.resolvedProfile === "health" : options.contentProfileMode === "health" || options.contentType === "health";
+  if (isNoMusic) {
+    onProgress("No Background Music selected: skipping music search...", 0.1);
+    checkAborted(signal);
+    let plan2 = loadAudioPlan(options.projectDir);
+    if (!plan2) {
+      plan2 = {
+        generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        sections: [],
+        sfxAssignments: []
+      };
+    } else {
+      plan2 = {
+        ...plan2,
+        sections: plan2.sections.map((s) => ({ ...s, approved: false })),
+        sfxAssignments: plan2.sfxAssignments || []
+      };
+    }
+    if (isHealthAudio) {
+      const healthPlanPath = path__namespace.join(options.projectDir, "analysis", "health-visual-plan.json");
+      if (fs__namespace.existsSync(healthPlanPath)) {
+        try {
+          const healthPlan = JSON.parse(fs__namespace.readFileSync(healthPlanPath, "utf-8"));
+          const sfxCues = /* @__PURE__ */ new Map();
+          const sfxScenes = [];
+          for (const sc of healthPlan.scenes || []) {
+            if (sc.sfxCue) {
+              sfxCues.set(sc.sceneIndex, sc.sfxCue);
+              sfxScenes.push({
+                sceneIndex: sc.sceneIndex,
+                startTime: sc.startTime,
+                endTime: sc.endTime,
+                duration: sc.duration,
+                category: sc.category,
+                narration: sc.narration,
+                visualIntent: sc.visualIntent,
+                motionPreset: sc.motionPreset
+              });
+            }
+          }
+          if (sfxCues.size > 0) {
+            onProgress("Planning and resolving Health cinematic SFX...", 0.5);
+            let retentionPlan = null;
+            try {
+              retentionPlan = ensureRetentionPlan(options.projectDir);
+            } catch {
+            }
+            await HealthSfxDirector.preloadStandardOpeningSfx(options.projectDir, options.openverseToken);
+            await HealthSfxDirector.applyHealthSfxToAudioPlan(
+              options.projectDir,
+              sfxCues,
+              sfxScenes,
+              options.openverseToken,
+              retentionPlan
+            );
+            plan2 = loadAudioPlan(options.projectDir) || plan2;
+          }
+        } catch (err) {
+          logger.warn(`[HealthSFX] Failed to apply Health SFX in No Music mode: ${err}`);
+        }
+      }
+    } else {
+      saveAudioPlan(options.projectDir, plan2);
+    }
+    const downloadedSfxCount2 = plan2?.sfxAssignments?.filter(
+      (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
+    ).length ?? 0;
+    onProgress(`Audio plan ready: Voiceover only (${downloadedSfxCount2} SFX, 0 music tracks)`, 1);
+    return {
+      success: true,
+      artifactPath: audioPlanPath,
+      data: plan2,
+      stats: {
+        sectionsCount: 0,
+        downloadedMusicCount: 0,
+        sfxCount: downloadedSfxCount2
+      }
+    };
+  }
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? "health" : "default", options.backgroundMusicMode)) {
     const cachedPlan = loadAudioPlan(options.projectDir);
     if (cachedPlan) {
       const downloadedMusicCount2 = cachedPlan.sections.filter(
@@ -26764,19 +28020,40 @@ async function runAudioSearchStage(options, onProgress, signal) {
 async function runPreflightStage(options, onProgress, signal) {
   checkAborted(signal);
   onProgress("Running render preflight inspection...", 0.1);
-  let captionPlan;
-  try {
-    const loaded = loadCaptionPlan(options.projectDir);
-    if (loaded?.enabled && loaded.phrases.length > 0) {
-      captionPlan = loaded;
+  const isSimpleAssembly = options.assemblyMode === "simple-assembly";
+  if (isSimpleAssembly) {
+    try {
+      const resolved = resolvePreparedProductionScenes(options.projectDir);
+      assertAllProductionScenesReady(resolved);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      logger.warn(`[PreflightStage] Simple Assembly scene readiness preflight failed: ${msg}`);
+      return {
+        success: false,
+        needsAttention: true,
+        error: `Preflight checks failed: ${msg}`,
+        artifactPath: path__namespace.join(options.projectDir, "analysis", "render-preflight.json")
+      };
     }
-  } catch {
+  }
+  let captionPlan;
+  if (!isSimpleAssembly) {
+    try {
+      const loaded = loadCaptionPlan(options.projectDir);
+      if (loaded?.enabled && loaded.phrases.length > 0) {
+        captionPlan = loaded;
+      }
+    } catch {
+    }
   }
   checkAborted(signal);
   const report = await runRenderPreflight({
     projectDir: options.projectDir,
     voiceoverPath: options.voiceoverPath,
-    captionPlan
+    captionPlan,
+    strictMissingMedia: isSimpleAssembly ? true : void 0,
+    resolution: options.resolution,
+    fps: options.fps
   });
   checkAborted(signal);
   const preflightPath = path__namespace.join(options.projectDir, "analysis", "render-preflight.json");
@@ -26807,6 +28084,13 @@ async function runPreflightStage(options, onProgress, signal) {
 }
 async function runRenderStage(options, onProgress, signal) {
   checkAborted(signal);
+  if (options.assemblyMode === "simple-assembly") {
+    return runSimpleAssemblyRenderStage(options, onProgress, signal);
+  }
+  return runExistingFullRenderStage(options, onProgress, signal);
+}
+async function runExistingFullRenderStage(options, onProgress, signal) {
+  checkAborted(signal);
   const outputDir = path__namespace.join(options.projectDir, "output");
   fs__namespace.mkdirSync(outputDir, { recursive: true });
   if (!renderJobCoordinator.isActive(options.projectDir)) {
@@ -26831,48 +28115,57 @@ async function runRenderStage(options, onProgress, signal) {
     try {
       const stat = fs__namespace.statSync(defaultCompletedVideo);
       if (stat.size > 1024 * 1024) {
-        const activeRecord = readActiveRender(options.projectDir);
-        const expectedRequestKey = computeRenderRequestKey({
-          projectDir: options.projectDir,
-          voiceoverPath: options.voiceoverPath,
-          outputName: baseTargetName,
-          resolution: options.resolution,
-          fps: options.fps,
-          transitionSettings: options.transitionSettings,
-          captionPlan,
-          editorialSettings: options.editorialSettings
-        });
-        const activeParams = activeRecord?.params;
-        const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? "full";
-        const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? "full";
-        const isExactMatch = activeRecord && activeRecord.status === "completed" && activeRecord.renderFingerprint === expectedRequestKey && requestedOverlayMode === cachedOverlayMode;
-        if (isExactMatch) {
-          const probe = await probeMedia$1(defaultCompletedVideo, { signal });
-          if (probe && probe.hasVideo && probe.duration > 0) {
-            logger.info(
-              `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
-            );
-            onProgress("Found verified completed video output matching settings, skipping render", 1);
-            return {
-              success: true,
-              cached: true,
-              artifactPath: defaultCompletedVideo,
-              data: {
-                outputPath: defaultCompletedVideo,
-                durationSecs: probe.duration,
-                fileSizeBytes: stat.size
-              },
-              stats: {
-                outputPath: defaultCompletedVideo,
-                fileSizeBytes: stat.size,
-                reused: true
-              }
-            };
-          }
-        } else {
+        const provenance = readRenderProvenance(options.projectDir);
+        if (provenance && provenance.assemblyMode !== "full-production") {
           logger.info(
-            `[RenderStage] Existing output ${path__namespace.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+            `[RenderStage] Output exists but provenance is ${provenance.assemblyMode} (expected full-production). Generating fresh Full output.`
           );
+        } else {
+          const activeRecord = readActiveRender(options.projectDir);
+          const expectedRequestKey = computeRenderRequestKey({
+            projectDir: options.projectDir,
+            voiceoverPath: options.voiceoverPath,
+            outputName: baseTargetName,
+            resolution: options.resolution,
+            fps: options.fps,
+            transitionSettings: options.transitionSettings,
+            captionPlan,
+            editorialSettings: options.editorialSettings,
+            backgroundMusicMode: options.backgroundMusicMode,
+            assemblyMode: "full-production"
+          });
+          const activeParams = activeRecord?.params;
+          const requestedOverlayMode = options.editorialSettings?.renderOverlayMode ?? "full";
+          const cachedOverlayMode = activeParams?.editorialSettings?.renderOverlayMode ?? "full";
+          const isExactMatch = activeRecord && activeRecord.status === "completed" && activeRecord.renderFingerprint === expectedRequestKey && requestedOverlayMode === cachedOverlayMode;
+          if (isExactMatch) {
+            const probe = await probeMedia$1(defaultCompletedVideo, { signal });
+            if (probe && probe.hasVideo && probe.duration > 0) {
+              logger.info(
+                `[RenderStage] Reusing verified completed output matching fingerprint ${expectedRequestKey.slice(0, 12)} (overlayMode=${requestedOverlayMode})`
+              );
+              onProgress("Found verified completed video output matching settings, skipping render", 1);
+              return {
+                success: true,
+                cached: true,
+                artifactPath: defaultCompletedVideo,
+                data: {
+                  outputPath: defaultCompletedVideo,
+                  durationSecs: probe.duration,
+                  fileSizeBytes: stat.size
+                },
+                stats: {
+                  outputPath: defaultCompletedVideo,
+                  fileSizeBytes: stat.size,
+                  reused: true
+                }
+              };
+            }
+          } else {
+            logger.info(
+              `[RenderStage] Existing output ${path__namespace.basename(defaultCompletedVideo)} does not match current configuration (requestedOverlay=${requestedOverlayMode}, cachedOverlay=${cachedOverlayMode}). Generating fresh output.`
+            );
+          }
         }
       }
     } catch {
@@ -26897,6 +28190,7 @@ async function runRenderStage(options, onProgress, signal) {
     transitionSettings: options.transitionSettings,
     captionPlan,
     editorialSettings: options.editorialSettings,
+    backgroundMusicMode: options.backgroundMusicMode,
     source: "pipeline",
     externalSignal: signal,
     onProgress: (p) => {
@@ -26906,6 +28200,31 @@ async function runRenderStage(options, onProgress, signal) {
   });
   const result = await promise;
   checkAborted(signal);
+  try {
+    writeRenderProvenance(options.projectDir, {
+      schemaVersion: 1,
+      assemblyMode: "full-production",
+      backgroundMusicMode: options.backgroundMusicMode ?? "auto",
+      renderRequestFingerprint: computeRenderRequestKey({
+        projectDir: options.projectDir,
+        voiceoverPath: options.voiceoverPath,
+        outputName: targetName,
+        resolution: options.resolution,
+        fps: options.fps,
+        transitionSettings: options.transitionSettings,
+        captionPlan,
+        editorialSettings: options.editorialSettings,
+        backgroundMusicMode: options.backgroundMusicMode,
+        assemblyMode: "full-production"
+      }),
+      outputPath: result.outputPath,
+      durationSecs: result.durationSecs,
+      fileSizeBytes: result.fileSizeBytes,
+      status: "completed",
+      completedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+  } catch {
+  }
   return {
     success: true,
     artifactPath: result.outputPath,
@@ -30310,7 +31629,7 @@ function countWords$2(text) {
 function sha256(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
-function writeFileAtomic$1(filePath, content) {
+function writeFileAtomic$2(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -30662,8 +31981,8 @@ function loadManualAiVideoPromptPack(projectDir) {
   }
 }
 function saveManualAiVideoPromptPackFiles(projectDir, pack) {
-  writeFileAtomic$1(getManualAiVideoPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic$1(getManualAiVideoPromptTxtPath(projectDir), formatManualAiVideoPromptText(pack) + "\n");
+  writeFileAtomic$2(getManualAiVideoPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$2(getManualAiVideoPromptTxtPath(projectDir), formatManualAiVideoPromptText(pack) + "\n");
 }
 function ensureManualAiVideoPromptPack(projectDir) {
   const imagePack = loadManualAiPromptPack(projectDir);
@@ -31913,7 +33232,7 @@ const EDITORIAL_VERIFICATION_SCHEMA_VERSION = 1;
 function getEditorialVerificationPath(projectDir) {
   return path__namespace.join(projectDir, "analysis", "embedded-editorial-verification.v1.json");
 }
-function writeFileAtomic(filePath, content) {
+function writeFileAtomic$1(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -31946,7 +33265,7 @@ function loadEditorialVerification(projectDir) {
 function saveEditorialVerification(projectDir, artifact) {
   const vPath = getEditorialVerificationPath(projectDir);
   artifact.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  writeFileAtomic(vPath, JSON.stringify(artifact, null, 2));
+  writeFileAtomic$1(vPath, JSON.stringify(artifact, null, 2));
 }
 function recordAssetVerification(projectDir, params) {
   const artifact = loadEditorialVerification(projectDir);
@@ -32306,6 +33625,233 @@ function registerManualAiHandlers(ipcMain) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[ManualAI-IPC] Commit failed: ${msg}`);
         manualAiAssetGate.notify(params?.projectDir ? normalizeProjectDir(params.projectDir) : "");
+        return { success: false, error: msg };
+      }
+    }
+  );
+}
+class SimpleAssemblyController {
+  activeJobs = /* @__PURE__ */ new Map();
+  isRunning(projectDir) {
+    return renderJobCoordinator.isActive(projectDir);
+  }
+  getStatus(projectDir) {
+    const job = this.activeJobs.get(projectDir);
+    if (job) {
+      return job.state;
+    }
+    return {
+      projectDir,
+      isActive: renderJobCoordinator.isActive(projectDir)
+    };
+  }
+  async startAssembly(request, senderWindow) {
+    const { projectDir } = request;
+    const requestKey = `simple-assembly:${projectDir}:${request.backgroundMusicMode}:${request.outputName || "simple_assembly"}`;
+    const abortController = new AbortController();
+    const state2 = {
+      projectDir,
+      isActive: true
+    };
+    this.activeJobs.set(projectDir, { abortController, state: state2 });
+    const broadcast = (p) => {
+      state2.lastProgress = p;
+      if (senderWindow && !senderWindow.isDestroyed()) {
+        try {
+          senderWindow.webContents.send(IPC_CHANNELS.SIMPLE_ASSEMBLY_PROGRESS, p);
+        } catch {
+        }
+      }
+    };
+    try {
+      const { promise } = renderJobCoordinator.run({
+        projectDir,
+        requestKey,
+        source: "manual",
+        externalSignal: abortController.signal,
+        starter: async (signal) => {
+          return await executeSimpleAssembly({
+            ...request,
+            signal,
+            onProgress: (p) => {
+              broadcast(p);
+              request.onProgress?.(p);
+            }
+          });
+        }
+      });
+      const res = await promise;
+      state2.isActive = false;
+      state2.outputPath = res.outputPath;
+      state2.error = res.error;
+      return res;
+    } catch (err) {
+      state2.isActive = false;
+      const msg = err instanceof Error ? err.message : String(err);
+      state2.error = msg;
+      if (err instanceof RenderBusyError) {
+        logger.warn(`[SimpleAssemblyController] ${msg}`);
+      } else {
+        logger.error(`[SimpleAssemblyController] Assembly failed: ${msg}`);
+      }
+      return { success: false, error: msg };
+    } finally {
+      this.activeJobs.delete(projectDir);
+    }
+  }
+  cancelAssembly(projectDir) {
+    const job = this.activeJobs.get(projectDir);
+    if (job) {
+      logger.info(`[SimpleAssemblyController] Cancelling assembly for ${projectDir}`);
+      job.abortController.abort();
+      renderJobCoordinator.cancel(projectDir, "user-cancelled");
+      this.activeJobs.delete(projectDir);
+      return true;
+    }
+    return renderJobCoordinator.cancel(projectDir, "user-cancelled");
+  }
+}
+const simpleAssemblyController = new SimpleAssemblyController();
+const PRODUCTION_MODE_SETTINGS_SCHEMA_VERSION = 1;
+function getProductionModeSettingsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "production-mode-settings.v1.json");
+}
+function writeFileAtomic(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function validateProductionModeSettings(raw) {
+  if (!raw || typeof raw !== "object") {
+    return { ...DEFAULT_PRODUCTION_MODE_SETTINGS };
+  }
+  const obj = raw;
+  const assemblyMode = obj.assemblyMode === "simple-assembly" ? "simple-assembly" : "full-production";
+  const backgroundMusicMode = obj.backgroundMusicMode === "off" ? "off" : "auto";
+  const shortClipPolicy = obj.shortClipPolicy === "freeze-last-frame" ? "freeze-last-frame" : "freeze-last-frame";
+  return {
+    schemaVersion: PRODUCTION_MODE_SETTINGS_SCHEMA_VERSION,
+    assemblyMode,
+    backgroundMusicMode,
+    shortClipPolicy
+  };
+}
+function loadProductionModeSettings(projectDir) {
+  if (!projectDir) return { ...DEFAULT_PRODUCTION_MODE_SETTINGS };
+  const settingsPath = getProductionModeSettingsPath(projectDir);
+  if (!fs__namespace.existsSync(settingsPath)) {
+    return { ...DEFAULT_PRODUCTION_MODE_SETTINGS };
+  }
+  try {
+    const raw = JSON.parse(fs__namespace.readFileSync(settingsPath, "utf-8"));
+    return validateProductionModeSettings(raw);
+  } catch (err) {
+    logger.warn(`[ProductionModeSettings] Failed to parse ${settingsPath}, falling back to defaults: ${String(err)}`);
+    return { ...DEFAULT_PRODUCTION_MODE_SETTINGS };
+  }
+}
+function saveProductionModeSettings(projectDir, settings) {
+  const current = loadProductionModeSettings(projectDir);
+  const merged = validateProductionModeSettings({
+    ...current,
+    ...settings
+  });
+  const settingsPath = getProductionModeSettingsPath(projectDir);
+  try {
+    writeFileAtomic(settingsPath, JSON.stringify(merged, null, 2));
+    logger.info(`[ProductionModeSettings] Saved settings to ${settingsPath}: assemblyMode=${merged.assemblyMode} musicMode=${merged.backgroundMusicMode}`);
+  } catch (err) {
+    logger.error(`[ProductionModeSettings] Failed saving ${settingsPath}: ${String(err)}`);
+    throw err;
+  }
+  return merged;
+}
+function registerSimpleAssemblyHandlers(ipcMain) {
+  ipcMain.handle(
+    IPC_CHANNELS.SIMPLE_ASSEMBLY_START,
+    async (event, request) => {
+      try {
+        if (!request?.projectDir) {
+          return { success: false, error: "projectDir is required for Simple Assembly." };
+        }
+        if (!request?.voiceoverPath) {
+          return { success: false, error: "voiceoverPath is required for Simple Assembly." };
+        }
+        const win = electron.BrowserWindow.fromWebContents(event.sender);
+        const result = await simpleAssemblyController.startAssembly(request, win);
+        return result;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[SimpleAssemblyIPC] Start failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.SIMPLE_ASSEMBLY_CANCEL,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) {
+          return { success: false, error: "projectDir is required to cancel assembly." };
+        }
+        const ok = simpleAssemblyController.cancelAssembly(params.projectDir);
+        return { success: ok };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[SimpleAssemblyIPC] Cancel failed: ${msg}`);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.SIMPLE_ASSEMBLY_STATUS_GET,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) return null;
+        return simpleAssemblyController.getStatus(params.projectDir);
+      } catch (err) {
+        logger.error(`[SimpleAssemblyIPC] GetStatus failed: ${String(err)}`);
+        return null;
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.SIMPLE_ASSEMBLY_SELECT_SCENE_FOLDER,
+    async (event) => {
+      const win = electron.BrowserWindow.fromWebContents(event.sender);
+      const res = await electron.dialog.showOpenDialog(win, {
+        title: "Select Scene Video Folder (Simple Assembly)",
+        properties: ["openDirectory"]
+      });
+      if (res.canceled || res.filePaths.length === 0) return null;
+      return res.filePaths[0];
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_MODE_SETTINGS_GET,
+    async (_event, params) => {
+      try {
+        const settings = loadProductionModeSettings(params?.projectDir);
+        return { success: true, settings };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PRODUCTION_MODE_SETTINGS_UPDATE,
+    async (_event, params) => {
+      try {
+        if (!params?.projectDir) {
+          return { success: false, error: "projectDir is required." };
+        }
+        const updated = saveProductionModeSettings(params.projectDir, params.patch || {});
+        return { success: true, settings: updated };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         return { success: false, error: msg };
       }
     }
@@ -33330,6 +34876,7 @@ electron.app.whenReady().then(() => {
   registerCaptionHandlers(electron.ipcMain);
   registerPipelineHandlers(electron.ipcMain);
   registerManualAiHandlers(electron.ipcMain);
+  registerSimpleAssemblyHandlers(electron.ipcMain);
   registerResearchHandlers(electron.ipcMain);
   registerThumbnailHandlers(electron.ipcMain);
   researchSidecar.start().catch((err) => {
