@@ -6,7 +6,7 @@
 - **Feature Branch:** `feature/qa-live-render-mode-switch-v1`
 - **PR Target Branch:** `QA`
 - **Verified Base QA Commit SHA:** `acb43ef33d5cefb127723cd57f15126bb1f53e73`
-- **Final Feature Commit SHA:** *(Updated upon commit; see git log on `feature/qa-live-render-mode-switch-v1`)*
+- **Feature Implementation Commit SHA:** `200787b83608981f2d7e8974fc22fb5fb908f256`
 
 ---
 
@@ -319,6 +319,7 @@ Executed via `npx tsx test/live-render-mode-e2e.test.ts`:
 
 ## 20. Pull Request Link
 
-- **Source Branch:** `feature/qa-live-render-mode-switch-v1`
-- **Target Branch:** `QA`
-- **Pull Request:** *(Created via `gh pr create --base QA --head feature/qa-live-render-mode-switch-v1`)*
+- **Pull Request (#16):** [https://github.com/quocan050302/Auto-edit-capcut/pull/16](https://github.com/quocan050302/Auto-edit-capcut/pull/16)
+- **Base Branch:** `QA` (HEAD: `acb43ef33d5cefb127723cd57f15126bb1f53e73`)
+- **Feature Branch:** `feature/qa-live-render-mode-switch-v1`
+- **Feature Commit SHA:** `200787b83608981f2d7e8974fc22fb5fb908f256`
