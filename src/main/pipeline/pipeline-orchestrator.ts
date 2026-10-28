@@ -44,7 +44,6 @@ import {
   reconcileProjectArtifacts
 } from './pipeline-artifacts'
 import { loadEditorialFocusSettings } from '../visual-mix/manual-ai/editorial-focus-settings'
-import { loadProductionModeSettings } from '../simple-assembly/production-mode-settings'
 import {
   runValidationStage,
   runTranscriptionStage,
@@ -245,16 +244,10 @@ class PipelineOrchestrator {
     if (!projectDir) throw new Error('projectDir is required to start Auto Production Pipeline.')
     const norm = normalizeProjectDir(projectDir)
     const effectiveEditorial = options.editorialSettings ?? loadEditorialFocusSettings(norm)
-    const prodSettings = loadProductionModeSettings(norm)
-    const effectiveAssemblyMode = options.assemblyMode ?? prodSettings?.assemblyMode ?? 'full-production'
-    const effectiveMusicMode = options.backgroundMusicMode ?? prodSettings?.backgroundMusicMode ?? 'auto'
     const effectiveOptions: AutoPipelineOptions = {
       ...options,
       projectDir: norm,
-      editorialSettings: effectiveEditorial,
-      assemblyMode: effectiveAssemblyMode,
-      backgroundMusicMode: effectiveMusicMode,
-      requireBackgroundMusic: effectiveMusicMode === 'off' ? false : (options.requireBackgroundMusic ?? true)
+      editorialSettings: effectiveEditorial
     }
 
     return this.withProjectLock(norm, async () => {
@@ -350,16 +343,6 @@ class PipelineOrchestrator {
       let state = loadPipelineState(norm)
       if (!state) {
         throw new Error(`No pipeline state found to resume for project: ${norm}`)
-      }
-
-      // Sync production mode settings from disk if updated
-      const prodSettings = loadProductionModeSettings(norm)
-      if (prodSettings) {
-        state.options.assemblyMode = prodSettings.assemblyMode
-        state.options.backgroundMusicMode = prodSettings.backgroundMusicMode
-        if (prodSettings.backgroundMusicMode === 'off') {
-          state.options.requireBackgroundMusic = false
-        }
       }
 
       // Nếu lease cũ còn tồn tại nhưng stale thì reclaim
