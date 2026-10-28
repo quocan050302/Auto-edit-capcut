@@ -7,7 +7,12 @@ import {
   PIPELINE_SCHEMA_VERSION,
   PIPELINE_EXECUTION_STAGES
 } from './pipeline-types'
-import { resolveVisualMixConfig, resolveContentProfileMode, resolveAiImageMode } from '../../../shared/types'
+import {
+  resolveVisualMixConfig,
+  resolveContentProfileMode,
+  resolveAiImageMode,
+  getActiveRunRenderSettings
+} from '../../../shared/types'
 import type {
   AutoPipelineState,
   AutoPipelineOptions,
@@ -84,6 +89,7 @@ export function updateHeartbeat(state: AutoPipelineState): void {
 export function releaseLease(state: AutoPipelineState): void {
   delete state.lease
   state.updatedAt = new Date().toISOString()
+  state.renderSettings = getActiveRunRenderSettings(state.options)
 }
 
 /**
@@ -136,7 +142,8 @@ export function toSnapshot(state: AutoPipelineState): PipelineSnapshot {
     fatalErrors: state.fatalErrors,
     renderOutputPath: state.renderOutputPath,
     preflightReportPath: state.preflightReportPath,
-    postflightReportPath: state.postflightReportPath
+    postflightReportPath: state.postflightReportPath,
+    renderSettings: getActiveRunRenderSettings(state.options)
   }
 }
 
@@ -229,8 +236,11 @@ export function createInitialPipelineState(
     inputFingerprint: fingerprint,
     options: {
       ...options,
-      projectDir: normalizeProjectDir(options.projectDir)
+      projectDir: normalizeProjectDir(options.projectDir),
+      initialRequireBackgroundMusic:
+        options.initialRequireBackgroundMusic ?? options.requireBackgroundMusic
     },
+    renderSettings: getActiveRunRenderSettings(options),
     stages: createDefaultStageStates(),
     warnings: [],
     fatalErrors: []
@@ -251,6 +261,7 @@ export function loadPipelineState(projectDir: string): AutoPipelineState | null 
       const parsed = JSON.parse(raw) as AutoPipelineState
       if (parsed && typeof parsed === 'object' && parsed.stages) {
         if (!parsed.version) parsed.version = 1
+        parsed.renderSettings = getActiveRunRenderSettings(parsed.options)
         return parsed
       }
     } catch (err) {
@@ -266,6 +277,7 @@ export function loadPipelineState(projectDir: string): AutoPipelineState | null 
       if (parsedBackup && typeof parsedBackup === 'object' && parsedBackup.stages) {
         logger.info(`[PipelineState] Successfully recovered pipeline state from backup`)
         if (!parsedBackup.version) parsedBackup.version = 1
+        parsedBackup.renderSettings = getActiveRunRenderSettings(parsedBackup.options)
         return parsedBackup
       }
     } catch {
@@ -310,16 +322,29 @@ export function savePipelineStateAtomic(
   state: AutoPipelineState
 ): void {
   const normDir = normalizeProjectDir(projectDir)
+  const prevProjectDir = state.projectDir
+  const prevVersion = state.version
+  const prevUpdatedAt = state.updatedAt
+  const prevRenderSettings = state.renderSettings
   state.projectDir = normDir
   state.version = (state.version || 0) + 1
   state.updatedAt = new Date().toISOString()
+  state.renderSettings = getActiveRunRenderSettings(state.options)
 
   const finalPath = getPipelineStatePath(normDir)
   const backupPath = getPipelineStateBackupPath(normDir)
   const dir = path.dirname(finalPath)
 
   if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true })
+    try {
+      fs.mkdirSync(dir, { recursive: true })
+    } catch (err) {
+      state.projectDir = prevProjectDir
+      state.version = prevVersion
+      state.updatedAt = prevUpdatedAt
+      state.renderSettings = prevRenderSettings
+      throw err
+    }
   }
 
   // Nếu file chính hiện tại hợp lệ, tạo backup
@@ -337,8 +362,25 @@ export function savePipelineStateAtomic(
   )
 
   const content = JSON.stringify(state, null, 2)
-  fs.writeFileSync(tmpPath, content, 'utf-8')
-  fs.renameSync(tmpPath, finalPath)
+  try {
+    fs.writeFileSync(tmpPath, content, 'utf-8')
+    fs.renameSync(tmpPath, finalPath)
+  } catch (err) {
+    state.projectDir = prevProjectDir
+    state.version = prevVersion
+    state.updatedAt = prevUpdatedAt
+    state.renderSettings = prevRenderSettings
+    if (fs.existsSync(tmpPath)) {
+      try {
+        fs.unlinkSync(tmpPath)
+      } catch {
+        /* ignore cleanup error */
+      }
+    }
+    throw err
+  }
+
+
 
   try {
     fs.copyFileSync(finalPath, backupPath)

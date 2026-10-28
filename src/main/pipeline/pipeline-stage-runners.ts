@@ -624,13 +624,16 @@ export async function runAudioSearchStage(
   if (isSimpleAssembly && isNoMusic) {
     onProgress('Simple Assembly + No Music: Voiceover only, zero background music and zero SFX', 1.0)
     let plan = loadAudioPlan(options.projectDir)
+    const hadExistingPlanOnDisk = !!plan
     if (!plan) {
       plan = {
         generatedAt: new Date().toISOString(),
         sections: [],
         sfxAssignments: []
       }
-      saveAudioPlan(options.projectDir, plan)
+      if (!hadExistingPlanOnDisk) {
+        saveAudioPlan(options.projectDir, plan)
+      }
     }
     return {
       success: true,
@@ -658,6 +661,7 @@ export async function runAudioSearchStage(
     checkAborted(signal)
 
     let plan = loadAudioPlan(options.projectDir)
+    const hadExistingPlanOnDisk = !!plan
     if (!plan) {
       plan = {
         generatedAt: new Date().toISOString(),
@@ -717,7 +721,9 @@ export async function runAudioSearchStage(
         }
       }
     } else {
-      saveAudioPlan(options.projectDir, plan)
+      if (!hadExistingPlanOnDisk) {
+        saveAudioPlan(options.projectDir, plan)
+      }
     }
 
     const downloadedSfxCount = plan?.sfxAssignments?.filter(
@@ -738,7 +744,7 @@ export async function runAudioSearchStage(
   }
 
   // Check cache nếu audio plan đã tồn tại và hợp lệ
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? 'health' : 'default', options.backgroundMusicMode)) {
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? 'health' : 'default', options.backgroundMusicMode, options.assemblyMode)) {
     const cachedPlan = loadAudioPlan(options.projectDir)
     if (cachedPlan) {
       const downloadedMusicCount = cachedPlan.sections.filter(

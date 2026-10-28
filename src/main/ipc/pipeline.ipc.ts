@@ -4,7 +4,8 @@ import { pipelineOrchestrator } from '../pipeline/pipeline-orchestrator'
 import { logger } from '../logger'
 import type {
   AutoPipelineOptions,
-  PipelineStage
+  PipelineStage,
+  UpdateFinalRenderOptionsRequest
 } from '../pipeline/pipeline-types'
 
 export function registerPipelineHandlers(ipcMain: IpcMain): void {
@@ -152,5 +153,23 @@ export function registerPipelineHandlers(ipcMain: IpcMain): void {
       }
     }
   )
-}
 
+  // ── Live Update Final Render Options (Active Run Only) ─────────────────────
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_UPDATE_FINAL_RENDER_OPTIONS,
+    async (_event, request: UpdateFinalRenderOptionsRequest) => {
+      try {
+        return await pipelineOrchestrator.updateFinalRenderOptions(request)
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.error(`[PipelineIPC] UpdateFinalRenderOptions failed: ${msg}`)
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: 'SAVE_FAILED',
+          error: msg
+        }
+      }
+    }
+  )
+}

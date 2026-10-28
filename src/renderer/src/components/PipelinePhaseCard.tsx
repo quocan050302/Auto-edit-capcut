@@ -170,7 +170,7 @@ export function computePhaseState(
         summary = 'Background music and sound effects matched'
         break
       case 'build':
-        summary = pipelineState?.options?.assemblyMode === 'simple-assembly'
+        summary = (pipelineState?.renderSettings?.assemblyMode ?? pipelineState?.options?.assemblyMode) === 'simple-assembly'
           ? 'Render preflight passed and scenes concatenated with voiceover'
           : 'Render preflight passed and video rendered'
         break
@@ -205,7 +205,7 @@ export function computePhaseState(
         summary = 'Selects and blends background soundtrack'
         break
       case 'build':
-        summary = pipelineState?.options?.assemblyMode === 'simple-assembly'
+        summary = (pipelineState?.renderSettings?.assemblyMode ?? pipelineState?.options?.assemblyMode) === 'simple-assembly'
           ? 'Render Preflight QA & Simple Assembly concatenation'
           : 'Automated QA check and final video rendering'
         break
