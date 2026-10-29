@@ -10,11 +10,11 @@ const genai = require("@google/genai");
 const crypto = require("crypto");
 const cp = require("child_process");
 const os = require("os");
+const https = require("https");
+const http = require("http");
 const bundler = require("@remotion/bundler");
 const renderer = require("@remotion/renderer");
 const perf_hooks = require("perf_hooks");
-const https = require("https");
-const http = require("http");
 const ffprobeStatic$2 = require("ffprobe-static");
 function _interopNamespaceDefault(e) {
   const n = Object.create(null, { [Symbol.toStringTag]: { value: "Module" } });
@@ -243,6 +243,18 @@ function resolveVisualMixConfig(options) {
   }
   return { ...DEFAULT_VISUAL_MIX_CONFIG };
 }
+function resolveBackgroundMusicMode(options) {
+  if (typeof options === "string") {
+    return options === "off" ? "off" : "auto";
+  }
+  return options?.backgroundMusicMode === "off" ? "off" : "auto";
+}
+function resolveVideoAssemblyMode(options) {
+  if (typeof options === "string") {
+    return options === "simple-assembly" ? "simple-assembly" : "full-production";
+  }
+  return options?.assemblyMode === "simple-assembly" ? "simple-assembly" : "full-production";
+}
 const DEFAULT_PRODUCTION_MODE_SETTINGS = {
   schemaVersion: 1,
   assemblyMode: "full-production",
@@ -391,6 +403,7 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  PIPELINE_UPDATE_FINAL_RENDER_OPTIONS: "pipeline:update-final-render-options",
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: "manual-ai:get-status",
   MANUAL_AI_GET_PROMPT_TEXT: "manual-ai:get-prompt-text",
@@ -458,6 +471,12 @@ const IPC_CHANNELS = {
   FLOWKIT_RUNTIME_ENSURE_READY: "flowkit:runtime-ensure-ready",
   FLOWKIT_RUNTIME_DETECT_PYTHON: "flowkit:runtime-detect-python"
 };
+function getActiveRunRenderSettings(options) {
+  return {
+    assemblyMode: resolveVideoAssemblyMode(options),
+    backgroundMusicMode: resolveBackgroundMusicMode(options)
+  };
+}
 function getWindow(event) {
   return electron.BrowserWindow.fromWebContents(event.sender) ?? electron.BrowserWindow.getAllWindows()[0] ?? null;
 }
@@ -4084,433 +4103,6 @@ class ThumbnailAutoTrigger {
   }
 }
 const thumbnailAutoTrigger = new ThumbnailAutoTrigger();
-const PIPELINE_SCHEMA_VERSION = 1;
-const PIPELINE_EXECUTION_STAGES = [
-  "validating",
-  "transcribing",
-  "planning",
-  "captions",
-  "global-context",
-  "stock-search",
-  "audio-search",
-  "preflight",
-  "rendering",
-  "postflight"
-];
-const APP_INSTANCE_ID = uuid.v4();
-function normalizeProjectDir(projectDir) {
-  if (!projectDir) return "";
-  const resolved = path__namespace.resolve(projectDir);
-  return path__namespace.normalize(resolved);
-}
-function getPipelineStatePath(projectDir) {
-  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.json");
-}
-function getPipelineStateBackupPath(projectDir) {
-  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.backup.json");
-}
-function isProcessAlive(pid) {
-  if (!pid || pid <= 0) return false;
-  try {
-    return process.kill(pid, 0);
-  } catch (err) {
-    const code = err.code;
-    return code === "EPERM";
-  }
-}
-function createLease(runId, currentStage) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  return {
-    runId,
-    appInstanceId: APP_INSTANCE_ID,
-    pid: process.pid,
-    acquiredAt: now,
-    heartbeatAt: now,
-    currentStage
-  };
-}
-function updateHeartbeat(state2) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  if (state2.lease) {
-    state2.lease.heartbeatAt = now;
-    state2.lease.currentStage = state2.currentStage;
-  } else {
-    state2.lease = createLease(state2.runId, state2.currentStage);
-  }
-  state2.updatedAt = now;
-}
-function releaseLease(state2) {
-  delete state2.lease;
-  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-}
-function isLeaseStale(lease, heartbeatTimeoutMs = 15e3) {
-  if (!lease) return false;
-  if (lease.appInstanceId !== APP_INSTANCE_ID) {
-    if (!isProcessAlive(lease.pid)) {
-      return true;
-    }
-    const lastHeartbeat2 = new Date(lease.heartbeatAt).getTime();
-    if (isNaN(lastHeartbeat2) || Date.now() - lastHeartbeat2 > heartbeatTimeoutMs) {
-      return true;
-    }
-    return true;
-  }
-  const lastHeartbeat = new Date(lease.heartbeatAt).getTime();
-  if (!isNaN(lastHeartbeat) && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
-    return true;
-  }
-  return false;
-}
-function toSnapshot(state2) {
-  return {
-    version: state2.version,
-    runId: state2.runId,
-    projectDir: state2.projectDir,
-    currentStage: state2.currentStage,
-    overallStatus: state2.overallStatus,
-    stages: state2.stages,
-    updatedAt: state2.updatedAt,
-    lease: state2.lease,
-    warnings: state2.warnings,
-    fatalErrors: state2.fatalErrors,
-    renderOutputPath: state2.renderOutputPath,
-    preflightReportPath: state2.preflightReportPath,
-    postflightReportPath: state2.postflightReportPath
-  };
-}
-function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
-  let scriptHash;
-  if (scriptPath && fs__namespace.existsSync(scriptPath)) {
-    try {
-      const content = fs__namespace.readFileSync(scriptPath);
-      scriptHash = crypto__namespace.createHash("md5").update(content).digest("hex");
-    } catch {
-    }
-  }
-  let voiceoverSize;
-  let voiceoverMtimeMs;
-  if (voiceoverPath && fs__namespace.existsSync(voiceoverPath)) {
-    try {
-      const stat = fs__namespace.statSync(voiceoverPath);
-      voiceoverSize = stat.size;
-      voiceoverMtimeMs = stat.mtimeMs;
-    } catch {
-    }
-  }
-  return {
-    scriptPath,
-    scriptHash,
-    voiceoverPath,
-    voiceoverSize,
-    voiceoverMtimeMs
-  };
-}
-function createDefaultStageStates() {
-  const stages = {};
-  for (const stage of PIPELINE_EXECUTION_STAGES) {
-    stages[stage] = {
-      status: "pending",
-      progress: 0
-    };
-  }
-  return stages;
-}
-function createInitialPipelineState(options, fingerprint, runId) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const rId = runId ?? uuid.v4();
-  return {
-    schemaVersion: PIPELINE_SCHEMA_VERSION,
-    version: 1,
-    runId: rId,
-    projectDir: normalizeProjectDir(options.projectDir),
-    currentStage: "idle",
-    overallStatus: "idle",
-    startedAt: now,
-    updatedAt: now,
-    inputFingerprint: fingerprint,
-    options: {
-      ...options,
-      projectDir: normalizeProjectDir(options.projectDir)
-    },
-    stages: createDefaultStageStates(),
-    warnings: [],
-    fatalErrors: []
-  };
-}
-function loadPipelineState(projectDir) {
-  const statePath = getPipelineStatePath(projectDir);
-  const backupPath = getPipelineStateBackupPath(projectDir);
-  if (fs__namespace.existsSync(statePath)) {
-    try {
-      const raw = fs__namespace.readFileSync(statePath, "utf-8");
-      const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === "object" && parsed.stages) {
-        if (!parsed.version) parsed.version = 1;
-        return parsed;
-      }
-    } catch (err) {
-      logger.warn(`[PipelineState] Primary state corrupt, trying backup: ${String(err)}`);
-    }
-  }
-  if (fs__namespace.existsSync(backupPath)) {
-    try {
-      const rawBackup = fs__namespace.readFileSync(backupPath, "utf-8");
-      const parsedBackup = JSON.parse(rawBackup);
-      if (parsedBackup && typeof parsedBackup === "object" && parsedBackup.stages) {
-        logger.info(`[PipelineState] Successfully recovered pipeline state from backup`);
-        if (!parsedBackup.version) parsedBackup.version = 1;
-        return parsedBackup;
-      }
-    } catch {
-    }
-  }
-  return null;
-}
-function savePipelineStateAtomic(projectDir, state2) {
-  const normDir = normalizeProjectDir(projectDir);
-  state2.projectDir = normDir;
-  state2.version = (state2.version || 0) + 1;
-  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const finalPath = getPipelineStatePath(normDir);
-  const backupPath = getPipelineStateBackupPath(normDir);
-  const dir = path__namespace.dirname(finalPath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  if (fs__namespace.existsSync(finalPath)) {
-    try {
-      fs__namespace.copyFileSync(finalPath, backupPath);
-    } catch {
-    }
-  }
-  const tmpPath = path__namespace.join(
-    dir,
-    `auto-pipeline-state.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
-  );
-  const content = JSON.stringify(state2, null, 2);
-  fs__namespace.writeFileSync(tmpPath, content, "utf-8");
-  fs__namespace.renameSync(tmpPath, finalPath);
-  try {
-    fs__namespace.copyFileSync(finalPath, backupPath);
-  } catch {
-  }
-}
-function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
-  const invalidated = /* @__PURE__ */ new Set();
-  const voiceoverChanged = oldState.inputFingerprint.voiceoverPath !== newFingerprint.voiceoverPath || oldState.inputFingerprint.voiceoverSize !== newFingerprint.voiceoverSize || oldState.inputFingerprint.voiceoverMtimeMs !== newFingerprint.voiceoverMtimeMs;
-  const scriptChanged = oldState.inputFingerprint.scriptPath !== newFingerprint.scriptPath || oldState.inputFingerprint.scriptHash !== newFingerprint.scriptHash;
-  if (voiceoverChanged) {
-    return [
-      "transcribing",
-      "planning",
-      "captions",
-      "global-context",
-      "stock-search",
-      "audio-search",
-      "preflight",
-      "rendering",
-      "postflight"
-    ];
-  }
-  if (scriptChanged) {
-    return [
-      "planning",
-      "captions",
-      "global-context",
-      "stock-search",
-      "audio-search",
-      "preflight",
-      "rendering",
-      "postflight"
-    ];
-  }
-  if (oldState.options.whisperModel !== newOptions.whisperModel && newOptions.whisperModel) {
-    return [
-      "transcribing",
-      "planning",
-      "captions",
-      "global-context",
-      "stock-search",
-      "audio-search",
-      "preflight",
-      "rendering",
-      "postflight"
-    ];
-  }
-  if (oldState.options.forceRegenerateCaptions !== newOptions.forceRegenerateCaptions && newOptions.forceRegenerateCaptions) {
-    invalidated.add("captions");
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  if (oldState.options.preferredStockProvider !== newOptions.preferredStockProvider) {
-    invalidated.add("stock-search");
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldProfileMode = resolveContentProfileMode(oldState.options);
-  const newProfileMode = resolveContentProfileMode(newOptions);
-  const oldContentType = oldState.options.contentType ?? "default";
-  const newContentType = newOptions.contentType ?? "default";
-  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
-    invalidated.add("stock-search");
-    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
-      invalidated.add("audio-search");
-    }
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === "health" ? "custom-mix" : "legacy");
-  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === "health" ? "custom-mix" : "legacy");
-  if (oldVisualMode !== newVisualMode) {
-    invalidated.add("stock-search");
-    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
-      invalidated.add("audio-search");
-    }
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
-    visualSourceMode: oldState.options.visualSourceMode,
-    visualMixConfig: oldState.options.visualMixConfig,
-    contentType: oldContentType
-  }) : void 0;
-  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
-    visualSourceMode: newOptions.visualSourceMode,
-    visualMixConfig: newOptions.visualMixConfig,
-    contentType: newContentType
-  }) : void 0;
-  const stripDefaultAiMode = (cfg) => {
-    if (!cfg || typeof cfg !== "object" || !("aiImageMode" in cfg)) return cfg;
-    const { aiImageMode, ...rest } = cfg;
-    return aiImageMode === "prompt" ? { ...rest, aiImageMode } : rest;
-  };
-  const oldVisualConfigStr = JSON.stringify(
-    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
-  );
-  const newVisualConfigStr = JSON.stringify(
-    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
-  );
-  const visualConfigChanged = oldVisualConfigStr !== newVisualConfigStr || oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio || oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio || oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution || oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior || resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig);
-  if (visualConfigChanged) {
-    invalidated.add("stock-search");
-    if (oldContentType === "health" || newContentType === "health") {
-      invalidated.add("audio-search");
-    }
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldMusicMode = oldState.options.backgroundMusicMode ?? "auto";
-  const newMusicMode = newOptions.backgroundMusicMode ?? "auto";
-  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic || oldMusicMode !== newMusicMode) {
-    invalidated.add("audio-search");
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldAssemblyMode = oldState.options.assemblyMode ?? "full-production";
-  const newAssemblyMode = newOptions.assemblyMode ?? "full-production";
-  if (oldAssemblyMode !== newAssemblyMode) {
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  if (oldState.options.fps !== newOptions.fps || oldState.options.resolution?.width !== newOptions.resolution?.width || oldState.options.resolution?.height !== newOptions.resolution?.height || oldState.options.outputName !== newOptions.outputName) {
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  const oldOverlayMode = oldState.options.editorialSettings?.renderOverlayMode ?? "full";
-  const newOverlayMode = newOptions.editorialSettings?.renderOverlayMode ?? "full";
-  if (oldOverlayMode !== newOverlayMode) {
-    invalidated.add("preflight");
-    invalidated.add("rendering");
-    invalidated.add("postflight");
-  }
-  return Array.from(invalidated);
-}
-function applyInvalidation(state2, invalidatedStages) {
-  for (const stage of invalidatedStages) {
-    if (state2.stages[stage]) {
-      state2.stages[stage] = {
-        status: "pending",
-        progress: 0,
-        message: "Invalidated due to input/setting change"
-      };
-    }
-  }
-}
-const HEALTH_SCHEMA_VERSION = 1;
-const DEFAULT_HEALTH_CONFIG = {
-  aiRatio: 0.8,
-  stockRatio: 0.2,
-  width: 1920,
-  height: 1080,
-  motionEnabled: true
-};
-function getHealthManifestPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "health-generated-assets.json");
-}
-function computeHealthConfigHash(config) {
-  const merged = { ...DEFAULT_HEALTH_CONFIG, ...config };
-  return crypto__namespace.createHash("md5").update(JSON.stringify(merged)).digest("hex");
-}
-function computeHealthGenerationHash(sceneIndex, narration, visualIntent, imagePrompt, config) {
-  const width = config?.width ?? DEFAULT_HEALTH_CONFIG.width;
-  const height = config?.height ?? DEFAULT_HEALTH_CONFIG.height;
-  const payload = [
-    String(sceneIndex),
-    (narration || "").trim().toLowerCase(),
-    (visualIntent || "").trim().toLowerCase(),
-    (imagePrompt || "").trim(),
-    `${width}x${height}`,
-    "GEM_PIX_2",
-    "health"
-  ].join("||");
-  return crypto__namespace.createHash("sha256").update(payload).digest("hex");
-}
-function computeHealthMotionHash(plan) {
-  const parts = (plan.scenes || []).map((s) => {
-    const motionStr = s.motion ? `${s.motion.preset}:${s.motion.intensity}:${s.motion.zoomEnd}` : s.motionPreset || "none";
-    const sfxStr = s.sfxCue ? `${s.sfxCue.type}:${s.sfxCue.volumeDb}` : "none";
-    return `${s.sceneIndex}:${s.category}:${motionStr}:${sfxStr}`;
-  });
-  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
-}
-function loadHealthGeneratedManifest(projectDir) {
-  const manifestPath = getHealthManifestPath(projectDir);
-  if (fs__namespace.existsSync(manifestPath)) {
-    try {
-      const data = JSON.parse(fs__namespace.readFileSync(manifestPath, "utf-8"));
-      if (data && typeof data === "object" && data.scenes) {
-        return data;
-      }
-    } catch (err) {
-      logger.warn(`[HealthVisualCache] Failed to parse ${manifestPath}: ${err}`);
-    }
-  }
-  return {
-    schemaVersion: HEALTH_SCHEMA_VERSION,
-    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    configHash: computeHealthConfigHash(),
-    scenes: {}
-  };
-}
-function saveHealthGeneratedManifest(projectDir, manifest) {
-  const manifestPath = getHealthManifestPath(projectDir);
-  const dir = path__namespace.dirname(manifestPath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  const tmpPath = `${manifestPath}.tmp.${Date.now()}`;
-  fs__namespace.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), "utf-8");
-  fs__namespace.renameSync(tmpPath, manifestPath);
-}
 const ffmpegStaticPath = require("ffmpeg-static");
 function getFfmpegBinary() {
   return ffmpegStaticPath;
@@ -4827,4742 +4419,6 @@ async function probeMedia$1(filePath, opts = {}) {
       }
     });
   });
-}
-const DEFAULT_RESOURCE_PROFILE = "balanced";
-const MB = 1024 * 1024;
-function clamp(v, min, max) {
-  return Math.min(max, Math.max(min, v));
-}
-function normalizeResourceProfile(p) {
-  return p === "low-power" || p === "fast" || p === "balanced" ? p : DEFAULT_RESOURCE_PROFILE;
-}
-function computeResourceLimits(profileInput, logicalCpus = os__namespace.cpus().length || 4, totalMemBytes = os__namespace.totalmem()) {
-  const profile = normalizeResourceProfile(profileInput);
-  const n = Math.max(1, Math.floor(logicalCpus));
-  const lowMemMachine = totalMemBytes > 0 && totalMemBytes < 12 * 1024 * MB;
-  switch (profile) {
-    case "low-power":
-      return {
-        profile,
-        logicalCpus: n,
-        ffmpegThreads: clamp(Math.floor(n / 4), 1, 2),
-        ffmpegFilterThreads: 1,
-        remotionConcurrency: 1,
-        offthreadVideoThreads: 1,
-        mediaCacheSizeInBytes: 256 * MB,
-        offthreadVideoCacheSizeInBytes: 256 * MB,
-        niceLevel: 15,
-        assemblyMaxScenesPerSegment: 8,
-        loadAverageFactor: 1
-      };
-    case "fast":
-      return {
-        profile,
-        logicalCpus: n,
-        ffmpegThreads: clamp(n - 2, 2, 6),
-        ffmpegFilterThreads: clamp(Math.floor(n / 2), 1, 4),
-        remotionConcurrency: clamp(Math.floor(n * 0.5), 1, 16),
-        offthreadVideoThreads: 2,
-        mediaCacheSizeInBytes: (lowMemMachine ? 384 : 512) * MB,
-        offthreadVideoCacheSizeInBytes: (lowMemMachine ? 384 : 512) * MB,
-        niceLevel: 0,
-        assemblyMaxScenesPerSegment: 24,
-        loadAverageFactor: 2
-      };
-    case "balanced":
-    default:
-      return {
-        profile: "balanced",
-        logicalCpus: n,
-        ffmpegThreads: clamp(Math.floor(n / 2), 2, 4),
-        ffmpegFilterThreads: clamp(Math.floor(n / 3), 1, 3),
-        remotionConcurrency: clamp(Math.floor(n / 4), 1, 2),
-        offthreadVideoThreads: 1,
-        mediaCacheSizeInBytes: (lowMemMachine ? 256 : 384) * MB,
-        offthreadVideoCacheSizeInBytes: (lowMemMachine ? 256 : 384) * MB,
-        niceLevel: 5,
-        assemblyMaxScenesPerSegment: 12,
-        loadAverageFactor: 1.5
-      };
-  }
-}
-function assessLoad(sample, limits) {
-  const reasons = [];
-  if (sample.availableMemRatio > 0 && sample.availableMemRatio < 0.15) {
-    reasons.push(`available memory ${(sample.availableMemRatio * 100).toFixed(0)}%`);
-  }
-  if (sample.eventLoopLagMs > 250) {
-    reasons.push(`event-loop lag ${Math.round(sample.eventLoopLagMs)}ms`);
-  }
-  if (sample.loadAvg1 > sample.logicalCpus * limits.loadAverageFactor) {
-    reasons.push(`load average ${sample.loadAvg1.toFixed(1)}`);
-  }
-  return { underPressure: reasons.length > 0, reasons };
-}
-function readAvailableMemoryRatio() {
-  const total = os__namespace.totalmem();
-  const fallback = total > 0 ? os__namespace.freemem() / total : 1;
-  if (process.platform !== "darwin") return Promise.resolve(fallback);
-  return new Promise((resolve) => {
-    cp.execFile("sysctl", ["-n", "kern.memorystatus_level"], { timeout: 2e3 }, (sErr, sOut) => {
-      const level = Number(String(sOut ?? "").trim());
-      if (!sErr && Number.isFinite(level) && level > 0 && level <= 100) return resolve(level / 100);
-      readVmStatRatio(total, fallback).then(resolve, () => resolve(fallback));
-    });
-  });
-}
-function readVmStatRatio(total, fallback) {
-  return new Promise((resolve) => {
-    cp.execFile("vm_stat", { timeout: 2e3 }, (err, stdout) => {
-      if (err || !stdout) return resolve(fallback);
-      try {
-        const pageSize = Number(/page size of (\d+) bytes/.exec(stdout)?.[1] ?? 4096);
-        const get = (label) => {
-          const m = new RegExp(`${label}:\\s+(\\d+)`).exec(stdout);
-          return m ? Number(m[1]) : 0;
-        };
-        const availPages = get("Pages free") + get("Pages inactive") + get("Pages speculative") + get("Pages purgeable");
-        const ratio = availPages * pageSize / total;
-        resolve(Number.isFinite(ratio) && ratio > 0 ? Math.min(1, ratio) : fallback);
-      } catch {
-        resolve(fallback);
-      }
-    });
-  });
-}
-class SystemLoadMonitor {
-  histogram = null;
-  start() {
-    if (this.histogram) return;
-    try {
-      this.histogram = perf_hooks.monitorEventLoopDelay({ resolution: 20 });
-      this.histogram.enable();
-    } catch {
-      this.histogram = null;
-    }
-  }
-  stop() {
-    try {
-      this.histogram?.disable();
-    } catch {
-    }
-    this.histogram = null;
-  }
-  async sample() {
-    let lagMs = 0;
-    if (this.histogram) {
-      lagMs = Math.max(0, this.histogram.percentile(95) / 1e6 - 20);
-      this.histogram.reset();
-    }
-    return {
-      loadAvg1: os__namespace.loadavg()[0] ?? 0,
-      logicalCpus: os__namespace.cpus().length || 1,
-      availableMemRatio: await readAvailableMemoryRatio(),
-      eventLoopLagMs: lagMs,
-      liveRenderProcesses: getLiveRenderProcessCount(),
-      sampledAt: Date.now()
-    };
-  }
-}
-function cancellableDelay(ms, signal) {
-  return new Promise((resolve) => {
-    if (signal?.aborted) return resolve();
-    const timer = setTimeout(done, ms);
-    function done() {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    }
-    signal?.addEventListener("abort", done, { once: true });
-  });
-}
-class AdaptiveThrottle {
-  constructor(limits, onNotice, sampler) {
-    this.limits = limits;
-    this.onNotice = onNotice;
-    this.sampler = sampler;
-  }
-  reducedSteps = 0;
-  monitor = new SystemLoadMonitor();
-  start() {
-    this.monitor.start();
-  }
-  stop() {
-    this.monitor.stop();
-  }
-  /** Remotion concurrency to use for the next job. */
-  currentRemotionConcurrency() {
-    return Math.max(1, this.limits.remotionConcurrency - this.reducedSteps);
-  }
-  /** Total time (ms) this render may spend waiting for the system to calm down. */
-  waitBudgetMs = 6e4;
-  async beforeNextJob(signal, maxWaits = 2, waitMs = 2500) {
-    let last = { underPressure: false, reasons: [] };
-    for (let attempt = 0; attempt <= maxWaits; attempt++) {
-      if (signal?.aborted) return last;
-      const sample = this.sampler ? await this.sampler() : await this.monitor.sample();
-      last = assessLoad(sample, this.limits);
-      if (!last.underPressure) {
-        if (this.reducedSteps > 0 && attempt === 0) this.reducedSteps--;
-        return last;
-      }
-      if (attempt === 0) {
-        this.reducedSteps = Math.min(this.reducedSteps + 1, Math.max(0, this.limits.remotionConcurrency - 1));
-        this.onNotice?.(`System under load — reducing render concurrency (${last.reasons.join(", ")})`);
-      }
-      if (attempt < maxWaits && this.waitBudgetMs > 0) {
-        const ms = Math.min(waitMs, this.waitBudgetMs);
-        this.waitBudgetMs -= ms;
-        await cancellableDelay(ms, signal);
-      } else {
-        break;
-      }
-    }
-    return last;
-  }
-}
-const MANIFEST_SCHEMA_VERSION = 2;
-function emptyCheckpoint(fingerprint = "") {
-  return { status: "pending", fingerprint };
-}
-function createManifest(params) {
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  return {
-    schemaVersion: MANIFEST_SCHEMA_VERSION,
-    renderFingerprint: params.renderFingerprint,
-    projectDir: params.projectDir,
-    outputName: params.outputName,
-    status: "initializing",
-    createdAt: now,
-    updatedAt: now,
-    settings: params.settings,
-    scenes: [],
-    assembly: emptyCheckpoint(),
-    audioMix: emptyCheckpoint(),
-    overlayBlocks: [],
-    composite: emptyCheckpoint(),
-    finalOutput: emptyCheckpoint(),
-    progress: {
-      completedScenes: 0,
-      totalScenes: 0,
-      completedOverlayBlocks: 0,
-      totalOverlayBlocks: 0,
-      currentPhase: "initializing"
-    },
-    invalidationReasons: [],
-    warnings: []
-  };
-}
-function recomputeManifestProgress(m) {
-  m.progress.totalScenes = m.scenes.length;
-  m.progress.completedScenes = m.scenes.filter((s) => s.status === "completed").length;
-  m.progress.totalOverlayBlocks = m.overlayBlocks.length;
-  m.progress.completedOverlayBlocks = m.overlayBlocks.filter((b) => b.status === "completed").length;
-}
-function fsyncDirBestEffort(dir) {
-  let fd = null;
-  try {
-    fd = fs__namespace.openSync(dir, "r");
-    fs__namespace.fsyncSync(fd);
-  } catch {
-  } finally {
-    if (fd !== null) {
-      try {
-        fs__namespace.closeSync(fd);
-      } catch {
-      }
-    }
-  }
-}
-function writeJsonAtomic(filePath, data) {
-  const dir = path__namespace.dirname(filePath);
-  fs__namespace.mkdirSync(dir, { recursive: true });
-  const tmpPath = `${filePath}.tmp`;
-  const content = JSON.stringify(data, null, 2);
-  const fd = fs__namespace.openSync(tmpPath, "w");
-  try {
-    fs__namespace.writeSync(fd, content, 0, "utf-8");
-    fs__namespace.fsyncSync(fd);
-  } finally {
-    fs__namespace.closeSync(fd);
-  }
-  fs__namespace.renameSync(tmpPath, filePath);
-  fsyncDirBestEffort(dir);
-}
-function tryParse(filePath) {
-  try {
-    if (!fs__namespace.existsSync(filePath)) return null;
-    const raw = fs__namespace.readFileSync(filePath, "utf-8");
-    if (!raw.trim()) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-function readJsonWithRecovery(filePath, validate = () => true) {
-  const tmpPath = `${filePath}.tmp`;
-  const primary = tryParse(filePath);
-  if (primary !== null && validate(primary)) {
-    if (fs__namespace.existsSync(tmpPath)) {
-      try {
-        fs__namespace.unlinkSync(tmpPath);
-      } catch {
-      }
-    }
-    return primary;
-  }
-  const tmp = tryParse(tmpPath);
-  if (tmp !== null && validate(tmp)) {
-    try {
-      fs__namespace.renameSync(tmpPath, filePath);
-    } catch {
-    }
-    return tmp;
-  }
-  return null;
-}
-function isValidManifest(v) {
-  const m = v;
-  return !!m && typeof m === "object" && m.schemaVersion === 2 && typeof m.renderFingerprint === "string" && Array.isArray(m.scenes) && Array.isArray(m.overlayBlocks) && !!m.assembly && !!m.audioMix;
-}
-function writeManifest(manifestPath, manifest) {
-  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  recomputeManifestProgress(manifest);
-  writeJsonAtomic(manifestPath, manifest);
-}
-function readManifest(manifestPath) {
-  return readJsonWithRecovery(manifestPath, isValidManifest);
-}
-function metaPathFor(artifactPath) {
-  return artifactPath.replace(/\.mp4$/i, "") + ".meta.json";
-}
-function writeArtifactMeta(artifactPath, meta) {
-  writeJsonAtomic(metaPathFor(artifactPath), meta);
-}
-function readArtifactMeta(artifactPath) {
-  return readJsonWithRecovery(metaPathFor(artifactPath), (v) => {
-    const m = v;
-    return !!m && typeof m.fingerprint === "string";
-  });
-}
-const DEFAULT_RENDER_PREFERENCES = {
-  resourceProfile: "balanced",
-  videoEncoder: "software-h264",
-  remotionHardwareAcceleration: false,
-  autoResumeAfterCrash: true,
-  maxCacheBytes: 30 * 1024 * 1024 * 1024
-};
-function prefsPath() {
-  const base = electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd();
-  return path__namespace.join(base, "render-preferences.json");
-}
-function normalizeRenderPreferences(raw) {
-  const r = raw ?? {};
-  return {
-    resourceProfile: normalizeResourceProfile(r.resourceProfile),
-    videoEncoder: r.videoEncoder === "videotoolbox-h264" ? "videotoolbox-h264" : "software-h264",
-    remotionHardwareAcceleration: r.remotionHardwareAcceleration === true,
-    autoResumeAfterCrash: r.autoResumeAfterCrash !== false,
-    maxCacheBytes: typeof r.maxCacheBytes === "number" && r.maxCacheBytes > 1024 * 1024 * 1024 ? r.maxCacheBytes : DEFAULT_RENDER_PREFERENCES.maxCacheBytes
-  };
-}
-function loadRenderPreferences() {
-  try {
-    const p = prefsPath();
-    if (!fs__namespace.existsSync(p)) return { ...DEFAULT_RENDER_PREFERENCES };
-    return normalizeRenderPreferences(readJsonWithRecovery(p));
-  } catch {
-    return { ...DEFAULT_RENDER_PREFERENCES };
-  }
-}
-function saveRenderPreferences(patch) {
-  const next = normalizeRenderPreferences({ ...loadRenderPreferences(), ...patch });
-  writeJsonAtomic(prefsPath(), next);
-  return next;
-}
-class HardwareEncoderError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = "HardwareEncoderError";
-  }
-}
-function bitrateForCrf(width, height, fps, crf) {
-  const bpp = 0.16 * Math.pow(0.89, crf - 20);
-  const bps = width * height * Math.max(1, fps) * bpp;
-  return Math.round(Math.min(8e7, Math.max(1e6, bps)));
-}
-function softwareEncoder() {
-  return {
-    mode: "software-h264",
-    key: "libx264",
-    videoArgs: (crf, preset) => ["-c:v", "libx264", "-preset", preset, "-crf", String(crf)]
-  };
-}
-function videoToolboxEncoder(width, height, fps) {
-  return {
-    mode: "videotoolbox-h264",
-    key: `h264_videotoolbox:${width}x${height}@${fps}`,
-    videoArgs: (crf) => {
-      const br = bitrateForCrf(width, height, fps, crf);
-      return [
-        "-c:v",
-        "h264_videotoolbox",
-        "-b:v",
-        String(br),
-        "-maxrate",
-        String(Math.round(br * 1.5)),
-        "-bufsize",
-        String(Math.round(br * 2)),
-        "-profile:v",
-        "high",
-        "-allow_sw",
-        "0"
-      ];
-    }
-  };
-}
-let vtProbeResult = null;
-function listEncoders() {
-  return new Promise((resolve) => {
-    const proc = cp.spawn(getFfmpegBinary(), ["-hide_banner", "-encoders"], { windowsHide: true });
-    let out = "";
-    proc.stdout.on("data", (d) => {
-      if (out.length < 1024 * 1024) out += d.toString();
-    });
-    proc.on("error", () => resolve(""));
-    proc.on("close", () => resolve(out));
-  });
-}
-async function probeVideoToolbox(force = false) {
-  if (vtProbeResult && !force) return vtProbeResult;
-  if (process.platform !== "darwin") {
-    vtProbeResult = { ok: false, reason: "VideoToolbox is only available on macOS" };
-    return vtProbeResult;
-  }
-  const encoders = await listEncoders();
-  if (!/\bh264_videotoolbox\b/.test(encoders)) {
-    vtProbeResult = { ok: false, reason: "h264_videotoolbox not present in this FFmpeg build" };
-    return vtProbeResult;
-  }
-  const tmp = path__namespace.join(os__namespace.tmpdir(), `vt-probe-${process.pid}-${Date.now()}.mp4`);
-  try {
-    await ffmpegRun$4([
-      "-y",
-      "-f",
-      "lavfi",
-      "-i",
-      "testsrc=size=320x240:rate=30:duration=1",
-      ...videoToolboxEncoder(320, 240, 30).videoArgs(20, "fast"),
-      "-pix_fmt",
-      "yuv420p",
-      tmp
-    ], { phase: "vt-probe" });
-    const probe = await probeMedia$1(tmp);
-    vtProbeResult = probe && probe.hasVideo && probe.width === 320 && probe.frames !== 0 ? { ok: true } : { ok: false, reason: "sample encode produced an invalid file" };
-  } catch (err) {
-    vtProbeResult = { ok: false, reason: `sample encode failed: ${String(err).slice(0, 200)}` };
-  } finally {
-    try {
-      if (fs__namespace.existsSync(tmp)) fs__namespace.unlinkSync(tmp);
-    } catch {
-    }
-  }
-  logger.info(`[VideoEncoder] VideoToolbox probe: ${JSON.stringify(vtProbeResult)}`);
-  return vtProbeResult;
-}
-async function resolveEncoder(requested, geometry, warnings) {
-  if (requested !== "videotoolbox-h264") return softwareEncoder();
-  const probe = await probeVideoToolbox();
-  if (!probe.ok) {
-    warnings.push(`Apple VideoToolbox unavailable (${probe.reason}); using Software H.264.`);
-    return softwareEncoder();
-  }
-  return videoToolboxEncoder(geometry.width, geometry.height, geometry.fps);
-}
-function asHardwareError(err, profile) {
-  if (profile.mode === "videotoolbox-h264" && !err?.name?.includes("Abort")) {
-    return new HardwareEncoderError(`VideoToolbox encode failed: ${String(err?.message ?? err).slice(0, 300)}`);
-  }
-  return err;
-}
-let cachedBundleUrl = null;
-let cachedBundlePromise = null;
-function getRemotionEntryPoint() {
-  const candidates = [
-    path__namespace.join(__dirname, "../../src/remotion/index.ts"),
-    path__namespace.join(__dirname, "../../../src/remotion/index.ts"),
-    path__namespace.join(process.cwd(), "src/remotion/index.ts")
-  ];
-  for (const c of candidates) {
-    if (fs__namespace.existsSync(c)) return c;
-  }
-  return candidates[0];
-}
-async function getBundle(onProgress) {
-  if (cachedBundleUrl) {
-    logger.info("[RemotionRenderer] Using bundle cache");
-    return cachedBundleUrl;
-  }
-  if (cachedBundlePromise) {
-    logger.info("[RemotionRenderer] Reusing in-flight bundle compilation");
-    return cachedBundlePromise;
-  }
-  logger.info("[RemotionRenderer] Bundling Remotion composition...");
-  const entryPoint = getRemotionEntryPoint();
-  cachedBundlePromise = bundler.bundle({
-    entryPoint,
-    onProgress: (progress) => {
-      onProgress?.(progress);
-      logger.debug(`[RemotionRenderer] Bundle: ${progress}%`);
-    }
-  }).then((url2) => {
-    cachedBundleUrl = url2;
-    cachedBundlePromise = null;
-    logger.info(`[RemotionRenderer] Bundle xong: ${url2}`);
-    return url2;
-  }).catch((err) => {
-    cachedBundlePromise = null;
-    cachedBundleUrl = null;
-    throw err;
-  });
-  return cachedBundlePromise;
-}
-async function renderCaptionsOverlay(options) {
-  const {
-    captionPlan,
-    proofVisuals,
-    visualGrammar,
-    openingEvents,
-    videoDurationInSeconds,
-    outputPath,
-    fps = 30,
-    resolution = { width: 1920, height: 1080 },
-    onBundleProgress,
-    onRenderProgress
-  } = options;
-  if (options.signal?.aborted) throw new RenderCancelledError();
-  fs__namespace.mkdirSync(path__namespace.dirname(outputPath), { recursive: true });
-  const bundleUrl = await getBundle(onBundleProgress);
-  const durationInFrames = Math.ceil(videoDurationInSeconds * fps);
-  const defaults = computeResourceLimits(loadRenderPreferences().resourceProfile);
-  const concurrency = Math.max(1, Math.floor(options.concurrency ?? defaults.remotionConcurrency));
-  const offthreadVideoThreads = Math.max(1, Math.floor(options.offthreadVideoThreads ?? defaults.offthreadVideoThreads));
-  const mediaCacheSizeInBytes = options.mediaCacheSizeInBytes ?? defaults.mediaCacheSizeInBytes;
-  const offthreadVideoCacheSizeInBytes = options.offthreadVideoCacheSizeInBytes ?? defaults.offthreadVideoCacheSizeInBytes;
-  const hardwareAcceleration = options.hardwareAcceleration === "if-possible" && process.platform === "darwin" ? "if-possible" : "disable";
-  logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)` + (options.frameRange ? ` range=${options.frameRange[0]}-${options.frameRange[1]}` : ""));
-  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}x${resolution.height}`);
-  logger.info(`[RemotionRenderer] Phrases: ${captionPlan?.phrases?.length ?? 0}`);
-  logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`);
-  logger.info(`[RemotionRenderer] VisualGrammar: ${visualGrammar?.length ?? 0}`);
-  logger.info(
-    `[RemotionRenderer] concurrency=${concurrency} offthreadThreads=${offthreadVideoThreads} mediaCache=${Math.round(mediaCacheSizeInBytes / 1048576)}MB offthreadCache=${Math.round(offthreadVideoCacheSizeInBytes / 1048576)}MB hw=${hardwareAcceleration}`
-  );
-  const inputProps = {
-    captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
-    proofVisuals: proofVisuals ?? [],
-    visualGrammar: visualGrammar ?? [],
-    openingEvents: openingEvents ?? []
-  };
-  const composition = await renderer.selectComposition({
-    serveUrl: bundleUrl,
-    id: "CaptionsOverlay",
-    inputProps
-  });
-  const runOnce = async (hw) => {
-    const { cancelSignal, cancel } = renderer.makeCancelSignal();
-    const onAbort = () => cancel();
-    options.signal?.addEventListener("abort", onAbort, { once: true });
-    try {
-      await renderer.renderMedia({
-        composition: {
-          ...composition,
-          durationInFrames,
-          fps,
-          width: resolution.width,
-          height: resolution.height
-        },
-        serveUrl: bundleUrl,
-        codec: "h264",
-        outputLocation: outputPath,
-        inputProps,
-        frameRange: options.frameRange ?? null,
-        concurrency,
-        offthreadVideoThreads,
-        mediaCacheSizeInBytes,
-        offthreadVideoCacheSizeInBytes,
-        hardwareAcceleration: hw,
-        // Hardware encoders do not support CRF — use an equivalent bitrate instead
-        ...hw === "if-possible" ? { videoBitrate: String(bitrateForCrf(resolution.width, resolution.height, fps, 18)) } : {},
-        cancelSignal,
-        onProgress: ({ progress }) => {
-          const pct = Math.round(progress * 100);
-          onRenderProgress?.(progress);
-          logger.debug(`[RemotionRenderer] Render: ${pct}%`);
-        }
-      });
-    } catch (err) {
-      if (options.signal?.aborted) throw new RenderCancelledError();
-      throw err;
-    } finally {
-      options.signal?.removeEventListener("abort", onAbort);
-    }
-  };
-  let hardwareFallback = false;
-  if (hardwareAcceleration === "if-possible") {
-    try {
-      await runOnce("if-possible");
-    } catch (err) {
-      if (options.signal?.aborted) throw err;
-      logger.warn(`[RemotionRenderer] Hardware-accelerated render failed, retrying with software: ${String(err)}`);
-      hardwareFallback = true;
-      await runOnce("disable");
-    }
-  } else {
-    await runOnce("disable");
-  }
-  logger.info(`[RemotionRenderer] Overlay complete: ${outputPath}`);
-  return { hardwareFallback };
-}
-function normalizeTransitionType(raw) {
-  if (!raw || typeof raw !== "string") return "dissolve";
-  const clean = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
-  switch (clean) {
-    case "none":
-    case "hard-cut":
-    case "hardcut":
-    case "cut":
-      return "cut";
-    case "crossfade":
-    case "cross-fade":
-    case "fade":
-      return "fade";
-    case "dissolve":
-      return "dissolve";
-    case "wipe-left":
-    case "wipeleft":
-      return "wipeleft";
-    case "wipe-right":
-    case "wiperight":
-      return "wiperight";
-    case "slide-left":
-    case "slideleft":
-      return "slideleft";
-    case "slide-right":
-    case "slideright":
-      return "slideright";
-    case "smooth-left":
-    case "smoothleft":
-      return "smoothleft";
-    case "smooth-right":
-    case "smoothright":
-      return "smoothright";
-    case "circle-open":
-    case "circleopen":
-      return "circleopen";
-    case "circle-close":
-    case "circleclose":
-      return "circleclose";
-    case "pixelize":
-    case "pixelate":
-      return "pixelize";
-    case "zoom":
-    case "zoom-in":
-    case "zoomin":
-      return "zoomin";
-    default:
-      return "dissolve";
-  }
-}
-function validateTransitionSettings(raw) {
-  if (!raw || typeof raw !== "object") return void 0;
-  if (!raw.enabled) {
-    return {
-      enabled: false,
-      mode: "smart",
-      defaultDuration: 0.35,
-      chapterDuration: 0.65
-    };
-  }
-  const mode = raw.mode === "single" ? "single" : "smart";
-  let singleType = void 0;
-  if (mode === "single") {
-    singleType = normalizeTransitionType(raw.singleType);
-  }
-  const defaultDuration = typeof raw.defaultDuration === "number" && Number.isFinite(raw.defaultDuration) ? Math.max(0.15, Math.min(1, raw.defaultDuration)) : 0.35;
-  const chapterDuration = typeof raw.chapterDuration === "number" && Number.isFinite(raw.chapterDuration) ? Math.max(0.25, Math.min(1.2, raw.chapterDuration)) : 0.65;
-  return {
-    enabled: true,
-    mode,
-    singleType,
-    defaultDuration: Math.round(defaultDuration * 1e3) / 1e3,
-    chapterDuration: Math.round(chapterDuration * 1e3) / 1e3
-  };
-}
-function resolveAllTransitions(sceneEntries, settings, openingHints) {
-  const count = sceneEntries.length;
-  if (count <= 1) return [];
-  const result = [];
-  for (let i = 0; i < count - 1; i++) {
-    const fromEntry = sceneEntries[i];
-    const toEntry = sceneEntries[i + 1];
-    const fromScene = fromEntry.scene;
-    const toScene = toEntry.scene;
-    let type = "dissolve";
-    let duration = settings.defaultDuration;
-    let reason = "";
-    if (settings.mode === "single") {
-      type = settings.singleType ?? "dissolve";
-      if (type === "cut") {
-        duration = 0;
-        reason = "single mode cut";
-      } else if (toEntry.isFirstInChapter) {
-        duration = settings.chapterDuration;
-        reason = "single mode chapter boundary";
-      } else {
-        duration = settings.defaultDuration;
-        reason = "single mode normal boundary";
-      }
-    } else {
-      const openingHint = openingHints?.find(
-        (h) => h.fromSceneIndex === fromScene.sceneIndex && h.toSceneIndex === toScene.sceneIndex
-      );
-      if (openingHint) {
-        type = openingHint.type;
-        duration = openingHint.duration ?? (type === "cut" ? 0 : settings.defaultDuration);
-        reason = `opening composer hint: ${openingHint.reason}`;
-      } else if (toScene.transitionIn) {
-        type = normalizeTransitionType(toScene.transitionIn);
-        if (type === "cut") {
-          duration = 0;
-          reason = "smart mode plan requested cut";
-        } else if (toEntry.isFirstInChapter) {
-          duration = settings.chapterDuration;
-          reason = "smart mode plan requested transition at chapter start";
-        } else if (toEntry.isFirstInSequence) {
-          duration = Math.min(settings.defaultDuration + 0.1, 0.6);
-          reason = "smart mode plan requested transition at sequence start";
-        } else {
-          duration = settings.defaultDuration;
-          reason = "smart mode plan requested transition";
-        }
-      } else {
-        if (toEntry.isFirstInChapter) {
-          type = "fade";
-          duration = settings.chapterDuration;
-          reason = "smart mode default new chapter fade";
-        } else if (toEntry.isFirstInSequence) {
-          type = "dissolve";
-          duration = Math.min(settings.defaultDuration + 0.1, 0.6);
-          reason = "smart mode default new sequence dissolve";
-        } else {
-          type = "dissolve";
-          duration = settings.defaultDuration;
-          reason = "smart mode default scene dissolve";
-        }
-      }
-    }
-    if (type !== "cut" && duration > 0) {
-      const fromDur = fromScene.duration;
-      const toDur = toScene.duration;
-      if (typeof fromDur !== "number" || !Number.isFinite(fromDur) || fromDur <= 0 || typeof toDur !== "number" || !Number.isFinite(toDur) || toDur <= 0) {
-        type = "cut";
-        duration = 0;
-        reason += " (invalid scene duration -> fallback cut)";
-      } else {
-        const maxSafe = Math.min(fromDur * 0.35, toDur * 0.35);
-        const safeDuration = Math.min(duration, maxSafe);
-        if (safeDuration < 0.12 || !Number.isFinite(safeDuration)) {
-          type = "cut";
-          duration = 0;
-          reason += ` (safe duration ${safeDuration.toFixed(3)}s < 0.12s threshold -> fallback cut)`;
-        } else {
-          duration = Math.round(safeDuration * 1e4) / 1e4;
-        }
-      }
-    } else {
-      duration = 0;
-    }
-    result.push({
-      fromSceneIndex: fromScene.sceneIndex,
-      toSceneIndex: toScene.sceneIndex,
-      type,
-      duration,
-      reason
-    });
-  }
-  return result;
-}
-function buildTransitionFilterGraph(scenes, transitions, fps) {
-  const count = scenes.length;
-  if (count <= 1) {
-    throw new Error("At least 2 scenes required to build transition filter graph");
-  }
-  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0);
-  const inputDurations = [];
-  const filterParts = [];
-  for (let i = 0; i < count; i++) {
-    const origDuration = scenes[i].duration;
-    const outgoingTrans = i < count - 1 ? transitions[i] : void 0;
-    const outgoingPadding = outgoingTrans && outgoingTrans.type !== "cut" && outgoingTrans.duration > 0 ? outgoingTrans.duration : 0;
-    const totalInputDuration = Math.round((origDuration + outgoingPadding) * 1e4) / 1e4;
-    inputDurations.push(totalInputDuration);
-    if (outgoingPadding > 0) {
-      filterParts.push(
-        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p,tpad=stop_mode=clone:stop_duration=${outgoingPadding.toFixed(4)}[v${i}]`
-      );
-    } else {
-      filterParts.push(
-        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[v${i}]`
-      );
-    }
-  }
-  let currentStream = "[v0]";
-  let currentEncodedDuration = inputDurations[0];
-  for (let i = 0; i < count - 1; i++) {
-    const trans = transitions[i];
-    const nextStream = `[v${i + 1}]`;
-    const nextInputDuration = inputDurations[i + 1];
-    if (trans.type !== "cut" && trans.duration > 0) {
-      const xfadeOffset = Math.round((currentEncodedDuration - trans.duration) * 1e4) / 1e4;
-      const outLabel = `[x${i}]`;
-      filterParts.push(
-        `${currentStream}${nextStream}xfade=transition=${trans.type}:duration=${trans.duration.toFixed(4)}:offset=${xfadeOffset.toFixed(4)}${outLabel}`
-      );
-      currentEncodedDuration = Math.round((currentEncodedDuration + nextInputDuration - trans.duration) * 1e4) / 1e4;
-      currentStream = outLabel;
-    } else {
-      const outLabel = `[c${i}]`;
-      filterParts.push(
-        `${currentStream}${nextStream}concat=n=2:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS,fps=${fps}${outLabel}`
-      );
-      currentEncodedDuration = Math.round((currentEncodedDuration + nextInputDuration) * 1e4) / 1e4;
-      currentStream = outLabel;
-    }
-  }
-  const finalTrimDur = Math.round(expectedDuration * 1e4) / 1e4;
-  filterParts.push(
-    `${currentStream}trim=duration=${finalTrimDur.toFixed(4)},setpts=PTS-STARTPTS[vout]`
-  );
-  return {
-    filterComplex: filterParts.join(";\n"),
-    expectedDuration: finalTrimDur,
-    inputDurations
-  };
-}
-async function probeVideoDuration(filePath) {
-  try {
-    const ffp = require("ffprobe-static");
-    if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
-    return new Promise((resolve) => {
-      const proc = cp.spawn(
-        ffp.path,
-        [
-          "-v",
-          "error",
-          "-show_entries",
-          "format=duration",
-          "-of",
-          "default=noprint_wrappers=1:nokey=1",
-          filePath
-        ],
-        { windowsHide: true }
-      );
-      let stdout = "";
-      proc.stdout.on("data", (d) => {
-        stdout += d.toString();
-      });
-      proc.on("close", (code) => {
-        if (code === 0) {
-          const val = parseFloat(stdout.trim());
-          resolve(Number.isFinite(val) ? val : null);
-        } else {
-          resolve(null);
-        }
-      });
-      proc.on("error", () => resolve(null));
-    });
-  } catch {
-    return null;
-  }
-}
-function ffmpegRun$3(args, options) {
-  return ffmpegRun$4(args, options ?? {});
-}
-function planTransitionSegments(scenes, transitions, fps, maxScenesPerSegment) {
-  const count = scenes.length;
-  const starts = [];
-  let acc = 0;
-  for (const s of scenes) {
-    starts.push(acc);
-    acc += s.duration;
-  }
-  const total = Math.round(acc * 1e4) / 1e4;
-  const totalFrames = Math.ceil(total * fps - 1e-6);
-  const splitScenes = [];
-  const maxPer = Math.max(2, Math.floor(maxScenesPerSegment));
-  let lastSplitScene = 0;
-  for (let k = 1; k < count; k++) {
-    if (k - lastSplitScene < maxPer) continue;
-    const incoming = transitions[k - 1];
-    const dIn = incoming && incoming.type !== "cut" ? incoming.duration : 0;
-    const pureStart = starts[k] + dIn;
-    const pureEnd = k + 1 < count ? starts[k + 1] : total;
-    const frame = Math.ceil(pureStart * fps - 1e-6) + 1;
-    if (frame / fps >= pureEnd - 1 / fps || frame >= totalFrames) continue;
-    splitScenes.push({ scene: k, frame });
-    lastSplitScene = k;
-  }
-  const segments = [];
-  let curScene = 0;
-  let curFrame = 0;
-  for (let i = 0; i <= splitScenes.length; i++) {
-    const next = splitScenes[i];
-    const endFrame = next ? next.frame : totalFrames;
-    const lastScene = next ? next.scene : count - 1;
-    segments.push({
-      segmentIndex: segments.length + 1,
-      firstScene: curScene,
-      lastScene,
-      shiftSec: starts[curScene],
-      startSec: curFrame / fps,
-      endSec: next ? endFrame / fps : total,
-      startFrame: curFrame,
-      endFrameExclusive: endFrame
-    });
-    if (next) {
-      curScene = next.scene;
-      curFrame = next.frame;
-    }
-  }
-  return segments;
-}
-function buildSegmentFilterGraph(allScenes, allTransitions, seg, fps) {
-  const subScenes = allScenes.slice(seg.firstScene, seg.lastScene + 1);
-  const subTransitions = allTransitions.slice(seg.firstScene, seg.lastScene);
-  let body;
-  if (subScenes.length === 1) {
-    body = `[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[seg0]`;
-  } else {
-    const { filterComplex } = buildTransitionFilterGraph(subScenes, subTransitions, fps);
-    const lines = filterComplex.split(";\n");
-    lines.pop();
-    const lastLabelMatch = /(\[[a-z]\d+\])$/.exec(lines[lines.length - 1]);
-    const lastLabel = lastLabelMatch ? lastLabelMatch[1] : "[v0]";
-    lines.push(`${lastLabel}null[seg0]`);
-    body = lines.join(";\n");
-  }
-  return `${body};
-[seg0]setpts=PTS+${seg.shiftSec.toFixed(6)}/TB,trim=start=${seg.startSec.toFixed(6)}:end=${seg.endSec.toFixed(6)},setpts=PTS-STARTPTS[vout]`;
-}
-async function concatSceneClipsWithTransitions(params) {
-  const {
-    sceneEntries,
-    sceneClips,
-    settings,
-    fps,
-    rawVideoPath,
-    onProgress,
-    openingHints
-  } = params;
-  if (sceneEntries.length <= 1 || sceneClips.length <= 1) {
-    return false;
-  }
-  const transitions = resolveAllTransitions(sceneEntries, settings, openingHints);
-  const cutCount = transitions.filter((t) => t.type === "cut").length;
-  const fadeCount = transitions.filter((t) => t.type === "fade").length;
-  const dissolveCount = transitions.filter((t) => t.type === "dissolve").length;
-  const otherCount = transitions.length - cutCount - fadeCount - dissolveCount;
-  const scenes = sceneEntries.map((e) => e.scene);
-  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0);
-  logger.info(
-    `[Transitions] enabled=true mode=${settings.mode} boundaries=${transitions.length}`
-  );
-  logger.info(
-    `[Transitions] cut=${cutCount} fade=${fadeCount} dissolve=${dissolveCount} other=${otherCount}`
-  );
-  logger.info(`[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s`);
-  if (cutCount === transitions.length) {
-    logger.info("[Transitions] All boundaries are hard cuts -- skipping xfade filter_complex");
-    return false;
-  }
-  onProgress?.("Applying scene transitions...", 0.78);
-  const codecArgs = params.videoCodecArgs ?? ["-c:v", "libx264", "-preset", "fast", "-crf", "20"];
-  const maxPer = params.maxScenesPerSegment ?? 0;
-  const useSegments = !!params.segmentRunner && maxPer >= 2 && sceneClips.length > maxPer + 1;
-  if (!useSegments) {
-    const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps);
-    logger.debug(`[Transitions] FFmpeg filter_complex:
-${filterComplex}`);
-    const inputArgs = [];
-    for (const clip of sceneClips) {
-      inputArgs.push("-i", clip);
-    }
-    const args = [
-      "-y",
-      ...inputArgs,
-      "-filter_complex",
-      filterComplex,
-      "-map",
-      "[vout]",
-      ...codecArgs,
-      "-pix_fmt",
-      "yuv420p",
-      "-r",
-      String(fps),
-      "-movflags",
-      "+faststart",
-      rawVideoPath
-    ];
-    await ffmpegRun$3(args, params.ffmpegOptions);
-  } else {
-    const segments = planTransitionSegments(scenes, transitions, fps, maxPer);
-    logger.info(`[Transitions] Segmented assembly: ${segments.length} segments (≤${maxPer + 1} inputs each)`);
-    const segmentFiles = [];
-    for (const seg of segments) {
-      onProgress?.(
-        `Assembling scene segment ${seg.segmentIndex}/${segments.length}...`,
-        0.78 + seg.segmentIndex / segments.length * 0.05
-      );
-      const file = await params.segmentRunner(seg, async (outputPath) => {
-        const inputArgs = [];
-        for (let i = seg.firstScene; i <= seg.lastScene; i++) inputArgs.push("-i", sceneClips[i]);
-        const filterComplex = buildSegmentFilterGraph(scenes, transitions, seg, fps);
-        await ffmpegRun$3([
-          "-y",
-          ...inputArgs,
-          "-filter_complex",
-          filterComplex,
-          "-map",
-          "[vout]",
-          ...codecArgs,
-          "-pix_fmt",
-          "yuv420p",
-          "-r",
-          String(fps),
-          outputPath
-        ], params.ffmpegOptions);
-      });
-      segmentFiles.push(file);
-    }
-    const listPath = path__namespace.join(params.tmpDir, `assembly-concat-${Date.now()}.txt`);
-    fs__namespace.writeFileSync(
-      listPath,
-      segmentFiles.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f.replace(/'/g, "'\\''")}'`).join("\n"),
-      "utf-8"
-    );
-    try {
-      await ffmpegRun$3(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", rawVideoPath], params.ffmpegOptions);
-    } finally {
-      try {
-        fs__namespace.unlinkSync(listPath);
-      } catch {
-      }
-    }
-  }
-  const outputDuration = await probeVideoDuration(rawVideoPath);
-  if (outputDuration !== null) {
-    const diff = Math.abs(outputDuration - expectedDuration);
-    logger.info(
-      `[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s, outputDuration=${outputDuration.toFixed(3)}s, diff=${diff.toFixed(3)}s`
-    );
-    const maxAllowedDiff = 1 / fps + 0.03;
-    if (diff > maxAllowedDiff) {
-      logger.warn(
-        `[Transitions] Duration deviation ${diff.toFixed(3)}s exceeds tolerance ${maxAllowedDiff.toFixed(3)}s`
-      );
-    }
-  } else {
-    logger.warn(
-      `[Transitions] Could not probe output duration, expectedDuration=${expectedDuration.toFixed(3)}s`
-    );
-  }
-  return true;
-}
-const LEVEL_CONFIG = {
-  low: {
-    maxBeatsPerScene: 2,
-    minBeatDuration: 4,
-    maxBeatDuration: 10,
-    cropAllowed: true,
-    proofVisualAllowed: true,
-    patternInterruptCooldown: 45,
-    strongEffectCooldown: 30
-  },
-  balanced: {
-    maxBeatsPerScene: 3,
-    minBeatDuration: 2.5,
-    maxBeatDuration: 7,
-    cropAllowed: true,
-    proofVisualAllowed: true,
-    patternInterruptCooldown: 25,
-    strongEffectCooldown: 20
-  },
-  high: {
-    maxBeatsPerScene: 4,
-    minBeatDuration: 1.8,
-    maxBeatDuration: 5,
-    cropAllowed: true,
-    proofVisualAllowed: true,
-    patternInterruptCooldown: 15,
-    strongEffectCooldown: 12
-  }
-};
-const ADDRESS_REGEX = /\b\d+\s+\w[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Highway|Hwy|Way|Place|Pl|Court|Ct)(?:[,.\s]+[\w\s]+)*/i;
-const UNIT_NUMBER_REGEX = /\b(\d{1,3}(?:,\d{3})+|\d{4,})\s+(people|persons|individuals|colonies|farms|states|acres|miles|kilometers|km|counties|homes|families|workers|companies|factories|ships|aircraft|troops|soldiers|nations|countries|tribes|reserves|parks)\b/i;
-const PROOF_PATTERNS = [
-  // Priority 1 — Dollar amounts (most impactful)
-  {
-    type: "number_card",
-    priority: 1,
-    regex: /\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|thousand|M|B|K))?|\b\d+(?:\.\d+)?\s*(?:million|billion)\s+dollars?\b/i,
-    label: "Dollar figure",
-    icon: "money",
-    position: "bottom_right"
-  },
-  // Priority 2 — Percentage
-  {
-    type: "stat_emphasis",
-    priority: 2,
-    regex: /\d+(?:\.\d+)?\s*(?:%|percent)\b/i,
-    label: "Percentage",
-    icon: "stat",
-    position: "bottom_left"
-  },
-  // Priority 3 — Million/billion/thousand (no dollar sign)
-  {
-    type: "stat_emphasis",
-    priority: 3,
-    regex: /\b\d+(?:\.\d+)?\s+(?:million|billion|thousand)\b(?!\s+dollars?)/i,
-    label: "Big stat",
-    icon: "stat",
-    position: "bottom_right"
-  },
-  // Priority 4 — Unit number (60,000 people etc.)
-  {
-    type: "number_card",
-    priority: 4,
-    regex: UNIT_NUMBER_REGEX,
-    label: "Unit number",
-    icon: "stat",
-    position: "bottom_right"
-  },
-  // Priority 5 — Large bare number
-  {
-    type: "number_card",
-    priority: 5,
-    regex: /\b\d{1,3}(?:,\d{3}){2,}\b/,
-    label: "Large number",
-    icon: "none",
-    position: "bottom_right"
-  },
-  // Priority 6 — Year (with context word nearby)
-  {
-    type: "date_card",
-    priority: 6,
-    regex: /\b(?:in|during|by|since|from|after|before|around|until|as of)\s+(1[0-9]{3}|20[0-9]{2})\b|(1[0-9]{3}|20[0-9]{2})\s+(?:to|through|until|–|-)\s+(?:1[0-9]{3}|20[0-9]{2})/i,
-    label: "Year",
-    icon: "calendar",
-    position: "top_right"
-  }
-];
-const KNOWN_LOCATIONS = [
-  // US States
-  { name: "Montana", canonical: "MONTANA", confidence: 0.95 },
-  { name: "South Dakota", canonical: "SOUTH DAKOTA", confidence: 0.95 },
-  { name: "North Dakota", canonical: "NORTH DAKOTA", confidence: 0.95 },
-  { name: "Wyoming", canonical: "WYOMING", confidence: 0.95 },
-  { name: "Colorado", canonical: "COLORADO", confidence: 0.9 },
-  { name: "Minnesota", canonical: "MINNESOTA", confidence: 0.9 },
-  { name: "Wisconsin", canonical: "WISCONSIN", confidence: 0.9 },
-  { name: "Iowa", canonical: "IOWA", confidence: 0.9 },
-  { name: "Kansas", canonical: "KANSAS", confidence: 0.9 },
-  { name: "Nebraska", canonical: "NEBRASKA", confidence: 0.9 },
-  { name: "Texas", canonical: "TEXAS", confidence: 0.9 },
-  { name: "California", canonical: "CALIFORNIA", confidence: 0.9 },
-  { name: "New York", canonical: "NEW YORK", confidence: 0.9 },
-  { name: "Pennsylvania", canonical: "PENNSYLVANIA", confidence: 0.9 },
-  { name: "Ohio", canonical: "OHIO", confidence: 0.9 },
-  { name: "Illinois", canonical: "ILLINOIS", confidence: 0.9 },
-  { name: "Michigan", canonical: "MICHIGAN", confidence: 0.9 },
-  { name: "Indiana", canonical: "INDIANA", confidence: 0.9 },
-  { name: "Missouri", canonical: "MISSOURI", confidence: 0.9 },
-  { name: "Washington", canonical: "WASHINGTON", confidence: 0.85 },
-  { name: "Oregon", canonical: "OREGON", confidence: 0.9 },
-  { name: "Idaho", canonical: "IDAHO", confidence: 0.9 },
-  { name: "Utah", canonical: "UTAH", confidence: 0.9 },
-  { name: "Nevada", canonical: "NEVADA", confidence: 0.9 },
-  { name: "Arizona", canonical: "ARIZONA", confidence: 0.9 },
-  { name: "New Mexico", canonical: "NEW MEXICO", confidence: 0.9 },
-  { name: "Oklahoma", canonical: "OKLAHOMA", confidence: 0.9 },
-  { name: "Arkansas", canonical: "ARKANSAS", confidence: 0.9 },
-  { name: "Louisiana", canonical: "LOUISIANA", confidence: 0.9 },
-  { name: "Mississippi", canonical: "MISSISSIPPI", confidence: 0.9 },
-  { name: "Alabama", canonical: "ALABAMA", confidence: 0.9 },
-  { name: "Georgia", canonical: "GEORGIA", confidence: 0.85 },
-  { name: "Florida", canonical: "FLORIDA", confidence: 0.9 },
-  { name: "Tennessee", canonical: "TENNESSEE", confidence: 0.9 },
-  { name: "Kentucky", canonical: "KENTUCKY", confidence: 0.9 },
-  { name: "Virginia", canonical: "VIRGINIA", confidence: 0.85 },
-  { name: "West Virginia", canonical: "WEST VIRGINIA", confidence: 0.9 },
-  { name: "North Carolina", canonical: "NORTH CAROLINA", confidence: 0.9 },
-  { name: "South Carolina", canonical: "SOUTH CAROLINA", confidence: 0.9 },
-  { name: "Maryland", canonical: "MARYLAND", confidence: 0.85 },
-  { name: "Delaware", canonical: "DELAWARE", confidence: 0.85 },
-  { name: "Connecticut", canonical: "CONNECTICUT", confidence: 0.85 },
-  { name: "Massachusetts", canonical: "MASSACHUSETTS", confidence: 0.9 },
-  { name: "Vermont", canonical: "VERMONT", confidence: 0.85 },
-  { name: "New Hampshire", canonical: "NEW HAMPSHIRE", confidence: 0.85 },
-  { name: "Maine", canonical: "MAINE", confidence: 0.85 },
-  { name: "Rhode Island", canonical: "RHODE ISLAND", confidence: 0.85 },
-  { name: "New Jersey", canonical: "NEW JERSEY", confidence: 0.85 },
-  { name: "Alaska", canonical: "ALASKA", confidence: 0.9 },
-  { name: "Hawaii", canonical: "HAWAII", confidence: 0.9 },
-  // Canadian Provinces
-  { name: "Manitoba", canonical: "MANITOBA, CANADA", confidence: 0.95 },
-  { name: "Saskatchewan", canonical: "SASKATCHEWAN, CANADA", confidence: 0.95 },
-  { name: "Alberta", canonical: "ALBERTA, CANADA", confidence: 0.95 },
-  { name: "British Columbia", canonical: "BRITISH COLUMBIA, CANADA", confidence: 0.9 },
-  { name: "Ontario", canonical: "ONTARIO, CANADA", confidence: 0.85 },
-  { name: "Quebec", canonical: "QUEBEC, CANADA", confidence: 0.9 },
-  // Major cities (high confidence)
-  { name: "Chicago", canonical: "CHICAGO", confidence: 0.9 },
-  { name: "Los Angeles", canonical: "LOS ANGELES", confidence: 0.9 },
-  { name: "Houston", canonical: "HOUSTON", confidence: 0.9 },
-  { name: "Phoenix", canonical: "PHOENIX", confidence: 0.9 },
-  { name: "Philadelphia", canonical: "PHILADELPHIA", confidence: 0.9 },
-  { name: "San Antonio", canonical: "SAN ANTONIO", confidence: 0.9 },
-  { name: "San Diego", canonical: "SAN DIEGO", confidence: 0.9 },
-  { name: "Dallas", canonical: "DALLAS", confidence: 0.9 },
-  { name: "San Francisco", canonical: "SAN FRANCISCO", confidence: 0.9 },
-  { name: "Seattle", canonical: "SEATTLE", confidence: 0.9 },
-  { name: "Denver", canonical: "DENVER", confidence: 0.9 },
-  { name: "Boston", canonical: "BOSTON", confidence: 0.9 },
-  { name: "Detroit", canonical: "DETROIT", confidence: 0.9 },
-  { name: "Minneapolis", canonical: "MINNEAPOLIS", confidence: 0.9 },
-  { name: "Winnipeg", canonical: "WINNIPEG, CANADA", confidence: 0.9 },
-  // Countries
-  { name: "Canada", canonical: "CANADA", confidence: 0.9 },
-  { name: "United States", canonical: "UNITED STATES", confidence: 0.85 },
-  { name: "Mexico", canonical: "MEXICO", confidence: 0.85 }
-];
-function detectLocationInText(text, contextLocations) {
-  const prioritized = KNOWN_LOCATIONS;
-  const sorted = [...prioritized].sort((a, b) => b.name.length - a.name.length);
-  for (const loc of sorted) {
-    const escaped = loc.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const regex = new RegExp(`\\b${escaped}\\b`, "i");
-    if (regex.test(text)) {
-      {
-        const withCountryMatch = text.match(
-          new RegExp(`\\b${escaped}\\s*,\\s*(Canada|USA|US|United States|Mexico)\\b`, "i")
-        );
-        if (withCountryMatch) {
-          return {
-            canonical: `${loc.name.toUpperCase()}, ${withCountryMatch[1].toUpperCase()}`,
-            confidence: 0.99
-          };
-        }
-      }
-      return { canonical: loc.canonical, confidence: loc.confidence };
-    }
-  }
-  return null;
-}
-function detectProofVisual(narrativeText, sceneId, relativeTime, durationSecs, contextLocations) {
-  if (!narrativeText || narrativeText.trim().length === 0) return null;
-  const addressMatch = narrativeText.match(ADDRESS_REGEX);
-  if (addressMatch) {
-    const text = addressMatch[0].trim().slice(0, 48);
-    return {
-      type: "location_label",
-      primaryText: text.toUpperCase(),
-      sourceField: "narrativeText",
-      relativeTime,
-      durationSecs: Math.min(durationSecs, 2.5),
-      position: "top_right",
-      stylePreset: "location_tag",
-      icon: "location",
-      confidence: 0.85
-    };
-  }
-  for (const pattern of PROOF_PATTERNS) {
-    const match = narrativeText.match(pattern.regex);
-    if (match) {
-      let primaryText = match[0].trim();
-      if (pattern.type === "date_card") {
-        const yearMatch = primaryText.match(/\b(1[0-9]{3}|20[0-9]{2})\b/);
-        if (yearMatch) primaryText = yearMatch[1];
-      }
-      if (primaryText.length > 32) primaryText = primaryText.slice(0, 32);
-      return {
-        type: pattern.type,
-        primaryText,
-        sourceField: "narrativeText",
-        relativeTime,
-        durationSecs: Math.min(durationSecs, 2.5),
-        position: pattern.position,
-        icon: pattern.icon,
-        confidence: 0.9
-      };
-    }
-  }
-  const locationResult = detectLocationInText(narrativeText);
-  if (locationResult && locationResult.confidence >= 0.8) {
-    return {
-      type: "location_label",
-      primaryText: locationResult.canonical.slice(0, 48),
-      sourceField: "narrativeText",
-      relativeTime,
-      durationSecs: Math.min(durationSecs, 2),
-      position: "top_left",
-      stylePreset: "location_tag",
-      icon: "location",
-      confidence: locationResult.confidence
-    };
-  }
-  return null;
-}
-function seedInt(sceneIndex, variant) {
-  return (sceneIndex * 2654435761 + variant * 40503 >>> 0) % 100;
-}
-function computeBeatDurations(sceneDuration, beatCount, sceneIndex, cfg) {
-  if (beatCount <= 1) return [sceneDuration];
-  const weights = [];
-  for (let i = 0; i < beatCount; i++) {
-    const seed = seedInt(sceneIndex, i);
-    weights.push(0.7 + seed / 100 * 0.6);
-  }
-  const totalWeight = weights.reduce((a, b) => a + b, 0);
-  const durations = weights.map((w) => {
-    const raw = w / totalWeight * sceneDuration;
-    return Math.max(cfg.minBeatDuration, Math.min(cfg.maxBeatDuration, raw));
-  });
-  const total = durations.reduce((a, b) => a + b, 0);
-  const ratio = sceneDuration / total;
-  return durations.map((d) => Math.round(d * ratio * 100) / 100);
-}
-function computeSemanticCrop(visualIntent, sceneIndex, beatIndex) {
-  if (!visualIntent) return void 0;
-  const text = visualIntent.toLowerCase();
-  const hasClearSubject = text.includes("person") || text.includes("face") || text.includes("hand") || text.includes("worker") || text.includes("machine") || text.includes("farm") || text.includes("equipment") || text.includes("animal") || text.includes("detail") || text.includes("close") || text.includes("operator");
-  if (!hasClearSubject) return void 0;
-  const seed = seedInt(sceneIndex, beatIndex + 10);
-  const scale = 1.06 + seed / 100 * 0.09;
-  const roundedScale = Math.round(scale * 100) / 100;
-  const offsetSeed = seedInt(sceneIndex, beatIndex + 20);
-  const x = (offsetSeed / 100 - 0.5) * 0.08;
-  return { x, y: 0, scale: roundedScale };
-}
-function cropToZoomFilter(crop, width, height, duration, fps) {
-  if (!crop || crop.scale <= 1.005) return void 0;
-  const s = crop.scale;
-  const frames = Math.round(duration * fps);
-  const xExtraPixels = Math.round((s - 1) * width * 0.5 + crop.x * width * (s - 1));
-  const yExtraPixels = Math.round((s - 1) * height * 0.5 + crop.y * height * (s - 1));
-  const xClamp = Math.max(0, Math.min(Math.round((s - 1) * width), xExtraPixels));
-  const yClamp = Math.max(0, Math.min(Math.round((s - 1) * height), yExtraPixels));
-  return `zoompan=z='${s.toFixed(3)}':x='${xClamp}':y='${yClamp}':d=${frames}:s=${width}x${height}:fps=${fps}`;
-}
-function resolveVisualBeats(scene, ctx, level) {
-  const cfg = LEVEL_CONFIG[level];
-  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
-  const energy = scene.energyLevel ?? "medium";
-  const duration = scene.duration;
-  let targetBeats = 1;
-  const isLongEnough = duration >= cfg.minBeatDuration * 2.5;
-  const isDramatic = energy === "low";
-  const isFast = energy === "high";
-  if (!isLongEnough) {
-    targetBeats = 1;
-  } else if (isDramatic) {
-    targetBeats = duration >= 8 ? 2 : 1;
-  } else if (isFast) {
-    const seed = seedInt(scene.sceneIndex, 1);
-    targetBeats = Math.min(cfg.maxBeatsPerScene, seed < 40 ? 2 : 3);
-  } else {
-    const seed = seedInt(scene.sceneIndex, 2);
-    targetBeats = seed < 60 ? 1 : 2;
-  }
-  const hint = scene.retentionHint;
-  if (hint) {
-    if (hint.beatPacing === "fast" && isLongEnough) {
-      targetBeats = Math.min(cfg.maxBeatsPerScene, Math.max(targetBeats, 2));
-    } else if (hint.beatPacing === "slow") {
-      targetBeats = duration >= 9 ? Math.min(targetBeats, 2) : 1;
-    }
-  }
-  targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
-  if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
-    targetBeats = Math.min(targetBeats, 1);
-  }
-  const beatDurations = computeBeatDurations(duration, targetBeats, scene.sceneIndex, cfg);
-  let cursor = 0;
-  const beats = [];
-  let proofVisualFound = null;
-  for (let i = 0; i < targetBeats; i++) {
-    const beatDuration = beatDurations[i];
-    const relStart = parseFloat(cursor.toFixed(3));
-    const relEnd = parseFloat((cursor + beatDuration).toFixed(3));
-    let beatType = "main_shot";
-    let beatPurpose = "establish";
-    let crop;
-    if (i === 0) {
-      beatType = "main_shot";
-      beatPurpose = "establish";
-    } else if (i === 1) {
-      const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
-      if (cfg.proofVisualAllowed && hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
-        const maxPvDur = hint?.proofPriority === "high" ? 3.5 : 2.5;
-        const pv = detectProofVisual(
-          scene.narrativeText,
-          sceneId,
-          relStart,
-          Math.min(beatDuration, maxPvDur)
-        );
-        if (pv) {
-          proofVisualFound = pv;
-          beatType = "proof_visual";
-          beatPurpose = "emphasize";
-        }
-      }
-      if (beatType === "main_shot") {
-        if (cfg.cropAllowed) {
-          const cropParams = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i);
-          if (cropParams) {
-            beatType = "detail_crop";
-            beatPurpose = "explain";
-            crop = cropParams;
-          }
-        }
-      }
-    } else {
-      const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
-      const shouldTriggerInterrupt = (scene.isPatternInterrupt || hint?.patternInterrupt) && timeSinceInterrupt >= cfg.patternInterruptCooldown;
-      if (shouldTriggerInterrupt) {
-        beatType = "pattern_interrupt";
-        beatPurpose = "reset_attention";
-      } else {
-        beatType = "secondary_asset";
-        beatPurpose = "explain";
-        if (cfg.cropAllowed) {
-          crop = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i + 5);
-        }
-      }
-    }
-    beats.push({
-      id: `beat_${sceneId}_${i}`,
-      sceneId,
-      relativeStart: relStart,
-      relativeEnd: relEnd,
-      type: beatType,
-      purpose: beatPurpose,
-      sourceAssetId: scene.localPath,
-      crop
-    });
-    cursor += beatDuration;
-  }
-  logger.info(
-    `[RetentionEngine] scene ${sceneId}: ${targetBeats} beat(s), energy=${energy}, dur=${duration.toFixed(1)}s` + (proofVisualFound ? `, proof=${proofVisualFound.primaryText}` : "")
-  );
-  return { beats, proofVisual: proofVisualFound };
-}
-function computeVisualLoad(params) {
-  let score = 0;
-  if (params.hasActiveCaption) score += 1;
-  if (params.hasStrongCaption) score += 1;
-  if (params.beatCount > 2) score += 1;
-  if (params.hasProofVisual) score += 2;
-  if (params.hasSfx) score += 1;
-  if (params.hasPatternInterrupt) score += 2;
-  return score;
-}
-const MAX_VISUAL_LOAD = 6;
-function resolveTransition(currentEnergy, previousEnergy, isNewChapter, isPatternInterrupt, prevTransition) {
-  if (isNewChapter) return "fade";
-  if (isPatternInterrupt) return "cut";
-  if (currentEnergy === "low" && previousEnergy !== "low") return "dissolve";
-  if (prevTransition === "dissolve") return "cut";
-  return "cut";
-}
-function createDefaultContext() {
-  return {
-    previousShotType: "wide",
-    previousTransitionType: "cut",
-    previousPatternInterruptType: null,
-    previousCropScale: 1,
-    timeSinceLastHumanShot: 999,
-    timeSinceLastProofVisual: 999,
-    timeSinceLastStrongEffect: 999,
-    consecutiveSameShot: 0,
-    consecutiveStrongEffect: 0,
-    accumulatedVisualLoad: 0,
-    sceneIndex: 0,
-    timeSinceLastRehook: 999,
-    timeSinceLastPatternInterrupt: 999,
-    recentNoveltyScores: [],
-    recentSceneRoles: [],
-    recentMotionPresets: [],
-    recentVisualCategories: [],
-    openLoopIds: []
-  };
-}
-function resolveSceneRetention(scene, ctx, settings) {
-  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
-  if (!settings.enabled) {
-    return makeSingleBeatDecision(sceneId, scene);
-  }
-  try {
-    return _resolveRetention(scene, ctx, settings);
-  } catch (err) {
-    logger.warn(`[RetentionEngine] scene ${sceneId} fallback: ${String(err)}`);
-    return makeSingleBeatDecision(sceneId, scene);
-  }
-}
-function _resolveRetention(scene, ctx, settings) {
-  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
-  const level = settings.level;
-  const notes = [];
-  const { beats, proofVisual } = resolveVisualBeats(scene, ctx, level);
-  const rawVisualLoad = computeVisualLoad({
-    hasActiveCaption: scene.hasCaptionInRange ?? false,
-    hasStrongCaption: scene.hasStrongCaption ?? false,
-    beatCount: beats.length,
-    hasProofVisual: proofVisual !== null && settings.proofVisualsEnabled,
-    hasSfx: scene.hasSfxInRange ?? false,
-    hasPatternInterrupt: scene.isPatternInterrupt ?? false
-  });
-  let finalBeats = beats;
-  let finalProof = proofVisual && settings.proofVisualsEnabled ? proofVisual : null;
-  if (rawVisualLoad > MAX_VISUAL_LOAD) {
-    notes.push(`Visual load ${rawVisualLoad} > ${MAX_VISUAL_LOAD} — reducing to single beat`);
-    logger.info(`[RetentionEngine] scene ${sceneId}: overload guard triggered (load=${rawVisualLoad})`);
-    finalBeats = [beats[0]];
-    finalProof = null;
-  }
-  for (const beat of finalBeats) {
-    if (beat.crop && beat.crop.scale > 1.005) {
-      beat.zoomFilter = `__crop_${beat.crop.scale}_${beat.crop.x}_${beat.crop.y}__`;
-    }
-  }
-  const transitionType = resolveTransition(
-    scene.energyLevel ?? "medium",
-    ctx.previousShotType === "wide" ? "medium" : "medium",
-    scene.isNewChapter ?? false,
-    scene.isPatternInterrupt ?? false,
-    ctx.previousTransitionType
-  );
-  const finalVisualLoad = computeVisualLoad({
-    hasActiveCaption: scene.hasCaptionInRange ?? false,
-    hasStrongCaption: scene.hasStrongCaption ?? false,
-    beatCount: finalBeats.length,
-    hasProofVisual: finalProof !== null,
-    hasSfx: scene.hasSfxInRange ?? false,
-    hasPatternInterrupt: scene.isPatternInterrupt ?? false
-  });
-  return {
-    sceneId,
-    visualBeats: finalBeats,
-    proofVisual: finalProof ?? void 0,
-    transitionType,
-    visualLoadScore: finalVisualLoad,
-    audioLoadScore: (scene.hasSfxInRange ? 1 : 0) + (scene.hasCaptionInRange ? 0.5 : 0),
-    notes
-  };
-}
-function makeSingleBeatDecision(sceneId, scene) {
-  return {
-    sceneId,
-    visualBeats: [{
-      id: `beat_${sceneId}_0`,
-      sceneId,
-      relativeStart: 0,
-      relativeEnd: scene.duration,
-      type: "main_shot",
-      purpose: "establish",
-      sourceAssetId: scene.localPath
-    }],
-    visualLoadScore: 0,
-    audioLoadScore: 0,
-    transitionType: "cut",
-    notes: ["legacy single-beat"]
-  };
-}
-function updateRetentionContext(ctx, scene, decision) {
-  ctx.sceneIndex++;
-  ctx.previousShotType = scene.shotType ?? "medium";
-  ctx.previousTransitionType = decision.transitionType ?? "cut";
-  ctx.timeSinceLastStrongEffect += scene.duration;
-  ctx.timeSinceLastProofVisual += scene.duration;
-  ctx.timeSinceLastHumanShot += scene.duration;
-  const hint = scene.retentionHint;
-  if (hint?.role === "re-hook" || hint?.role === "hook") {
-    ctx.timeSinceLastRehook = 0;
-  } else {
-    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration;
-  }
-  if (hint?.patternInterrupt || scene.isPatternInterrupt) {
-    ctx.timeSinceLastPatternInterrupt = 0;
-  } else {
-    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
-  }
-  if (hint?.noveltyScore !== void 0) {
-    ctx.recentNoveltyScores = [...ctx.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
-  }
-  if (hint?.role) {
-    ctx.recentSceneRoles = [...ctx.recentSceneRoles || [], hint.role].slice(-10);
-  }
-  if (decision.proofVisual) {
-    ctx.timeSinceLastProofVisual = 0;
-  }
-  if (scene.isPatternInterrupt || hint?.patternInterrupt) {
-    ctx.timeSinceLastStrongEffect = 0;
-    ctx.previousPatternInterruptType = "pattern_interrupt";
-  }
-  if (decision.visualBeats.length > 2) {
-    ctx.timeSinceLastStrongEffect = 0;
-  }
-}
-const QA_CONFIG = {
-  longStaticThresholdHigh: 7,
-  // giây — high energy scene không nên tĩnh lâu hơn
-  longStaticThresholdMedium: 12,
-  // giây — medium energy
-  longStaticThresholdLow: 20,
-  // giây — low energy OK để dài hơn
-  repeatedShotTypeWindow: 4
-};
-const PROOF_REGEX = /\$[\d,]+|\d+\.?\d*\s*%|\b(1[0-9]{3}|20[0-9]{2})\b|\d{1,3}(,\d{3})+|\b\d+\s*(million|billion|thousand)\b/i;
-function makeFlag(sceneId, flagType, severity, description, suggestion) {
-  return { sceneId, flagType, severity, description, suggestion };
-}
-function runRetentionQA(scenes, retentionPlan) {
-  const flags = [];
-  for (const scene of scenes) {
-    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
-    const energy = scene.energyLevel ?? "medium";
-    const beats = scene.visualBeats;
-    let longestBeat = scene.duration;
-    if (beats && beats.length > 0) {
-      longestBeat = Math.max(...beats.map((b) => b.relativeEnd - b.relativeStart));
-    }
-    const threshold = energy === "high" ? QA_CONFIG.longStaticThresholdHigh : energy === "low" ? QA_CONFIG.longStaticThresholdLow : QA_CONFIG.longStaticThresholdMedium;
-    if (longestBeat > threshold) {
-      flags.push(makeFlag(
-        sceneId,
-        "LONG_STATIC_VISUAL",
-        energy === "high" ? "warning" : "info",
-        `Longest beat ${longestBeat.toFixed(1)}s exceeds threshold ${threshold}s for ${energy} energy`,
-        energy === "high" ? "Add detail crop or secondary visual" : "Consider subtle crop for variety"
-      ));
-    }
-  }
-  if (scenes.length >= QA_CONFIG.repeatedShotTypeWindow) {
-    for (let i = 0; i <= scenes.length - QA_CONFIG.repeatedShotTypeWindow; i++) {
-      const window = scenes.slice(i, i + QA_CONFIG.repeatedShotTypeWindow);
-      const firstShot = window[0].shotType;
-      if (firstShot && window.every((s) => s.shotType === firstShot)) {
-        const sceneId = window[QA_CONFIG.repeatedShotTypeWindow - 1].sceneId ?? String(window[QA_CONFIG.repeatedShotTypeWindow - 1].sceneIndex);
-        flags.push(makeFlag(
-          sceneId,
-          "REPEATED_SHOT_TYPE",
-          "warning",
-          `${QA_CONFIG.repeatedShotTypeWindow} consecutive "${firstShot}" shot type scenes`,
-          "Try detail crop or secondary asset with different framing"
-        ));
-        i += QA_CONFIG.repeatedShotTypeWindow - 1;
-      }
-    }
-  }
-  let windowProofCount = 0;
-  let windowHasStatCount = 0;
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i];
-    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
-    const hasStatInNarration = scene.narrativeText ? PROOF_REGEX.test(scene.narrativeText) : false;
-    if (hasStatInNarration) windowHasStatCount++;
-    const hasPvBeat = scene.visualBeats?.some((b) => b.type === "proof_visual") ?? false;
-    if (hasPvBeat) windowProofCount++;
-    if ((i + 1) % 5 === 0) {
-      if (windowHasStatCount >= 2 && windowProofCount === 0) {
-        flags.push(makeFlag(
-          sceneId,
-          "MISSING_PROOF_OPPORTUNITY",
-          "info",
-          `${windowHasStatCount} stat references in last 5 scenes with no proof visuals`,
-          "Enable proofVisualsEnabled in retention settings"
-        ));
-      }
-      windowProofCount = 0;
-      windowHasStatCount = 0;
-    }
-  }
-  let noResetSeconds = 0;
-  const NO_RESET_THRESHOLD = 30;
-  for (const scene of scenes) {
-    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
-    const hasReset = scene.isPatternInterrupt || (scene.visualBeats ?? []).some(
-      (b) => b.type === "pattern_interrupt" || b.type === "proof_visual"
-    );
-    if (!hasReset) {
-      noResetSeconds += scene.duration;
-      if (noResetSeconds > NO_RESET_THRESHOLD) {
-        flags.push(makeFlag(
-          sceneId,
-          "NO_VISUAL_RESET",
-          "warning",
-          `${Math.round(noResetSeconds)}s without visual reset or pattern interrupt`,
-          "Add proof visual or detail crop in this stretch"
-        ));
-        noResetSeconds = 0;
-      }
-    } else {
-      noResetSeconds = 0;
-    }
-  }
-  if (retentionPlan) {
-    const plans = retentionPlan.scenes || [];
-    for (let i = 2; i < plans.length; i++) {
-      const p0 = plans[i - 2];
-      const p1 = plans[i - 1];
-      const p2 = plans[i];
-      if (p0.noveltyScore < 0.4 && p1.noveltyScore < 0.4 && p2.noveltyScore < 0.4) {
-        flags.push(makeFlag(
-          p2.sceneId,
-          "LOW_NOVELTY_STREAK",
-          "warning",
-          `Low novelty streak across 3 consecutive scenes (${p0.noveltyScore.toFixed(2)}, ${p1.noveltyScore.toFixed(2)}, ${p2.noveltyScore.toFixed(2)})`,
-          "Vary camera motion, apply detail crop, or introduce a proof visual"
-        ));
-      }
-    }
-    const motionHistory = [];
-    for (const sc of scenes) {
-      const motion = sc.motionPreset || sc.motion?.preset;
-      if (motion) {
-        motionHistory.push({ sceneId: sc.sceneId ?? String(sc.sceneIndex), motion });
-      }
-    }
-    for (let i = 2; i < motionHistory.length; i++) {
-      const m0 = motionHistory[i - 2].motion;
-      const m1 = motionHistory[i - 1].motion;
-      const m2 = motionHistory[i].motion;
-      if (m0 && m1 === m0 && m2 === m0) {
-        flags.push(makeFlag(
-          motionHistory[i].sceneId,
-          "REPEATED_MOTION",
-          "warning",
-          `3 consecutive AI still scenes use identical motion preset "${m0}"`,
-          "Use alternate motion preset or subtle pan to increase visual variety"
-        ));
-      }
-    }
-    for (let i = 2; i < scenes.length; i++) {
-      const c0 = scenes[i - 2].category;
-      const c1 = scenes[i - 1].category;
-      const c2 = scenes[i].category;
-      if (c0 && c1 === c0 && c2 === c0 && c0 !== "conceptual") {
-        flags.push(makeFlag(
-          scenes[i].sceneId ?? String(scenes[i].sceneIndex),
-          "REPEATED_VISUAL_CATEGORY",
-          "info",
-          `3 consecutive scenes share the same visual category "${c0}"`,
-          "Ensure camera angles or framing vary between scenes"
-        ));
-      }
-    }
-    for (const loop of retentionPlan.openLoops || []) {
-      if (loop.status === "open" && loop.confidence >= 0.85) {
-        flags.push(makeFlag(
-          String(loop.openedAtSceneIndex),
-          "OPEN_LOOP_UNRESOLVED",
-          "info",
-          `Open loop "${loop.question}" has no identified payoff scene`,
-          "Consider addressing or answering the open question in a later scene"
-        ));
-      }
-    }
-    const targetGap = retentionPlan.strategy?.targetRehookGapSecs || 35;
-    let timeSinceLastRehook = 0;
-    for (const p of plans) {
-      const sc = scenes.find((s) => s.sceneIndex === p.sceneIndex);
-      const dur = sc?.duration || 4;
-      if (p.role === "hook" || p.role === "re-hook" || p.role === "surprise" || p.patternInterrupt) {
-        if (timeSinceLastRehook > targetGap * 1.5) {
-          flags.push(makeFlag(
-            p.sceneId,
-            "REHOOK_GAP_TOO_LONG",
-            "warning",
-            `Re-hook gap of ${Math.round(timeSinceLastRehook)}s exceeded recommended target (${targetGap}s)`,
-            "Add an engaging narrative question or pattern interrupt earlier"
-          ));
-        }
-        timeSinceLastRehook = 0;
-      } else {
-        timeSinceLastRehook += dur;
-      }
-    }
-  }
-  const bySeverity = {
-    error: flags.filter((f) => f.severity === "error").length,
-    warning: flags.filter((f) => f.severity === "warning").length,
-    info: flags.filter((f) => f.severity === "info").length
-  };
-  logger.info(
-    `[RetentionQA] ${flags.length} flags: ${bySeverity.error} errors, ${bySeverity.warning} warnings, ${bySeverity.info} info`
-  );
-  return flags;
-}
-function generateRetentionSummary(scenes, retentionPlan, flags = []) {
-  let totalDuration = 0;
-  for (const s of scenes) {
-    totalDuration += s.duration || 0;
-  }
-  const lowNoveltyFlags = flags.filter((f) => f.flagType === "LOW_NOVELTY_STREAK").length;
-  const longRehookFlags = flags.filter((f) => f.flagType === "REHOOK_GAP_TOO_LONG").length;
-  const repeatedMotionFlags = flags.filter((f) => f.flagType === "REPEATED_MOTION").length;
-  const overeditedFlags = flags.filter((f) => f.flagType === "OVEREDITED" || f.flagType === "EFFECT_OVERLOAD").length;
-  const detectedLoops = retentionPlan?.openLoops?.length || 0;
-  const resolvedLoops = retentionPlan?.openLoops?.filter((l) => l.status === "resolved").length || 0;
-  const unresolvedLoops = detectedLoops - resolvedLoops;
-  const patternInterrupts = retentionPlan?.summary?.patternInterrupts ?? scenes.filter((s) => s.isPatternInterrupt).length;
-  let avgNovelty = 0.7;
-  if (retentionPlan?.scenes && retentionPlan.scenes.length > 0) {
-    const sum = retentionPlan.scenes.reduce((acc, sp) => acc + (sp.noveltyScore || 0), 0);
-    avgNovelty = Math.round(sum / retentionPlan.scenes.length * 100) / 100;
-  }
-  let healthScore = 100;
-  healthScore -= lowNoveltyFlags * 5;
-  healthScore -= longRehookFlags * 5;
-  healthScore -= repeatedMotionFlags * 3;
-  healthScore -= unresolvedLoops * 4;
-  healthScore -= overeditedFlags * 4;
-  healthScore = Math.max(40, Math.min(100, healthScore));
-  return {
-    schemaVersion: 1,
-    sceneCount: scenes.length,
-    durationSecs: Math.round(totalDuration * 10) / 10,
-    retentionHealthScore: healthScore,
-    riskCounts: {
-      lowNovelty: lowNoveltyFlags,
-      longRehookGap: longRehookFlags,
-      repeatedMotion: repeatedMotionFlags,
-      overedited: overeditedFlags
-    },
-    openLoops: {
-      detected: detectedLoops,
-      resolved: resolvedLoops,
-      unresolved: unresolvedLoops
-    },
-    patternInterrupts,
-    averageNoveltyScore: avgNovelty
-  };
-}
-function saveRetentionSummary(projectDir, summary) {
-  try {
-    const summaryPath = path__namespace.join(projectDir, "analysis", "retention-summary.json");
-    const dir = path__namespace.dirname(summaryPath);
-    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
-    fs__namespace.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf-8");
-    logger.info(`[RetentionQA] Retention summary saved to retention-summary.json (score=${summary.retentionHealthScore})`);
-  } catch (err) {
-    logger.warn(`[RetentionQA] Failed to save retention summary: ${String(err)}`);
-  }
-}
-const STOP_WORDS = /* @__PURE__ */ new Set([
-  "a",
-  "an",
-  "the",
-  "in",
-  "on",
-  "at",
-  "of",
-  "for",
-  "with",
-  "by",
-  "about",
-  "against",
-  "between",
-  "into",
-  "through",
-  "during",
-  "before",
-  "after",
-  "above",
-  "below",
-  "to",
-  "from",
-  "up",
-  "down",
-  "is",
-  "are",
-  "was",
-  "were",
-  "be",
-  "been",
-  "being",
-  "have",
-  "has",
-  "had",
-  "do",
-  "does",
-  "did",
-  "and",
-  "but",
-  "if",
-  "or",
-  "because",
-  "as",
-  "until",
-  "while",
-  "this",
-  "that",
-  "these",
-  "those",
-  "it",
-  "its",
-  "show",
-  "showing",
-  "shot",
-  "view",
-  "close",
-  "up",
-  "scene",
-  "visual",
-  "cinematic",
-  "high",
-  "quality",
-  "you",
-  "your",
-  "we",
-  "our",
-  "us",
-  "they",
-  "them",
-  "their",
-  "he",
-  "him",
-  "his",
-  "she",
-  "her",
-  "now",
-  "right",
-  "here",
-  "there",
-  "just",
-  "even",
-  "also",
-  "any",
-  "all",
-  "some",
-  "many",
-  "much",
-  "more",
-  "most",
-  "very",
-  "really",
-  "however",
-  "furthermore",
-  "what",
-  "why",
-  "how",
-  "when",
-  "where",
-  "which",
-  "who",
-  "whose",
-  "whom",
-  "can",
-  "could",
-  "will",
-  "would",
-  "should",
-  "may",
-  "might",
-  "must",
-  "without",
-  "well",
-  "like"
-]);
-function extractNormalizedKeywords(text) {
-  if (!text || typeof text !== "string") return [];
-  const tokens = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP_WORDS.has(w));
-  return Array.from(new Set(tokens));
-}
-function classifySubjectType(visualIntent, category, narrativeText) {
-  const combined = `${category || ""} ${visualIntent || ""} ${narrativeText || ""}`.toLowerCase();
-  if (combined.includes("anatomy") || combined.includes("organ") || combined.includes("kidney") || combined.includes("heart") || combined.includes("liver") || combined.includes("artery") || combined.includes("blood") || combined.includes("cell") || combined.includes("neuron") || combined.includes("tissue") || combined.includes("vessel") || combined.includes("microscopic")) {
-    return "anatomy";
-  }
-  if (combined.includes("person") || combined.includes("doctor") || combined.includes("patient") || combined.includes("man") || combined.includes("woman") || combined.includes("face") || combined.includes("hand") || combined.includes("worker") || combined.includes("lifestyle") || combined.includes("human")) {
-    return "human";
-  }
-  if (combined.includes("data") || combined.includes("chart") || combined.includes("graph") || combined.includes("study") || combined.includes("stat") || combined.includes("evidence") || combined.includes("percentage") || combined.includes("number")) {
-    return "data";
-  }
-  if (combined.includes("landscape") || combined.includes("hospital") || combined.includes("clinic") || combined.includes("room") || combined.includes("city") || combined.includes("outdoor") || combined.includes("nature") || combined.includes("environment")) {
-    return "environment";
-  }
-  if (combined.includes("pill") || combined.includes("bottle") || combined.includes("food") || combined.includes("equipment") || combined.includes("machine") || combined.includes("tool") || combined.includes("object")) {
-    return "object";
-  }
-  if (combined.includes("conceptual") || combined.includes("mechanism")) {
-    return "conceptual";
-  }
-  return "unknown";
-}
-function computeKeywordJaccard(kw1, kw2) {
-  if (kw1.length === 0 || kw2.length === 0) return 0;
-  const set1 = new Set(kw1);
-  const set2 = new Set(kw2);
-  let intersection = 0;
-  for (const w of set1) {
-    if (set2.has(w)) intersection++;
-  }
-  const union = set1.size + set2.size - intersection;
-  return union > 0 ? intersection / union : 0;
-}
-function computeSignatureSimilarity(current, previous, isIntentionalMotif = false) {
-  let sim = 0;
-  if (current.visualSource && previous.visualSource && current.visualSource === previous.visualSource) {
-    sim += 0.15;
-  }
-  if (current.shotType && previous.shotType && current.shotType.toLowerCase() === previous.shotType.toLowerCase()) {
-    sim += 0.2;
-  }
-  const sameCategory = Boolean(
-    current.category && previous.category && current.category.toLowerCase() === previous.category.toLowerCase()
-  );
-  const sameSubject = Boolean(
-    current.subjectType && previous.subjectType && current.subjectType !== "unknown" && current.subjectType === previous.subjectType
-  );
-  let categorySim = sameCategory ? 0.3 : sameSubject ? 0.2 : 0;
-  if (isIntentionalMotif && (sameCategory || sameSubject)) {
-    categorySim *= 0.4;
-  }
-  sim += categorySim;
-  const kwOverlap = computeKeywordJaccard(current.visualIntentKeywords, previous.visualIntentKeywords);
-  sim += kwOverlap * (isIntentionalMotif ? 0.12 : 0.25);
-  if (current.motionPreset && previous.motionPreset && current.motionPreset === previous.motionPreset) {
-    sim += 0.1;
-  }
-  return Math.min(0.88, Math.max(0, sim));
-}
-function computeNoveltyScore(current, recentHistory, motifsOrWindowSize = [], windowSizeOpt = 4) {
-  if (recentHistory.length === 0) {
-    return 1;
-  }
-  let motifs = [];
-  let windowSize = 4;
-  if (typeof motifsOrWindowSize === "number") {
-    windowSize = motifsOrWindowSize;
-  } else if (Array.isArray(motifsOrWindowSize)) {
-    motifs = motifsOrWindowSize;
-    windowSize = windowSizeOpt;
-  }
-  const window = recentHistory.slice(-windowSize);
-  const weights = [0.45, 0.25, 0.18, 0.12].slice(0, window.length);
-  let totalWeight = 0;
-  let weightedDistanceSum = 0;
-  let highSimStreak = 0;
-  for (let idx = 0; idx < window.length; idx++) {
-    const prev = window[window.length - 1 - idx];
-    const weight = weights[idx] || 0.1;
-    const isMotif = Boolean(
-      current.motifId && prev.motifId && current.motifId === prev.motifId || current.motifId && motifs.some((m) => m.id === current.motifId && m.recurringSceneIndices.includes(prev.sceneIndex)) || current.motifId && (prev.category === current.category || prev.visualIntentKeywords.some((kw) => current.motifId?.includes(kw)))
-    );
-    const similarity = computeSignatureSimilarity(current, prev, isMotif);
-    if (similarity >= 0.5) {
-      highSimStreak++;
-    }
-    const distance = 1 - similarity;
-    weightedDistanceSum += distance * weight;
-    totalWeight += weight;
-  }
-  let score = totalWeight > 0 ? weightedDistanceSum / totalWeight : 1;
-  if (highSimStreak >= 2) {
-    const fatiguePenalty = (highSimStreak - 1) * 0.04;
-    score = Math.max(0.01, score - fatiguePenalty);
-  }
-  return Math.round(score * 100) / 100;
-}
-function isLowNoveltyStreak(noveltyScores, minStreakOrThreshold = 3, thresholdOrMinStreak) {
-  let minStreak = 3;
-  let threshold = 0.4;
-  {
-    {
-      threshold = minStreakOrThreshold;
-      minStreak = thresholdOrMinStreak;
-    }
-  }
-  if (noveltyScores.length < minStreak) return false;
-  const lastN = noveltyScores.slice(-minStreak);
-  return lastN.every((s) => s < threshold);
-}
-const RETENTION_PLAN_SCHEMA_VERSION = 1;
-function sha256$4(text) {
-  return crypto__namespace.createHash("sha256").update(text).digest("hex");
-}
-function writeFileAtomic$6(filePath, content) {
-  const dir = path__namespace.dirname(filePath);
-  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
-  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
-  fs__namespace.writeFileSync(tmp, content, "utf-8");
-  fs__namespace.renameSync(tmp, filePath);
-}
-function getSceneText(scene) {
-  return (scene.narrativeText || scene.narration || "").trim();
-}
-const QUESTION_STARTERS = /^(why|how|what|could|can|is\s+it\s+true|where|when|which|who|what\s+if)\b/i;
-const TEASER_PATTERNS = [
-  /\bthe\s+real\s+(reason|problem|truth|cause)\b/i,
-  /\bthere\s+is\s+another\s+(reason|problem|factor)\b/i,
-  /\bwhat\s+happens\s+next\b/i,
-  /\blater\s+(we('ll| will)|in\s+this)\b/i,
-  /\bas\s+we('ll| will)\s+(see|discover|learn|find\s+out)\b/i,
-  /\bthe\s+truth\s+is\s+far\s+more\b/i,
-  /\bwait\s+until\s+you\s+(see|hear|discover)\b/i,
-  /\bthe\s+secret\s+behind\b/i
-];
-const PAYOFF_SIGNALS = [
-  /\bthe\s+reason\b.*\b(is|was)\b/i,
-  /\bthis\s+happens\s+because\b/i,
-  /\bthe\s+answer\b.*\b(is|comes\s+down\s+to|lies\s+in)\b/i,
-  /\bit\s+turns\s+out\b/i,
-  /\bhere('s| is)\s+why\b/i,
-  /\bthat('s| is)\s+why\b/i,
-  /\bnow\s+we\s+(understand|know)\b/i,
-  /\bresearchers\s+(discovered|found|proved)\b/i,
-  /\bthe\s+solution\s+(is|was)\b/i
-];
-function detectOpenLoops(scenes) {
-  const loops = [];
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i];
-    const text = getSceneText(scene);
-    if (!text || text.length < 10) continue;
-    const hasQuestionMark = text.includes("?");
-    const isQuestionSentence = QUESTION_STARTERS.test(text);
-    const hasTeaserPhrase = TEASER_PATTERNS.some((p) => p.test(text));
-    if (!hasQuestionMark && !isQuestionSentence && !hasTeaserPhrase) {
-      continue;
-    }
-    if (i === 0 && !hasTeaserPhrase) {
-      continue;
-    }
-    const isPureDeclarative = !hasQuestionMark && !hasTeaserPhrase && !isQuestionSentence;
-    if (isPureDeclarative) continue;
-    const keywords = extractNormalizedKeywords(text).filter(
-      (k) => !["why", "how", "what", "when", "where", "next", "reason", "happen"].includes(k)
-    );
-    if (keywords.length === 0) continue;
-    const loopId = `loop_${i + 1}`;
-    loops.push({
-      id: loopId,
-      openedAtSceneIndex: scene.sceneIndex,
-      question: text.slice(0, 120),
-      confidence: hasTeaserPhrase || hasQuestionMark ? 0.9 : 0.75,
-      status: "open",
-      keywords
-    });
-  }
-  for (const loop of loops) {
-    let bestPayoffIndex;
-    let maxOverlap = 0;
-    for (let j = 0; j < scenes.length; j++) {
-      const candidate = scenes[j];
-      if (candidate.sceneIndex <= loop.openedAtSceneIndex) continue;
-      const candidateText = getSceneText(candidate).toLowerCase();
-      const hasPayoffSignal = PAYOFF_SIGNALS.some((p) => p.test(candidateText));
-      const candidateKeywords = extractNormalizedKeywords(candidateText);
-      let overlapCount = 0;
-      for (const kw of loop.keywords) {
-        const matches = candidateKeywords.some(
-          (ck) => ck === kw || ck.length >= 4 && kw.length >= 4 && (ck.startsWith(kw) || kw.startsWith(ck))
-        );
-        if (matches) {
-          overlapCount++;
-        }
-      }
-      const distance = candidate.sceneIndex - loop.openedAtSceneIndex;
-      if (hasPayoffSignal) {
-        if (overlapCount >= 1 || distance <= 4) {
-          if (overlapCount >= maxOverlap) {
-            maxOverlap = overlapCount;
-            bestPayoffIndex = candidate.sceneIndex;
-          }
-        }
-      } else if (overlapCount >= 2 && distance > 1) {
-        if (overlapCount > maxOverlap) {
-          maxOverlap = overlapCount;
-          bestPayoffIndex = candidate.sceneIndex;
-        }
-      }
-    }
-    if (bestPayoffIndex !== void 0) {
-      loop.payoffSceneIndex = bestPayoffIndex;
-      loop.status = "resolved";
-    }
-  }
-  return loops;
-}
-function detectMotifs(scenes) {
-  const keywordSceneMap = /* @__PURE__ */ new Map();
-  for (const s of scenes) {
-    const text = `${s.visualIntent || ""} ${getSceneText(s)}`;
-    const kws = extractNormalizedKeywords(text);
-    for (const kw of kws) {
-      if (kw.length < 4) continue;
-      const list = keywordSceneMap.get(kw) || [];
-      list.push(s.sceneIndex);
-      keywordSceneMap.set(kw, list);
-    }
-  }
-  const motifs = [];
-  for (const [kw, indices] of keywordSceneMap.entries()) {
-    const uniqueIndices = Array.from(new Set(indices));
-    if (uniqueIndices.length >= 3 && uniqueIndices.length <= scenes.length * 0.6) {
-      motifs.push({
-        id: `motif_${kw}`,
-        label: kw,
-        conceptKeywords: [kw],
-        firstSeenSceneIndex: uniqueIndices[0],
-        recurringSceneIndices: uniqueIndices
-      });
-    }
-  }
-  motifs.sort((a, b) => b.recurringSceneIndices.length - a.recurringSceneIndices.length);
-  return motifs.slice(0, 5);
-}
-const PROOF_KEYWORDS = /\b(percent|%|\$|study|studies|trial|trials|data|researchers|university|published|patients|statistics|proven|evidence|hospital|dr\.|doctor|clinical)\b/i;
-const MECHANISM_KEYWORDS = /\b(pathway|process|filters|absorbs|produces|mechanism|triggers|causes|functions|cells|vessels|bloodstream|molecules|artery|system|organ|tissue)\b/i;
-const COMPARISON_KEYWORDS = /\b(compared\s+to|unlike|versus|vs|in\s+contrast|differently|while|on\s+the\s+other\s+hand|standard|traditional)\b/i;
-const SURPRISE_KEYWORDS = /\b(unexpectedly|surprisingly|strange|shocking|twist|catch|ironically|little\s+known|hidden|secret)\b/i;
-const SOLUTION_KEYWORDS = /\b(solution|prevent|treat|treatment|protocol|action|step|remedy|cure|how\s+to|takeaway)\b/i;
-const BRIDGE_KEYWORDS = /\b(meanwhile|moving\s+on|next|furthermore|now\s+let's|turning\s+to)\b/i;
-const RECAP_KEYWORDS = /\b(to\s+summarize|in\s+summary|we\s+have\s+seen|remember|recap)\b/i;
-const CONCLUSION_KEYWORDS = /\b(finally|in\s+conclusion|ultimately|final\s+thought|takeaway|in\s+the\s+end)\b/i;
-function classifySceneRole(scene, totalScenes, elapsedSecs, openLoop, isPayoffScene, arrayIndex) {
-  const text = getSceneText(scene).toLowerCase();
-  (scene.visualIntent || "").toLowerCase();
-  const isFirst = arrayIndex !== void 0 ? arrayIndex === 0 : scene.sceneIndex <= 1;
-  if (isFirst) {
-    return { role: "hook", reason: "Opening hook: establish strong core intrigue" };
-  }
-  if (isPayoffScene) {
-    return { role: "payoff", reason: "Resolves previously established open loop question" };
-  }
-  if (openLoop && openLoop.openedAtSceneIndex === scene.sceneIndex) {
-    return { role: "open-loop", reason: `Introduces open loop: "${openLoop.question}"` };
-  }
-  const isLast = arrayIndex !== void 0 ? arrayIndex === totalScenes - 1 : scene.sceneIndex >= totalScenes;
-  if (isLast || CONCLUSION_KEYWORDS.test(text)) {
-    return { role: "conclusion", reason: "Final takeaway / conclusion of narrative" };
-  }
-  if (RECAP_KEYWORDS.test(text)) {
-    return { role: "recap", reason: "Synthesizes previous insights" };
-  }
-  if (SOLUTION_KEYWORDS.test(text)) {
-    return { role: "solution", reason: "Presents actionable remedy or solution" };
-  }
-  if (SURPRISE_KEYWORDS.test(text)) {
-    return { role: "surprise", reason: "Presents counter-intuitive or surprising fact" };
-  }
-  if (PROOF_KEYWORDS.test(text) || /\b\d+(\.\d+)?%|\$\d+|\b\d{1,3}(,\d{3})+\b/.test(text)) {
-    return { role: "proof", reason: "Narrative presents factual data, study, or statistics" };
-  }
-  if (COMPARISON_KEYWORDS.test(text)) {
-    return { role: "comparison", reason: "Compares alternatives, contrast, or duality" };
-  }
-  if (MECHANISM_KEYWORDS.test(text)) {
-    return { role: "mechanism", reason: "Explains internal workings or biological mechanism" };
-  }
-  if (scene.sceneIndex <= 2) {
-    return { role: "setup", reason: "Establishes foundational context" };
-  }
-  if (BRIDGE_KEYWORDS.test(text)) {
-    return { role: "bridge", reason: "Narrative bridge between topics" };
-  }
-  if (text.includes("problem") || text.includes("danger") || text.includes("risk") || text.includes("fail")) {
-    return { role: "problem", reason: "Highlights conflict, obstacle, or risk" };
-  }
-  return { role: "setup", reason: "Narrative context" };
-}
-function analyzeRetentionPlan(rawScenes, options = {}) {
-  const level = options.level || "balanced";
-  const targetRehookGapSecs = options.targetRehookGapSecs || (level === "high" ? 25 : level === "low" ? 50 : 35);
-  const maxNoResetSecs = options.maxNoResetSecs || (level === "high" ? 30 : level === "low" ? 60 : 42);
-  const noveltyWindowScenes = options.noveltyWindowScenes || 4;
-  const totalScenes = rawScenes.length;
-  let totalDuration = 0;
-  for (const s of rawScenes) {
-    totalDuration += s.duration || 0;
-  }
-  const openLoops = detectOpenLoops(rawScenes);
-  const payoffSceneSet = /* @__PURE__ */ new Set();
-  const loopByOpenedScene = /* @__PURE__ */ new Map();
-  for (const l of openLoops) {
-    loopByOpenedScene.set(l.openedAtSceneIndex, l);
-    if (l.payoffSceneIndex !== void 0) {
-      payoffSceneSet.add(l.payoffSceneIndex);
-    }
-  }
-  const motifs = detectMotifs(rawScenes);
-  const motifSceneMap = /* @__PURE__ */ new Map();
-  for (const m of motifs) {
-    for (const scIdx of m.recurringSceneIndices) {
-      if (!motifSceneMap.has(scIdx)) {
-        motifSceneMap.set(scIdx, m.id);
-      }
-    }
-  }
-  const signatures = [];
-  const scenePlans = [];
-  const recentNoveltyScores = [];
-  let elapsedSecs = 0;
-  let timeSinceLastReset = 0;
-  let timeSinceLastPatternInterrupt = 999;
-  let hookCount = 0;
-  let rehookCount = 0;
-  let payoffCount = 0;
-  let interruptCount = 0;
-  let lowNoveltyCount = 0;
-  for (let i = 0; i < rawScenes.length; i++) {
-    const scene = rawScenes[i];
-    const sceneId = scene.sceneId || String(scene.sceneIndex);
-    const duration = scene.duration || 4;
-    const openLoop = loopByOpenedScene.get(scene.sceneIndex);
-    const isPayoff = payoffSceneSet.has(scene.sceneIndex);
-    let { role, reason } = classifySceneRole(
-      scene,
-      totalScenes,
-      elapsedSecs,
-      openLoop,
-      isPayoff,
-      i
-    );
-    const canBeRehook = role !== "hook" && role !== "payoff" && role !== "conclusion" && role !== "recap" && timeSinceLastReset >= targetRehookGapSecs;
-    if (canBeRehook) {
-      const text = getSceneText(scene).toLowerCase();
-      const hasTurnSignal = text.includes("?") || text.startsWith("now") || text.startsWith("here") || text.startsWith("wait") || text.startsWith("notice") || text.startsWith("surprisingly") || text.startsWith("what about") || SURPRISE_KEYWORDS.test(text) || COMPARISON_KEYWORDS.test(text);
-      if (hasTurnSignal || timeSinceLastReset >= maxNoResetSecs) {
-        role = "re-hook";
-        reason = `Re-hook: attention refreshed after ${Math.round(timeSinceLastReset)}s neutral stretch`;
-        rehookCount++;
-        timeSinceLastReset = 0;
-      }
-    }
-    if (role === "hook") hookCount++;
-    if (role === "payoff") payoffCount++;
-    const sceneText = getSceneText(scene);
-    const kws = extractNormalizedKeywords(`${scene.visualIntent || ""} ${sceneText}`);
-    const subject = classifySubjectType(scene.visualIntent, scene.category, sceneText);
-    const sig = {
-      sceneIndex: scene.sceneIndex,
-      sceneId,
-      visualSource: scene.visualStrategy || (scene.localPath?.includes("generated") ? "ai-still" : "stock"),
-      shotType: scene.shotType || "medium",
-      energyLevel: scene.energyLevel || "medium",
-      visualIntentKeywords: kws,
-      category: scene.category,
-      motionPreset: scene.motionPreset,
-      subjectType: subject,
-      role,
-      motifId: motifSceneMap.get(scene.sceneIndex)
-    };
-    const noveltyScore = computeNoveltyScore(sig, signatures, motifs, noveltyWindowScenes);
-    signatures.push(sig);
-    recentNoveltyScores.push(noveltyScore);
-    if (noveltyScore < 0.4) {
-      lowNoveltyCount++;
-    }
-    const hasLowNoveltyStreak = isLowNoveltyStreak(recentNoveltyScores, 0.4, 3);
-    const interruptCooldown = level === "high" ? 15 : level === "low" ? 45 : 25;
-    let shouldInterrupt = false;
-    let interruptReason;
-    if (timeSinceLastPatternInterrupt >= interruptCooldown) {
-      if (role === "surprise") {
-        shouldInterrupt = true;
-        interruptReason = "Narrative surprise pivot";
-      } else if (role === "re-hook") {
-        shouldInterrupt = true;
-        interruptReason = "Re-hook attention refresh";
-      } else if (hasLowNoveltyStreak) {
-        shouldInterrupt = true;
-        interruptReason = "Low novelty streak across consecutive scenes";
-      } else if (timeSinceLastReset >= maxNoResetSecs) {
-        shouldInterrupt = true;
-        interruptReason = `Reset attention after ${Math.round(timeSinceLastReset)}s neutral stretch`;
-      } else if (scene.isPatternInterrupt) {
-        shouldInterrupt = true;
-        interruptReason = "Edit plan designated pattern interrupt";
-      }
-    }
-    if (shouldInterrupt) {
-      interruptCount++;
-      timeSinceLastPatternInterrupt = 0;
-      timeSinceLastReset = 0;
-    } else {
-      timeSinceLastPatternInterrupt += duration;
-    }
-    const isResetEvent = role === "hook" || role === "re-hook" || role === "surprise" || role === "payoff" || shouldInterrupt;
-    if (isResetEvent) {
-      timeSinceLastReset = 0;
-    } else {
-      timeSinceLastReset += duration;
-    }
-    let avoidSpoiler = false;
-    for (const l of openLoops) {
-      if (l.payoffSceneIndex !== void 0 && scene.sceneIndex > l.openedAtSceneIndex && scene.sceneIndex < l.payoffSceneIndex) {
-        avoidSpoiler = true;
-        break;
-      }
-    }
-    let intensity = "medium";
-    if (role === "hook" || role === "surprise" || role === "payoff") {
-      intensity = "high";
-    } else if (role === "bridge" || role === "conclusion" || role === "recap") {
-      intensity = "low";
-    }
-    let beatPacing = "normal";
-    if (role === "hook" || role === "re-hook" || role === "surprise") {
-      beatPacing = "fast";
-    } else if (role === "proof" || role === "payoff" || role === "bridge" || role === "conclusion") {
-      beatPacing = "slow";
-    }
-    let preferredVisualChange = "none";
-    if (shouldInterrupt) {
-      if (role === "proof") preferredVisualChange = "proof";
-      else if (role === "re-hook" || role === "surprise") preferredVisualChange = "motion";
-      else if (hasLowNoveltyStreak) preferredVisualChange = "crop";
-      else preferredVisualChange = "hard-cut";
-    }
-    let overlayPriority = "none";
-    if (role === "proof") overlayPriority = "high";
-    else if (role === "hook" || role === "payoff" || role === "surprise") overlayPriority = "medium";
-    else if (role === "re-hook") overlayPriority = "low";
-    const proofPriority = role === "proof" || role === "payoff" && PROOF_KEYWORDS.test(getSceneText(scene)) ? "high" : "normal";
-    const motionEnergy = role === "hook" || role === "re-hook" || role === "surprise" ? "elevated" : role === "proof" || role === "bridge" || role === "conclusion" ? "calm" : "normal";
-    scenePlans.push({
-      sceneIndex: scene.sceneIndex,
-      sceneId,
-      role,
-      intensity,
-      reason,
-      noveltyScore,
-      noveltyTarget: 0.5,
-      patternInterrupt: shouldInterrupt,
-      patternInterruptReason: interruptReason,
-      openLoopId: openLoop?.id,
-      payoffForLoopId: isPayoff ? openLoops.find((l) => l.payoffSceneIndex === scene.sceneIndex)?.id : void 0,
-      avoidSpoiler,
-      motionEnergy,
-      beatPacing,
-      overlayPriority,
-      proofPriority,
-      preferredVisualChange,
-      notes: [
-        `role=${role}`,
-        `novelty=${noveltyScore.toFixed(2)}`,
-        `resetTime=${Math.round(timeSinceLastReset)}s`
-      ]
-    });
-    elapsedSecs += duration;
-  }
-  const hashPayload = JSON.stringify({
-    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
-    level,
-    totalScenes,
-    scenes: rawScenes.map((s) => ({
-      i: s.sceneIndex,
-      dur: s.duration,
-      text: getSceneText(s),
-      intent: s.visualIntent,
-      e: s.energyLevel,
-      sh: s.shotType
-    }))
-  });
-  const inputHash = sha256$4(hashPayload);
-  return {
-    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    inputHash,
-    totalScenes,
-    totalDuration: Math.round(totalDuration * 100) / 100,
-    strategy: {
-      level,
-      targetRehookGapSecs,
-      maxNoResetSecs,
-      noveltyWindowScenes
-    },
-    openLoops,
-    motifs,
-    scenes: scenePlans,
-    summary: {
-      hooks: hookCount,
-      rehooks: rehookCount,
-      payoffs: payoffCount,
-      patternInterrupts: interruptCount,
-      lowNoveltyScenes: lowNoveltyCount,
-      openLoops: openLoops.length
-    }
-  };
-}
-function getRetentionPlanPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "retention-plan.json");
-}
-function loadRetentionPlan(projectDir) {
-  try {
-    const p = getRetentionPlanPath(projectDir);
-    if (!fs__namespace.existsSync(p)) return null;
-    const content = fs__namespace.readFileSync(p, "utf-8");
-    return JSON.parse(content);
-  } catch (err) {
-    logger.warn(`[RetentionDirector] Failed to load retention plan: ${String(err)}`);
-    return null;
-  }
-}
-function saveRetentionPlan(projectDir, plan) {
-  const p = getRetentionPlanPath(projectDir);
-  writeFileAtomic$6(p, JSON.stringify(plan, null, 2));
-  logger.info(
-    `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
-  );
-}
-function ensureRetentionPlan(projectDir, options) {
-  try {
-    let scenes = options?.scenes;
-    if (!scenes || scenes.length === 0) {
-      const editPlanPath = path__namespace.join(projectDir, "edit-plan", "master-edit-plan.json");
-      if (fs__namespace.existsSync(editPlanPath)) {
-        try {
-          const raw = JSON.parse(fs__namespace.readFileSync(editPlanPath, "utf-8"));
-          scenes = raw.scenes || [];
-        } catch {
-        }
-      }
-    }
-    if (!scenes || scenes.length === 0) {
-      logger.info("[RetentionDirector] No scenes provided or found in edit-plan. Skipping retention plan.");
-      return null;
-    }
-    let globalContext;
-    const globalContextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
-    if (fs__namespace.existsSync(globalContextPath)) {
-      try {
-        globalContext = JSON.parse(fs__namespace.readFileSync(globalContextPath, "utf-8"));
-      } catch {
-      }
-    }
-    const cached = loadRetentionPlan(projectDir);
-    if (cached && !options?.force) {
-      if (cached.totalScenes === scenes.length) {
-        return cached;
-      }
-    }
-    const plan = analyzeRetentionPlan(scenes, {
-      level: options?.level || "balanced",
-      globalContext
-    });
-    saveRetentionPlan(projectDir, plan);
-    return plan;
-  } catch (err) {
-    logger.warn(`[RetentionDirector] Failed to ensure retention plan (falling open): ${String(err)}`);
-    return null;
-  }
-}
-const SCENE_RENDERER_VERSION = "scene-v2.0";
-const RENDERER_SCHEMA_VERSION = "render-v2.0";
-const OVERLAY_RENDERER_VERSION = "overlay-v2.0";
-function normalizeForCanonical(value) {
-  if (value === null || value === void 0) return null;
-  if (typeof value === "number") {
-    if (!Number.isFinite(value)) return String(value);
-    return Math.round(value * 1e6) / 1e6;
-  }
-  if (typeof value === "string" || typeof value === "boolean") return value;
-  if (Array.isArray(value)) return value.map(normalizeForCanonical);
-  if (typeof value === "object") {
-    const out = {};
-    for (const key2 of Object.keys(value).sort()) {
-      const v = value[key2];
-      if (v === void 0 || typeof v === "function") continue;
-      out[key2] = normalizeForCanonical(v);
-    }
-    return out;
-  }
-  return String(value);
-}
-function canonicalJson(value) {
-  return JSON.stringify(normalizeForCanonical(value));
-}
-function sha256$3(input) {
-  return crypto__namespace.createHash("sha256").update(input).digest("hex");
-}
-function fingerprintOf(value) {
-  return sha256$3(canonicalJson(value));
-}
-function normalizeSignaturePath(p) {
-  return path__namespace.normalize(path__namespace.resolve(p));
-}
-function fileSignature(filePath) {
-  if (!filePath) return null;
-  const normalizedPath = normalizeSignaturePath(filePath);
-  try {
-    const st = fs__namespace.statSync(normalizedPath);
-    return { normalizedPath, size: st.size, mtimeMs: Math.floor(st.mtimeMs) };
-  } catch {
-    return { normalizedPath, size: 0, mtimeMs: 0, missing: true };
-  }
-}
-const SMALL_JSON_LIMIT = 8 * 1024 * 1024;
-function hashFileContent(filePath) {
-  try {
-    const st = fs__namespace.statSync(filePath);
-    if (st.size <= SMALL_JSON_LIMIT) {
-      return sha256$3(fs__namespace.readFileSync(filePath));
-    }
-    return fingerprintOf(fileSignature(filePath));
-  } catch {
-    return "absent";
-  }
-}
-function hashJsonValue(value) {
-  return value === void 0 || value === null ? "none" : fingerprintOf(value);
-}
-function computeSceneFingerprint(input) {
-  return fingerprintOf({
-    v: SCENE_RENDERER_VERSION,
-    // NOTE: sceneOrdinal is intentionally excluded — clip pixels do not depend on
-    // render position, so inserting a scene elsewhere must not invalidate this clip.
-    sceneIndex: input.sceneIndex,
-    duration: input.duration,
-    startTime: input.startTime,
-    mediaType: input.mediaType,
-    media: input.mediaSignature,
-    beats: input.visualBeats ?? null,
-    filter: input.filterChain,
-    multiBeat: input.multiBeat,
-    semanticCrop: input.semanticCrop,
-    base: input.base
-  });
-}
-function computeAssemblyFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "assembly", ...input });
-}
-function computeAudioFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "audio", ...input });
-}
-function computeOverlayBlockFingerprint(input) {
-  return fingerprintOf({ v: OVERLAY_RENDERER_VERSION, kind: "overlay-block", ...input });
-}
-function computeBlockLocalOverlayFingerprint(input) {
-  return computeOverlayBlockFingerprint({
-    overlayPropsHash: input.blockOverlayPropsHash,
-    startFrame: input.startFrame,
-    endFrameExclusive: input.endFrameExclusive,
-    totalFrames: input.totalFrames,
-    base: input.base,
-    remotionSourceHash: input.remotionSourceHash,
-    hardwareAcceleration: input.hardwareAcceleration
-  });
-}
-function computeCompositeFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "composite", ...input });
-}
-function computeRenderFingerprint(input) {
-  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "render", ...input });
-}
-function shortFingerprint(fp, len = 16) {
-  return fp.replace(/[^a-f0-9]/gi, "").slice(0, len);
-}
-function computeDirectorySignature(dir, maxEntries = 2e3) {
-  const entries = [];
-  const walk = (d) => {
-    if (entries.length >= maxEntries) return;
-    let list;
-    try {
-      list = fs__namespace.readdirSync(d, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const ent of list) {
-      if (entries.length >= maxEntries) return;
-      if (ent.name === "node_modules" || ent.name.startsWith(".")) continue;
-      const full = path__namespace.join(d, ent.name);
-      if (ent.isDirectory()) walk(full);
-      else {
-        try {
-          const st = fs__namespace.statSync(full);
-          entries.push([path__namespace.relative(dir, full), st.size, Math.floor(st.mtimeMs)]);
-        } catch {
-        }
-      }
-    }
-  };
-  walk(dir);
-  entries.sort((a, b) => a[0].localeCompare(b[0]));
-  return entries.length ? fingerprintOf(entries) : "absent";
-}
-const SCHEMA_VERSION = 1;
-const OPENING_WINDOW_SECS = 60;
-function getOpeningPlanPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "opening-retention-plan.json");
-}
-function ensureOpeningRetentionPlan(inputs) {
-  try {
-    const { projectDir, scenes, retentionPlan, captionPlan, proofVisuals, visualGrammar, globalContext } = inputs;
-    const p = getOpeningPlanPath(projectDir);
-    const openingScenes = scenes.filter((s) => s.startTime < OPENING_WINDOW_SECS);
-    const inputHash = fingerprintOf({
-      v: SCHEMA_VERSION,
-      scenes: openingScenes.map((s) => ({ i: s.sceneIndex, s: s.startTime, d: s.duration, v: s.visualIntent })),
-      retention: openingScenes.map((s) => retentionPlan.scenes[s.sceneIndex]),
-      proofVisuals: proofVisuals.filter((pv) => pv.absoluteStartTime < OPENING_WINDOW_SECS),
-      visualGrammar: visualGrammar.filter((vg) => vg.sceneIndex < openingScenes.length),
-      captionPlan: captionPlan?.enabled ? captionPlan.phrases.filter((p2) => p2.start < OPENING_WINDOW_SECS) : null,
-      globalContext
-    });
-    if (fs__namespace.existsSync(p)) {
-      try {
-        const cached = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
-        if (cached.schemaVersion === SCHEMA_VERSION && cached.inputHash === inputHash) {
-          return cached;
-        }
-      } catch {
-      }
-    }
-    const plan = buildOpeningPlan(inputs, inputHash);
-    fs__namespace.writeFileSync(p, JSON.stringify(plan, null, 2), "utf-8");
-    logger.info(
-      `[OpeningRetention] window=${plan.windowSecs}s events=${plan.events.length} transitions=${plan.transitionHints.length} sfx=${plan.sfxEvents.length}`
-    );
-    return plan;
-  } catch (err) {
-    logger.warn(`[OpeningRetention] Failed to generate plan (falling open): ${String(err)}`);
-    return null;
-  }
-}
-function buildOpeningPlan(inputs, inputHash) {
-  const { scenes, retentionPlan, captionPlan, proofVisuals } = inputs;
-  const events = [];
-  const transitionHints = [];
-  const motionHints = [];
-  const sfxEvents = [];
-  const intensityCurve = [
-    { startTime: 0, endTime: 5, intensity: 1 },
-    { startTime: 5, endTime: 15, intensity: 0.9 },
-    { startTime: 15, endTime: 30, intensity: 0.75 },
-    { startTime: 30, endTime: 45, intensity: 0.6 },
-    { startTime: 45, endTime: 60, intensity: 0.4 }
-  ];
-  const activeIntervals = [];
-  if (captionPlan?.enabled) {
-    captionPlan.phrases.filter((p) => p.start < OPENING_WINDOW_SECS).forEach((p) => {
-      activeIntervals.push({ start: p.start, end: p.end, type: "caption" });
-    });
-  }
-  proofVisuals.filter((pv) => pv.absoluteStartTime < OPENING_WINDOW_SECS).forEach((pv) => {
-    activeIntervals.push({ start: pv.absoluteStartTime, end: pv.absoluteEndTime, type: "proof" });
-  });
-  function hasCollision(start, end) {
-    return activeIntervals.some((iv) => start < iv.end && end > iv.start);
-  }
-  let lastStrongEventTime = -999;
-  for (let i = 0; i < scenes.length; i++) {
-    const scene = scenes[i];
-    if (scene.startTime >= OPENING_WINDOW_SECS) break;
-    const role = retentionPlan.scenes[i];
-    if (i > 0) {
-      const prevScene = scenes[i - 1];
-      const boundaryTime = scene.startTime;
-      if (boundaryTime < OPENING_WINDOW_SECS) {
-        if (boundaryTime < 15) {
-          transitionHints.push({
-            fromSceneIndex: prevScene.sceneIndex,
-            toSceneIndex: scene.sceneIndex,
-            boundaryTime,
-            type: role.role === "setup" ? "cut" : role.role === "payoff" ? "zoomin" : "cut",
-            strength: "normal",
-            reason: "opening-documentary-cut"
-          });
-        } else if (boundaryTime < 30) {
-          if (role.role === "payoff" || role.role === "re-hook") {
-            transitionHints.push({
-              fromSceneIndex: prevScene.sceneIndex,
-              toSceneIndex: scene.sceneIndex,
-              boundaryTime,
-              type: "wipeleft",
-              strength: "normal",
-              reason: "opening-reveal"
-            });
-          }
-        }
-      }
-    }
-    if (scene.startTime < 5 && scene.duration > 2) {
-      motionHints.push({
-        sceneIndex: scene.sceneIndex,
-        startTime: scene.startTime,
-        type: "micro-push",
-        intensity: "subtle",
-        reason: "0-5s-engagement"
-      });
-    }
-    const sceneEnd = Math.min(scene.startTime + scene.duration, OPENING_WINDOW_SECS);
-    if (role.role === "hook" && scene.startTime < 15) {
-      const phrase = captionPlan?.phrases.find((p) => p.start >= scene.startTime && p.end <= sceneEnd && p.words.length <= 5);
-      if (phrase && !hasCollision(phrase.start, phrase.start + 1.5)) {
-        if (phrase.start - lastStrongEventTime > 2) {
-          const headlineText = phrase.words.map((w) => w.text).join(" ").toUpperCase().replace(/[^A-Z0-9$!? ]/g, "");
-          events.push({
-            id: `hook-headline-${i}`,
-            sourceSceneIndex: scene.sceneIndex,
-            startTime: phrase.start,
-            duration: 1.5,
-            type: "hook-headline",
-            priority: "critical",
-            primaryText: headlineText,
-            animationPreset: "hook-punch",
-            sourceEvidence: "caption",
-            confidence: 0.95
-          });
-          sfxEvents.push({
-            id: `sfx-hook-${i}`,
-            sceneIndex: scene.sceneIndex,
-            absoluteTime: phrase.start,
-            type: "soft-impact",
-            volumeDb: 0,
-            duration: 2,
-            priority: "critical",
-            reason: "headline-impact"
-          });
-          activeIntervals.push({ start: phrase.start, end: phrase.start + 1.5, type: "hook" });
-          lastStrongEventTime = phrase.start;
-        }
-      }
-    }
-    if (role.openLoopStart && scene.startTime < 30) {
-      const qPhrase = captionPlan?.phrases.find((p) => p.start >= scene.startTime && p.end <= sceneEnd && p.words.some((w) => w.text.includes("?")));
-      if (qPhrase && !hasCollision(qPhrase.start, qPhrase.start + 1.5) && qPhrase.start - lastStrongEventTime > 3) {
-        events.push({
-          id: `question-${i}`,
-          sourceSceneIndex: scene.sceneIndex,
-          startTime: qPhrase.start,
-          duration: 1.5,
-          type: "question-card",
-          priority: "high",
-          primaryText: qPhrase.words.map((w) => w.text).join(" ").toUpperCase(),
-          sourceEvidence: "caption",
-          confidence: 0.9
-        });
-        sfxEvents.push({
-          id: `sfx-q-${i}`,
-          sceneIndex: scene.sceneIndex,
-          absoluteTime: qPhrase.start,
-          type: "reverse-whoosh",
-          volumeDb: 0,
-          duration: 1,
-          priority: "high",
-          reason: "question-reversal"
-        });
-        activeIntervals.push({ start: qPhrase.start, end: qPhrase.start + 1.5, type: "question" });
-        lastStrongEventTime = qPhrase.start;
-      }
-    }
-  }
-  return {
-    schemaVersion: SCHEMA_VERSION,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    inputHash,
-    windowSecs: OPENING_WINDOW_SECS,
-    enabled: true,
-    intensityCurve,
-    events,
-    transitionHints,
-    motionHints,
-    sfxEvents,
-    summary: {
-      overlays: events.length,
-      transitions: transitionHints.length,
-      motionAccents: motionHints.length,
-      sfxCues: sfxEvents.length
-    }
-  };
-}
-const SAFE_PRESET_VARIATIONS = {
-  "push-in-center": ["slow-push-in", "push-in-left", "pan-left", "micro-drift"],
-  "slow-push-in": ["push-in-center", "micro-drift", "pan-right", "still-hold"],
-  "pan-left": ["pan-right", "push-in-center", "slow-push-in", "micro-drift"],
-  "pan-right": ["pan-left", "push-in-center", "slow-push-out", "micro-drift"],
-  "micro-drift": ["slow-push-in", "pan-left", "still-hold", "push-in-center"],
-  "slow-push-out": ["micro-drift", "pan-right", "still-hold", "slow-push-in"],
-  "push-out-center": ["slow-push-out", "micro-drift", "pan-left", "still-hold"],
-  "pan-up": ["pan-down", "push-in-center", "micro-drift", "slow-push-in"],
-  "pan-down": ["pan-up", "slow-push-in", "pan-right", "micro-drift"],
-  "still-hold": ["micro-drift", "slow-push-in", "pan-left"]
-};
-function pickAlternativePreset(repeatedPreset, role) {
-  const alternatives = SAFE_PRESET_VARIATIONS[repeatedPreset] || ["slow-push-in", "pan-left", "micro-drift"];
-  if (role === "proof" || role === "payoff") {
-    if (alternatives.includes("slow-push-in")) return "slow-push-in";
-    if (alternatives.includes("still-hold")) return "still-hold";
-    if (alternatives.includes("micro-drift")) return "micro-drift";
-  }
-  if (role === "hook" || role === "re-hook" || role === "surprise") {
-    if (alternatives.includes("push-in-center")) return "push-in-center";
-    if (alternatives.includes("push-in-left")) return "push-in-left";
-    if (alternatives.includes("pan-right")) return "pan-right";
-  }
-  return alternatives[0] || "micro-drift";
-}
-function applyRetentionMotionHint(baseMotion, retentionHint, recentMotionHistory = []) {
-  if (!retentionHint) {
-    return baseMotion;
-  }
-  try {
-    const isSpecObject = typeof baseMotion === "object" && baseMotion !== null && "preset" in baseMotion;
-    let currentPreset = isSpecObject ? baseMotion.preset : baseMotion;
-    const isGenericDefault = currentPreset === "push-in-center" || currentPreset === "slow-push-in";
-    if (isGenericDefault) {
-      switch (retentionHint.role) {
-        case "hook":
-        case "surprise":
-          currentPreset = "push-in-center";
-          break;
-        case "mechanism":
-          currentPreset = "pan-left";
-          break;
-        case "proof":
-          currentPreset = "still-hold";
-          break;
-        case "payoff":
-          currentPreset = "slow-push-in";
-          break;
-        case "bridge":
-        case "recap":
-        case "conclusion":
-          currentPreset = "micro-drift";
-          break;
-        case "re-hook":
-          currentPreset = "pan-right";
-          break;
-      }
-    }
-    if (recentMotionHistory.length >= 2) {
-      const lastTwo = recentMotionHistory.slice(-2);
-      if (lastTwo[0] === currentPreset && lastTwo[1] === currentPreset) {
-        const alt = pickAlternativePreset(currentPreset, retentionHint.role);
-        logger.info(
-          `[RetentionMotion] Scene ${retentionHint.sceneIndex}: repeated motion '${currentPreset}' detected, switching to '${alt}' for novelty`
-        );
-        currentPreset = alt;
-      }
-    }
-    if (isSpecObject) {
-      const spec = baseMotion;
-      let intensity = spec.intensity;
-      if (retentionHint.motionEnergy === "elevated" && intensity === "subtle") {
-        intensity = "medium";
-      } else if (retentionHint.motionEnergy === "calm" && intensity === "medium") {
-        intensity = "subtle";
-      }
-      return {
-        ...spec,
-        preset: currentPreset,
-        intensity
-      };
-    }
-    return currentPreset;
-  } catch (err) {
-    logger.warn(`[RetentionMotion] Failed to apply hint: ${String(err)}, using base motion`);
-    return baseMotion;
-  }
-}
-const DEFAULT_RETENTION_SETTINGS = {
-  enabled: true,
-  level: "balanced",
-  proofVisualsEnabled: true,
-  semanticCropEnabled: true,
-  patternInterruptEnabled: true
-};
-function atomicWriteJson(filePath, data, indent = 2) {
-  const dir = path__namespace.dirname(filePath);
-  if (!fs__namespace.existsSync(dir)) {
-    fs__namespace.mkdirSync(dir, { recursive: true });
-  }
-  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
-  const serialized = JSON.stringify(data, null, indent);
-  if (!serialized || serialized.length === 0) {
-    throw new Error(`Cannot write empty JSON data to ${filePath}`);
-  }
-  try {
-    fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
-    try {
-      fs__namespace.renameSync(tmpPath, filePath);
-    } catch {
-      if (fs__namespace.existsSync(filePath)) {
-        fs__namespace.unlinkSync(filePath);
-      }
-      fs__namespace.renameSync(tmpPath, filePath);
-    }
-  } catch (err) {
-    try {
-      if (fs__namespace.existsSync(tmpPath)) {
-        fs__namespace.unlinkSync(tmpPath);
-      }
-    } catch {
-    }
-    logger.error(`[AtomicJsonStore] Failed to write ${filePath}: ${String(err)}`);
-    throw err;
-  }
-}
-function atomicReadJson(filePath, defaultValue) {
-  try {
-    if (!fs__namespace.existsSync(filePath)) {
-      return defaultValue;
-    }
-    const raw = fs__namespace.readFileSync(filePath, "utf-8").trim();
-    if (!raw) {
-      return defaultValue;
-    }
-    return JSON.parse(raw);
-  } catch (err) {
-    logger.warn(`[AtomicJsonStore] Failed to read ${filePath}, returning default: ${String(err)}`);
-    return defaultValue;
-  }
-}
-const readJsonSafe$1 = atomicReadJson;
-function getProjectSettingsPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "production-settings.json");
-}
-function loadProductionSettings(projectDir) {
-  if (projectDir) {
-    const projectSettingsPath = getProjectSettingsPath(projectDir);
-    if (fs__namespace.existsSync(projectSettingsPath)) {
-      const projectSettings = atomicReadJson(
-        projectSettingsPath,
-        {}
-      );
-      const nested = projectSettings.productionIntelligence || {};
-      return {
-        ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
-        ...projectSettings,
-        ...nested
-      };
-    }
-  }
-  try {
-    const config = loadConfig();
-    if (config.productionIntelligenceSettings) {
-      const nested = config.productionIntelligenceSettings.productionIntelligence || {};
-      return {
-        ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
-        ...config.productionIntelligenceSettings,
-        ...nested
-      };
-    }
-  } catch (err) {
-    logger.warn(`[ProductionSettings] Error reading global config: ${String(err)}`);
-  }
-  return { ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS };
-}
-function saveProductionSettings(settings, projectDir) {
-  const current = loadProductionSettings(projectDir);
-  const nested = settings.productionIntelligence || {};
-  const updated = {
-    ...current,
-    ...settings,
-    ...nested
-  };
-  if (projectDir) {
-    const projectSettingsPath = getProjectSettingsPath(projectDir);
-    try {
-      atomicWriteJson(projectSettingsPath, updated);
-      logger.info(`[ProductionSettings] Saved project settings: ${projectSettingsPath}`);
-    } catch (err) {
-      logger.error(`[ProductionSettings] Failed saving project settings: ${String(err)}`);
-    }
-  }
-  try {
-    const config = loadConfig();
-    config.productionIntelligenceSettings = updated;
-    saveConfig(config);
-  } catch (err) {
-    logger.warn(`[ProductionSettings] Failed saving to global config: ${String(err)}`);
-  }
-  return updated;
-}
-class SfxCacheManager {
-  static getCachePath(projectDir) {
-    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
-  }
-  static getAudioDir(projectDir) {
-    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
-  }
-  /**
-   * Loads the cache manifest with full backward compatibility for schema v1.
-   * If entries lack provider/metadata fields from earlier versions, they still load cleanly.
-   */
-  static loadCacheManifest(projectDir) {
-    const p = this.getCachePath(projectDir);
-    if (fs__namespace.existsSync(p)) {
-      try {
-        const raw = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
-        return {
-          schemaVersion: raw.schemaVersion || 1,
-          updatedAt: raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
-          entries: raw.entries || {}
-        };
-      } catch (err) {
-        logger.warn(`[SfxCache] Corrupted cache at ${p}, recreating: ${err}`);
-      }
-    }
-    return {
-      schemaVersion: 1,
-      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      entries: {}
-    };
-  }
-  /**
-   * Atomically saves cache manifest using a temporary file.
-   */
-  static saveCacheManifest(projectDir, manifest) {
-    const p = this.getCachePath(projectDir);
-    const dir = path__namespace.dirname(p);
-    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
-    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    const tmp = `${p}.tmp.${Date.now()}`;
-    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
-    fs__namespace.renameSync(tmp, p);
-  }
-  /**
-   * Retrieves a cached SFX if the file exists and is valid.
-   * Cleans up broken cache entries on miss.
-   */
-  static getCachedSfx(projectDir, type) {
-    if (type === "none") return null;
-    const manifest = this.loadCacheManifest(projectDir);
-    const entry = manifest.entries[type];
-    if (!entry) return null;
-    if (!entry.localPath || !fs__namespace.existsSync(entry.localPath)) {
-      logger.debug(`[SfxCache] Missing file for cached type=${type} at ${entry.localPath}`);
-      delete manifest.entries[type];
-      this.saveCacheManifest(projectDir, manifest);
-      return null;
-    }
-    try {
-      const stat = fs__namespace.statSync(entry.localPath);
-      if (stat.size < 512) {
-        logger.debug(`[SfxCache] Cached file too small (${stat.size} bytes) for type=${type}`);
-        delete manifest.entries[type];
-        this.saveCacheManifest(projectDir, manifest);
-        return null;
-      }
-    } catch {
-      return null;
-    }
-    const provider = entry.provider || (entry.generated ? "procedural" : "openverse");
-    return {
-      type,
-      provider: "cache",
-      localPath: entry.localPath,
-      durationSecs: entry.durationSecs || 1,
-      sourceId: entry.assetId,
-      sourceLabel: entry.sourceLabel || `Cached (${provider})`,
-      creator: entry.creator || (provider === "procedural" ? "Local Procedural SFX" : "Cached SFX"),
-      license: entry.license || "Project Cache",
-      sourceUrl: entry.pageUrl || entry.sourceUrl,
-      generated: entry.generated ?? provider === "procedural"
-    };
-  }
-  /**
-   * Stores a successfully resolved SFX into the project cache manifest.
-   */
-  static recordCachedSfx(projectDir, resolved) {
-    const manifest = this.loadCacheManifest(projectDir);
-    const entry = {
-      assetId: resolved.sourceId || `${resolved.provider}-${resolved.type}`,
-      sfxType: resolved.type,
-      query: resolved.type,
-      localPath: resolved.localPath,
-      license: resolved.license || "Internal Asset",
-      creator: resolved.creator || resolved.sourceLabel || "SFX Engine",
-      pageUrl: resolved.sourceUrl || "",
-      downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      provider: resolved.provider,
-      sourceLabel: resolved.sourceLabel,
-      sourceUrl: resolved.sourceUrl,
-      durationSecs: resolved.durationSecs,
-      generated: resolved.generated
-    };
-    manifest.entries[resolved.type] = entry;
-    this.saveCacheManifest(projectDir, manifest);
-    logger.debug(`[SfxCache] Saved cache entry for type=${resolved.type} provider=${resolved.provider}`);
-  }
-}
-function flattenEditPlanScenes(plan) {
-  const result = [];
-  const chapters = plan.chapters ?? [];
-  for (let chIdx = 0; chIdx < chapters.length; chIdx++) {
-    const ch = chapters[chIdx];
-    const chapterIndex = typeof ch.chapterIndex === "number" ? ch.chapterIndex : chIdx;
-    const chapterTitle = ch.title ?? `Chapter ${chapterIndex + 1}`;
-    const chapterPurpose = ch.purpose ?? "";
-    const rawSequences = ch.sequences ?? ch.chapters_seq ?? [];
-    let isFirstInChapter = true;
-    for (let seqIdx = 0; seqIdx < rawSequences.length; seqIdx++) {
-      const seq = rawSequences[seqIdx];
-      const sequenceIndex = typeof seq.sequenceIndex === "number" ? seq.sequenceIndex : seqIdx;
-      const sequenceTitle = seq.title ?? `Sequence ${sequenceIndex + 1}`;
-      const scenes = seq.scenes ?? [];
-      let isFirstInSequence = true;
-      for (let scIdx = 0; scIdx < scenes.length; scIdx++) {
-        const rawScene = scenes[scIdx];
-        const sceneIndex = typeof rawScene.sceneIndex === "number" ? rawScene.sceneIndex : result.length;
-        const sceneId = typeof rawScene.sceneId === "string" && rawScene.sceneId.trim().length > 0 ? rawScene.sceneId : `chapter-${chapterIndex}-sequence-${sequenceIndex}-scene-${sceneIndex}`;
-        const isLastInSequence = scIdx === scenes.length - 1;
-        const isLastInChapter = isLastInSequence && seqIdx === rawSequences.length - 1;
-        result.push({
-          scene: rawScene,
-          sceneId,
-          sceneIndex,
-          chapterIndex,
-          chapterTitle,
-          chapterPurpose,
-          sequenceIndex,
-          sequenceTitle,
-          isFirstInChapter,
-          isFirstInSequence,
-          isLastInChapter,
-          isLastInSequence
-        });
-        isFirstInChapter = false;
-        isFirstInSequence = false;
-      }
-    }
-  }
-  return result;
-}
-const CLAIM_EXTRACTION_VERSION = "1.0.0";
-function getClaimLedgerPath(projectDir) {
-  return path__namespace.join(projectDir, "analysis", "claim-evidence-ledger.json");
-}
-function computeScriptHash$1(text) {
-  return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
-}
-function computeGlobalContextHash(ctx) {
-  if (!ctx) return "no-ctx";
-  const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
-  return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
-}
-function extractClaimsRuleBased(scenes, scriptHash, ctxHash) {
-  const claims = [];
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const statRegex = /\b\d+(\.\d+)?\s*(%|percent|percentage)\b/i;
-  const moneyRegex = /(\$\s*\d+[\d,.]*|\b\d+[\d,.]*\s*(dollars|cents|USD|billion|million|trillion))\b/i;
-  const dateRegex = /\b(18\d\d|19\d\d|20\d\d)\b/;
-  for (const sc of scenes) {
-    const text = sc.narration.trim();
-    if (!text) continue;
-    const sentences = text.split(/(?<=[.?!])\s+/).filter((s) => s.length > 10);
-    for (const sent of sentences) {
-      let type = null;
-      let importance = "MEDIUM";
-      let proofVisualType = void 0;
-      if (moneyRegex.test(sent)) {
-        type = "MONEY";
-        importance = "HIGH";
-        proofVisualType = "STAT_CARD";
-      } else if (statRegex.test(sent)) {
-        type = "STATISTIC";
-        importance = "HIGH";
-        proofVisualType = "STAT_CARD";
-      } else if (dateRegex.test(sent)) {
-        type = "DATE";
-        importance = "MEDIUM";
-        proofVisualType = "DOCUMENT_CARD";
-      }
-      if (type) {
-        const id = `claim_${crypto__namespace.createHash("md5").update(sent).digest("hex").slice(0, 10)}`;
-        const existing = claims.find((c) => c.normalizedClaim.toLowerCase() === sent.toLowerCase());
-        if (existing) {
-          if (!existing.sceneIds.includes(sc.sceneId)) {
-            existing.sceneIds.push(sc.sceneId);
-          }
-        } else {
-          claims.push({
-            id,
-            scriptText: sent,
-            normalizedClaim: sent,
-            type,
-            chapterId: sc.chapterId,
-            sequenceId: sc.sequenceId,
-            sceneIds: [sc.sceneId],
-            importance,
-            confidence: 75,
-            verificationStatus: "UNSOURCED",
-            evidenceSourceIds: [],
-            proofVisualRecommended: true,
-            proofVisualType,
-            warnings: [
-              `Extracted via rule-based parser. Requires authoritative citation.`
-            ],
-            extractionVersion: CLAIM_EXTRACTION_VERSION,
-            createdAt: now,
-            updatedAt: now
-          });
-        }
-      }
-    }
-  }
-  const ledger = {
-    projectId: "default",
-    scriptHash,
-    globalContextHash: ctxHash,
-    claims,
-    sources: [],
-    summary: computeLedgerSummary(claims),
-    generatedAt: now,
-    version: CLAIM_EXTRACTION_VERSION
-  };
-  return ledger;
-}
-function computeLedgerSummary(claims) {
-  let verified = 0;
-  let partiallyVerified = 0;
-  let unsourced = 0;
-  let contradicted = 0;
-  let criticalUnsourced = 0;
-  for (const c of claims) {
-    if (c.verificationStatus === "VERIFIED") verified++;
-    else if (c.verificationStatus === "PARTIALLY_VERIFIED") partiallyVerified++;
-    else if (c.verificationStatus === "UNSOURCED") {
-      unsourced++;
-      if (c.importance === "CRITICAL" || c.importance === "HIGH") criticalUnsourced++;
-    } else if (c.verificationStatus === "CONTRADICTED") contradicted++;
-  }
-  const totalClaims = claims.length;
-  const covered = verified + partiallyVerified;
-  const coveragePct = totalClaims > 0 ? Math.round(covered / totalClaims * 100) : 100;
-  return {
-    totalClaims,
-    verified,
-    partiallyVerified,
-    unsourced,
-    contradicted,
-    criticalUnsourced,
-    coveragePct
-  };
-}
-function sanitizeAiClaims(rawClaims, scenes) {
-  const validSceneIds = new Set(scenes.map((s) => s.sceneId));
-  const sceneMap = new Map(scenes.map((s) => [s.sceneId, s]));
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const claims = [];
-  if (!Array.isArray(rawClaims)) return claims;
-  for (let idx = 0; idx < rawClaims.length; idx++) {
-    const raw = rawClaims[idx];
-    if (typeof raw !== "object" || raw === null) continue;
-    const r = raw;
-    const scriptText = String(r.scriptText || r.claimText || "").trim();
-    if (!scriptText) continue;
-    const normalizedClaim = String(r.normalizedClaim || scriptText).trim();
-    const validTypes = [
-      "STATISTIC",
-      "MONEY",
-      "DATE",
-      "HISTORICAL_EVENT",
-      "PERSON",
-      "COMPANY",
-      "LOCATION",
-      "POLICY",
-      "QUOTE",
-      "COMPARISON",
-      "CAUSAL",
-      "GENERAL_FACT"
-    ];
-    const rawType = String(r.type || "GENERAL_FACT").toUpperCase();
-    const type = validTypes.includes(rawType) ? rawType : "GENERAL_FACT";
-    const rawImp = String(r.importance || "MEDIUM").toUpperCase();
-    const importance = rawImp === "CRITICAL" || rawImp === "HIGH" || rawImp === "LOW" ? rawImp : "MEDIUM";
-    let sceneIds = [];
-    if (Array.isArray(r.sceneIds)) {
-      sceneIds = r.sceneIds.map(String).filter((id2) => validSceneIds.has(id2));
-    }
-    if (sceneIds.length === 0) {
-      const match = scenes.find((s) => s.narration.toLowerCase().includes(scriptText.toLowerCase()));
-      if (match) sceneIds = [match.sceneId];
-    }
-    if (sceneIds.length === 0 && scenes.length > 0) {
-      sceneIds = [scenes[0].sceneId];
-    }
-    const firstScene = sceneMap.get(sceneIds[0]);
-    const rawStatus = String(r.verificationStatus || "").toUpperCase();
-    const verificationStatus = rawStatus === "PARTIALLY_VERIFIED" || rawStatus === "VERIFIED" ? "UNSOURCED" : rawStatus === "CONTRADICTED" ? "CONTRADICTED" : "UNSOURCED";
-    const warnings = Array.isArray(r.warnings) ? r.warnings.map(String) : [];
-    if (verificationStatus === "UNSOURCED" && warnings.length === 0) {
-      warnings.push(`Factual claim requires documentation or authoritative source citation.`);
-    }
-    const id = String(r.id || `claim_${idx + 1}_${crypto__namespace.createHash("md5").update(scriptText).digest("hex").slice(0, 8)}`);
-    let proofVisualType = void 0;
-    if (r.proofVisualType) {
-      const pvt = String(r.proofVisualType).toUpperCase();
-      if (["STAT_CARD", "DOCUMENT_CARD", "QUOTE_CARD", "COMPARISON_CARD", "DATA_NOTE", "ARCHIVE_VISUAL"].includes(pvt)) {
-        proofVisualType = pvt;
-      }
-    }
-    claims.push({
-      id,
-      scriptText,
-      normalizedClaim,
-      type,
-      chapterId: firstScene?.chapterId,
-      sequenceId: firstScene?.sequenceId,
-      sceneIds,
-      importance,
-      confidence: Math.min(100, Math.max(0, Number(r.confidence) || 80)),
-      verificationStatus,
-      evidenceSourceIds: [],
-      proofVisualRecommended: Boolean(r.proofVisualRecommended ?? (type === "STATISTIC" || type === "MONEY")),
-      proofVisualType,
-      warnings,
-      extractionVersion: CLAIM_EXTRACTION_VERSION,
-      createdAt: now,
-      updatedAt: now
-    });
-  }
-  return claims;
-}
-async function extractDocumentaryClaims(params) {
-  const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
-  const ledgerPath = getClaimLedgerPath(projectDir);
-  const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
-  const scriptHash = computeScriptHash$1(fullText);
-  const ctxHash = computeGlobalContextHash(globalContext);
-  if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
-    try {
-      const existing = readJsonSafe$1(ledgerPath, null);
-      if (existing && existing.claims && existing.scriptHash === scriptHash && existing.globalContextHash === ctxHash) {
-        logger.info(`[ClaimLedger] Using cached Claim & Evidence Ledger (${existing.claims.length} claims)`);
-        onProgress?.(`Loaded cached Claim Ledger (${existing.claims.length} claims)`, 1);
-        return existing;
-      }
-    } catch {
-    }
-  }
-  onProgress?.(`Analyzing script for factual claims and evidence requirements...`, 0.1);
-  const cleanKey = normalizeApiKey(apiKey);
-  if (!cleanKey) {
-    logger.warn(`[ClaimLedger] No Gemini API key provided. Using rule-based claim extraction.`);
-    onProgress?.(`Gemini key unavailable — using rule-based claim extraction`, 0.5);
-    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
-    atomicWriteJson(ledgerPath, fallbackLedger);
-    return fallbackLedger;
-  }
-  const models = getAvailableModelsForTask("claim_analysis", params.model);
-  const sceneBriefs = scenes.slice(0, 150).map((s) => ({
-    sceneId: s.sceneId,
-    sceneIndex: s.sceneIndex,
-    chapter: s.chapterTitle ?? s.chapterId ?? "",
-    narration: s.narration
-  }));
-  const prompt = `You are a Senior Documentary Fact-Checker and Archive Producer for a high-end investigative documentary.
-Analyze the following documentary script and its scene breakdown to identify ALL statements that require documentary proof or citation.
-
-CRITICAL RULES:
-1. Do NOT treat general narrative actions (e.g. "She looked out the window", "The rain fell gently") as factual claims.
-2. Focus on:
-   - STATISTIC (percentages, market share, headcounts)
-   - MONEY (dollar amounts, profits, costs, fines, valuations)
-   - DATE (specific years, historical milestones, policy launch dates)
-   - HISTORICAL_EVENT (battles, legal rulings, treaties, disasters)
-   - PERSON (specific public figures, allegations, quotes, titles)
-   - COMPANY (corporate actions, monopolies, revenue, investigations)
-   - LOCATION (geopolitical claims, boundaries, treaty zones)
-   - POLICY (laws, regulations, legal mandates, institutional rules)
-   - QUOTE (direct or indirect quotes attributed to real individuals)
-   - COMPARISON ("largest in history", "twice as expensive", "faster than X")
-   - CAUSAL ("X directly caused Y", "the collapse occurred because of Z")
-3. ANTI-HALLUCINATION:
-   - DO NOT fabricate citations, URLs, author names, or publisher names.
-   - Leave verificationStatus as "UNSOURCED".
-   - Include specific guidance in 'warnings' about what type of primary source is needed (e.g., "Requires SEC 10-K filing or BLS statistical report").
-4. Map each claim to its corresponding sceneIds from the provided scene list.
-
-Global Context:
-- Primary Subject: ${globalContext?.primarySubject ?? "Documentary subject"}
-- Central Thesis: ${globalContext?.centralThesis ?? "Documentary thesis"}
-
-Scenes:
-${JSON.stringify(sceneBriefs, null, 2)}
-
-Respond with STRICT JSON matching this schema:
-{
-  "claims": [
-    {
-      "id": "claim_1",
-      "scriptText": "exact sentence or clause from script",
-      "normalizedClaim": "concise factual assertion",
-      "type": "STATISTIC" | "MONEY" | "DATE" | "HISTORICAL_EVENT" | "PERSON" | "COMPANY" | "LOCATION" | "POLICY" | "QUOTE" | "COMPARISON" | "CAUSAL" | "GENERAL_FACT",
-      "importance": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
-      "confidence": 85,
-      "sceneIds": ["scene_001"],
-      "proofVisualRecommended": true,
-      "proofVisualType": "STAT_CARD" | "DOCUMENT_CARD" | "QUOTE_CARD" | "COMPARISON_CARD" | "DATA_NOTE" | "ARCHIVE_VISUAL",
-      "warnings": ["Requires specific primary documentation."]
-    }
-  ]
-}`;
-  let rawJson = "";
-  let successfulModel = "";
-  for (const currentModel of models) {
-    try {
-      onProgress?.(`Extracting claims with ${currentModel}...`, 0.3);
-      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
-      const res = await ai.models.generateContent({
-        model: currentModel,
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: {
-          responseMimeType: "application/json",
-          temperature: 0.1,
-          maxOutputTokens: 8192
-        }
-      });
-      rawJson = res.text ?? "";
-      if (rawJson) {
-        successfulModel = currentModel;
-        recordModelSuccess(currentModel);
-        break;
-      }
-    } catch (err) {
-      const { kind, message } = classifyGeminiErrorKind(err);
-      recordModelFailure(currentModel, kind);
-      logger.warn(`[ClaimLedger] Model ${currentModel} failed (${kind}): ${message}`);
-    }
-  }
-  let claims = [];
-  if (rawJson) {
-    try {
-      const parsed = JSON.parse(rawJson);
-      const list = Array.isArray(parsed) ? parsed : parsed.claims || [];
-      claims = sanitizeAiClaims(list, scenes);
-      logger.info(`[ClaimLedger] Extracted ${claims.length} claims using ${successfulModel}`);
-    } catch (err) {
-      logger.error(`[ClaimLedger] Failed to parse AI claim response: ${String(err)}`);
-    }
-  }
-  if (claims.length === 0) {
-    logger.warn(`[ClaimLedger] AI returned no claims, executing rule-based fallback`);
-    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
-    atomicWriteJson(ledgerPath, fallbackLedger);
-    return fallbackLedger;
-  }
-  const now = (/* @__PURE__ */ new Date()).toISOString();
-  const ledger = {
-    projectId: path__namespace.basename(projectDir),
-    scriptHash,
-    globalContextHash: ctxHash,
-    claims,
-    sources: [],
-    summary: computeLedgerSummary(claims),
-    generatedAt: now,
-    version: CLAIM_EXTRACTION_VERSION
-  };
-  atomicWriteJson(ledgerPath, ledger);
-  onProgress?.(`Claim Ledger ready (${claims.length} claims, ${ledger.summary.unsourced} unsourced)`, 1);
-  return ledger;
-}
-function addEvidenceSource(projectDir, source) {
-  const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe$1(ledgerPath, null);
-  if (!ledger) {
-    return { success: false, error: "Claim ledger does not exist." };
-  }
-  const id = source.id || `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-  const newSource = {
-    ...source,
-    id,
-    manuallyAdded: true
-  };
-  ledger.sources.push(newSource);
-  atomicWriteJson(ledgerPath, ledger);
-  return { success: true, source: newSource };
-}
-function linkSourceToClaim(projectDir, claimId, sourceId, newStatus) {
-  const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe$1(ledgerPath, null);
-  if (!ledger) {
-    return { success: false, error: "Claim ledger does not exist." };
-  }
-  const claim = ledger.claims.find((c) => c.id === claimId);
-  if (!claim) {
-    return { success: false, error: `Claim ${claimId} not found.` };
-  }
-  const source = ledger.sources.find((s) => s.id === sourceId);
-  if (!source) {
-    return { success: false, error: `Source ${sourceId} not found.` };
-  }
-  if (!claim.evidenceSourceIds.includes(sourceId)) {
-    claim.evidenceSourceIds.push(sourceId);
-  }
-  if (newStatus) {
-    claim.verificationStatus = newStatus;
-  } else if (claim.verificationStatus === "UNSOURCED") {
-    claim.verificationStatus = "VERIFIED";
-  }
-  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ledger.summary = computeLedgerSummary(ledger.claims);
-  atomicWriteJson(ledgerPath, ledger);
-  return { success: true, claim };
-}
-function unlinkSourceFromClaim(projectDir, claimId, sourceId) {
-  const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe$1(ledgerPath, null);
-  if (!ledger) {
-    return { success: false, error: "Claim ledger does not exist." };
-  }
-  const claim = ledger.claims.find((c) => c.id === claimId);
-  if (!claim) {
-    return { success: false, error: `Claim ${claimId} not found.` };
-  }
-  claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== sourceId);
-  if (claim.evidenceSourceIds.length === 0 && (claim.verificationStatus === "VERIFIED" || claim.verificationStatus === "PARTIALLY_VERIFIED")) {
-    claim.verificationStatus = "UNSOURCED";
-  }
-  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ledger.summary = computeLedgerSummary(ledger.claims);
-  atomicWriteJson(ledgerPath, ledger);
-  return { success: true, claim };
-}
-function updateClaimStatus(projectDir, claimId, status, warningText) {
-  const ledgerPath = getClaimLedgerPath(projectDir);
-  const ledger = readJsonSafe$1(ledgerPath, null);
-  if (!ledger) {
-    return { success: false, error: "Claim ledger does not exist." };
-  }
-  const claim = ledger.claims.find((c) => c.id === claimId);
-  if (!claim) {
-    return { success: false, error: `Claim ${claimId} not found.` };
-  }
-  claim.verificationStatus = status;
-  if (warningText) {
-    if (!claim.warnings.includes(warningText)) {
-      claim.warnings.push(warningText);
-    }
-  }
-  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-  ledger.summary = computeLedgerSummary(ledger.claims);
-  atomicWriteJson(ledgerPath, ledger);
-  return { success: true, claim };
-}
-function escapeCsvField(val) {
-  if (val === void 0 || val === null) return '""';
-  const str = String(val).replace(/"/g, '""');
-  return `"${str}"`;
-}
-function exportClaimManifests(projectDir, exportDir) {
-  try {
-    const ledgerPath = getClaimLedgerPath(projectDir);
-    const ledger = readJsonSafe$1(ledgerPath, null);
-    if (!ledger) {
-      return { success: false, error: "Claim ledger not found for export." };
-    }
-    const outDir = exportDir || path__namespace.join(projectDir, "exports");
-    fs__namespace.mkdirSync(outDir, { recursive: true });
-    const jsonPath = path__namespace.join(outDir, "claim-evidence-ledger.json");
-    atomicWriteJson(jsonPath, ledger);
-    const csvPath = path__namespace.join(outDir, "sources.csv");
-    const sourceMap = new Map(ledger.sources.map((s) => [s.id, s]));
-    const headers = [
-      "claim_id",
-      "scene_ids",
-      "claim_text",
-      "claim_type",
-      "importance",
-      "verification_status",
-      "source_title",
-      "publisher",
-      "source_url",
-      "published_at",
-      "accessed_at",
-      "license",
-      "attribution",
-      "asset_id",
-      "local_path",
-      "timecode",
-      "notes"
-    ];
-    const rows = [headers.join(",")];
-    for (const claim of ledger.claims) {
-      const linkedSources = claim.evidenceSourceIds.map((id) => sourceMap.get(id)).filter(Boolean);
-      if (linkedSources.length === 0) {
-        rows.push(
-          [
-            escapeCsvField(claim.id),
-            escapeCsvField(claim.sceneIds.join(";")),
-            escapeCsvField(claim.scriptText || claim.normalizedClaim),
-            escapeCsvField(claim.type),
-            escapeCsvField(claim.importance),
-            escapeCsvField(claim.verificationStatus),
-            escapeCsvField("UNSOURCED"),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(""),
-            escapeCsvField(claim.warnings.join("; "))
-          ].join(",")
-        );
-      } else {
-        for (const src of linkedSources) {
-          const timecode = src.timecodeStart !== void 0 && src.timecodeEnd !== void 0 ? `${src.timecodeStart}-${src.timecodeEnd}` : "";
-          rows.push(
-            [
-              escapeCsvField(claim.id),
-              escapeCsvField(claim.sceneIds.join(";")),
-              escapeCsvField(claim.scriptText || claim.normalizedClaim),
-              escapeCsvField(claim.type),
-              escapeCsvField(claim.importance),
-              escapeCsvField(claim.verificationStatus),
-              escapeCsvField(src.title),
-              escapeCsvField(src.publisher),
-              escapeCsvField(src.url),
-              escapeCsvField(src.publishedAt),
-              escapeCsvField(src.accessedAt),
-              escapeCsvField(src.license),
-              escapeCsvField(src.attribution),
-              escapeCsvField(src.assetId),
-              escapeCsvField(src.localPath),
-              escapeCsvField(timecode),
-              escapeCsvField(src.notes)
-            ].join(",")
-          );
-        }
-      }
-    }
-    fs__namespace.writeFileSync(csvPath, rows.join("\n"), "utf-8");
-    const licensesPath = path__namespace.join(outDir, "licenses.json");
-    const licenses = ledger.sources.map((s) => ({
-      sourceId: s.id,
-      title: s.title ?? "Untitled Source",
-      publisher: s.publisher ?? "Unknown",
-      license: s.license ?? "All Rights Reserved / Fair Use Claim",
-      attribution: s.attribution ?? s.publisher ?? s.title ?? "",
-      url: s.url
-    }));
-    atomicWriteJson(licensesPath, {
-      project: path__namespace.basename(projectDir),
-      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
-      licenses
-    });
-    logger.info(`[EvidenceExport] Exported ${ledger.claims.length} claims and ${ledger.sources.length} sources to ${outDir}`);
-    return { success: true, csvPath, jsonPath, licensesPath };
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    logger.error(`[EvidenceExport] Failed exporting manifests: ${msg}`);
-    return { success: false, error: msg };
-  }
-}
-const YEAR_REGEX = /\b(1[6-9]\d{2}|20\d{2})('?s)?\b/;
-const CENTURY_REGEX = /\b(\d{1,2}(?:st|nd|rd|th))\s+century\b/i;
-const MONTH_YEAR_REGEX = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(1[6-9]\d{2}|20\d{2})\b/i;
-const STAT_PERCENT_REGEX = /\b(\d+(?:\.\d+)?%)(?!\w)/;
-const STAT_MONEY_REGEX = /(\$\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|trillion))?|\b\d+(?:\.\d+)?\s*(?:million|billion|triệu|tỷ)\s*(?:dollars|đô la|đồng|usd|vnd)?\b)/i;
-const STAT_COUNT_REGEX = /\b(\d+(?:,\d{3})+|\d{2,}\s*(?:thousand|hundred))\s+([a-zA-Z]+)\b/i;
-const LOCATION_INDICATOR_REGEX = /(?:^|\s|\b)(?:in|at|near|across|from|tại|ở)\s+(?:thành phố|thủ đô|city|capital)?\s*([A-Za-zÀ-ỹ]+(?:\s+[A-Za-zÀ-ỹ]+)*(?:,\s*[A-Za-zÀ-ỹ]+)?)/iu;
-const QUOTE_MARK_REGEX = /["“]([^"”]{6,100})["”]/;
-const QUOTE_VERB_REGEX = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:said|declared|stated|proclaimed|whispered|wrote)\b[:,\s]*["“]?([^"”.!]{6,80})["”]?/i;
-const COMPARISON_REGEX = /(?:instead of|compared to|versus|\bvs\.?\b|on the other hand|while [a-z]+ [a-z]+, [a-z]+|rather than|trong khi|thay vì|so với|ngược lại|mặt khác|trái ngược)/i;
-const DOCUMENT_REGEX = /(?:document|contract|treaty|accord|constitution|charter|bill|law|docket|manifesto|record|file|deed|license|affidavit|hợp đồng|giấy tờ|hồ sơ|văn bản|nghị quyết|nghị định|hóa đơn|luật|hiến pháp)/iu;
-function classifyNarrationGrammar(narration, scene) {
-  const text = narration.trim();
-  if (scene.isFirstInChapter && scene.chapterTitle && scene.sceneIndex > 1) {
-    return {
-      type: "chapter_title",
-      confidence: 0.95,
-      reason: `First scene in chapter: "${scene.chapterTitle}"`,
-      primaryText: scene.chapterTitle.toUpperCase(),
-      secondaryText: `CHAPTER ${scene.chapterTitle}`,
-      position: "center"
-    };
-  }
-  const monthYearMatch = text.match(MONTH_YEAR_REGEX);
-  if (monthYearMatch) {
-    return {
-      type: "date_card",
-      confidence: 0.9,
-      reason: `Temporal anchor: "${monthYearMatch[0]}"`,
-      primaryText: monthYearMatch[0].toUpperCase(),
-      secondaryText: "HISTORICAL TIMELINE",
-      position: "top_right"
-    };
-  }
-  const yearMatch = text.match(YEAR_REGEX);
-  if (yearMatch) {
-    return {
-      type: "date_card",
-      confidence: 0.88,
-      reason: `Year reference: "${yearMatch[0]}"`,
-      primaryText: yearMatch[0],
-      secondaryText: "CHRONOLOGY",
-      position: "top_right"
-    };
-  }
-  const centuryMatch = text.match(CENTURY_REGEX);
-  if (centuryMatch) {
-    return {
-      type: "date_card",
-      confidence: 0.85,
-      reason: `Era reference: "${centuryMatch[0]}"`,
-      primaryText: centuryMatch[0].toUpperCase(),
-      secondaryText: "HISTORICAL ERA",
-      position: "top_right"
-    };
-  }
-  const moneyMatch = text.match(STAT_MONEY_REGEX);
-  if (moneyMatch) {
-    return {
-      type: "stat_card",
-      confidence: 0.92,
-      reason: `Financial figure: "${moneyMatch[0]}"`,
-      primaryText: moneyMatch[0].trim(),
-      secondaryText: "KEY DATA POINT",
-      position: "bottom_left"
-    };
-  }
-  const percentMatch = text.match(STAT_PERCENT_REGEX);
-  if (percentMatch) {
-    return {
-      type: "stat_card",
-      confidence: 0.9,
-      reason: `Percentage metric: "${percentMatch[0]}"`,
-      primaryText: percentMatch[0],
-      secondaryText: "STATISTICAL METRIC",
-      position: "bottom_left"
-    };
-  }
-  const countMatch = text.match(STAT_COUNT_REGEX);
-  if (countMatch && !countMatch[2].match(/^(seconds|minutes|hours|days|weeks|months|years)$/i)) {
-    return {
-      type: "stat_card",
-      confidence: 0.85,
-      reason: `Quantifiable count: "${countMatch[0]}"`,
-      primaryText: countMatch[1],
-      secondaryText: countMatch[2].toUpperCase(),
-      position: "bottom_left"
-    };
-  }
-  const quoteMarkMatch = text.match(QUOTE_MARK_REGEX);
-  if (quoteMarkMatch && quoteMarkMatch[1].length > 10) {
-    return {
-      type: "quote_card",
-      confidence: 0.88,
-      reason: "Quotation in narration",
-      primaryText: `"${quoteMarkMatch[1].trim()}"`,
-      secondaryText: "RECORDED TESTIMONY",
-      position: "bottom_right"
-    };
-  }
-  const quoteVerbMatch = text.match(QUOTE_VERB_REGEX);
-  if (quoteVerbMatch && quoteVerbMatch[2].length > 8) {
-    return {
-      type: "quote_card",
-      confidence: 0.82,
-      reason: `Attributed statement: ${quoteVerbMatch[1]}`,
-      primaryText: `"${quoteVerbMatch[2].trim()}"`,
-      secondaryText: quoteVerbMatch[1].toUpperCase(),
-      position: "bottom_right"
-    };
-  }
-  if (COMPARISON_REGEX.test(text) && text.length > 20) {
-    if (text.includes(",")) {
-      const commaParts = text.split(",");
-      const a = commaParts[0].replace(COMPARISON_REGEX, "").trim().split(/\s+/).slice(-4).join(" ");
-      const b = commaParts[1].trim().split(/\s+/).slice(0, 4).join(" ");
-      if (a && b) {
-        return {
-          type: "comparison_card",
-          confidence: 0.8,
-          reason: "Contrastive statement structure",
-          primaryText: a.toUpperCase(),
-          secondaryText: `VS. ${b.toUpperCase()}`,
-          position: "center_bottom"
-        };
-      }
-    }
-    const parts = text.split(COMPARISON_REGEX).map((p) => p.trim()).filter(Boolean);
-    if (parts.length >= 2) {
-      const a = parts[0].split(/\s+/).slice(-4).join(" ");
-      const b = parts[1].split(/\s+/).slice(0, 4).join(" ");
-      return {
-        type: "comparison_card",
-        confidence: 0.78,
-        reason: "Contrastive statement structure",
-        primaryText: a.toUpperCase(),
-        secondaryText: `VS. ${b.toUpperCase()}`,
-        position: "center_bottom"
-      };
-    }
-  }
-  if (DOCUMENT_REGEX.test(text)) {
-    const docMatch = text.match(DOCUMENT_REGEX);
-    return {
-      type: "document_card",
-      confidence: 0.8,
-      reason: `Historical or official record reference: "${docMatch?.[0]}"`,
-      primaryText: (docMatch?.[0] || "OFFICIAL RECORD").toUpperCase(),
-      secondaryText: "ARCHIVAL DOSSIER",
-      position: "bottom_right"
-    };
-  }
-  const locMatch = text.match(LOCATION_INDICATOR_REGEX);
-  if (locMatch && !locMatch[1].match(/^(January|February|March|April|May|June|July|August|September|October|November|December|Chapter|Scene|Part)$/i)) {
-    return {
-      type: "location_card",
-      confidence: 0.75,
-      reason: `Geographic location reference: "${locMatch[1]}"`,
-      primaryText: locMatch[1].toUpperCase(),
-      secondaryText: "LOCATION",
-      position: "top_left"
-    };
-  }
-  if (scene.mediaType === "image") {
-    return {
-      type: "photo_parallax",
-      confidence: 0.7,
-      reason: "Still photo suitable for documentary parallax depth movement",
-      position: "center"
-    };
-  }
-  return {
-    type: "stock_video",
-    confidence: 0.6,
-    reason: "Standard contextual footage"
-  };
-}
-function enforceGrammarDensityAndSpacing(rawDecisions, scenes, maxDensity = 0.25, minSpacingSecs = 6, captionPlan, proofVisuals) {
-  const totalScenes = scenes.length;
-  const maxAllowedGraphics = Math.max(1, Math.floor(totalScenes * maxDensity));
-  let lastGraphicEndTime = -999;
-  let lastGraphicType = "stock_video";
-  let graphicCount = 0;
-  const results = [];
-  for (let i = 0; i < rawDecisions.length; i++) {
-    const dec = { ...rawDecisions[i] };
-    const sc = scenes.find((s) => s.sceneIndex === dec.sceneIndex);
-    if (!sc) {
-      results.push(dec);
-      continue;
-    }
-    const isGraphic = dec.type !== "stock_video" && dec.type !== "stock_image" && dec.type !== "photo_parallax";
-    if (!isGraphic) {
-      dec.enabled = true;
-      results.push(dec);
-      continue;
-    }
-    if (graphicCount >= maxAllowedGraphics) {
-      dec.enabled = false;
-      dec.reason += " (disabled: reached max 25% density limit)";
-      results.push(dec);
-      continue;
-    }
-    if (lastGraphicType !== "stock_video" && lastGraphicType !== "stock_image" && lastGraphicType !== "photo_parallax" && dec.type !== "chapter_title" && lastGraphicType !== "chapter_title") {
-      dec.enabled = false;
-      dec.reason += " (disabled: anti-clutter rule — avoid consecutive graphic cards)";
-      results.push(dec);
-      continue;
-    }
-    const proposedStartTime = sc.startTime + dec.startOffset;
-    if (proposedStartTime - lastGraphicEndTime < minSpacingSecs && dec.type !== "chapter_title") {
-      dec.enabled = false;
-      dec.reason += ` (disabled: min ${minSpacingSecs}s spacing from previous graphic)`;
-      results.push(dec);
-      continue;
-    }
-    if (captionPlan?.phrases) {
-      const collision = captionPlan.phrases.some((p) => {
-        if (p.presetType === "big_statement" || p.emphasisType === "hook") {
-          const pStart = p.startTime;
-          const pEnd = p.endTime;
-          const gStart = proposedStartTime;
-          const gEnd = proposedStartTime + dec.duration;
-          return Math.max(pStart, gStart) < Math.min(pEnd, gEnd);
-        }
-        return false;
-      });
-      if (collision) {
-        dec.enabled = false;
-        dec.reason += " (disabled: collision avoidance with prominent kinetic caption)";
-        results.push(dec);
-        continue;
-      }
-    }
-    if (proofVisuals) {
-      const proofCollision = proofVisuals.some((pv) => {
-        if (pv.absoluteStartTime != null && pv.absoluteEndTime != null) {
-          const pvStart = pv.absoluteStartTime;
-          const pvEnd = pv.absoluteEndTime;
-          const gStart = proposedStartTime;
-          const gEnd = proposedStartTime + dec.duration;
-          return Math.max(pvStart, gStart) < Math.min(pvEnd, gEnd);
-        }
-        return false;
-      });
-      if (proofCollision) {
-        dec.enabled = false;
-        dec.reason += " (disabled: avoided duplicate overlay with active proof visual)";
-        results.push(dec);
-        continue;
-      }
-    }
-    dec.enabled = true;
-    lastGraphicEndTime = proposedStartTime + dec.duration;
-    lastGraphicType = dec.type;
-    graphicCount++;
-    results.push(dec);
-  }
-  return results;
-}
-function generateVisualGrammarPlan(params) {
-  const { projectDir, editPlan, captionPlan, proofVisuals } = params;
-  const prodSettings = params.settings ?? loadProductionSettings(projectDir);
-  const flattened = flattenEditPlanScenes(editPlan);
-  const claimLedgerPath = getClaimLedgerPath(projectDir);
-  const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe$1(claimLedgerPath, null) : null;
-  const claimsByScene = /* @__PURE__ */ new Map();
-  if (claimLedger?.claims) {
-    for (const c of claimLedger.claims) {
-      for (const scId of c.sceneIds) {
-        claimsByScene.set(scId, c);
-      }
-    }
-  }
-  const rawDecisions = flattened.map((entry) => {
-    const narration = entry.scene.narrativeText ?? "";
-    const classification = classifyNarrationGrammar(narration, {
-      isFirstInChapter: entry.isFirstInChapter,
-      chapterTitle: entry.chapterTitle,
-      sceneIndex: entry.sceneIndex,
-      mediaType: entry.scene.mediaType
-    });
-    const duration = entry.scene.duration ?? (entry.scene.endTime ?? 0) - (entry.scene.startTime ?? 0);
-    const graphicDuration = Math.min(Math.max(2.5, duration * 0.6), 4.5);
-    const startOffset = Math.min(0.5, Math.max(0, duration - graphicDuration));
-    const linkedClaim = claimsByScene.get(entry.sceneId);
-    let enabled = prodSettings.enabled && prodSettings.visualSceneGrammarEnabled;
-    let reason = classification.reason;
-    if (linkedClaim) {
-      if (linkedClaim.verificationStatus === "CONTRADICTED") {
-        enabled = false;
-        reason = `BLOCKED_BY_EVIDENCE: Claim "${linkedClaim.normalizedClaim}" is contradicted.`;
-      } else if (linkedClaim.verificationStatus === "VERIFIED") {
-        reason += ` (Verified by documentation)`;
-        if (linkedClaim.evidenceSourceIds?.length > 0 && !classification.secondaryText) {
-          const src = claimLedger?.sources?.find((s) => s.id === linkedClaim.evidenceSourceIds[0]);
-          if (src?.publisher || src?.title) {
-            classification.secondaryText = `SOURCE: ${src.publisher || src.title}`;
-          }
-        }
-      } else if (linkedClaim.verificationStatus === "UNSOURCED") {
-        reason += ` (Caution: claim is unsourced)`;
-      }
-    }
-    return {
-      sceneId: entry.sceneId,
-      sceneIndex: entry.sceneIndex,
-      type: classification.type,
-      confidence: classification.confidence,
-      reason,
-      primaryText: classification.primaryText,
-      secondaryText: classification.secondaryText,
-      sourceNarration: narration.slice(0, 100),
-      startOffset,
-      duration: graphicDuration,
-      position: classification.position ?? "bottom_right",
-      enabled
-    };
-  });
-  const sceneInfos = flattened.map((f) => ({
-    sceneIndex: f.sceneIndex,
-    startTime: f.scene.startTime ?? 0,
-    endTime: f.scene.endTime ?? 0,
-    duration: f.scene.duration ?? (f.scene.endTime ?? 0) - (f.scene.startTime ?? 0)
-  }));
-  const finalDecisions = enforceGrammarDensityAndSpacing(
-    rawDecisions,
-    sceneInfos,
-    prodSettings.maxVisualGrammarDensity || 0.25,
-    6,
-    captionPlan,
-    proofVisuals
-  );
-  const activeGraphics = finalDecisions.filter(
-    (d) => d.enabled && d.type !== "stock_video" && d.type !== "stock_image" && d.type !== "photo_parallax"
-  );
-  const plan = {
-    version: 1,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    density: flattened.length > 0 ? activeGraphics.length / flattened.length : 0,
-    totalScenes: flattened.length,
-    graphicCount: activeGraphics.length,
-    decisions: finalDecisions
-  };
-  const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
-  atomicWriteJson(planPath, plan);
-  logger.info(
-    `[VisualGrammar] Generated plan with ${activeGraphics.length}/${flattened.length} graphics (${Math.round(plan.density * 100)}% density)`
-  );
-  return plan;
-}
-function loadVisualGrammarPlan(projectDir) {
-  const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
-  if (!fs__namespace.existsSync(planPath)) return null;
-  return readJsonSafe$1(planPath, null);
-}
-const ffmpegStatic$1 = require("ffmpeg-static");
-const ffprobeStatic$1 = require("ffprobe-static");
-const probeCache = /* @__PURE__ */ new Map();
-async function probeMediaDetailed(filePath) {
-  if (!filePath || !fs__namespace.existsSync(filePath)) return null;
-  try {
-    const stat = fs__namespace.statSync(filePath);
-    const cached = probeCache.get(filePath);
-    if (cached && cached.mtimeMs === stat.mtimeMs) {
-      return cached.probe;
-    }
-    if (!ffprobeStatic$1?.path || !fs__namespace.existsSync(ffprobeStatic$1.path)) {
-      logger.warn("[QA-Probe] ffprobe binary not found");
-      return null;
-    }
-    return new Promise((resolve) => {
-      const proc = cp.spawn(
-        ffprobeStatic$1.path,
-        [
-          "-v",
-          "error",
-          "-show_entries",
-          "stream=codec_type,codec_name,width,height,r_frame_rate,duration:format=duration,size",
-          "-of",
-          "json",
-          filePath
-        ],
-        { windowsHide: true }
-      );
-      let stdout = "";
-      proc.stdout.on("data", (d) => {
-        stdout += d.toString();
-      });
-      proc.on("close", (code) => {
-        if (code !== 0) {
-          resolve(null);
-          return;
-        }
-        try {
-          const parsed = JSON.parse(stdout);
-          const streams = parsed.streams ?? [];
-          const videoStream = streams.find((s) => s.codec_type === "video");
-          const audioStream = streams.find((s) => s.codec_type === "audio");
-          const formatDuration = parseFloat(parsed.format?.duration ?? "0");
-          const videoDuration = parseFloat(videoStream?.duration ?? "0");
-          const durationSecs = formatDuration > 0 ? formatDuration : videoDuration;
-          let fps = 30;
-          if (videoStream?.r_frame_rate) {
-            const [num, den] = videoStream.r_frame_rate.split("/").map(Number);
-            if (num && den) fps = Math.round(num / den * 100) / 100;
-          }
-          const details = {
-            hasVideo: !!videoStream,
-            hasAudio: !!audioStream,
-            width: Number(videoStream?.width) || 0,
-            height: Number(videoStream?.height) || 0,
-            durationSecs,
-            fps,
-            codecVideo: videoStream?.codec_name,
-            codecAudio: audioStream?.codec_name,
-            fileSizeBytes: stat.size
-          };
-          probeCache.set(filePath, { probe: details, mtimeMs: stat.mtimeMs });
-          resolve(details);
-        } catch {
-          resolve(null);
-        }
-      });
-      proc.on("error", () => resolve(null));
-    });
-  } catch (err) {
-    logger.warn(`[QA-Probe] Error probing file ${filePath}: ${String(err)}`);
-    return null;
-  }
-}
-async function analyzeVideoQuality(filePath, totalDuration) {
-  const result = {
-    durationSecs: totalDuration,
-    blackSegments: [],
-    totalBlackDuration: 0,
-    blackCoveragePct: 0,
-    freezeSegments: [],
-    silenceSegments: []
-  };
-  if (!ffmpegStatic$1 || !fs__namespace.existsSync(filePath)) {
-    return result;
-  }
-  return new Promise((resolve) => {
-    const proc = cp.spawn(
-      ffmpegStatic$1,
-      [
-        "-v",
-        "info",
-        "-i",
-        filePath,
-        "-vf",
-        "blackdetect=d=1.5:pix_th=0.10,freezedetect=n=-50dB:d=3.0",
-        "-af",
-        "silencedetect=noise=-50dB:d=3.0",
-        "-f",
-        "null",
-        "-"
-      ],
-      { windowsHide: true }
-    );
-    let stderr = "";
-    proc.stderr.on("data", (d) => {
-      stderr += d.toString();
-    });
-    proc.on("close", () => {
-      const blackMatches = stderr.matchAll(/black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)/g);
-      for (const m of blackMatches) {
-        const start = parseFloat(m[1]);
-        const end = parseFloat(m[2]);
-        const duration = parseFloat(m[3]);
-        result.blackSegments.push({ start, end, duration });
-        result.totalBlackDuration += duration;
-      }
-      if (totalDuration > 0) {
-        result.blackCoveragePct = Math.round(result.totalBlackDuration / totalDuration * 100);
-      }
-      const freezeStartMatches = stderr.matchAll(/freeze_start:\s*([\d.]+)/g);
-      const freezeDurMatches = stderr.matchAll(/freeze_duration:\s*([\d.]+)/g);
-      const freezeStarts = Array.from(freezeStartMatches).map((m) => parseFloat(m[1]));
-      const freezeDurs = Array.from(freezeDurMatches).map((m) => parseFloat(m[1]));
-      for (let i = 0; i < Math.min(freezeStarts.length, freezeDurs.length); i++) {
-        const start = freezeStarts[i];
-        const dur = freezeDurs[i];
-        result.freezeSegments.push({ start, end: start + dur, duration: dur });
-      }
-      const silStarts = Array.from(stderr.matchAll(/silence_start:\s*([\d.]+)/g)).map((m) => parseFloat(m[1]));
-      const silDurs = Array.from(stderr.matchAll(/silence_duration:\s*([\d.]+)/g)).map((m) => parseFloat(m[1]));
-      for (let i = 0; i < Math.min(silStarts.length, silDurs.length); i++) {
-        const start = silStarts[i];
-        const dur = silDurs[i];
-        result.silenceSegments.push({ start, end: start + dur, duration: dur });
-      }
-      resolve(result);
-    });
-    proc.on("error", () => resolve(result));
-  });
-}
-async function generateContactSheet(videoPath, outputPath, durationSecs) {
-  if (!ffmpegStatic$1 || !fs__namespace.existsSync(videoPath) || durationSecs <= 0) {
-    return false;
-  }
-  try {
-    const tmpDir = fs__namespace.mkdtempSync("contact_sheet_");
-    const frameCount = 5;
-    const timestamps = [
-      0.5,
-      Math.max(1, durationSecs * 0.25),
-      Math.max(2, durationSecs * 0.5),
-      Math.max(3, durationSecs * 0.75),
-      Math.max(4, durationSecs - 0.8)
-    ];
-    const extractedFiles = [];
-    for (let i = 0; i < timestamps.length; i++) {
-      const ts = Math.min(timestamps[i], Math.max(0, durationSecs - 0.2));
-      const framePath = `${tmpDir}/frame_${i}.jpg`;
-      await new Promise((resolve) => {
-        const p = cp.spawn(
-          ffmpegStatic$1,
-          [
-            "-y",
-            "-ss",
-            String(ts),
-            "-i",
-            videoPath,
-            "-vframes",
-            "1",
-            "-q:v",
-            "3",
-            framePath
-          ],
-          { windowsHide: true }
-        );
-        p.on("close", () => resolve());
-        p.on("error", () => resolve());
-      });
-      if (fs__namespace.existsSync(framePath) && fs__namespace.statSync(framePath).size > 0) {
-        extractedFiles.push(framePath);
-      }
-    }
-    if (extractedFiles.length === 0) {
-      fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
-      return false;
-    }
-    const tileFilter = extractedFiles.length >= 5 ? "tile=5x1" : `tile=${extractedFiles.length}x1`;
-    const concatInputArgs = extractedFiles.flatMap((f) => ["-i", f]);
-    await new Promise((resolve, reject2) => {
-      const p = cp.spawn(
-        ffmpegStatic$1,
-        [
-          "-y",
-          ...concatInputArgs,
-          "-filter_complex",
-          `${extractedFiles.map((_, idx) => `[${idx}:v]scale=384:216[v${idx}]`).join(";")};${extractedFiles.map((_, idx) => `[v${idx}]`).join("")}${tileFilter}`,
-          outputPath
-        ],
-        { windowsHide: true }
-      );
-      p.on("close", (code) => {
-        if (code === 0 && fs__namespace.existsSync(outputPath) && fs__namespace.statSync(outputPath).size > 0) {
-          resolve();
-        } else {
-          reject2(new Error(`FFmpeg contact sheet tile exited with ${code}`));
-        }
-      });
-      p.on("error", reject2);
-    });
-    fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
-    return true;
-  } catch (err) {
-    logger.warn(`[QA-ContactSheet] Failed to generate contact sheet: ${String(err)}`);
-    return false;
-  }
-}
-const POSTFLIGHT_THRESHOLDS = {
-  MAX_BENIGN_BLACK_SEGMENT_SECS: 2,
-  // Black transition dip <= 2s is benign
-  FATAL_BLACK_COVERAGE_PERCENT: 80,
-  // > 80% black coverage across entire video is fatal
-  WARNING_FREEZE_SEGMENT_SECS: 4,
-  // Freeze frame > 4.0s triggers warning
-  DURATION_MISMATCH_WARN_SECS: 1,
-  // Duration difference > 1.0s triggers warning
-  DURATION_MISMATCH_FATAL_PERCENT: 15
-  // > 15% duration mismatch is fatal
-};
-async function runRenderPostflight(options) {
-  const {
-    projectDir,
-    workingOutputPath,
-    expectedDuration,
-    totalScenes,
-    hasVoiceover,
-    targetResolution = { width: 1920, height: 1080 }
-  } = options;
-  const issues = [];
-  let issueId = 1;
-  function addIssue(severity, category, message, suggestion, details) {
-    issues.push({
-      id: `postflight_${issueId++}`,
-      stage: "postflight",
-      severity,
-      category,
-      message,
-      suggestion,
-      details
-    });
-  }
-  if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
-    addIssue("fatal", "output", "Render output file is missing or has 0 bytes.", "Check FFmpeg logs for render crash");
-    return buildReport$1(expectedDuration, 0, totalScenes, issues);
-  }
-  const probe = await probeMediaDetailed(workingOutputPath);
-  if (!probe) {
-    addIssue("fatal", "output", "FFprobe failed to inspect render output.", "The output file is corrupt or unreadable");
-    return buildReport$1(expectedDuration, 0, totalScenes, issues);
-  }
-  if (!probe.hasVideo || probe.durationSecs <= 0) {
-    addIssue("fatal", "output", "Render output has no valid video stream or duration is 0.", "Ensure input media files are valid and FFmpeg arguments are correct");
-  }
-  if (hasVoiceover && !probe.hasAudio) {
-    addIssue("fatal", "audio", "Render output is missing audio stream while voiceover was expected.", "Check audio mixing and codec settings");
-  }
-  if (probe.width !== targetResolution.width || probe.height !== targetResolution.height) {
-    addIssue(
-      "warning",
-      "output",
-      `Rendered resolution (${probe.width}x${probe.height}) differs from target (${targetResolution.width}x${targetResolution.height})`,
-      "Verify scaling filter in render pipeline"
-    );
-  }
-  const durationDiff = Math.abs(probe.durationSecs - expectedDuration);
-  const durationMismatchPercent = expectedDuration > 0 ? durationDiff / expectedDuration * 100 : 0;
-  if (durationDiff > POSTFLIGHT_THRESHOLDS.DURATION_MISMATCH_WARN_SECS) {
-    if (durationMismatchPercent > POSTFLIGHT_THRESHOLDS.DURATION_MISMATCH_FATAL_PERCENT && expectedDuration > 10) {
-      addIssue(
-        "fatal",
-        "output",
-        `Rendered duration (${probe.durationSecs.toFixed(1)}s) deviates by ${durationMismatchPercent.toFixed(1)}% from expected (${expectedDuration.toFixed(1)}s)`,
-        "Check scene transition and audio alignment"
-      );
-    } else {
-      addIssue(
-        "warning",
-        "output",
-        `Rendered duration (${probe.durationSecs.toFixed(1)}s) deviates slightly from expected (${expectedDuration.toFixed(1)}s)`,
-        "Normal variation from transition xfade"
-      );
-    }
-  }
-  const quality = await analyzeVideoQuality(workingOutputPath, probe.durationSecs);
-  if (quality.blackCoveragePct >= POSTFLIGHT_THRESHOLDS.FATAL_BLACK_COVERAGE_PERCENT) {
-    addIssue(
-      "fatal",
-      "output",
-      `Severe black screen detected: ${quality.blackCoveragePct}% of the video is completely black`,
-      "Check if video codecs or transition offsets are producing black frames"
-    );
-  } else {
-    for (const b of quality.blackSegments) {
-      if (b.duration > POSTFLIGHT_THRESHOLDS.MAX_BENIGN_BLACK_SEGMENT_SECS) {
-        addIssue(
-          "warning",
-          "output",
-          `Prolonged black segment of ${b.duration.toFixed(1)}s detected at ${b.start.toFixed(1)}s - ${b.end.toFixed(1)}s`,
-          "Check missing media or long transition dip"
-        );
-      }
-    }
-  }
-  for (const f of quality.freezeSegments) {
-    if (f.duration > POSTFLIGHT_THRESHOLDS.WARNING_FREEZE_SEGMENT_SECS) {
-      addIssue(
-        "warning",
-        "output",
-        `Freeze frame of ${f.duration.toFixed(1)}s detected at ${f.start.toFixed(1)}s - ${f.end.toFixed(1)}s`,
-        "Check if source footage duration is too short for scene duration"
-      );
-    }
-  }
-  const contactSheetPath = path.join(projectDir, "output", "render-contact-sheet.jpg");
-  try {
-    const csSuccess = await generateContactSheet(workingOutputPath, contactSheetPath, probe.durationSecs);
-    if (csSuccess) {
-      addIssue("info", "output", "Contact sheet generated successfully at output/render-contact-sheet.jpg");
-    } else {
-      addIssue("warning", "output", "Failed to generate visual contact sheet (non-fatal)");
-    }
-  } catch (err) {
-    addIssue("warning", "output", `Contact sheet error: ${String(err)} (non-fatal)`);
-  }
-  const report = buildReport$1(expectedDuration, probe.durationSecs, totalScenes, issues);
-  const reportPath = path.join(projectDir, "analysis", "render-qa.json");
-  atomicWriteJson(reportPath, report);
-  logger.info(`[QA-Postflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning)`);
-  return report;
-}
-function buildReport$1(expectedDuration, actualDuration, totalScenes, issues) {
-  const fatalCount = issues.filter((i) => i.severity === "fatal").length;
-  const warningCount = issues.filter((i) => i.severity === "warning").length;
-  const infoCount = issues.filter((i) => i.severity === "info").length;
-  let status = "passed";
-  if (fatalCount > 0) {
-    status = "failed";
-  } else if (warningCount > 0) {
-    status = "passed_with_warnings";
-  }
-  return {
-    version: 1,
-    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
-    status,
-    expectedDuration: Math.round(expectedDuration * 100) / 100,
-    actualDuration: Math.round(actualDuration * 100) / 100,
-    totalScenes,
-    resolvedScenes: totalScenes,
-    missingScenes: 0,
-    fatalCount,
-    warningCount,
-    infoCount,
-    issues
-  };
-}
-function buildHealthMotionFilter(presetOrSpec, width, height, duration, fps) {
-  const spec = typeof presetOrSpec === "string" ? resolvePresetDefaults(presetOrSpec, duration) : presetOrSpec;
-  if (spec.preset === "none") {
-    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
-  }
-  const frames = Math.max(1, Math.round(duration * fps));
-  const PI = "3.14159265";
-  let tExpr;
-  switch (spec.ease) {
-    case "linear":
-      tExpr = `(on/${frames})`;
-      break;
-    case "ease-out":
-      tExpr = `sin((${PI}/2)*(on/${frames}))`;
-      break;
-    case "ease-in-out":
-    default:
-      tExpr = `((1-cos(${PI}*on/${frames}))/2)`;
-      break;
-  }
-  const zStart = spec.zoomStart;
-  const zEnd = spec.zoomEnd;
-  const zRange = (zEnd - zStart).toFixed(6);
-  let zExpr;
-  let xExpr;
-  let yExpr;
-  switch (spec.preset) {
-    case "gentle-pulse": {
-      zExpr = `(1.025+0.02*sin(2*${PI}*on/${frames}))`;
-      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
-      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
-      break;
-    }
-    case "still-hold": {
-      zExpr = `${zStart.toFixed(4)}`;
-      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
-      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
-      break;
-    }
-    case "pan-left": {
-      zExpr = `${zStart.toFixed(4)}`;
-      xExpr = `((iw-iw/zoom)*(0.75-0.50*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
-      break;
-    }
-    case "pan-right": {
-      zExpr = `${zStart.toFixed(4)}`;
-      xExpr = `((iw-iw/zoom)*(0.25+0.50*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
-      break;
-    }
-    case "pan-up": {
-      zExpr = `${zStart.toFixed(4)}`;
-      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
-      yExpr = `((ih-ih/zoom)*(0.75-0.50*${tExpr}))`;
-      break;
-    }
-    case "pan-down": {
-      zExpr = `${zStart.toFixed(4)}`;
-      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
-      yExpr = `((ih-ih/zoom)*(0.25+0.50*${tExpr}))`;
-      break;
-    }
-    case "drift-up-left": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*(0.70-0.40*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*(0.70-0.40*${tExpr}))`;
-      break;
-    }
-    case "drift-up-right": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*(0.30+0.40*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*(0.70-0.40*${tExpr}))`;
-      break;
-    }
-    case "drift-down-left": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*(0.70-0.40*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*(0.30+0.40*${tExpr}))`;
-      break;
-    }
-    case "drift-down-right": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*(0.30+0.40*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*(0.30+0.40*${tExpr}))`;
-      break;
-    }
-    case "push-out-center":
-    case "slow-push-out": {
-      zExpr = `(${zEnd.toFixed(4)}-(${zEnd - zStart})*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
-      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
-      break;
-    }
-    case "push-in-left":
-    case "focus-left": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*0.30)`;
-      yExpr = `((ih-ih/zoom)*0.50)`;
-      break;
-    }
-    case "push-in-right":
-    case "focus-right": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*0.70)`;
-      yExpr = `((ih-ih/zoom)*0.50)`;
-      break;
-    }
-    case "micro-drift": {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*(0.40+0.20*${tExpr}))`;
-      yExpr = `((ih-ih/zoom)*(0.40+0.20*${tExpr}))`;
-      break;
-    }
-    case "push-in-center":
-    case "slow-push-in":
-    default: {
-      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
-      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
-      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
-      break;
-    }
-  }
-  return `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=1:s=${width}x${height}:fps=${fps}`;
-}
-function resolvePresetDefaults(preset, duration) {
-  const isShort = duration < 2.5;
-  const isLong = duration > 5;
-  const intensity = isShort ? "very-subtle" : isLong ? "medium" : "subtle";
-  const zoomStart = 1;
-  const zoomEnd = isShort ? 1.03 : isLong ? 1.08 : 1.06;
-  switch (preset) {
-    case "push-in-left":
-    case "focus-left":
-      return {
-        preset,
-        intensity,
-        focusX: 0.3,
-        focusY: 0.5,
-        zoomStart: 1.01,
-        zoomEnd,
-        ease: "ease-in-out",
-        reason: "Focus push toward viewer left"
-      };
-    case "push-in-right":
-    case "focus-right":
-      return {
-        preset,
-        intensity,
-        focusX: 0.7,
-        focusY: 0.5,
-        zoomStart: 1.01,
-        zoomEnd,
-        ease: "ease-in-out",
-        reason: "Focus push toward viewer right"
-      };
-    case "push-out-center":
-    case "slow-push-out":
-      return {
-        preset: "push-out-center",
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1,
-        zoomEnd,
-        ease: "ease-in-out",
-        reason: "Calm perspective push out from center"
-      };
-    case "pan-left":
-      return {
-        preset: "pan-left",
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.05,
-        zoomEnd: 1.05,
-        ease: "ease-in-out",
-        reason: "Smooth horizontal pan right to left"
-      };
-    case "pan-right":
-      return {
-        preset: "pan-right",
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.05,
-        zoomEnd: 1.05,
-        ease: "ease-in-out",
-        reason: "Smooth horizontal pan left to right"
-      };
-    case "pan-up":
-      return {
-        preset: "pan-up",
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.05,
-        zoomEnd: 1.05,
-        ease: "ease-in-out",
-        reason: "Smooth upward vertical pan"
-      };
-    case "pan-down":
-      return {
-        preset: "pan-down",
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.05,
-        zoomEnd: 1.05,
-        ease: "ease-in-out",
-        reason: "Smooth downward vertical pan"
-      };
-    case "drift-up-left":
-    case "drift-up-right":
-    case "drift-down-left":
-    case "drift-down-right":
-      return {
-        preset,
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.01,
-        zoomEnd: isShort ? 1.03 : 1.06,
-        ease: "ease-in-out",
-        reason: `Subtle directional diagonal drift (${preset})`
-      };
-    case "gentle-pulse":
-      return {
-        preset: "gentle-pulse",
-        intensity: "subtle",
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.025,
-        zoomEnd: 1.045,
-        ease: "ease-in-out",
-        reason: "Smooth organic biological pulsation"
-      };
-    case "still-hold":
-      return {
-        preset: "still-hold",
-        intensity: "very-subtle",
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1.02,
-        zoomEnd: 1.02,
-        ease: "linear",
-        reason: "Calm still hold with micro-scale overscan"
-      };
-    case "none":
-      return {
-        preset: "none",
-        intensity: "very-subtle",
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart: 1,
-        zoomEnd: 1,
-        ease: "linear",
-        reason: "Static image without camera motion"
-      };
-    case "slow-push-in":
-    case "push-in-center":
-    default:
-      return {
-        preset: "push-in-center",
-        intensity,
-        focusX: 0.5,
-        focusY: 0.5,
-        zoomStart,
-        zoomEnd,
-        ease: "ease-in-out",
-        reason: "Documentary push-in on focal subject"
-      };
-  }
 }
 const VIDEO_DURATION_PROBE_TIMEOUT_MS = 45e3;
 function parsePacketTimingLine(line) {
@@ -10054,6 +4910,390 @@ function buildGeneralImagePrompt(params) {
   }
   return prompt;
 }
+function flattenEditPlanScenes(plan) {
+  const result = [];
+  const chapters = plan.chapters ?? [];
+  for (let chIdx = 0; chIdx < chapters.length; chIdx++) {
+    const ch = chapters[chIdx];
+    const chapterIndex = typeof ch.chapterIndex === "number" ? ch.chapterIndex : chIdx;
+    const chapterTitle = ch.title ?? `Chapter ${chapterIndex + 1}`;
+    const chapterPurpose = ch.purpose ?? "";
+    const rawSequences = ch.sequences ?? ch.chapters_seq ?? [];
+    let isFirstInChapter = true;
+    for (let seqIdx = 0; seqIdx < rawSequences.length; seqIdx++) {
+      const seq = rawSequences[seqIdx];
+      const sequenceIndex = typeof seq.sequenceIndex === "number" ? seq.sequenceIndex : seqIdx;
+      const sequenceTitle = seq.title ?? `Sequence ${sequenceIndex + 1}`;
+      const scenes = seq.scenes ?? [];
+      let isFirstInSequence = true;
+      for (let scIdx = 0; scIdx < scenes.length; scIdx++) {
+        const rawScene = scenes[scIdx];
+        const sceneIndex = typeof rawScene.sceneIndex === "number" ? rawScene.sceneIndex : result.length;
+        const sceneId = typeof rawScene.sceneId === "string" && rawScene.sceneId.trim().length > 0 ? rawScene.sceneId : `chapter-${chapterIndex}-sequence-${sequenceIndex}-scene-${sceneIndex}`;
+        const isLastInSequence = scIdx === scenes.length - 1;
+        const isLastInChapter = isLastInSequence && seqIdx === rawSequences.length - 1;
+        result.push({
+          scene: rawScene,
+          sceneId,
+          sceneIndex,
+          chapterIndex,
+          chapterTitle,
+          chapterPurpose,
+          sequenceIndex,
+          sequenceTitle,
+          isFirstInChapter,
+          isFirstInSequence,
+          isLastInChapter,
+          isLastInSequence
+        });
+        isFirstInChapter = false;
+        isFirstInSequence = false;
+      }
+    }
+  }
+  return result;
+}
+const HEALTH_SCHEMA_VERSION = 1;
+const DEFAULT_HEALTH_CONFIG = {
+  aiRatio: 0.8,
+  stockRatio: 0.2,
+  width: 1920,
+  height: 1080,
+  motionEnabled: true
+};
+function getHealthManifestPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "health-generated-assets.json");
+}
+function computeHealthConfigHash(config) {
+  const merged = { ...DEFAULT_HEALTH_CONFIG, ...config };
+  return crypto__namespace.createHash("md5").update(JSON.stringify(merged)).digest("hex");
+}
+function computeHealthGenerationHash(sceneIndex, narration, visualIntent, imagePrompt, config) {
+  const width = config?.width ?? DEFAULT_HEALTH_CONFIG.width;
+  const height = config?.height ?? DEFAULT_HEALTH_CONFIG.height;
+  const payload = [
+    String(sceneIndex),
+    (narration || "").trim().toLowerCase(),
+    (visualIntent || "").trim().toLowerCase(),
+    (imagePrompt || "").trim(),
+    `${width}x${height}`,
+    "GEM_PIX_2",
+    "health"
+  ].join("||");
+  return crypto__namespace.createHash("sha256").update(payload).digest("hex");
+}
+function computeHealthMotionHash(plan) {
+  const parts = (plan.scenes || []).map((s) => {
+    const motionStr = s.motion ? `${s.motion.preset}:${s.motion.intensity}:${s.motion.zoomEnd}` : s.motionPreset || "none";
+    const sfxStr = s.sfxCue ? `${s.sfxCue.type}:${s.sfxCue.volumeDb}` : "none";
+    return `${s.sceneIndex}:${s.category}:${motionStr}:${sfxStr}`;
+  });
+  return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
+}
+function loadHealthGeneratedManifest(projectDir) {
+  const manifestPath = getHealthManifestPath(projectDir);
+  if (fs__namespace.existsSync(manifestPath)) {
+    try {
+      const data = JSON.parse(fs__namespace.readFileSync(manifestPath, "utf-8"));
+      if (data && typeof data === "object" && data.scenes) {
+        return data;
+      }
+    } catch (err) {
+      logger.warn(`[HealthVisualCache] Failed to parse ${manifestPath}: ${err}`);
+    }
+  }
+  return {
+    schemaVersion: HEALTH_SCHEMA_VERSION,
+    updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    configHash: computeHealthConfigHash(),
+    scenes: {}
+  };
+}
+function saveHealthGeneratedManifest(projectDir, manifest) {
+  const manifestPath = getHealthManifestPath(projectDir);
+  const dir = path__namespace.dirname(manifestPath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  const tmpPath = `${manifestPath}.tmp.${Date.now()}`;
+  fs__namespace.writeFileSync(tmpPath, JSON.stringify(manifest, null, 2), "utf-8");
+  fs__namespace.renameSync(tmpPath, manifestPath);
+}
+function buildHealthMotionFilter(presetOrSpec, width, height, duration, fps) {
+  const spec = typeof presetOrSpec === "string" ? resolvePresetDefaults(presetOrSpec, duration) : presetOrSpec;
+  if (spec.preset === "none") {
+    return `scale=${width}:${height}:force_original_aspect_ratio=decrease,pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2,setsar=1`;
+  }
+  const frames = Math.max(1, Math.round(duration * fps));
+  const PI = "3.14159265";
+  let tExpr;
+  switch (spec.ease) {
+    case "linear":
+      tExpr = `(on/${frames})`;
+      break;
+    case "ease-out":
+      tExpr = `sin((${PI}/2)*(on/${frames}))`;
+      break;
+    case "ease-in-out":
+    default:
+      tExpr = `((1-cos(${PI}*on/${frames}))/2)`;
+      break;
+  }
+  const zStart = spec.zoomStart;
+  const zEnd = spec.zoomEnd;
+  const zRange = (zEnd - zStart).toFixed(6);
+  let zExpr;
+  let xExpr;
+  let yExpr;
+  switch (spec.preset) {
+    case "gentle-pulse": {
+      zExpr = `(1.025+0.02*sin(2*${PI}*on/${frames}))`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "still-hold": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "pan-left": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*(0.75-0.50*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "pan-right": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*(0.25+0.50*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "pan-up": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*(0.75-0.50*${tExpr}))`;
+      break;
+    }
+    case "pan-down": {
+      zExpr = `${zStart.toFixed(4)}`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*(0.25+0.50*${tExpr}))`;
+      break;
+    }
+    case "drift-up-left": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.70-0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.70-0.40*${tExpr}))`;
+      break;
+    }
+    case "drift-up-right": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.30+0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.70-0.40*${tExpr}))`;
+      break;
+    }
+    case "drift-down-left": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.70-0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.30+0.40*${tExpr}))`;
+      break;
+    }
+    case "drift-down-right": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.30+0.40*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.30+0.40*${tExpr}))`;
+      break;
+    }
+    case "push-out-center":
+    case "slow-push-out": {
+      zExpr = `(${zEnd.toFixed(4)}-(${zEnd - zStart})*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+    case "push-in-left":
+    case "focus-left": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*0.30)`;
+      yExpr = `((ih-ih/zoom)*0.50)`;
+      break;
+    }
+    case "push-in-right":
+    case "focus-right": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*0.70)`;
+      yExpr = `((ih-ih/zoom)*0.50)`;
+      break;
+    }
+    case "micro-drift": {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*(0.40+0.20*${tExpr}))`;
+      yExpr = `((ih-ih/zoom)*(0.40+0.20*${tExpr}))`;
+      break;
+    }
+    case "push-in-center":
+    case "slow-push-in":
+    default: {
+      zExpr = `(${zStart.toFixed(4)}+${zRange}*${tExpr})`;
+      xExpr = `((iw-iw/zoom)*${spec.focusX.toFixed(2)})`;
+      yExpr = `((ih-ih/zoom)*${spec.focusY.toFixed(2)})`;
+      break;
+    }
+  }
+  return `zoompan=z='${zExpr}':x='${xExpr}':y='${yExpr}':d=1:s=${width}x${height}:fps=${fps}`;
+}
+function resolvePresetDefaults(preset, duration) {
+  const isShort = duration < 2.5;
+  const isLong = duration > 5;
+  const intensity = isShort ? "very-subtle" : isLong ? "medium" : "subtle";
+  const zoomStart = 1;
+  const zoomEnd = isShort ? 1.03 : isLong ? 1.08 : 1.06;
+  switch (preset) {
+    case "push-in-left":
+    case "focus-left":
+      return {
+        preset,
+        intensity,
+        focusX: 0.3,
+        focusY: 0.5,
+        zoomStart: 1.01,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Focus push toward viewer left"
+      };
+    case "push-in-right":
+    case "focus-right":
+      return {
+        preset,
+        intensity,
+        focusX: 0.7,
+        focusY: 0.5,
+        zoomStart: 1.01,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Focus push toward viewer right"
+      };
+    case "push-out-center":
+    case "slow-push-out":
+      return {
+        preset: "push-out-center",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Calm perspective push out from center"
+      };
+    case "pan-left":
+      return {
+        preset: "pan-left",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth horizontal pan right to left"
+      };
+    case "pan-right":
+      return {
+        preset: "pan-right",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth horizontal pan left to right"
+      };
+    case "pan-up":
+      return {
+        preset: "pan-up",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth upward vertical pan"
+      };
+    case "pan-down":
+      return {
+        preset: "pan-down",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.05,
+        zoomEnd: 1.05,
+        ease: "ease-in-out",
+        reason: "Smooth downward vertical pan"
+      };
+    case "drift-up-left":
+    case "drift-up-right":
+    case "drift-down-left":
+    case "drift-down-right":
+      return {
+        preset,
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.01,
+        zoomEnd: isShort ? 1.03 : 1.06,
+        ease: "ease-in-out",
+        reason: `Subtle directional diagonal drift (${preset})`
+      };
+    case "gentle-pulse":
+      return {
+        preset: "gentle-pulse",
+        intensity: "subtle",
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.025,
+        zoomEnd: 1.045,
+        ease: "ease-in-out",
+        reason: "Smooth organic biological pulsation"
+      };
+    case "still-hold":
+      return {
+        preset: "still-hold",
+        intensity: "very-subtle",
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1.02,
+        zoomEnd: 1.02,
+        ease: "linear",
+        reason: "Calm still hold with micro-scale overscan"
+      };
+    case "none":
+      return {
+        preset: "none",
+        intensity: "very-subtle",
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart: 1,
+        zoomEnd: 1,
+        ease: "linear",
+        reason: "Static image without camera motion"
+      };
+    case "slow-push-in":
+    case "push-in-center":
+    default:
+      return {
+        preset: "push-in-center",
+        intensity,
+        focusX: 0.5,
+        focusY: 0.5,
+        zoomStart,
+        zoomEnd,
+        ease: "ease-in-out",
+        reason: "Documentary push-in on focal subject"
+      };
+  }
+}
 const HEART_PULSE_REGEX = /\b(heart|cardiac|pulse|pulsat|beat|rhythm|blood\s*pressure|arterial\s*pulse|systol|diastol)\b/i;
 const DOWNWARD_REGEX = /\b(down|downward|digest|digestive|stomach|gut|intestine|colon|waste|excret|sink|lower|absorb|drop)\b/i;
 const UPWARD_REGEX = /\b(up|upward|brain|cortex|head|neuron|wake|waking|rise|rising|increas|elevat|ascend|signal|energy)\b/i;
@@ -10175,6 +5415,114 @@ class HealthMotionDirector {
       return notLast1[0];
     }
     return searchPool[sceneIndex % searchPool.length] || "push-in-center";
+  }
+}
+class SfxCacheManager {
+  static getCachePath(projectDir) {
+    return path__namespace.join(projectDir, "analysis", "health-sfx-cache.json");
+  }
+  static getAudioDir(projectDir) {
+    return path__namespace.join(projectDir, "assets", "audio", "health-sfx");
+  }
+  /**
+   * Loads the cache manifest with full backward compatibility for schema v1.
+   * If entries lack provider/metadata fields from earlier versions, they still load cleanly.
+   */
+  static loadCacheManifest(projectDir) {
+    const p = this.getCachePath(projectDir);
+    if (fs__namespace.existsSync(p)) {
+      try {
+        const raw = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+        return {
+          schemaVersion: raw.schemaVersion || 1,
+          updatedAt: raw.updatedAt || (/* @__PURE__ */ new Date()).toISOString(),
+          entries: raw.entries || {}
+        };
+      } catch (err) {
+        logger.warn(`[SfxCache] Corrupted cache at ${p}, recreating: ${err}`);
+      }
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      entries: {}
+    };
+  }
+  /**
+   * Atomically saves cache manifest using a temporary file.
+   */
+  static saveCacheManifest(projectDir, manifest) {
+    const p = this.getCachePath(projectDir);
+    const dir = path__namespace.dirname(p);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    const tmp = `${p}.tmp.${Date.now()}`;
+    fs__namespace.writeFileSync(tmp, JSON.stringify(manifest, null, 2), "utf-8");
+    fs__namespace.renameSync(tmp, p);
+  }
+  /**
+   * Retrieves a cached SFX if the file exists and is valid.
+   * Cleans up broken cache entries on miss.
+   */
+  static getCachedSfx(projectDir, type) {
+    if (type === "none") return null;
+    const manifest = this.loadCacheManifest(projectDir);
+    const entry = manifest.entries[type];
+    if (!entry) return null;
+    if (!entry.localPath || !fs__namespace.existsSync(entry.localPath)) {
+      logger.debug(`[SfxCache] Missing file for cached type=${type} at ${entry.localPath}`);
+      delete manifest.entries[type];
+      this.saveCacheManifest(projectDir, manifest);
+      return null;
+    }
+    try {
+      const stat = fs__namespace.statSync(entry.localPath);
+      if (stat.size < 512) {
+        logger.debug(`[SfxCache] Cached file too small (${stat.size} bytes) for type=${type}`);
+        delete manifest.entries[type];
+        this.saveCacheManifest(projectDir, manifest);
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    const provider = entry.provider || (entry.generated ? "procedural" : "openverse");
+    return {
+      type,
+      provider: "cache",
+      localPath: entry.localPath,
+      durationSecs: entry.durationSecs || 1,
+      sourceId: entry.assetId,
+      sourceLabel: entry.sourceLabel || `Cached (${provider})`,
+      creator: entry.creator || (provider === "procedural" ? "Local Procedural SFX" : "Cached SFX"),
+      license: entry.license || "Project Cache",
+      sourceUrl: entry.pageUrl || entry.sourceUrl,
+      generated: entry.generated ?? provider === "procedural"
+    };
+  }
+  /**
+   * Stores a successfully resolved SFX into the project cache manifest.
+   */
+  static recordCachedSfx(projectDir, resolved) {
+    const manifest = this.loadCacheManifest(projectDir);
+    const entry = {
+      assetId: resolved.sourceId || `${resolved.provider}-${resolved.type}`,
+      sfxType: resolved.type,
+      query: resolved.type,
+      localPath: resolved.localPath,
+      license: resolved.license || "Internal Asset",
+      creator: resolved.creator || resolved.sourceLabel || "SFX Engine",
+      pageUrl: resolved.sourceUrl || "",
+      downloadedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      provider: resolved.provider,
+      sourceLabel: resolved.sourceLabel,
+      sourceUrl: resolved.sourceUrl,
+      durationSecs: resolved.durationSecs,
+      generated: resolved.generated
+    };
+    manifest.entries[resolved.type] = entry;
+    this.saveCacheManifest(projectDir, manifest);
+    logger.debug(`[SfxCache] Saved cache entry for type=${resolved.type} provider=${resolved.provider}`);
   }
 }
 let cachedCapability = null;
@@ -12316,7 +7664,7 @@ function countWords$3(text) {
 function normWs$1(text) {
   return (text || "").replace(/\s+/g, " ").trim();
 }
-function sha256$2(parts) {
+function sha256$4(parts) {
   return crypto__namespace.createHash("sha256").update(parts.join("||")).digest("hex");
 }
 function sanitizePromptLine(prompt) {
@@ -12605,7 +7953,7 @@ function buildManualScenePrompt(params) {
   return prompt;
 }
 function computeManualPromptHash(params) {
-  return sha256$2([
+  return sha256$4([
     normWs$1(params.narration),
     normWs$1(params.visualIntent),
     params.profile,
@@ -12615,7 +7963,7 @@ function computeManualPromptHash(params) {
   ]);
 }
 function computeInputHash(params) {
-  return sha256$2([
+  return sha256$4([
     String(params.sceneIndex),
     normWs$1(params.narration),
     normWs$1(params.visualIntent),
@@ -12754,7 +8102,7 @@ function formatManualAiPromptText(pack) {
   const sorted = [...pack.scenes].sort((a, b) => a.sceneIndex - b.sceneIndex);
   return sorted.map((e) => `${formatSceneLabel(e.sceneIndex)} | ${sanitizePromptLine(e.prompt)}`).join("\n\n");
 }
-function writeFileAtomic$5(filePath, content) {
+function writeFileAtomic$6(filePath, content) {
   const dir = path__namespace.dirname(filePath);
   if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
   const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
@@ -12774,8 +8122,8 @@ function loadManualAiPromptPack(projectDir) {
   }
 }
 function saveManualAiPromptPackFiles(projectDir, pack) {
-  writeFileAtomic$5(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
-  writeFileAtomic$5(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
+  writeFileAtomic$6(getManualAiPromptJsonPath(projectDir), JSON.stringify(pack, null, 2));
+  writeFileAtomic$6(getManualAiPromptTxtPath(projectDir), formatManualAiPromptText(pack) + "\n");
 }
 function readManualAiPromptText(projectDir) {
   const pack = loadManualAiPromptPack(projectDir);
@@ -12984,7 +8332,8 @@ function evaluateManualAiStatusForProject(projectDir, imageMode = "prompt") {
   const norm2 = projectDir ? path__namespace.normalize(path__namespace.resolve(projectDir)) : "";
   return evaluateManualAiStatus({ projectDir: norm2, pack: loadManualAiPromptPack(norm2), imageMode });
 }
-function readJsonSafe(p) {
+const getManualAiStatus$1 = evaluateManualAiStatusForProject;
+function readJsonSafe$1(p) {
   try {
     if (!fs__namespace.existsSync(p)) return null;
     return JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
@@ -12993,7 +8342,7 @@ function readJsonSafe(p) {
   }
 }
 function findMissingManualAiScenes(projectDir) {
-  const snapshot = readJsonSafe(
+  const snapshot = readJsonSafe$1(
     path__namespace.join(projectDir, "analysis", "visual-input-snapshot.json")
   );
   if (snapshot?.aiImageMode !== "prompt") return [];
@@ -13002,17 +8351,17 @@ function findMissingManualAiScenes(projectDir) {
     path__namespace.join(projectDir, "project.json")
   ].find((p) => fs__namespace.existsSync(p));
   if (stateFile) {
-    const proj = readJsonSafe(stateFile);
+    const proj = readJsonSafe$1(stateFile);
     const inputs = proj?.inputs;
     if (inputs) {
       if (inputs.visualSourceMode !== "custom-mix") return [];
       if (resolveAiImageMode(inputs.visualMixConfig) !== "prompt") return [];
     }
   }
-  const plan = readJsonSafe(getVisualMixPlanFilePath(projectDir));
+  const plan = readJsonSafe$1(getVisualMixPlanFilePath(projectDir));
   const aiScenes = (plan?.scenes ?? []).filter((s) => s.strategy === "ai-still").map((s) => s.sceneIndex);
   if (aiScenes.length === 0) return [];
-  const assignmentsRaw = readJsonSafe(path__namespace.join(projectDir, "analysis", "stock-assignments.json"));
+  const assignmentsRaw = readJsonSafe$1(path__namespace.join(projectDir, "analysis", "stock-assignments.json"));
   const assignments = Array.isArray(assignmentsRaw) ? assignmentsRaw : [];
   const byScene = new Map(assignments.map((a) => [a.sceneIndex, a]));
   const missing = [];
@@ -13022,6 +8371,4710 @@ function findMissingManualAiScenes(projectDir) {
     if (!ok) missing.push(idx);
   }
   return missing;
+}
+const PIPELINE_SCHEMA_VERSION = 1;
+const PIPELINE_EXECUTION_STAGES = [
+  "validating",
+  "transcribing",
+  "planning",
+  "captions",
+  "global-context",
+  "stock-search",
+  "audio-search",
+  "preflight",
+  "rendering",
+  "postflight"
+];
+const APP_INSTANCE_ID = uuid.v4();
+function normalizeProjectDir(projectDir) {
+  if (!projectDir) return "";
+  const resolved = path__namespace.resolve(projectDir);
+  return path__namespace.normalize(resolved);
+}
+function getPipelineStatePath(projectDir) {
+  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.json");
+}
+function getPipelineStateBackupPath(projectDir) {
+  return path__namespace.join(normalizeProjectDir(projectDir), "analysis", "auto-pipeline-state.backup.json");
+}
+function isProcessAlive(pid) {
+  if (!pid || pid <= 0) return false;
+  try {
+    return process.kill(pid, 0);
+  } catch (err) {
+    const code = err.code;
+    return code === "EPERM";
+  }
+}
+function createLease(runId, currentStage) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  return {
+    runId,
+    appInstanceId: APP_INSTANCE_ID,
+    pid: process.pid,
+    acquiredAt: now,
+    heartbeatAt: now,
+    currentStage
+  };
+}
+function updateHeartbeat(state2) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (state2.lease) {
+    state2.lease.heartbeatAt = now;
+    state2.lease.currentStage = state2.currentStage;
+  } else {
+    state2.lease = createLease(state2.runId, state2.currentStage);
+  }
+  state2.updatedAt = now;
+}
+function releaseLease(state2) {
+  delete state2.lease;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  state2.renderSettings = getActiveRunRenderSettings(state2.options);
+}
+function isLeaseStale(lease, heartbeatTimeoutMs = 15e3) {
+  if (!lease) return false;
+  if (lease.appInstanceId !== APP_INSTANCE_ID) {
+    if (!isProcessAlive(lease.pid)) {
+      return true;
+    }
+    const lastHeartbeat2 = new Date(lease.heartbeatAt).getTime();
+    if (isNaN(lastHeartbeat2) || Date.now() - lastHeartbeat2 > heartbeatTimeoutMs) {
+      return true;
+    }
+    return true;
+  }
+  const lastHeartbeat = new Date(lease.heartbeatAt).getTime();
+  if (!isNaN(lastHeartbeat) && Date.now() - lastHeartbeat > heartbeatTimeoutMs) {
+    return true;
+  }
+  return false;
+}
+function toSnapshot(state2) {
+  return {
+    version: state2.version,
+    runId: state2.runId,
+    projectDir: state2.projectDir,
+    currentStage: state2.currentStage,
+    overallStatus: state2.overallStatus,
+    stages: state2.stages,
+    updatedAt: state2.updatedAt,
+    lease: state2.lease,
+    warnings: state2.warnings,
+    fatalErrors: state2.fatalErrors,
+    renderOutputPath: state2.renderOutputPath,
+    preflightReportPath: state2.preflightReportPath,
+    postflightReportPath: state2.postflightReportPath,
+    renderSettings: getActiveRunRenderSettings(state2.options)
+  };
+}
+function computeInputFingerprint(_projectDir, scriptPath, voiceoverPath) {
+  let scriptHash;
+  if (scriptPath && fs__namespace.existsSync(scriptPath)) {
+    try {
+      const content = fs__namespace.readFileSync(scriptPath);
+      scriptHash = crypto__namespace.createHash("md5").update(content).digest("hex");
+    } catch {
+    }
+  }
+  let voiceoverSize;
+  let voiceoverMtimeMs;
+  if (voiceoverPath && fs__namespace.existsSync(voiceoverPath)) {
+    try {
+      const stat = fs__namespace.statSync(voiceoverPath);
+      voiceoverSize = stat.size;
+      voiceoverMtimeMs = stat.mtimeMs;
+    } catch {
+    }
+  }
+  return {
+    scriptPath,
+    scriptHash,
+    voiceoverPath,
+    voiceoverSize,
+    voiceoverMtimeMs
+  };
+}
+function createDefaultStageStates() {
+  const stages = {};
+  for (const stage of PIPELINE_EXECUTION_STAGES) {
+    stages[stage] = {
+      status: "pending",
+      progress: 0
+    };
+  }
+  return stages;
+}
+function createInitialPipelineState(options, fingerprint, runId) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const rId = runId ?? uuid.v4();
+  return {
+    schemaVersion: PIPELINE_SCHEMA_VERSION,
+    version: 1,
+    runId: rId,
+    projectDir: normalizeProjectDir(options.projectDir),
+    currentStage: "idle",
+    overallStatus: "idle",
+    startedAt: now,
+    updatedAt: now,
+    inputFingerprint: fingerprint,
+    options: {
+      ...options,
+      projectDir: normalizeProjectDir(options.projectDir),
+      initialRequireBackgroundMusic: options.initialRequireBackgroundMusic ?? options.requireBackgroundMusic
+    },
+    renderSettings: getActiveRunRenderSettings(options),
+    stages: createDefaultStageStates(),
+    warnings: [],
+    fatalErrors: []
+  };
+}
+function loadPipelineState(projectDir) {
+  const statePath = getPipelineStatePath(projectDir);
+  const backupPath = getPipelineStateBackupPath(projectDir);
+  if (fs__namespace.existsSync(statePath)) {
+    try {
+      const raw = fs__namespace.readFileSync(statePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object" && parsed.stages) {
+        if (!parsed.version) parsed.version = 1;
+        parsed.renderSettings = getActiveRunRenderSettings(parsed.options);
+        return parsed;
+      }
+    } catch (err) {
+      logger.warn(`[PipelineState] Primary state corrupt, trying backup: ${String(err)}`);
+    }
+  }
+  if (fs__namespace.existsSync(backupPath)) {
+    try {
+      const rawBackup = fs__namespace.readFileSync(backupPath, "utf-8");
+      const parsedBackup = JSON.parse(rawBackup);
+      if (parsedBackup && typeof parsedBackup === "object" && parsedBackup.stages) {
+        logger.info(`[PipelineState] Successfully recovered pipeline state from backup`);
+        if (!parsedBackup.version) parsedBackup.version = 1;
+        parsedBackup.renderSettings = getActiveRunRenderSettings(parsedBackup.options);
+        return parsedBackup;
+      }
+    } catch {
+    }
+  }
+  return null;
+}
+function savePipelineStateAtomic(projectDir, state2) {
+  const normDir = normalizeProjectDir(projectDir);
+  const prevProjectDir = state2.projectDir;
+  const prevVersion = state2.version;
+  const prevUpdatedAt = state2.updatedAt;
+  const prevRenderSettings = state2.renderSettings;
+  state2.projectDir = normDir;
+  state2.version = (state2.version || 0) + 1;
+  state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  state2.renderSettings = getActiveRunRenderSettings(state2.options);
+  const finalPath = getPipelineStatePath(normDir);
+  const backupPath = getPipelineStateBackupPath(normDir);
+  const dir = path__namespace.dirname(finalPath);
+  if (!fs__namespace.existsSync(dir)) {
+    try {
+      fs__namespace.mkdirSync(dir, { recursive: true });
+    } catch (err) {
+      state2.projectDir = prevProjectDir;
+      state2.version = prevVersion;
+      state2.updatedAt = prevUpdatedAt;
+      state2.renderSettings = prevRenderSettings;
+      throw err;
+    }
+  }
+  if (fs__namespace.existsSync(finalPath)) {
+    try {
+      fs__namespace.copyFileSync(finalPath, backupPath);
+    } catch {
+    }
+  }
+  const tmpPath = path__namespace.join(
+    dir,
+    `auto-pipeline-state.json.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`
+  );
+  const content = JSON.stringify(state2, null, 2);
+  try {
+    fs__namespace.writeFileSync(tmpPath, content, "utf-8");
+    fs__namespace.renameSync(tmpPath, finalPath);
+  } catch (err) {
+    state2.projectDir = prevProjectDir;
+    state2.version = prevVersion;
+    state2.updatedAt = prevUpdatedAt;
+    state2.renderSettings = prevRenderSettings;
+    if (fs__namespace.existsSync(tmpPath)) {
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+    throw err;
+  }
+  try {
+    fs__namespace.copyFileSync(finalPath, backupPath);
+  } catch {
+  }
+}
+function determineInvalidatedStages(oldState, newOptions, newFingerprint) {
+  const invalidated = /* @__PURE__ */ new Set();
+  const voiceoverChanged = oldState.inputFingerprint.voiceoverPath !== newFingerprint.voiceoverPath || oldState.inputFingerprint.voiceoverSize !== newFingerprint.voiceoverSize || oldState.inputFingerprint.voiceoverMtimeMs !== newFingerprint.voiceoverMtimeMs;
+  const scriptChanged = oldState.inputFingerprint.scriptPath !== newFingerprint.scriptPath || oldState.inputFingerprint.scriptHash !== newFingerprint.scriptHash;
+  if (voiceoverChanged) {
+    return [
+      "transcribing",
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (scriptChanged) {
+    return [
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (oldState.options.whisperModel !== newOptions.whisperModel && newOptions.whisperModel) {
+    return [
+      "transcribing",
+      "planning",
+      "captions",
+      "global-context",
+      "stock-search",
+      "audio-search",
+      "preflight",
+      "rendering",
+      "postflight"
+    ];
+  }
+  if (oldState.options.forceRegenerateCaptions !== newOptions.forceRegenerateCaptions && newOptions.forceRegenerateCaptions) {
+    invalidated.add("captions");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.preferredStockProvider !== newOptions.preferredStockProvider) {
+    invalidated.add("stock-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldProfileMode = resolveContentProfileMode(oldState.options);
+  const newProfileMode = resolveContentProfileMode(newOptions);
+  const oldContentType = oldState.options.contentType ?? "default";
+  const newContentType = newOptions.contentType ?? "default";
+  if (oldProfileMode !== newProfileMode || oldContentType !== newContentType) {
+    invalidated.add("stock-search");
+    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldVisualMode = oldState.options.visualSourceMode ?? (oldProfileMode === "health" ? "custom-mix" : "legacy");
+  const newVisualMode = newOptions.visualSourceMode ?? (newProfileMode === "health" ? "custom-mix" : "legacy");
+  if (oldVisualMode !== newVisualMode) {
+    invalidated.add("stock-search");
+    if (oldProfileMode === "health" || newProfileMode === "health" || oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldResolvedMix = oldState.options.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: oldState.options.visualSourceMode,
+    visualMixConfig: oldState.options.visualMixConfig,
+    contentType: oldContentType
+  }) : void 0;
+  const newResolvedMix = newOptions.visualMixConfig ? resolveVisualMixConfig({
+    visualSourceMode: newOptions.visualSourceMode,
+    visualMixConfig: newOptions.visualMixConfig,
+    contentType: newContentType
+  }) : void 0;
+  const stripDefaultAiMode = (cfg) => {
+    if (!cfg || typeof cfg !== "object" || !("aiImageMode" in cfg)) return cfg;
+    const { aiImageMode, ...rest } = cfg;
+    return aiImageMode === "prompt" ? { ...rest, aiImageMode } : rest;
+  };
+  const oldVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(oldState.options.visualMixConfig) ?? oldState.options.healthVisualConfig
+  );
+  const newVisualConfigStr = JSON.stringify(
+    stripDefaultAiMode(newOptions.visualMixConfig) ?? newOptions.healthVisualConfig
+  );
+  const visualConfigChanged = oldVisualConfigStr !== newVisualConfigStr || oldResolvedMix?.aiImageRatio !== newResolvedMix?.aiImageRatio || oldResolvedMix?.stockFootageRatio !== newResolvedMix?.stockFootageRatio || oldResolvedMix?.imageOutputResolution !== newResolvedMix?.imageOutputResolution || oldResolvedMix?.aiFailureBehavior !== newResolvedMix?.aiFailureBehavior || resolveAiImageMode(oldState.options.visualMixConfig) !== resolveAiImageMode(newOptions.visualMixConfig);
+  if (visualConfigChanged) {
+    invalidated.add("stock-search");
+    if (oldContentType === "health" || newContentType === "health") {
+      invalidated.add("audio-search");
+    }
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldMusicMode = oldState.options.backgroundMusicMode ?? "auto";
+  const newMusicMode = newOptions.backgroundMusicMode ?? "auto";
+  if (oldState.options.requireBackgroundMusic !== newOptions.requireBackgroundMusic || oldMusicMode !== newMusicMode) {
+    invalidated.add("audio-search");
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldAssemblyMode = oldState.options.assemblyMode ?? "full-production";
+  const newAssemblyMode = newOptions.assemblyMode ?? "full-production";
+  if (oldAssemblyMode !== newAssemblyMode) {
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  if (oldState.options.fps !== newOptions.fps || oldState.options.resolution?.width !== newOptions.resolution?.width || oldState.options.resolution?.height !== newOptions.resolution?.height || oldState.options.outputName !== newOptions.outputName) {
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  const oldOverlayMode = oldState.options.editorialSettings?.renderOverlayMode ?? "full";
+  const newOverlayMode = newOptions.editorialSettings?.renderOverlayMode ?? "full";
+  if (oldOverlayMode !== newOverlayMode) {
+    invalidated.add("preflight");
+    invalidated.add("rendering");
+    invalidated.add("postflight");
+  }
+  return Array.from(invalidated);
+}
+function applyInvalidation(state2, invalidatedStages) {
+  for (const stage of invalidatedStages) {
+    if (state2.stages[stage]) {
+      state2.stages[stage] = {
+        status: "pending",
+        progress: 0,
+        message: "Invalidated due to input/setting change"
+      };
+    }
+  }
+}
+const DEFAULT_RESOURCE_PROFILE = "balanced";
+const MB = 1024 * 1024;
+function clamp(v, min, max) {
+  return Math.min(max, Math.max(min, v));
+}
+function normalizeResourceProfile(p) {
+  return p === "low-power" || p === "fast" || p === "balanced" ? p : DEFAULT_RESOURCE_PROFILE;
+}
+function computeResourceLimits(profileInput, logicalCpus = os__namespace.cpus().length || 4, totalMemBytes = os__namespace.totalmem()) {
+  const profile = normalizeResourceProfile(profileInput);
+  const n = Math.max(1, Math.floor(logicalCpus));
+  const lowMemMachine = totalMemBytes > 0 && totalMemBytes < 12 * 1024 * MB;
+  switch (profile) {
+    case "low-power":
+      return {
+        profile,
+        logicalCpus: n,
+        ffmpegThreads: clamp(Math.floor(n / 4), 1, 2),
+        ffmpegFilterThreads: 1,
+        remotionConcurrency: 1,
+        offthreadVideoThreads: 1,
+        mediaCacheSizeInBytes: 256 * MB,
+        offthreadVideoCacheSizeInBytes: 256 * MB,
+        niceLevel: 15,
+        assemblyMaxScenesPerSegment: 8,
+        loadAverageFactor: 1
+      };
+    case "fast":
+      return {
+        profile,
+        logicalCpus: n,
+        ffmpegThreads: clamp(n - 2, 2, 6),
+        ffmpegFilterThreads: clamp(Math.floor(n / 2), 1, 4),
+        remotionConcurrency: clamp(Math.floor(n * 0.5), 1, 16),
+        offthreadVideoThreads: 2,
+        mediaCacheSizeInBytes: (lowMemMachine ? 384 : 512) * MB,
+        offthreadVideoCacheSizeInBytes: (lowMemMachine ? 384 : 512) * MB,
+        niceLevel: 0,
+        assemblyMaxScenesPerSegment: 24,
+        loadAverageFactor: 2
+      };
+    case "balanced":
+    default:
+      return {
+        profile: "balanced",
+        logicalCpus: n,
+        ffmpegThreads: clamp(Math.floor(n / 2), 2, 4),
+        ffmpegFilterThreads: clamp(Math.floor(n / 3), 1, 3),
+        remotionConcurrency: clamp(Math.floor(n / 4), 1, 2),
+        offthreadVideoThreads: 1,
+        mediaCacheSizeInBytes: (lowMemMachine ? 256 : 384) * MB,
+        offthreadVideoCacheSizeInBytes: (lowMemMachine ? 256 : 384) * MB,
+        niceLevel: 5,
+        assemblyMaxScenesPerSegment: 12,
+        loadAverageFactor: 1.5
+      };
+  }
+}
+function assessLoad(sample, limits) {
+  const reasons = [];
+  if (sample.availableMemRatio > 0 && sample.availableMemRatio < 0.15) {
+    reasons.push(`available memory ${(sample.availableMemRatio * 100).toFixed(0)}%`);
+  }
+  if (sample.eventLoopLagMs > 250) {
+    reasons.push(`event-loop lag ${Math.round(sample.eventLoopLagMs)}ms`);
+  }
+  if (sample.loadAvg1 > sample.logicalCpus * limits.loadAverageFactor) {
+    reasons.push(`load average ${sample.loadAvg1.toFixed(1)}`);
+  }
+  return { underPressure: reasons.length > 0, reasons };
+}
+function readAvailableMemoryRatio() {
+  const total = os__namespace.totalmem();
+  const fallback = total > 0 ? os__namespace.freemem() / total : 1;
+  if (process.platform !== "darwin") return Promise.resolve(fallback);
+  return new Promise((resolve) => {
+    cp.execFile("sysctl", ["-n", "kern.memorystatus_level"], { timeout: 2e3 }, (sErr, sOut) => {
+      const level = Number(String(sOut ?? "").trim());
+      if (!sErr && Number.isFinite(level) && level > 0 && level <= 100) return resolve(level / 100);
+      readVmStatRatio(total, fallback).then(resolve, () => resolve(fallback));
+    });
+  });
+}
+function readVmStatRatio(total, fallback) {
+  return new Promise((resolve) => {
+    cp.execFile("vm_stat", { timeout: 2e3 }, (err, stdout) => {
+      if (err || !stdout) return resolve(fallback);
+      try {
+        const pageSize = Number(/page size of (\d+) bytes/.exec(stdout)?.[1] ?? 4096);
+        const get = (label) => {
+          const m = new RegExp(`${label}:\\s+(\\d+)`).exec(stdout);
+          return m ? Number(m[1]) : 0;
+        };
+        const availPages = get("Pages free") + get("Pages inactive") + get("Pages speculative") + get("Pages purgeable");
+        const ratio = availPages * pageSize / total;
+        resolve(Number.isFinite(ratio) && ratio > 0 ? Math.min(1, ratio) : fallback);
+      } catch {
+        resolve(fallback);
+      }
+    });
+  });
+}
+class SystemLoadMonitor {
+  histogram = null;
+  start() {
+    if (this.histogram) return;
+    try {
+      this.histogram = perf_hooks.monitorEventLoopDelay({ resolution: 20 });
+      this.histogram.enable();
+    } catch {
+      this.histogram = null;
+    }
+  }
+  stop() {
+    try {
+      this.histogram?.disable();
+    } catch {
+    }
+    this.histogram = null;
+  }
+  async sample() {
+    let lagMs = 0;
+    if (this.histogram) {
+      lagMs = Math.max(0, this.histogram.percentile(95) / 1e6 - 20);
+      this.histogram.reset();
+    }
+    return {
+      loadAvg1: os__namespace.loadavg()[0] ?? 0,
+      logicalCpus: os__namespace.cpus().length || 1,
+      availableMemRatio: await readAvailableMemoryRatio(),
+      eventLoopLagMs: lagMs,
+      liveRenderProcesses: getLiveRenderProcessCount(),
+      sampledAt: Date.now()
+    };
+  }
+}
+function cancellableDelay(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+class AdaptiveThrottle {
+  constructor(limits, onNotice, sampler) {
+    this.limits = limits;
+    this.onNotice = onNotice;
+    this.sampler = sampler;
+  }
+  reducedSteps = 0;
+  monitor = new SystemLoadMonitor();
+  start() {
+    this.monitor.start();
+  }
+  stop() {
+    this.monitor.stop();
+  }
+  /** Remotion concurrency to use for the next job. */
+  currentRemotionConcurrency() {
+    return Math.max(1, this.limits.remotionConcurrency - this.reducedSteps);
+  }
+  /** Total time (ms) this render may spend waiting for the system to calm down. */
+  waitBudgetMs = 6e4;
+  async beforeNextJob(signal, maxWaits = 2, waitMs = 2500) {
+    let last = { underPressure: false, reasons: [] };
+    for (let attempt = 0; attempt <= maxWaits; attempt++) {
+      if (signal?.aborted) return last;
+      const sample = this.sampler ? await this.sampler() : await this.monitor.sample();
+      last = assessLoad(sample, this.limits);
+      if (!last.underPressure) {
+        if (this.reducedSteps > 0 && attempt === 0) this.reducedSteps--;
+        return last;
+      }
+      if (attempt === 0) {
+        this.reducedSteps = Math.min(this.reducedSteps + 1, Math.max(0, this.limits.remotionConcurrency - 1));
+        this.onNotice?.(`System under load — reducing render concurrency (${last.reasons.join(", ")})`);
+      }
+      if (attempt < maxWaits && this.waitBudgetMs > 0) {
+        const ms = Math.min(waitMs, this.waitBudgetMs);
+        this.waitBudgetMs -= ms;
+        await cancellableDelay(ms, signal);
+      } else {
+        break;
+      }
+    }
+    return last;
+  }
+}
+const MANIFEST_SCHEMA_VERSION = 2;
+function emptyCheckpoint(fingerprint = "") {
+  return { status: "pending", fingerprint };
+}
+function createManifest(params) {
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  return {
+    schemaVersion: MANIFEST_SCHEMA_VERSION,
+    renderFingerprint: params.renderFingerprint,
+    projectDir: params.projectDir,
+    outputName: params.outputName,
+    status: "initializing",
+    createdAt: now,
+    updatedAt: now,
+    settings: params.settings,
+    scenes: [],
+    assembly: emptyCheckpoint(),
+    audioMix: emptyCheckpoint(),
+    overlayBlocks: [],
+    composite: emptyCheckpoint(),
+    finalOutput: emptyCheckpoint(),
+    progress: {
+      completedScenes: 0,
+      totalScenes: 0,
+      completedOverlayBlocks: 0,
+      totalOverlayBlocks: 0,
+      currentPhase: "initializing"
+    },
+    invalidationReasons: [],
+    warnings: []
+  };
+}
+function recomputeManifestProgress(m) {
+  m.progress.totalScenes = m.scenes.length;
+  m.progress.completedScenes = m.scenes.filter((s) => s.status === "completed").length;
+  m.progress.totalOverlayBlocks = m.overlayBlocks.length;
+  m.progress.completedOverlayBlocks = m.overlayBlocks.filter((b) => b.status === "completed").length;
+}
+function fsyncDirBestEffort(dir) {
+  let fd = null;
+  try {
+    fd = fs__namespace.openSync(dir, "r");
+    fs__namespace.fsyncSync(fd);
+  } catch {
+  } finally {
+    if (fd !== null) {
+      try {
+        fs__namespace.closeSync(fd);
+      } catch {
+      }
+    }
+  }
+}
+function writeJsonAtomic(filePath, data) {
+  const dir = path__namespace.dirname(filePath);
+  fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmpPath = `${filePath}.tmp`;
+  const content = JSON.stringify(data, null, 2);
+  const fd = fs__namespace.openSync(tmpPath, "w");
+  try {
+    fs__namespace.writeSync(fd, content, 0, "utf-8");
+    fs__namespace.fsyncSync(fd);
+  } finally {
+    fs__namespace.closeSync(fd);
+  }
+  fs__namespace.renameSync(tmpPath, filePath);
+  fsyncDirBestEffort(dir);
+}
+function tryParse(filePath) {
+  try {
+    if (!fs__namespace.existsSync(filePath)) return null;
+    const raw = fs__namespace.readFileSync(filePath, "utf-8");
+    if (!raw.trim()) return null;
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+function readJsonWithRecovery(filePath, validate = () => true) {
+  const tmpPath = `${filePath}.tmp`;
+  const primary = tryParse(filePath);
+  if (primary !== null && validate(primary)) {
+    if (fs__namespace.existsSync(tmpPath)) {
+      try {
+        fs__namespace.unlinkSync(tmpPath);
+      } catch {
+      }
+    }
+    return primary;
+  }
+  const tmp = tryParse(tmpPath);
+  if (tmp !== null && validate(tmp)) {
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+    } catch {
+    }
+    return tmp;
+  }
+  return null;
+}
+function isValidManifest(v) {
+  const m = v;
+  return !!m && typeof m === "object" && m.schemaVersion === 2 && typeof m.renderFingerprint === "string" && Array.isArray(m.scenes) && Array.isArray(m.overlayBlocks) && !!m.assembly && !!m.audioMix;
+}
+function writeManifest(manifestPath, manifest) {
+  manifest.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  recomputeManifestProgress(manifest);
+  writeJsonAtomic(manifestPath, manifest);
+}
+function readManifest(manifestPath) {
+  return readJsonWithRecovery(manifestPath, isValidManifest);
+}
+function metaPathFor(artifactPath) {
+  return artifactPath.replace(/\.mp4$/i, "") + ".meta.json";
+}
+function writeArtifactMeta(artifactPath, meta) {
+  writeJsonAtomic(metaPathFor(artifactPath), meta);
+}
+function readArtifactMeta(artifactPath) {
+  return readJsonWithRecovery(metaPathFor(artifactPath), (v) => {
+    const m = v;
+    return !!m && typeof m.fingerprint === "string";
+  });
+}
+const DEFAULT_RENDER_PREFERENCES = {
+  resourceProfile: "balanced",
+  videoEncoder: "software-h264",
+  remotionHardwareAcceleration: false,
+  autoResumeAfterCrash: true,
+  maxCacheBytes: 30 * 1024 * 1024 * 1024
+};
+function prefsPath() {
+  const base = electron.app && typeof electron.app.getPath === "function" ? electron.app.getPath("userData") : process.cwd();
+  return path__namespace.join(base, "render-preferences.json");
+}
+function normalizeRenderPreferences(raw) {
+  const r = raw ?? {};
+  return {
+    resourceProfile: normalizeResourceProfile(r.resourceProfile),
+    videoEncoder: r.videoEncoder === "videotoolbox-h264" ? "videotoolbox-h264" : "software-h264",
+    remotionHardwareAcceleration: r.remotionHardwareAcceleration === true,
+    autoResumeAfterCrash: r.autoResumeAfterCrash !== false,
+    maxCacheBytes: typeof r.maxCacheBytes === "number" && r.maxCacheBytes > 1024 * 1024 * 1024 ? r.maxCacheBytes : DEFAULT_RENDER_PREFERENCES.maxCacheBytes
+  };
+}
+function loadRenderPreferences() {
+  try {
+    const p = prefsPath();
+    if (!fs__namespace.existsSync(p)) return { ...DEFAULT_RENDER_PREFERENCES };
+    return normalizeRenderPreferences(readJsonWithRecovery(p));
+  } catch {
+    return { ...DEFAULT_RENDER_PREFERENCES };
+  }
+}
+function saveRenderPreferences(patch) {
+  const next = normalizeRenderPreferences({ ...loadRenderPreferences(), ...patch });
+  writeJsonAtomic(prefsPath(), next);
+  return next;
+}
+class HardwareEncoderError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "HardwareEncoderError";
+  }
+}
+function bitrateForCrf(width, height, fps, crf) {
+  const bpp = 0.16 * Math.pow(0.89, crf - 20);
+  const bps = width * height * Math.max(1, fps) * bpp;
+  return Math.round(Math.min(8e7, Math.max(1e6, bps)));
+}
+function softwareEncoder() {
+  return {
+    mode: "software-h264",
+    key: "libx264",
+    videoArgs: (crf, preset) => ["-c:v", "libx264", "-preset", preset, "-crf", String(crf)]
+  };
+}
+function videoToolboxEncoder(width, height, fps) {
+  return {
+    mode: "videotoolbox-h264",
+    key: `h264_videotoolbox:${width}x${height}@${fps}`,
+    videoArgs: (crf) => {
+      const br = bitrateForCrf(width, height, fps, crf);
+      return [
+        "-c:v",
+        "h264_videotoolbox",
+        "-b:v",
+        String(br),
+        "-maxrate",
+        String(Math.round(br * 1.5)),
+        "-bufsize",
+        String(Math.round(br * 2)),
+        "-profile:v",
+        "high",
+        "-allow_sw",
+        "0"
+      ];
+    }
+  };
+}
+let vtProbeResult = null;
+function listEncoders() {
+  return new Promise((resolve) => {
+    const proc = cp.spawn(getFfmpegBinary(), ["-hide_banner", "-encoders"], { windowsHide: true });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      if (out.length < 1024 * 1024) out += d.toString();
+    });
+    proc.on("error", () => resolve(""));
+    proc.on("close", () => resolve(out));
+  });
+}
+async function probeVideoToolbox(force = false) {
+  if (vtProbeResult && !force) return vtProbeResult;
+  if (process.platform !== "darwin") {
+    vtProbeResult = { ok: false, reason: "VideoToolbox is only available on macOS" };
+    return vtProbeResult;
+  }
+  const encoders = await listEncoders();
+  if (!/\bh264_videotoolbox\b/.test(encoders)) {
+    vtProbeResult = { ok: false, reason: "h264_videotoolbox not present in this FFmpeg build" };
+    return vtProbeResult;
+  }
+  const tmp = path__namespace.join(os__namespace.tmpdir(), `vt-probe-${process.pid}-${Date.now()}.mp4`);
+  try {
+    await ffmpegRun$4([
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      "testsrc=size=320x240:rate=30:duration=1",
+      ...videoToolboxEncoder(320, 240, 30).videoArgs(20, "fast"),
+      "-pix_fmt",
+      "yuv420p",
+      tmp
+    ], { phase: "vt-probe" });
+    const probe = await probeMedia$1(tmp);
+    vtProbeResult = probe && probe.hasVideo && probe.width === 320 && probe.frames !== 0 ? { ok: true } : { ok: false, reason: "sample encode produced an invalid file" };
+  } catch (err) {
+    vtProbeResult = { ok: false, reason: `sample encode failed: ${String(err).slice(0, 200)}` };
+  } finally {
+    try {
+      if (fs__namespace.existsSync(tmp)) fs__namespace.unlinkSync(tmp);
+    } catch {
+    }
+  }
+  logger.info(`[VideoEncoder] VideoToolbox probe: ${JSON.stringify(vtProbeResult)}`);
+  return vtProbeResult;
+}
+async function resolveEncoder(requested, geometry, warnings) {
+  if (requested !== "videotoolbox-h264") return softwareEncoder();
+  const probe = await probeVideoToolbox();
+  if (!probe.ok) {
+    warnings.push(`Apple VideoToolbox unavailable (${probe.reason}); using Software H.264.`);
+    return softwareEncoder();
+  }
+  return videoToolboxEncoder(geometry.width, geometry.height, geometry.fps);
+}
+function asHardwareError(err, profile) {
+  if (profile.mode === "videotoolbox-h264" && !err?.name?.includes("Abort")) {
+    return new HardwareEncoderError(`VideoToolbox encode failed: ${String(err?.message ?? err).slice(0, 300)}`);
+  }
+  return err;
+}
+let cachedBundleUrl = null;
+let cachedBundlePromise = null;
+function getRemotionEntryPoint() {
+  const candidates = [
+    path__namespace.join(__dirname, "../../src/remotion/index.ts"),
+    path__namespace.join(__dirname, "../../../src/remotion/index.ts"),
+    path__namespace.join(process.cwd(), "src/remotion/index.ts")
+  ];
+  for (const c of candidates) {
+    if (fs__namespace.existsSync(c)) return c;
+  }
+  return candidates[0];
+}
+async function getBundle(onProgress) {
+  if (cachedBundleUrl) {
+    logger.info("[RemotionRenderer] Using bundle cache");
+    return cachedBundleUrl;
+  }
+  if (cachedBundlePromise) {
+    logger.info("[RemotionRenderer] Reusing in-flight bundle compilation");
+    return cachedBundlePromise;
+  }
+  logger.info("[RemotionRenderer] Bundling Remotion composition...");
+  const entryPoint = getRemotionEntryPoint();
+  cachedBundlePromise = bundler.bundle({
+    entryPoint,
+    onProgress: (progress) => {
+      onProgress?.(progress);
+      logger.debug(`[RemotionRenderer] Bundle: ${progress}%`);
+    }
+  }).then((url2) => {
+    cachedBundleUrl = url2;
+    cachedBundlePromise = null;
+    logger.info(`[RemotionRenderer] Bundle xong: ${url2}`);
+    return url2;
+  }).catch((err) => {
+    cachedBundlePromise = null;
+    cachedBundleUrl = null;
+    throw err;
+  });
+  return cachedBundlePromise;
+}
+async function renderCaptionsOverlay(options) {
+  const {
+    captionPlan,
+    proofVisuals,
+    visualGrammar,
+    openingEvents,
+    videoDurationInSeconds,
+    outputPath,
+    fps = 30,
+    resolution = { width: 1920, height: 1080 },
+    onBundleProgress,
+    onRenderProgress
+  } = options;
+  if (options.signal?.aborted) throw new RenderCancelledError();
+  fs__namespace.mkdirSync(path__namespace.dirname(outputPath), { recursive: true });
+  const bundleUrl = await getBundle(onBundleProgress);
+  const durationInFrames = Math.ceil(videoDurationInSeconds * fps);
+  const defaults = computeResourceLimits(loadRenderPreferences().resourceProfile);
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? defaults.remotionConcurrency));
+  const offthreadVideoThreads = Math.max(1, Math.floor(options.offthreadVideoThreads ?? defaults.offthreadVideoThreads));
+  const mediaCacheSizeInBytes = options.mediaCacheSizeInBytes ?? defaults.mediaCacheSizeInBytes;
+  const offthreadVideoCacheSizeInBytes = options.offthreadVideoCacheSizeInBytes ?? defaults.offthreadVideoCacheSizeInBytes;
+  const hardwareAcceleration = options.hardwareAcceleration === "if-possible" && process.platform === "darwin" ? "if-possible" : "disable";
+  logger.info(`[RemotionRenderer] Render ${durationInFrames} frames (${videoDurationInSeconds}s @ ${fps}fps)` + (options.frameRange ? ` range=${options.frameRange[0]}-${options.frameRange[1]}` : ""));
+  logger.info(`[RemotionRenderer] Resolution: ${resolution.width}x${resolution.height}`);
+  logger.info(`[RemotionRenderer] Phrases: ${captionPlan?.phrases?.length ?? 0}`);
+  logger.info(`[RemotionRenderer] ProofVisuals: ${proofVisuals?.length ?? 0}`);
+  logger.info(`[RemotionRenderer] VisualGrammar: ${visualGrammar?.length ?? 0}`);
+  logger.info(
+    `[RemotionRenderer] concurrency=${concurrency} offthreadThreads=${offthreadVideoThreads} mediaCache=${Math.round(mediaCacheSizeInBytes / 1048576)}MB offthreadCache=${Math.round(offthreadVideoCacheSizeInBytes / 1048576)}MB hw=${hardwareAcceleration}`
+  );
+  const inputProps = {
+    captionPlan: captionPlan ?? { enabled: true, activeRanges: [], phrases: [] },
+    proofVisuals: proofVisuals ?? [],
+    visualGrammar: visualGrammar ?? [],
+    openingEvents: openingEvents ?? []
+  };
+  const composition = await renderer.selectComposition({
+    serveUrl: bundleUrl,
+    id: "CaptionsOverlay",
+    inputProps
+  });
+  const runOnce = async (hw) => {
+    const { cancelSignal, cancel } = renderer.makeCancelSignal();
+    const onAbort = () => cancel();
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      await renderer.renderMedia({
+        composition: {
+          ...composition,
+          durationInFrames,
+          fps,
+          width: resolution.width,
+          height: resolution.height
+        },
+        serveUrl: bundleUrl,
+        codec: "h264",
+        outputLocation: outputPath,
+        inputProps,
+        frameRange: options.frameRange ?? null,
+        concurrency,
+        offthreadVideoThreads,
+        mediaCacheSizeInBytes,
+        offthreadVideoCacheSizeInBytes,
+        hardwareAcceleration: hw,
+        // Hardware encoders do not support CRF — use an equivalent bitrate instead
+        ...hw === "if-possible" ? { videoBitrate: String(bitrateForCrf(resolution.width, resolution.height, fps, 18)) } : {},
+        cancelSignal,
+        onProgress: ({ progress }) => {
+          const pct = Math.round(progress * 100);
+          onRenderProgress?.(progress);
+          logger.debug(`[RemotionRenderer] Render: ${pct}%`);
+        }
+      });
+    } catch (err) {
+      if (options.signal?.aborted) throw new RenderCancelledError();
+      throw err;
+    } finally {
+      options.signal?.removeEventListener("abort", onAbort);
+    }
+  };
+  let hardwareFallback = false;
+  if (hardwareAcceleration === "if-possible") {
+    try {
+      await runOnce("if-possible");
+    } catch (err) {
+      if (options.signal?.aborted) throw err;
+      logger.warn(`[RemotionRenderer] Hardware-accelerated render failed, retrying with software: ${String(err)}`);
+      hardwareFallback = true;
+      await runOnce("disable");
+    }
+  } else {
+    await runOnce("disable");
+  }
+  logger.info(`[RemotionRenderer] Overlay complete: ${outputPath}`);
+  return { hardwareFallback };
+}
+function normalizeTransitionType(raw) {
+  if (!raw || typeof raw !== "string") return "dissolve";
+  const clean = raw.trim().toLowerCase().replace(/[_\s]+/g, "-");
+  switch (clean) {
+    case "none":
+    case "hard-cut":
+    case "hardcut":
+    case "cut":
+      return "cut";
+    case "crossfade":
+    case "cross-fade":
+    case "fade":
+      return "fade";
+    case "dissolve":
+      return "dissolve";
+    case "wipe-left":
+    case "wipeleft":
+      return "wipeleft";
+    case "wipe-right":
+    case "wiperight":
+      return "wiperight";
+    case "slide-left":
+    case "slideleft":
+      return "slideleft";
+    case "slide-right":
+    case "slideright":
+      return "slideright";
+    case "smooth-left":
+    case "smoothleft":
+      return "smoothleft";
+    case "smooth-right":
+    case "smoothright":
+      return "smoothright";
+    case "circle-open":
+    case "circleopen":
+      return "circleopen";
+    case "circle-close":
+    case "circleclose":
+      return "circleclose";
+    case "pixelize":
+    case "pixelate":
+      return "pixelize";
+    case "zoom":
+    case "zoom-in":
+    case "zoomin":
+      return "zoomin";
+    default:
+      return "dissolve";
+  }
+}
+function validateTransitionSettings(raw) {
+  if (!raw || typeof raw !== "object") return void 0;
+  if (!raw.enabled) {
+    return {
+      enabled: false,
+      mode: "smart",
+      defaultDuration: 0.35,
+      chapterDuration: 0.65
+    };
+  }
+  const mode = raw.mode === "single" ? "single" : "smart";
+  let singleType = void 0;
+  if (mode === "single") {
+    singleType = normalizeTransitionType(raw.singleType);
+  }
+  const defaultDuration = typeof raw.defaultDuration === "number" && Number.isFinite(raw.defaultDuration) ? Math.max(0.15, Math.min(1, raw.defaultDuration)) : 0.35;
+  const chapterDuration = typeof raw.chapterDuration === "number" && Number.isFinite(raw.chapterDuration) ? Math.max(0.25, Math.min(1.2, raw.chapterDuration)) : 0.65;
+  return {
+    enabled: true,
+    mode,
+    singleType,
+    defaultDuration: Math.round(defaultDuration * 1e3) / 1e3,
+    chapterDuration: Math.round(chapterDuration * 1e3) / 1e3
+  };
+}
+function resolveAllTransitions(sceneEntries, settings, openingHints) {
+  const count = sceneEntries.length;
+  if (count <= 1) return [];
+  const result = [];
+  for (let i = 0; i < count - 1; i++) {
+    const fromEntry = sceneEntries[i];
+    const toEntry = sceneEntries[i + 1];
+    const fromScene = fromEntry.scene;
+    const toScene = toEntry.scene;
+    let type = "dissolve";
+    let duration = settings.defaultDuration;
+    let reason = "";
+    if (settings.mode === "single") {
+      type = settings.singleType ?? "dissolve";
+      if (type === "cut") {
+        duration = 0;
+        reason = "single mode cut";
+      } else if (toEntry.isFirstInChapter) {
+        duration = settings.chapterDuration;
+        reason = "single mode chapter boundary";
+      } else {
+        duration = settings.defaultDuration;
+        reason = "single mode normal boundary";
+      }
+    } else {
+      const openingHint = openingHints?.find(
+        (h) => h.fromSceneIndex === fromScene.sceneIndex && h.toSceneIndex === toScene.sceneIndex
+      );
+      if (openingHint) {
+        type = openingHint.type;
+        duration = openingHint.duration ?? (type === "cut" ? 0 : settings.defaultDuration);
+        reason = `opening composer hint: ${openingHint.reason}`;
+      } else if (toScene.transitionIn) {
+        type = normalizeTransitionType(toScene.transitionIn);
+        if (type === "cut") {
+          duration = 0;
+          reason = "smart mode plan requested cut";
+        } else if (toEntry.isFirstInChapter) {
+          duration = settings.chapterDuration;
+          reason = "smart mode plan requested transition at chapter start";
+        } else if (toEntry.isFirstInSequence) {
+          duration = Math.min(settings.defaultDuration + 0.1, 0.6);
+          reason = "smart mode plan requested transition at sequence start";
+        } else {
+          duration = settings.defaultDuration;
+          reason = "smart mode plan requested transition";
+        }
+      } else {
+        if (toEntry.isFirstInChapter) {
+          type = "fade";
+          duration = settings.chapterDuration;
+          reason = "smart mode default new chapter fade";
+        } else if (toEntry.isFirstInSequence) {
+          type = "dissolve";
+          duration = Math.min(settings.defaultDuration + 0.1, 0.6);
+          reason = "smart mode default new sequence dissolve";
+        } else {
+          type = "dissolve";
+          duration = settings.defaultDuration;
+          reason = "smart mode default scene dissolve";
+        }
+      }
+    }
+    if (type !== "cut" && duration > 0) {
+      const fromDur = fromScene.duration;
+      const toDur = toScene.duration;
+      if (typeof fromDur !== "number" || !Number.isFinite(fromDur) || fromDur <= 0 || typeof toDur !== "number" || !Number.isFinite(toDur) || toDur <= 0) {
+        type = "cut";
+        duration = 0;
+        reason += " (invalid scene duration -> fallback cut)";
+      } else {
+        const maxSafe = Math.min(fromDur * 0.35, toDur * 0.35);
+        const safeDuration = Math.min(duration, maxSafe);
+        if (safeDuration < 0.12 || !Number.isFinite(safeDuration)) {
+          type = "cut";
+          duration = 0;
+          reason += ` (safe duration ${safeDuration.toFixed(3)}s < 0.12s threshold -> fallback cut)`;
+        } else {
+          duration = Math.round(safeDuration * 1e4) / 1e4;
+        }
+      }
+    } else {
+      duration = 0;
+    }
+    result.push({
+      fromSceneIndex: fromScene.sceneIndex,
+      toSceneIndex: toScene.sceneIndex,
+      type,
+      duration,
+      reason
+    });
+  }
+  return result;
+}
+function buildTransitionFilterGraph(scenes, transitions, fps) {
+  const count = scenes.length;
+  if (count <= 1) {
+    throw new Error("At least 2 scenes required to build transition filter graph");
+  }
+  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0);
+  const inputDurations = [];
+  const filterParts = [];
+  for (let i = 0; i < count; i++) {
+    const origDuration = scenes[i].duration;
+    const outgoingTrans = i < count - 1 ? transitions[i] : void 0;
+    const outgoingPadding = outgoingTrans && outgoingTrans.type !== "cut" && outgoingTrans.duration > 0 ? outgoingTrans.duration : 0;
+    const totalInputDuration = Math.round((origDuration + outgoingPadding) * 1e4) / 1e4;
+    inputDurations.push(totalInputDuration);
+    if (outgoingPadding > 0) {
+      filterParts.push(
+        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p,tpad=stop_mode=clone:stop_duration=${outgoingPadding.toFixed(4)}[v${i}]`
+      );
+    } else {
+      filterParts.push(
+        `[${i}:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[v${i}]`
+      );
+    }
+  }
+  let currentStream = "[v0]";
+  let currentEncodedDuration = inputDurations[0];
+  for (let i = 0; i < count - 1; i++) {
+    const trans = transitions[i];
+    const nextStream = `[v${i + 1}]`;
+    const nextInputDuration = inputDurations[i + 1];
+    if (trans.type !== "cut" && trans.duration > 0) {
+      const xfadeOffset = Math.round((currentEncodedDuration - trans.duration) * 1e4) / 1e4;
+      const outLabel = `[x${i}]`;
+      filterParts.push(
+        `${currentStream}${nextStream}xfade=transition=${trans.type}:duration=${trans.duration.toFixed(4)}:offset=${xfadeOffset.toFixed(4)}${outLabel}`
+      );
+      currentEncodedDuration = Math.round((currentEncodedDuration + nextInputDuration - trans.duration) * 1e4) / 1e4;
+      currentStream = outLabel;
+    } else {
+      const outLabel = `[c${i}]`;
+      filterParts.push(
+        `${currentStream}${nextStream}concat=n=2:v=1:a=0,settb=AVTB,setpts=PTS-STARTPTS,fps=${fps}${outLabel}`
+      );
+      currentEncodedDuration = Math.round((currentEncodedDuration + nextInputDuration) * 1e4) / 1e4;
+      currentStream = outLabel;
+    }
+  }
+  const finalTrimDur = Math.round(expectedDuration * 1e4) / 1e4;
+  filterParts.push(
+    `${currentStream}trim=duration=${finalTrimDur.toFixed(4)},setpts=PTS-STARTPTS[vout]`
+  );
+  return {
+    filterComplex: filterParts.join(";\n"),
+    expectedDuration: finalTrimDur,
+    inputDurations
+  };
+}
+async function probeVideoDuration(filePath) {
+  try {
+    const ffp = require("ffprobe-static");
+    if (!ffp?.path || !fs__namespace.existsSync(ffp.path)) return null;
+    return new Promise((resolve) => {
+      const proc = cp.spawn(
+        ffp.path,
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "default=noprint_wrappers=1:nokey=1",
+          filePath
+        ],
+        { windowsHide: true }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("close", (code) => {
+        if (code === 0) {
+          const val = parseFloat(stdout.trim());
+          resolve(Number.isFinite(val) ? val : null);
+        } else {
+          resolve(null);
+        }
+      });
+      proc.on("error", () => resolve(null));
+    });
+  } catch {
+    return null;
+  }
+}
+function ffmpegRun$3(args, options) {
+  return ffmpegRun$4(args, options ?? {});
+}
+function planTransitionSegments(scenes, transitions, fps, maxScenesPerSegment) {
+  const count = scenes.length;
+  const starts = [];
+  let acc = 0;
+  for (const s of scenes) {
+    starts.push(acc);
+    acc += s.duration;
+  }
+  const total = Math.round(acc * 1e4) / 1e4;
+  const totalFrames = Math.ceil(total * fps - 1e-6);
+  const splitScenes = [];
+  const maxPer = Math.max(2, Math.floor(maxScenesPerSegment));
+  let lastSplitScene = 0;
+  for (let k = 1; k < count; k++) {
+    if (k - lastSplitScene < maxPer) continue;
+    const incoming = transitions[k - 1];
+    const dIn = incoming && incoming.type !== "cut" ? incoming.duration : 0;
+    const pureStart = starts[k] + dIn;
+    const pureEnd = k + 1 < count ? starts[k + 1] : total;
+    const frame = Math.ceil(pureStart * fps - 1e-6) + 1;
+    if (frame / fps >= pureEnd - 1 / fps || frame >= totalFrames) continue;
+    splitScenes.push({ scene: k, frame });
+    lastSplitScene = k;
+  }
+  const segments = [];
+  let curScene = 0;
+  let curFrame = 0;
+  for (let i = 0; i <= splitScenes.length; i++) {
+    const next = splitScenes[i];
+    const endFrame = next ? next.frame : totalFrames;
+    const lastScene = next ? next.scene : count - 1;
+    segments.push({
+      segmentIndex: segments.length + 1,
+      firstScene: curScene,
+      lastScene,
+      shiftSec: starts[curScene],
+      startSec: curFrame / fps,
+      endSec: next ? endFrame / fps : total,
+      startFrame: curFrame,
+      endFrameExclusive: endFrame
+    });
+    if (next) {
+      curScene = next.scene;
+      curFrame = next.frame;
+    }
+  }
+  return segments;
+}
+function buildSegmentFilterGraph(allScenes, allTransitions, seg, fps) {
+  const subScenes = allScenes.slice(seg.firstScene, seg.lastScene + 1);
+  const subTransitions = allTransitions.slice(seg.firstScene, seg.lastScene);
+  let body;
+  if (subScenes.length === 1) {
+    body = `[0:v]settb=AVTB,setpts=PTS-STARTPTS,fps=${fps},format=yuv420p[seg0]`;
+  } else {
+    const { filterComplex } = buildTransitionFilterGraph(subScenes, subTransitions, fps);
+    const lines = filterComplex.split(";\n");
+    lines.pop();
+    const lastLabelMatch = /(\[[a-z]\d+\])$/.exec(lines[lines.length - 1]);
+    const lastLabel = lastLabelMatch ? lastLabelMatch[1] : "[v0]";
+    lines.push(`${lastLabel}null[seg0]`);
+    body = lines.join(";\n");
+  }
+  return `${body};
+[seg0]setpts=PTS+${seg.shiftSec.toFixed(6)}/TB,trim=start=${seg.startSec.toFixed(6)}:end=${seg.endSec.toFixed(6)},setpts=PTS-STARTPTS[vout]`;
+}
+async function concatSceneClipsWithTransitions(params) {
+  const {
+    sceneEntries,
+    sceneClips,
+    settings,
+    fps,
+    rawVideoPath,
+    onProgress,
+    openingHints
+  } = params;
+  if (sceneEntries.length <= 1 || sceneClips.length <= 1) {
+    return false;
+  }
+  const transitions = resolveAllTransitions(sceneEntries, settings, openingHints);
+  const cutCount = transitions.filter((t) => t.type === "cut").length;
+  const fadeCount = transitions.filter((t) => t.type === "fade").length;
+  const dissolveCount = transitions.filter((t) => t.type === "dissolve").length;
+  const otherCount = transitions.length - cutCount - fadeCount - dissolveCount;
+  const scenes = sceneEntries.map((e) => e.scene);
+  const expectedDuration = scenes.reduce((sum, s) => sum + s.duration, 0);
+  logger.info(
+    `[Transitions] enabled=true mode=${settings.mode} boundaries=${transitions.length}`
+  );
+  logger.info(
+    `[Transitions] cut=${cutCount} fade=${fadeCount} dissolve=${dissolveCount} other=${otherCount}`
+  );
+  logger.info(`[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s`);
+  if (cutCount === transitions.length) {
+    logger.info("[Transitions] All boundaries are hard cuts -- skipping xfade filter_complex");
+    return false;
+  }
+  onProgress?.("Applying scene transitions...", 0.78);
+  const codecArgs = params.videoCodecArgs ?? ["-c:v", "libx264", "-preset", "fast", "-crf", "20"];
+  const maxPer = params.maxScenesPerSegment ?? 0;
+  const useSegments = !!params.segmentRunner && maxPer >= 2 && sceneClips.length > maxPer + 1;
+  if (!useSegments) {
+    const { filterComplex } = buildTransitionFilterGraph(scenes, transitions, fps);
+    logger.debug(`[Transitions] FFmpeg filter_complex:
+${filterComplex}`);
+    const inputArgs = [];
+    for (const clip of sceneClips) {
+      inputArgs.push("-i", clip);
+    }
+    const args = [
+      "-y",
+      ...inputArgs,
+      "-filter_complex",
+      filterComplex,
+      "-map",
+      "[vout]",
+      ...codecArgs,
+      "-pix_fmt",
+      "yuv420p",
+      "-r",
+      String(fps),
+      "-movflags",
+      "+faststart",
+      rawVideoPath
+    ];
+    await ffmpegRun$3(args, params.ffmpegOptions);
+  } else {
+    const segments = planTransitionSegments(scenes, transitions, fps, maxPer);
+    logger.info(`[Transitions] Segmented assembly: ${segments.length} segments (≤${maxPer + 1} inputs each)`);
+    const segmentFiles = [];
+    for (const seg of segments) {
+      onProgress?.(
+        `Assembling scene segment ${seg.segmentIndex}/${segments.length}...`,
+        0.78 + seg.segmentIndex / segments.length * 0.05
+      );
+      const file = await params.segmentRunner(seg, async (outputPath) => {
+        const inputArgs = [];
+        for (let i = seg.firstScene; i <= seg.lastScene; i++) inputArgs.push("-i", sceneClips[i]);
+        const filterComplex = buildSegmentFilterGraph(scenes, transitions, seg, fps);
+        await ffmpegRun$3([
+          "-y",
+          ...inputArgs,
+          "-filter_complex",
+          filterComplex,
+          "-map",
+          "[vout]",
+          ...codecArgs,
+          "-pix_fmt",
+          "yuv420p",
+          "-r",
+          String(fps),
+          outputPath
+        ], params.ffmpegOptions);
+      });
+      segmentFiles.push(file);
+    }
+    const listPath = path__namespace.join(params.tmpDir, `assembly-concat-${Date.now()}.txt`);
+    fs__namespace.writeFileSync(
+      listPath,
+      segmentFiles.map((f) => `file '${process.platform === "win32" ? f.replace(/\\/g, "/") : f.replace(/'/g, "'\\''")}'`).join("\n"),
+      "utf-8"
+    );
+    try {
+      await ffmpegRun$3(["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-movflags", "+faststart", rawVideoPath], params.ffmpegOptions);
+    } finally {
+      try {
+        fs__namespace.unlinkSync(listPath);
+      } catch {
+      }
+    }
+  }
+  const outputDuration = await probeVideoDuration(rawVideoPath);
+  if (outputDuration !== null) {
+    const diff = Math.abs(outputDuration - expectedDuration);
+    logger.info(
+      `[Transitions] expectedDuration=${expectedDuration.toFixed(3)}s, outputDuration=${outputDuration.toFixed(3)}s, diff=${diff.toFixed(3)}s`
+    );
+    const maxAllowedDiff = 1 / fps + 0.03;
+    if (diff > maxAllowedDiff) {
+      logger.warn(
+        `[Transitions] Duration deviation ${diff.toFixed(3)}s exceeds tolerance ${maxAllowedDiff.toFixed(3)}s`
+      );
+    }
+  } else {
+    logger.warn(
+      `[Transitions] Could not probe output duration, expectedDuration=${expectedDuration.toFixed(3)}s`
+    );
+  }
+  return true;
+}
+const LEVEL_CONFIG = {
+  low: {
+    maxBeatsPerScene: 2,
+    minBeatDuration: 4,
+    maxBeatDuration: 10,
+    cropAllowed: true,
+    proofVisualAllowed: true,
+    patternInterruptCooldown: 45,
+    strongEffectCooldown: 30
+  },
+  balanced: {
+    maxBeatsPerScene: 3,
+    minBeatDuration: 2.5,
+    maxBeatDuration: 7,
+    cropAllowed: true,
+    proofVisualAllowed: true,
+    patternInterruptCooldown: 25,
+    strongEffectCooldown: 20
+  },
+  high: {
+    maxBeatsPerScene: 4,
+    minBeatDuration: 1.8,
+    maxBeatDuration: 5,
+    cropAllowed: true,
+    proofVisualAllowed: true,
+    patternInterruptCooldown: 15,
+    strongEffectCooldown: 12
+  }
+};
+const ADDRESS_REGEX = /\b\d+\s+\w[\w\s]+(?:Street|St|Avenue|Ave|Road|Rd|Boulevard|Blvd|Lane|Ln|Drive|Dr|Highway|Hwy|Way|Place|Pl|Court|Ct)(?:[,.\s]+[\w\s]+)*/i;
+const UNIT_NUMBER_REGEX = /\b(\d{1,3}(?:,\d{3})+|\d{4,})\s+(people|persons|individuals|colonies|farms|states|acres|miles|kilometers|km|counties|homes|families|workers|companies|factories|ships|aircraft|troops|soldiers|nations|countries|tribes|reserves|parks)\b/i;
+const PROOF_PATTERNS = [
+  // Priority 1 — Dollar amounts (most impactful)
+  {
+    type: "number_card",
+    priority: 1,
+    regex: /\$[\d,]+(?:\.\d+)?(?:\s*(?:million|billion|thousand|M|B|K))?|\b\d+(?:\.\d+)?\s*(?:million|billion)\s+dollars?\b/i,
+    label: "Dollar figure",
+    icon: "money",
+    position: "bottom_right"
+  },
+  // Priority 2 — Percentage
+  {
+    type: "stat_emphasis",
+    priority: 2,
+    regex: /\d+(?:\.\d+)?\s*(?:%|percent)\b/i,
+    label: "Percentage",
+    icon: "stat",
+    position: "bottom_left"
+  },
+  // Priority 3 — Million/billion/thousand (no dollar sign)
+  {
+    type: "stat_emphasis",
+    priority: 3,
+    regex: /\b\d+(?:\.\d+)?\s+(?:million|billion|thousand)\b(?!\s+dollars?)/i,
+    label: "Big stat",
+    icon: "stat",
+    position: "bottom_right"
+  },
+  // Priority 4 — Unit number (60,000 people etc.)
+  {
+    type: "number_card",
+    priority: 4,
+    regex: UNIT_NUMBER_REGEX,
+    label: "Unit number",
+    icon: "stat",
+    position: "bottom_right"
+  },
+  // Priority 5 — Large bare number
+  {
+    type: "number_card",
+    priority: 5,
+    regex: /\b\d{1,3}(?:,\d{3}){2,}\b/,
+    label: "Large number",
+    icon: "none",
+    position: "bottom_right"
+  },
+  // Priority 6 — Year (with context word nearby)
+  {
+    type: "date_card",
+    priority: 6,
+    regex: /\b(?:in|during|by|since|from|after|before|around|until|as of)\s+(1[0-9]{3}|20[0-9]{2})\b|(1[0-9]{3}|20[0-9]{2})\s+(?:to|through|until|–|-)\s+(?:1[0-9]{3}|20[0-9]{2})/i,
+    label: "Year",
+    icon: "calendar",
+    position: "top_right"
+  }
+];
+const KNOWN_LOCATIONS = [
+  // US States
+  { name: "Montana", canonical: "MONTANA", confidence: 0.95 },
+  { name: "South Dakota", canonical: "SOUTH DAKOTA", confidence: 0.95 },
+  { name: "North Dakota", canonical: "NORTH DAKOTA", confidence: 0.95 },
+  { name: "Wyoming", canonical: "WYOMING", confidence: 0.95 },
+  { name: "Colorado", canonical: "COLORADO", confidence: 0.9 },
+  { name: "Minnesota", canonical: "MINNESOTA", confidence: 0.9 },
+  { name: "Wisconsin", canonical: "WISCONSIN", confidence: 0.9 },
+  { name: "Iowa", canonical: "IOWA", confidence: 0.9 },
+  { name: "Kansas", canonical: "KANSAS", confidence: 0.9 },
+  { name: "Nebraska", canonical: "NEBRASKA", confidence: 0.9 },
+  { name: "Texas", canonical: "TEXAS", confidence: 0.9 },
+  { name: "California", canonical: "CALIFORNIA", confidence: 0.9 },
+  { name: "New York", canonical: "NEW YORK", confidence: 0.9 },
+  { name: "Pennsylvania", canonical: "PENNSYLVANIA", confidence: 0.9 },
+  { name: "Ohio", canonical: "OHIO", confidence: 0.9 },
+  { name: "Illinois", canonical: "ILLINOIS", confidence: 0.9 },
+  { name: "Michigan", canonical: "MICHIGAN", confidence: 0.9 },
+  { name: "Indiana", canonical: "INDIANA", confidence: 0.9 },
+  { name: "Missouri", canonical: "MISSOURI", confidence: 0.9 },
+  { name: "Washington", canonical: "WASHINGTON", confidence: 0.85 },
+  { name: "Oregon", canonical: "OREGON", confidence: 0.9 },
+  { name: "Idaho", canonical: "IDAHO", confidence: 0.9 },
+  { name: "Utah", canonical: "UTAH", confidence: 0.9 },
+  { name: "Nevada", canonical: "NEVADA", confidence: 0.9 },
+  { name: "Arizona", canonical: "ARIZONA", confidence: 0.9 },
+  { name: "New Mexico", canonical: "NEW MEXICO", confidence: 0.9 },
+  { name: "Oklahoma", canonical: "OKLAHOMA", confidence: 0.9 },
+  { name: "Arkansas", canonical: "ARKANSAS", confidence: 0.9 },
+  { name: "Louisiana", canonical: "LOUISIANA", confidence: 0.9 },
+  { name: "Mississippi", canonical: "MISSISSIPPI", confidence: 0.9 },
+  { name: "Alabama", canonical: "ALABAMA", confidence: 0.9 },
+  { name: "Georgia", canonical: "GEORGIA", confidence: 0.85 },
+  { name: "Florida", canonical: "FLORIDA", confidence: 0.9 },
+  { name: "Tennessee", canonical: "TENNESSEE", confidence: 0.9 },
+  { name: "Kentucky", canonical: "KENTUCKY", confidence: 0.9 },
+  { name: "Virginia", canonical: "VIRGINIA", confidence: 0.85 },
+  { name: "West Virginia", canonical: "WEST VIRGINIA", confidence: 0.9 },
+  { name: "North Carolina", canonical: "NORTH CAROLINA", confidence: 0.9 },
+  { name: "South Carolina", canonical: "SOUTH CAROLINA", confidence: 0.9 },
+  { name: "Maryland", canonical: "MARYLAND", confidence: 0.85 },
+  { name: "Delaware", canonical: "DELAWARE", confidence: 0.85 },
+  { name: "Connecticut", canonical: "CONNECTICUT", confidence: 0.85 },
+  { name: "Massachusetts", canonical: "MASSACHUSETTS", confidence: 0.9 },
+  { name: "Vermont", canonical: "VERMONT", confidence: 0.85 },
+  { name: "New Hampshire", canonical: "NEW HAMPSHIRE", confidence: 0.85 },
+  { name: "Maine", canonical: "MAINE", confidence: 0.85 },
+  { name: "Rhode Island", canonical: "RHODE ISLAND", confidence: 0.85 },
+  { name: "New Jersey", canonical: "NEW JERSEY", confidence: 0.85 },
+  { name: "Alaska", canonical: "ALASKA", confidence: 0.9 },
+  { name: "Hawaii", canonical: "HAWAII", confidence: 0.9 },
+  // Canadian Provinces
+  { name: "Manitoba", canonical: "MANITOBA, CANADA", confidence: 0.95 },
+  { name: "Saskatchewan", canonical: "SASKATCHEWAN, CANADA", confidence: 0.95 },
+  { name: "Alberta", canonical: "ALBERTA, CANADA", confidence: 0.95 },
+  { name: "British Columbia", canonical: "BRITISH COLUMBIA, CANADA", confidence: 0.9 },
+  { name: "Ontario", canonical: "ONTARIO, CANADA", confidence: 0.85 },
+  { name: "Quebec", canonical: "QUEBEC, CANADA", confidence: 0.9 },
+  // Major cities (high confidence)
+  { name: "Chicago", canonical: "CHICAGO", confidence: 0.9 },
+  { name: "Los Angeles", canonical: "LOS ANGELES", confidence: 0.9 },
+  { name: "Houston", canonical: "HOUSTON", confidence: 0.9 },
+  { name: "Phoenix", canonical: "PHOENIX", confidence: 0.9 },
+  { name: "Philadelphia", canonical: "PHILADELPHIA", confidence: 0.9 },
+  { name: "San Antonio", canonical: "SAN ANTONIO", confidence: 0.9 },
+  { name: "San Diego", canonical: "SAN DIEGO", confidence: 0.9 },
+  { name: "Dallas", canonical: "DALLAS", confidence: 0.9 },
+  { name: "San Francisco", canonical: "SAN FRANCISCO", confidence: 0.9 },
+  { name: "Seattle", canonical: "SEATTLE", confidence: 0.9 },
+  { name: "Denver", canonical: "DENVER", confidence: 0.9 },
+  { name: "Boston", canonical: "BOSTON", confidence: 0.9 },
+  { name: "Detroit", canonical: "DETROIT", confidence: 0.9 },
+  { name: "Minneapolis", canonical: "MINNEAPOLIS", confidence: 0.9 },
+  { name: "Winnipeg", canonical: "WINNIPEG, CANADA", confidence: 0.9 },
+  // Countries
+  { name: "Canada", canonical: "CANADA", confidence: 0.9 },
+  { name: "United States", canonical: "UNITED STATES", confidence: 0.85 },
+  { name: "Mexico", canonical: "MEXICO", confidence: 0.85 }
+];
+function detectLocationInText(text, contextLocations) {
+  const prioritized = KNOWN_LOCATIONS;
+  const sorted = [...prioritized].sort((a, b) => b.name.length - a.name.length);
+  for (const loc of sorted) {
+    const escaped = loc.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const regex = new RegExp(`\\b${escaped}\\b`, "i");
+    if (regex.test(text)) {
+      {
+        const withCountryMatch = text.match(
+          new RegExp(`\\b${escaped}\\s*,\\s*(Canada|USA|US|United States|Mexico)\\b`, "i")
+        );
+        if (withCountryMatch) {
+          return {
+            canonical: `${loc.name.toUpperCase()}, ${withCountryMatch[1].toUpperCase()}`,
+            confidence: 0.99
+          };
+        }
+      }
+      return { canonical: loc.canonical, confidence: loc.confidence };
+    }
+  }
+  return null;
+}
+function detectProofVisual(narrativeText, sceneId, relativeTime, durationSecs, contextLocations) {
+  if (!narrativeText || narrativeText.trim().length === 0) return null;
+  const addressMatch = narrativeText.match(ADDRESS_REGEX);
+  if (addressMatch) {
+    const text = addressMatch[0].trim().slice(0, 48);
+    return {
+      type: "location_label",
+      primaryText: text.toUpperCase(),
+      sourceField: "narrativeText",
+      relativeTime,
+      durationSecs: Math.min(durationSecs, 2.5),
+      position: "top_right",
+      stylePreset: "location_tag",
+      icon: "location",
+      confidence: 0.85
+    };
+  }
+  for (const pattern of PROOF_PATTERNS) {
+    const match = narrativeText.match(pattern.regex);
+    if (match) {
+      let primaryText = match[0].trim();
+      if (pattern.type === "date_card") {
+        const yearMatch = primaryText.match(/\b(1[0-9]{3}|20[0-9]{2})\b/);
+        if (yearMatch) primaryText = yearMatch[1];
+      }
+      if (primaryText.length > 32) primaryText = primaryText.slice(0, 32);
+      return {
+        type: pattern.type,
+        primaryText,
+        sourceField: "narrativeText",
+        relativeTime,
+        durationSecs: Math.min(durationSecs, 2.5),
+        position: pattern.position,
+        icon: pattern.icon,
+        confidence: 0.9
+      };
+    }
+  }
+  const locationResult = detectLocationInText(narrativeText);
+  if (locationResult && locationResult.confidence >= 0.8) {
+    return {
+      type: "location_label",
+      primaryText: locationResult.canonical.slice(0, 48),
+      sourceField: "narrativeText",
+      relativeTime,
+      durationSecs: Math.min(durationSecs, 2),
+      position: "top_left",
+      stylePreset: "location_tag",
+      icon: "location",
+      confidence: locationResult.confidence
+    };
+  }
+  return null;
+}
+function seedInt(sceneIndex, variant) {
+  return (sceneIndex * 2654435761 + variant * 40503 >>> 0) % 100;
+}
+function computeBeatDurations(sceneDuration, beatCount, sceneIndex, cfg) {
+  if (beatCount <= 1) return [sceneDuration];
+  const weights = [];
+  for (let i = 0; i < beatCount; i++) {
+    const seed = seedInt(sceneIndex, i);
+    weights.push(0.7 + seed / 100 * 0.6);
+  }
+  const totalWeight = weights.reduce((a, b) => a + b, 0);
+  const durations = weights.map((w) => {
+    const raw = w / totalWeight * sceneDuration;
+    return Math.max(cfg.minBeatDuration, Math.min(cfg.maxBeatDuration, raw));
+  });
+  const total = durations.reduce((a, b) => a + b, 0);
+  const ratio = sceneDuration / total;
+  return durations.map((d) => Math.round(d * ratio * 100) / 100);
+}
+function computeSemanticCrop(visualIntent, sceneIndex, beatIndex) {
+  if (!visualIntent) return void 0;
+  const text = visualIntent.toLowerCase();
+  const hasClearSubject = text.includes("person") || text.includes("face") || text.includes("hand") || text.includes("worker") || text.includes("machine") || text.includes("farm") || text.includes("equipment") || text.includes("animal") || text.includes("detail") || text.includes("close") || text.includes("operator");
+  if (!hasClearSubject) return void 0;
+  const seed = seedInt(sceneIndex, beatIndex + 10);
+  const scale = 1.06 + seed / 100 * 0.09;
+  const roundedScale = Math.round(scale * 100) / 100;
+  const offsetSeed = seedInt(sceneIndex, beatIndex + 20);
+  const x = (offsetSeed / 100 - 0.5) * 0.08;
+  return { x, y: 0, scale: roundedScale };
+}
+function cropToZoomFilter(crop, width, height, duration, fps) {
+  if (!crop || crop.scale <= 1.005) return void 0;
+  const s = crop.scale;
+  const frames = Math.round(duration * fps);
+  const xExtraPixels = Math.round((s - 1) * width * 0.5 + crop.x * width * (s - 1));
+  const yExtraPixels = Math.round((s - 1) * height * 0.5 + crop.y * height * (s - 1));
+  const xClamp = Math.max(0, Math.min(Math.round((s - 1) * width), xExtraPixels));
+  const yClamp = Math.max(0, Math.min(Math.round((s - 1) * height), yExtraPixels));
+  return `zoompan=z='${s.toFixed(3)}':x='${xClamp}':y='${yClamp}':d=${frames}:s=${width}x${height}:fps=${fps}`;
+}
+function resolveVisualBeats(scene, ctx, level) {
+  const cfg = LEVEL_CONFIG[level];
+  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  const energy = scene.energyLevel ?? "medium";
+  const duration = scene.duration;
+  let targetBeats = 1;
+  const isLongEnough = duration >= cfg.minBeatDuration * 2.5;
+  const isDramatic = energy === "low";
+  const isFast = energy === "high";
+  if (!isLongEnough) {
+    targetBeats = 1;
+  } else if (isDramatic) {
+    targetBeats = duration >= 8 ? 2 : 1;
+  } else if (isFast) {
+    const seed = seedInt(scene.sceneIndex, 1);
+    targetBeats = Math.min(cfg.maxBeatsPerScene, seed < 40 ? 2 : 3);
+  } else {
+    const seed = seedInt(scene.sceneIndex, 2);
+    targetBeats = seed < 60 ? 1 : 2;
+  }
+  const hint = scene.retentionHint;
+  if (hint) {
+    if (hint.beatPacing === "fast" && isLongEnough) {
+      targetBeats = Math.min(cfg.maxBeatsPerScene, Math.max(targetBeats, 2));
+    } else if (hint.beatPacing === "slow") {
+      targetBeats = duration >= 9 ? Math.min(targetBeats, 2) : 1;
+    }
+  }
+  targetBeats = Math.min(targetBeats, cfg.maxBeatsPerScene);
+  if (ctx.timeSinceLastStrongEffect < cfg.strongEffectCooldown) {
+    targetBeats = Math.min(targetBeats, 1);
+  }
+  const beatDurations = computeBeatDurations(duration, targetBeats, scene.sceneIndex, cfg);
+  let cursor = 0;
+  const beats = [];
+  let proofVisualFound = null;
+  for (let i = 0; i < targetBeats; i++) {
+    const beatDuration = beatDurations[i];
+    const relStart = parseFloat(cursor.toFixed(3));
+    const relEnd = parseFloat((cursor + beatDuration).toFixed(3));
+    let beatType = "main_shot";
+    let beatPurpose = "establish";
+    let crop;
+    if (i === 0) {
+      beatType = "main_shot";
+      beatPurpose = "establish";
+    } else if (i === 1) {
+      const hasNarrative = scene.narrativeText && scene.narrativeText.length > 0;
+      if (cfg.proofVisualAllowed && hasNarrative && ctx.timeSinceLastProofVisual > 15 && proofVisualFound === null) {
+        const maxPvDur = hint?.proofPriority === "high" ? 3.5 : 2.5;
+        const pv = detectProofVisual(
+          scene.narrativeText,
+          sceneId,
+          relStart,
+          Math.min(beatDuration, maxPvDur)
+        );
+        if (pv) {
+          proofVisualFound = pv;
+          beatType = "proof_visual";
+          beatPurpose = "emphasize";
+        }
+      }
+      if (beatType === "main_shot") {
+        if (cfg.cropAllowed) {
+          const cropParams = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i);
+          if (cropParams) {
+            beatType = "detail_crop";
+            beatPurpose = "explain";
+            crop = cropParams;
+          }
+        }
+      }
+    } else {
+      const timeSinceInterrupt = ctx.timeSinceLastStrongEffect;
+      const shouldTriggerInterrupt = (scene.isPatternInterrupt || hint?.patternInterrupt) && timeSinceInterrupt >= cfg.patternInterruptCooldown;
+      if (shouldTriggerInterrupt) {
+        beatType = "pattern_interrupt";
+        beatPurpose = "reset_attention";
+      } else {
+        beatType = "secondary_asset";
+        beatPurpose = "explain";
+        if (cfg.cropAllowed) {
+          crop = computeSemanticCrop(scene.visualIntent, scene.sceneIndex, i + 5);
+        }
+      }
+    }
+    beats.push({
+      id: `beat_${sceneId}_${i}`,
+      sceneId,
+      relativeStart: relStart,
+      relativeEnd: relEnd,
+      type: beatType,
+      purpose: beatPurpose,
+      sourceAssetId: scene.localPath,
+      crop
+    });
+    cursor += beatDuration;
+  }
+  logger.info(
+    `[RetentionEngine] scene ${sceneId}: ${targetBeats} beat(s), energy=${energy}, dur=${duration.toFixed(1)}s` + (proofVisualFound ? `, proof=${proofVisualFound.primaryText}` : "")
+  );
+  return { beats, proofVisual: proofVisualFound };
+}
+function computeVisualLoad(params) {
+  let score = 0;
+  if (params.hasActiveCaption) score += 1;
+  if (params.hasStrongCaption) score += 1;
+  if (params.beatCount > 2) score += 1;
+  if (params.hasProofVisual) score += 2;
+  if (params.hasSfx) score += 1;
+  if (params.hasPatternInterrupt) score += 2;
+  return score;
+}
+const MAX_VISUAL_LOAD = 6;
+function resolveTransition(currentEnergy, previousEnergy, isNewChapter, isPatternInterrupt, prevTransition) {
+  if (isNewChapter) return "fade";
+  if (isPatternInterrupt) return "cut";
+  if (currentEnergy === "low" && previousEnergy !== "low") return "dissolve";
+  if (prevTransition === "dissolve") return "cut";
+  return "cut";
+}
+function createDefaultContext() {
+  return {
+    previousShotType: "wide",
+    previousTransitionType: "cut",
+    previousPatternInterruptType: null,
+    previousCropScale: 1,
+    timeSinceLastHumanShot: 999,
+    timeSinceLastProofVisual: 999,
+    timeSinceLastStrongEffect: 999,
+    consecutiveSameShot: 0,
+    consecutiveStrongEffect: 0,
+    accumulatedVisualLoad: 0,
+    sceneIndex: 0,
+    timeSinceLastRehook: 999,
+    timeSinceLastPatternInterrupt: 999,
+    recentNoveltyScores: [],
+    recentSceneRoles: [],
+    recentMotionPresets: [],
+    recentVisualCategories: [],
+    openLoopIds: []
+  };
+}
+function resolveSceneRetention(scene, ctx, settings) {
+  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  if (!settings.enabled) {
+    return makeSingleBeatDecision(sceneId, scene);
+  }
+  try {
+    return _resolveRetention(scene, ctx, settings);
+  } catch (err) {
+    logger.warn(`[RetentionEngine] scene ${sceneId} fallback: ${String(err)}`);
+    return makeSingleBeatDecision(sceneId, scene);
+  }
+}
+function _resolveRetention(scene, ctx, settings) {
+  const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+  const level = settings.level;
+  const notes = [];
+  const { beats, proofVisual } = resolveVisualBeats(scene, ctx, level);
+  const rawVisualLoad = computeVisualLoad({
+    hasActiveCaption: scene.hasCaptionInRange ?? false,
+    hasStrongCaption: scene.hasStrongCaption ?? false,
+    beatCount: beats.length,
+    hasProofVisual: proofVisual !== null && settings.proofVisualsEnabled,
+    hasSfx: scene.hasSfxInRange ?? false,
+    hasPatternInterrupt: scene.isPatternInterrupt ?? false
+  });
+  let finalBeats = beats;
+  let finalProof = proofVisual && settings.proofVisualsEnabled ? proofVisual : null;
+  if (rawVisualLoad > MAX_VISUAL_LOAD) {
+    notes.push(`Visual load ${rawVisualLoad} > ${MAX_VISUAL_LOAD} — reducing to single beat`);
+    logger.info(`[RetentionEngine] scene ${sceneId}: overload guard triggered (load=${rawVisualLoad})`);
+    finalBeats = [beats[0]];
+    finalProof = null;
+  }
+  for (const beat of finalBeats) {
+    if (beat.crop && beat.crop.scale > 1.005) {
+      beat.zoomFilter = `__crop_${beat.crop.scale}_${beat.crop.x}_${beat.crop.y}__`;
+    }
+  }
+  const transitionType = resolveTransition(
+    scene.energyLevel ?? "medium",
+    ctx.previousShotType === "wide" ? "medium" : "medium",
+    scene.isNewChapter ?? false,
+    scene.isPatternInterrupt ?? false,
+    ctx.previousTransitionType
+  );
+  const finalVisualLoad = computeVisualLoad({
+    hasActiveCaption: scene.hasCaptionInRange ?? false,
+    hasStrongCaption: scene.hasStrongCaption ?? false,
+    beatCount: finalBeats.length,
+    hasProofVisual: finalProof !== null,
+    hasSfx: scene.hasSfxInRange ?? false,
+    hasPatternInterrupt: scene.isPatternInterrupt ?? false
+  });
+  return {
+    sceneId,
+    visualBeats: finalBeats,
+    proofVisual: finalProof ?? void 0,
+    transitionType,
+    visualLoadScore: finalVisualLoad,
+    audioLoadScore: (scene.hasSfxInRange ? 1 : 0) + (scene.hasCaptionInRange ? 0.5 : 0),
+    notes
+  };
+}
+function makeSingleBeatDecision(sceneId, scene) {
+  return {
+    sceneId,
+    visualBeats: [{
+      id: `beat_${sceneId}_0`,
+      sceneId,
+      relativeStart: 0,
+      relativeEnd: scene.duration,
+      type: "main_shot",
+      purpose: "establish",
+      sourceAssetId: scene.localPath
+    }],
+    visualLoadScore: 0,
+    audioLoadScore: 0,
+    transitionType: "cut",
+    notes: ["legacy single-beat"]
+  };
+}
+function updateRetentionContext(ctx, scene, decision) {
+  ctx.sceneIndex++;
+  ctx.previousShotType = scene.shotType ?? "medium";
+  ctx.previousTransitionType = decision.transitionType ?? "cut";
+  ctx.timeSinceLastStrongEffect += scene.duration;
+  ctx.timeSinceLastProofVisual += scene.duration;
+  ctx.timeSinceLastHumanShot += scene.duration;
+  const hint = scene.retentionHint;
+  if (hint?.role === "re-hook" || hint?.role === "hook") {
+    ctx.timeSinceLastRehook = 0;
+  } else {
+    ctx.timeSinceLastRehook = (ctx.timeSinceLastRehook ?? 0) + scene.duration;
+  }
+  if (hint?.patternInterrupt || scene.isPatternInterrupt) {
+    ctx.timeSinceLastPatternInterrupt = 0;
+  } else {
+    ctx.timeSinceLastPatternInterrupt = (ctx.timeSinceLastPatternInterrupt ?? 0) + scene.duration;
+  }
+  if (hint?.noveltyScore !== void 0) {
+    ctx.recentNoveltyScores = [...ctx.recentNoveltyScores || [], hint.noveltyScore].slice(-10);
+  }
+  if (hint?.role) {
+    ctx.recentSceneRoles = [...ctx.recentSceneRoles || [], hint.role].slice(-10);
+  }
+  if (decision.proofVisual) {
+    ctx.timeSinceLastProofVisual = 0;
+  }
+  if (scene.isPatternInterrupt || hint?.patternInterrupt) {
+    ctx.timeSinceLastStrongEffect = 0;
+    ctx.previousPatternInterruptType = "pattern_interrupt";
+  }
+  if (decision.visualBeats.length > 2) {
+    ctx.timeSinceLastStrongEffect = 0;
+  }
+}
+const QA_CONFIG = {
+  longStaticThresholdHigh: 7,
+  // giây — high energy scene không nên tĩnh lâu hơn
+  longStaticThresholdMedium: 12,
+  // giây — medium energy
+  longStaticThresholdLow: 20,
+  // giây — low energy OK để dài hơn
+  repeatedShotTypeWindow: 4
+};
+const PROOF_REGEX = /\$[\d,]+|\d+\.?\d*\s*%|\b(1[0-9]{3}|20[0-9]{2})\b|\d{1,3}(,\d{3})+|\b\d+\s*(million|billion|thousand)\b/i;
+function makeFlag(sceneId, flagType, severity, description, suggestion) {
+  return { sceneId, flagType, severity, description, suggestion };
+}
+function runRetentionQA(scenes, retentionPlan) {
+  const flags = [];
+  for (const scene of scenes) {
+    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+    const energy = scene.energyLevel ?? "medium";
+    const beats = scene.visualBeats;
+    let longestBeat = scene.duration;
+    if (beats && beats.length > 0) {
+      longestBeat = Math.max(...beats.map((b) => b.relativeEnd - b.relativeStart));
+    }
+    const threshold = energy === "high" ? QA_CONFIG.longStaticThresholdHigh : energy === "low" ? QA_CONFIG.longStaticThresholdLow : QA_CONFIG.longStaticThresholdMedium;
+    if (longestBeat > threshold) {
+      flags.push(makeFlag(
+        sceneId,
+        "LONG_STATIC_VISUAL",
+        energy === "high" ? "warning" : "info",
+        `Longest beat ${longestBeat.toFixed(1)}s exceeds threshold ${threshold}s for ${energy} energy`,
+        energy === "high" ? "Add detail crop or secondary visual" : "Consider subtle crop for variety"
+      ));
+    }
+  }
+  if (scenes.length >= QA_CONFIG.repeatedShotTypeWindow) {
+    for (let i = 0; i <= scenes.length - QA_CONFIG.repeatedShotTypeWindow; i++) {
+      const window = scenes.slice(i, i + QA_CONFIG.repeatedShotTypeWindow);
+      const firstShot = window[0].shotType;
+      if (firstShot && window.every((s) => s.shotType === firstShot)) {
+        const sceneId = window[QA_CONFIG.repeatedShotTypeWindow - 1].sceneId ?? String(window[QA_CONFIG.repeatedShotTypeWindow - 1].sceneIndex);
+        flags.push(makeFlag(
+          sceneId,
+          "REPEATED_SHOT_TYPE",
+          "warning",
+          `${QA_CONFIG.repeatedShotTypeWindow} consecutive "${firstShot}" shot type scenes`,
+          "Try detail crop or secondary asset with different framing"
+        ));
+        i += QA_CONFIG.repeatedShotTypeWindow - 1;
+      }
+    }
+  }
+  let windowProofCount = 0;
+  let windowHasStatCount = 0;
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+    const hasStatInNarration = scene.narrativeText ? PROOF_REGEX.test(scene.narrativeText) : false;
+    if (hasStatInNarration) windowHasStatCount++;
+    const hasPvBeat = scene.visualBeats?.some((b) => b.type === "proof_visual") ?? false;
+    if (hasPvBeat) windowProofCount++;
+    if ((i + 1) % 5 === 0) {
+      if (windowHasStatCount >= 2 && windowProofCount === 0) {
+        flags.push(makeFlag(
+          sceneId,
+          "MISSING_PROOF_OPPORTUNITY",
+          "info",
+          `${windowHasStatCount} stat references in last 5 scenes with no proof visuals`,
+          "Enable proofVisualsEnabled in retention settings"
+        ));
+      }
+      windowProofCount = 0;
+      windowHasStatCount = 0;
+    }
+  }
+  let noResetSeconds = 0;
+  const NO_RESET_THRESHOLD = 30;
+  for (const scene of scenes) {
+    const sceneId = scene.sceneId ?? String(scene.sceneIndex);
+    const hasReset = scene.isPatternInterrupt || (scene.visualBeats ?? []).some(
+      (b) => b.type === "pattern_interrupt" || b.type === "proof_visual"
+    );
+    if (!hasReset) {
+      noResetSeconds += scene.duration;
+      if (noResetSeconds > NO_RESET_THRESHOLD) {
+        flags.push(makeFlag(
+          sceneId,
+          "NO_VISUAL_RESET",
+          "warning",
+          `${Math.round(noResetSeconds)}s without visual reset or pattern interrupt`,
+          "Add proof visual or detail crop in this stretch"
+        ));
+        noResetSeconds = 0;
+      }
+    } else {
+      noResetSeconds = 0;
+    }
+  }
+  if (retentionPlan) {
+    const plans = retentionPlan.scenes || [];
+    for (let i = 2; i < plans.length; i++) {
+      const p0 = plans[i - 2];
+      const p1 = plans[i - 1];
+      const p2 = plans[i];
+      if (p0.noveltyScore < 0.4 && p1.noveltyScore < 0.4 && p2.noveltyScore < 0.4) {
+        flags.push(makeFlag(
+          p2.sceneId,
+          "LOW_NOVELTY_STREAK",
+          "warning",
+          `Low novelty streak across 3 consecutive scenes (${p0.noveltyScore.toFixed(2)}, ${p1.noveltyScore.toFixed(2)}, ${p2.noveltyScore.toFixed(2)})`,
+          "Vary camera motion, apply detail crop, or introduce a proof visual"
+        ));
+      }
+    }
+    const motionHistory = [];
+    for (const sc of scenes) {
+      const motion = sc.motionPreset || sc.motion?.preset;
+      if (motion) {
+        motionHistory.push({ sceneId: sc.sceneId ?? String(sc.sceneIndex), motion });
+      }
+    }
+    for (let i = 2; i < motionHistory.length; i++) {
+      const m0 = motionHistory[i - 2].motion;
+      const m1 = motionHistory[i - 1].motion;
+      const m2 = motionHistory[i].motion;
+      if (m0 && m1 === m0 && m2 === m0) {
+        flags.push(makeFlag(
+          motionHistory[i].sceneId,
+          "REPEATED_MOTION",
+          "warning",
+          `3 consecutive AI still scenes use identical motion preset "${m0}"`,
+          "Use alternate motion preset or subtle pan to increase visual variety"
+        ));
+      }
+    }
+    for (let i = 2; i < scenes.length; i++) {
+      const c0 = scenes[i - 2].category;
+      const c1 = scenes[i - 1].category;
+      const c2 = scenes[i].category;
+      if (c0 && c1 === c0 && c2 === c0 && c0 !== "conceptual") {
+        flags.push(makeFlag(
+          scenes[i].sceneId ?? String(scenes[i].sceneIndex),
+          "REPEATED_VISUAL_CATEGORY",
+          "info",
+          `3 consecutive scenes share the same visual category "${c0}"`,
+          "Ensure camera angles or framing vary between scenes"
+        ));
+      }
+    }
+    for (const loop of retentionPlan.openLoops || []) {
+      if (loop.status === "open" && loop.confidence >= 0.85) {
+        flags.push(makeFlag(
+          String(loop.openedAtSceneIndex),
+          "OPEN_LOOP_UNRESOLVED",
+          "info",
+          `Open loop "${loop.question}" has no identified payoff scene`,
+          "Consider addressing or answering the open question in a later scene"
+        ));
+      }
+    }
+    const targetGap = retentionPlan.strategy?.targetRehookGapSecs || 35;
+    let timeSinceLastRehook = 0;
+    for (const p of plans) {
+      const sc = scenes.find((s) => s.sceneIndex === p.sceneIndex);
+      const dur = sc?.duration || 4;
+      if (p.role === "hook" || p.role === "re-hook" || p.role === "surprise" || p.patternInterrupt) {
+        if (timeSinceLastRehook > targetGap * 1.5) {
+          flags.push(makeFlag(
+            p.sceneId,
+            "REHOOK_GAP_TOO_LONG",
+            "warning",
+            `Re-hook gap of ${Math.round(timeSinceLastRehook)}s exceeded recommended target (${targetGap}s)`,
+            "Add an engaging narrative question or pattern interrupt earlier"
+          ));
+        }
+        timeSinceLastRehook = 0;
+      } else {
+        timeSinceLastRehook += dur;
+      }
+    }
+  }
+  const bySeverity = {
+    error: flags.filter((f) => f.severity === "error").length,
+    warning: flags.filter((f) => f.severity === "warning").length,
+    info: flags.filter((f) => f.severity === "info").length
+  };
+  logger.info(
+    `[RetentionQA] ${flags.length} flags: ${bySeverity.error} errors, ${bySeverity.warning} warnings, ${bySeverity.info} info`
+  );
+  return flags;
+}
+function generateRetentionSummary(scenes, retentionPlan, flags = []) {
+  let totalDuration = 0;
+  for (const s of scenes) {
+    totalDuration += s.duration || 0;
+  }
+  const lowNoveltyFlags = flags.filter((f) => f.flagType === "LOW_NOVELTY_STREAK").length;
+  const longRehookFlags = flags.filter((f) => f.flagType === "REHOOK_GAP_TOO_LONG").length;
+  const repeatedMotionFlags = flags.filter((f) => f.flagType === "REPEATED_MOTION").length;
+  const overeditedFlags = flags.filter((f) => f.flagType === "OVEREDITED" || f.flagType === "EFFECT_OVERLOAD").length;
+  const detectedLoops = retentionPlan?.openLoops?.length || 0;
+  const resolvedLoops = retentionPlan?.openLoops?.filter((l) => l.status === "resolved").length || 0;
+  const unresolvedLoops = detectedLoops - resolvedLoops;
+  const patternInterrupts = retentionPlan?.summary?.patternInterrupts ?? scenes.filter((s) => s.isPatternInterrupt).length;
+  let avgNovelty = 0.7;
+  if (retentionPlan?.scenes && retentionPlan.scenes.length > 0) {
+    const sum = retentionPlan.scenes.reduce((acc, sp) => acc + (sp.noveltyScore || 0), 0);
+    avgNovelty = Math.round(sum / retentionPlan.scenes.length * 100) / 100;
+  }
+  let healthScore = 100;
+  healthScore -= lowNoveltyFlags * 5;
+  healthScore -= longRehookFlags * 5;
+  healthScore -= repeatedMotionFlags * 3;
+  healthScore -= unresolvedLoops * 4;
+  healthScore -= overeditedFlags * 4;
+  healthScore = Math.max(40, Math.min(100, healthScore));
+  return {
+    schemaVersion: 1,
+    sceneCount: scenes.length,
+    durationSecs: Math.round(totalDuration * 10) / 10,
+    retentionHealthScore: healthScore,
+    riskCounts: {
+      lowNovelty: lowNoveltyFlags,
+      longRehookGap: longRehookFlags,
+      repeatedMotion: repeatedMotionFlags,
+      overedited: overeditedFlags
+    },
+    openLoops: {
+      detected: detectedLoops,
+      resolved: resolvedLoops,
+      unresolved: unresolvedLoops
+    },
+    patternInterrupts,
+    averageNoveltyScore: avgNovelty
+  };
+}
+function saveRetentionSummary(projectDir, summary) {
+  try {
+    const summaryPath = path__namespace.join(projectDir, "analysis", "retention-summary.json");
+    const dir = path__namespace.dirname(summaryPath);
+    if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+    fs__namespace.writeFileSync(summaryPath, JSON.stringify(summary, null, 2), "utf-8");
+    logger.info(`[RetentionQA] Retention summary saved to retention-summary.json (score=${summary.retentionHealthScore})`);
+  } catch (err) {
+    logger.warn(`[RetentionQA] Failed to save retention summary: ${String(err)}`);
+  }
+}
+const STOP_WORDS = /* @__PURE__ */ new Set([
+  "a",
+  "an",
+  "the",
+  "in",
+  "on",
+  "at",
+  "of",
+  "for",
+  "with",
+  "by",
+  "about",
+  "against",
+  "between",
+  "into",
+  "through",
+  "during",
+  "before",
+  "after",
+  "above",
+  "below",
+  "to",
+  "from",
+  "up",
+  "down",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "being",
+  "have",
+  "has",
+  "had",
+  "do",
+  "does",
+  "did",
+  "and",
+  "but",
+  "if",
+  "or",
+  "because",
+  "as",
+  "until",
+  "while",
+  "this",
+  "that",
+  "these",
+  "those",
+  "it",
+  "its",
+  "show",
+  "showing",
+  "shot",
+  "view",
+  "close",
+  "up",
+  "scene",
+  "visual",
+  "cinematic",
+  "high",
+  "quality",
+  "you",
+  "your",
+  "we",
+  "our",
+  "us",
+  "they",
+  "them",
+  "their",
+  "he",
+  "him",
+  "his",
+  "she",
+  "her",
+  "now",
+  "right",
+  "here",
+  "there",
+  "just",
+  "even",
+  "also",
+  "any",
+  "all",
+  "some",
+  "many",
+  "much",
+  "more",
+  "most",
+  "very",
+  "really",
+  "however",
+  "furthermore",
+  "what",
+  "why",
+  "how",
+  "when",
+  "where",
+  "which",
+  "who",
+  "whose",
+  "whom",
+  "can",
+  "could",
+  "will",
+  "would",
+  "should",
+  "may",
+  "might",
+  "must",
+  "without",
+  "well",
+  "like"
+]);
+function extractNormalizedKeywords(text) {
+  if (!text || typeof text !== "string") return [];
+  const tokens = text.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter((w) => w.length > 2 && !STOP_WORDS.has(w));
+  return Array.from(new Set(tokens));
+}
+function classifySubjectType(visualIntent, category, narrativeText) {
+  const combined = `${category || ""} ${visualIntent || ""} ${narrativeText || ""}`.toLowerCase();
+  if (combined.includes("anatomy") || combined.includes("organ") || combined.includes("kidney") || combined.includes("heart") || combined.includes("liver") || combined.includes("artery") || combined.includes("blood") || combined.includes("cell") || combined.includes("neuron") || combined.includes("tissue") || combined.includes("vessel") || combined.includes("microscopic")) {
+    return "anatomy";
+  }
+  if (combined.includes("person") || combined.includes("doctor") || combined.includes("patient") || combined.includes("man") || combined.includes("woman") || combined.includes("face") || combined.includes("hand") || combined.includes("worker") || combined.includes("lifestyle") || combined.includes("human")) {
+    return "human";
+  }
+  if (combined.includes("data") || combined.includes("chart") || combined.includes("graph") || combined.includes("study") || combined.includes("stat") || combined.includes("evidence") || combined.includes("percentage") || combined.includes("number")) {
+    return "data";
+  }
+  if (combined.includes("landscape") || combined.includes("hospital") || combined.includes("clinic") || combined.includes("room") || combined.includes("city") || combined.includes("outdoor") || combined.includes("nature") || combined.includes("environment")) {
+    return "environment";
+  }
+  if (combined.includes("pill") || combined.includes("bottle") || combined.includes("food") || combined.includes("equipment") || combined.includes("machine") || combined.includes("tool") || combined.includes("object")) {
+    return "object";
+  }
+  if (combined.includes("conceptual") || combined.includes("mechanism")) {
+    return "conceptual";
+  }
+  return "unknown";
+}
+function computeKeywordJaccard(kw1, kw2) {
+  if (kw1.length === 0 || kw2.length === 0) return 0;
+  const set1 = new Set(kw1);
+  const set2 = new Set(kw2);
+  let intersection = 0;
+  for (const w of set1) {
+    if (set2.has(w)) intersection++;
+  }
+  const union = set1.size + set2.size - intersection;
+  return union > 0 ? intersection / union : 0;
+}
+function computeSignatureSimilarity(current, previous, isIntentionalMotif = false) {
+  let sim = 0;
+  if (current.visualSource && previous.visualSource && current.visualSource === previous.visualSource) {
+    sim += 0.15;
+  }
+  if (current.shotType && previous.shotType && current.shotType.toLowerCase() === previous.shotType.toLowerCase()) {
+    sim += 0.2;
+  }
+  const sameCategory = Boolean(
+    current.category && previous.category && current.category.toLowerCase() === previous.category.toLowerCase()
+  );
+  const sameSubject = Boolean(
+    current.subjectType && previous.subjectType && current.subjectType !== "unknown" && current.subjectType === previous.subjectType
+  );
+  let categorySim = sameCategory ? 0.3 : sameSubject ? 0.2 : 0;
+  if (isIntentionalMotif && (sameCategory || sameSubject)) {
+    categorySim *= 0.4;
+  }
+  sim += categorySim;
+  const kwOverlap = computeKeywordJaccard(current.visualIntentKeywords, previous.visualIntentKeywords);
+  sim += kwOverlap * (isIntentionalMotif ? 0.12 : 0.25);
+  if (current.motionPreset && previous.motionPreset && current.motionPreset === previous.motionPreset) {
+    sim += 0.1;
+  }
+  return Math.min(0.88, Math.max(0, sim));
+}
+function computeNoveltyScore(current, recentHistory, motifsOrWindowSize = [], windowSizeOpt = 4) {
+  if (recentHistory.length === 0) {
+    return 1;
+  }
+  let motifs = [];
+  let windowSize = 4;
+  if (typeof motifsOrWindowSize === "number") {
+    windowSize = motifsOrWindowSize;
+  } else if (Array.isArray(motifsOrWindowSize)) {
+    motifs = motifsOrWindowSize;
+    windowSize = windowSizeOpt;
+  }
+  const window = recentHistory.slice(-windowSize);
+  const weights = [0.45, 0.25, 0.18, 0.12].slice(0, window.length);
+  let totalWeight = 0;
+  let weightedDistanceSum = 0;
+  let highSimStreak = 0;
+  for (let idx = 0; idx < window.length; idx++) {
+    const prev = window[window.length - 1 - idx];
+    const weight = weights[idx] || 0.1;
+    const isMotif = Boolean(
+      current.motifId && prev.motifId && current.motifId === prev.motifId || current.motifId && motifs.some((m) => m.id === current.motifId && m.recurringSceneIndices.includes(prev.sceneIndex)) || current.motifId && (prev.category === current.category || prev.visualIntentKeywords.some((kw) => current.motifId?.includes(kw)))
+    );
+    const similarity = computeSignatureSimilarity(current, prev, isMotif);
+    if (similarity >= 0.5) {
+      highSimStreak++;
+    }
+    const distance = 1 - similarity;
+    weightedDistanceSum += distance * weight;
+    totalWeight += weight;
+  }
+  let score = totalWeight > 0 ? weightedDistanceSum / totalWeight : 1;
+  if (highSimStreak >= 2) {
+    const fatiguePenalty = (highSimStreak - 1) * 0.04;
+    score = Math.max(0.01, score - fatiguePenalty);
+  }
+  return Math.round(score * 100) / 100;
+}
+function isLowNoveltyStreak(noveltyScores, minStreakOrThreshold = 3, thresholdOrMinStreak) {
+  let minStreak = 3;
+  let threshold = 0.4;
+  {
+    {
+      threshold = minStreakOrThreshold;
+      minStreak = thresholdOrMinStreak;
+    }
+  }
+  if (noveltyScores.length < minStreak) return false;
+  const lastN = noveltyScores.slice(-minStreak);
+  return lastN.every((s) => s < threshold);
+}
+const RETENTION_PLAN_SCHEMA_VERSION = 1;
+function sha256$3(text) {
+  return crypto__namespace.createHash("sha256").update(text).digest("hex");
+}
+function writeFileAtomic$5(filePath, content) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) fs__namespace.mkdirSync(dir, { recursive: true });
+  const tmp = `${filePath}.tmp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}`;
+  fs__namespace.writeFileSync(tmp, content, "utf-8");
+  fs__namespace.renameSync(tmp, filePath);
+}
+function getSceneText(scene) {
+  return (scene.narrativeText || scene.narration || "").trim();
+}
+const QUESTION_STARTERS = /^(why|how|what|could|can|is\s+it\s+true|where|when|which|who|what\s+if)\b/i;
+const TEASER_PATTERNS = [
+  /\bthe\s+real\s+(reason|problem|truth|cause)\b/i,
+  /\bthere\s+is\s+another\s+(reason|problem|factor)\b/i,
+  /\bwhat\s+happens\s+next\b/i,
+  /\blater\s+(we('ll| will)|in\s+this)\b/i,
+  /\bas\s+we('ll| will)\s+(see|discover|learn|find\s+out)\b/i,
+  /\bthe\s+truth\s+is\s+far\s+more\b/i,
+  /\bwait\s+until\s+you\s+(see|hear|discover)\b/i,
+  /\bthe\s+secret\s+behind\b/i
+];
+const PAYOFF_SIGNALS = [
+  /\bthe\s+reason\b.*\b(is|was)\b/i,
+  /\bthis\s+happens\s+because\b/i,
+  /\bthe\s+answer\b.*\b(is|comes\s+down\s+to|lies\s+in)\b/i,
+  /\bit\s+turns\s+out\b/i,
+  /\bhere('s| is)\s+why\b/i,
+  /\bthat('s| is)\s+why\b/i,
+  /\bnow\s+we\s+(understand|know)\b/i,
+  /\bresearchers\s+(discovered|found|proved)\b/i,
+  /\bthe\s+solution\s+(is|was)\b/i
+];
+function detectOpenLoops(scenes) {
+  const loops = [];
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    const text = getSceneText(scene);
+    if (!text || text.length < 10) continue;
+    const hasQuestionMark = text.includes("?");
+    const isQuestionSentence = QUESTION_STARTERS.test(text);
+    const hasTeaserPhrase = TEASER_PATTERNS.some((p) => p.test(text));
+    if (!hasQuestionMark && !isQuestionSentence && !hasTeaserPhrase) {
+      continue;
+    }
+    if (i === 0 && !hasTeaserPhrase) {
+      continue;
+    }
+    const isPureDeclarative = !hasQuestionMark && !hasTeaserPhrase && !isQuestionSentence;
+    if (isPureDeclarative) continue;
+    const keywords = extractNormalizedKeywords(text).filter(
+      (k) => !["why", "how", "what", "when", "where", "next", "reason", "happen"].includes(k)
+    );
+    if (keywords.length === 0) continue;
+    const loopId = `loop_${i + 1}`;
+    loops.push({
+      id: loopId,
+      openedAtSceneIndex: scene.sceneIndex,
+      question: text.slice(0, 120),
+      confidence: hasTeaserPhrase || hasQuestionMark ? 0.9 : 0.75,
+      status: "open",
+      keywords
+    });
+  }
+  for (const loop of loops) {
+    let bestPayoffIndex;
+    let maxOverlap = 0;
+    for (let j = 0; j < scenes.length; j++) {
+      const candidate = scenes[j];
+      if (candidate.sceneIndex <= loop.openedAtSceneIndex) continue;
+      const candidateText = getSceneText(candidate).toLowerCase();
+      const hasPayoffSignal = PAYOFF_SIGNALS.some((p) => p.test(candidateText));
+      const candidateKeywords = extractNormalizedKeywords(candidateText);
+      let overlapCount = 0;
+      for (const kw of loop.keywords) {
+        const matches = candidateKeywords.some(
+          (ck) => ck === kw || ck.length >= 4 && kw.length >= 4 && (ck.startsWith(kw) || kw.startsWith(ck))
+        );
+        if (matches) {
+          overlapCount++;
+        }
+      }
+      const distance = candidate.sceneIndex - loop.openedAtSceneIndex;
+      if (hasPayoffSignal) {
+        if (overlapCount >= 1 || distance <= 4) {
+          if (overlapCount >= maxOverlap) {
+            maxOverlap = overlapCount;
+            bestPayoffIndex = candidate.sceneIndex;
+          }
+        }
+      } else if (overlapCount >= 2 && distance > 1) {
+        if (overlapCount > maxOverlap) {
+          maxOverlap = overlapCount;
+          bestPayoffIndex = candidate.sceneIndex;
+        }
+      }
+    }
+    if (bestPayoffIndex !== void 0) {
+      loop.payoffSceneIndex = bestPayoffIndex;
+      loop.status = "resolved";
+    }
+  }
+  return loops;
+}
+function detectMotifs(scenes) {
+  const keywordSceneMap = /* @__PURE__ */ new Map();
+  for (const s of scenes) {
+    const text = `${s.visualIntent || ""} ${getSceneText(s)}`;
+    const kws = extractNormalizedKeywords(text);
+    for (const kw of kws) {
+      if (kw.length < 4) continue;
+      const list = keywordSceneMap.get(kw) || [];
+      list.push(s.sceneIndex);
+      keywordSceneMap.set(kw, list);
+    }
+  }
+  const motifs = [];
+  for (const [kw, indices] of keywordSceneMap.entries()) {
+    const uniqueIndices = Array.from(new Set(indices));
+    if (uniqueIndices.length >= 3 && uniqueIndices.length <= scenes.length * 0.6) {
+      motifs.push({
+        id: `motif_${kw}`,
+        label: kw,
+        conceptKeywords: [kw],
+        firstSeenSceneIndex: uniqueIndices[0],
+        recurringSceneIndices: uniqueIndices
+      });
+    }
+  }
+  motifs.sort((a, b) => b.recurringSceneIndices.length - a.recurringSceneIndices.length);
+  return motifs.slice(0, 5);
+}
+const PROOF_KEYWORDS = /\b(percent|%|\$|study|studies|trial|trials|data|researchers|university|published|patients|statistics|proven|evidence|hospital|dr\.|doctor|clinical)\b/i;
+const MECHANISM_KEYWORDS = /\b(pathway|process|filters|absorbs|produces|mechanism|triggers|causes|functions|cells|vessels|bloodstream|molecules|artery|system|organ|tissue)\b/i;
+const COMPARISON_KEYWORDS = /\b(compared\s+to|unlike|versus|vs|in\s+contrast|differently|while|on\s+the\s+other\s+hand|standard|traditional)\b/i;
+const SURPRISE_KEYWORDS = /\b(unexpectedly|surprisingly|strange|shocking|twist|catch|ironically|little\s+known|hidden|secret)\b/i;
+const SOLUTION_KEYWORDS = /\b(solution|prevent|treat|treatment|protocol|action|step|remedy|cure|how\s+to|takeaway)\b/i;
+const BRIDGE_KEYWORDS = /\b(meanwhile|moving\s+on|next|furthermore|now\s+let's|turning\s+to)\b/i;
+const RECAP_KEYWORDS = /\b(to\s+summarize|in\s+summary|we\s+have\s+seen|remember|recap)\b/i;
+const CONCLUSION_KEYWORDS = /\b(finally|in\s+conclusion|ultimately|final\s+thought|takeaway|in\s+the\s+end)\b/i;
+function classifySceneRole(scene, totalScenes, elapsedSecs, openLoop, isPayoffScene, arrayIndex) {
+  const text = getSceneText(scene).toLowerCase();
+  (scene.visualIntent || "").toLowerCase();
+  const isFirst = arrayIndex !== void 0 ? arrayIndex === 0 : scene.sceneIndex <= 1;
+  if (isFirst) {
+    return { role: "hook", reason: "Opening hook: establish strong core intrigue" };
+  }
+  if (isPayoffScene) {
+    return { role: "payoff", reason: "Resolves previously established open loop question" };
+  }
+  if (openLoop && openLoop.openedAtSceneIndex === scene.sceneIndex) {
+    return { role: "open-loop", reason: `Introduces open loop: "${openLoop.question}"` };
+  }
+  const isLast = arrayIndex !== void 0 ? arrayIndex === totalScenes - 1 : scene.sceneIndex >= totalScenes;
+  if (isLast || CONCLUSION_KEYWORDS.test(text)) {
+    return { role: "conclusion", reason: "Final takeaway / conclusion of narrative" };
+  }
+  if (RECAP_KEYWORDS.test(text)) {
+    return { role: "recap", reason: "Synthesizes previous insights" };
+  }
+  if (SOLUTION_KEYWORDS.test(text)) {
+    return { role: "solution", reason: "Presents actionable remedy or solution" };
+  }
+  if (SURPRISE_KEYWORDS.test(text)) {
+    return { role: "surprise", reason: "Presents counter-intuitive or surprising fact" };
+  }
+  if (PROOF_KEYWORDS.test(text) || /\b\d+(\.\d+)?%|\$\d+|\b\d{1,3}(,\d{3})+\b/.test(text)) {
+    return { role: "proof", reason: "Narrative presents factual data, study, or statistics" };
+  }
+  if (COMPARISON_KEYWORDS.test(text)) {
+    return { role: "comparison", reason: "Compares alternatives, contrast, or duality" };
+  }
+  if (MECHANISM_KEYWORDS.test(text)) {
+    return { role: "mechanism", reason: "Explains internal workings or biological mechanism" };
+  }
+  if (scene.sceneIndex <= 2) {
+    return { role: "setup", reason: "Establishes foundational context" };
+  }
+  if (BRIDGE_KEYWORDS.test(text)) {
+    return { role: "bridge", reason: "Narrative bridge between topics" };
+  }
+  if (text.includes("problem") || text.includes("danger") || text.includes("risk") || text.includes("fail")) {
+    return { role: "problem", reason: "Highlights conflict, obstacle, or risk" };
+  }
+  return { role: "setup", reason: "Narrative context" };
+}
+function analyzeRetentionPlan(rawScenes, options = {}) {
+  const level = options.level || "balanced";
+  const targetRehookGapSecs = options.targetRehookGapSecs || (level === "high" ? 25 : level === "low" ? 50 : 35);
+  const maxNoResetSecs = options.maxNoResetSecs || (level === "high" ? 30 : level === "low" ? 60 : 42);
+  const noveltyWindowScenes = options.noveltyWindowScenes || 4;
+  const totalScenes = rawScenes.length;
+  let totalDuration = 0;
+  for (const s of rawScenes) {
+    totalDuration += s.duration || 0;
+  }
+  const openLoops = detectOpenLoops(rawScenes);
+  const payoffSceneSet = /* @__PURE__ */ new Set();
+  const loopByOpenedScene = /* @__PURE__ */ new Map();
+  for (const l of openLoops) {
+    loopByOpenedScene.set(l.openedAtSceneIndex, l);
+    if (l.payoffSceneIndex !== void 0) {
+      payoffSceneSet.add(l.payoffSceneIndex);
+    }
+  }
+  const motifs = detectMotifs(rawScenes);
+  const motifSceneMap = /* @__PURE__ */ new Map();
+  for (const m of motifs) {
+    for (const scIdx of m.recurringSceneIndices) {
+      if (!motifSceneMap.has(scIdx)) {
+        motifSceneMap.set(scIdx, m.id);
+      }
+    }
+  }
+  const signatures = [];
+  const scenePlans = [];
+  const recentNoveltyScores = [];
+  let elapsedSecs = 0;
+  let timeSinceLastReset = 0;
+  let timeSinceLastPatternInterrupt = 999;
+  let hookCount = 0;
+  let rehookCount = 0;
+  let payoffCount = 0;
+  let interruptCount = 0;
+  let lowNoveltyCount = 0;
+  for (let i = 0; i < rawScenes.length; i++) {
+    const scene = rawScenes[i];
+    const sceneId = scene.sceneId || String(scene.sceneIndex);
+    const duration = scene.duration || 4;
+    const openLoop = loopByOpenedScene.get(scene.sceneIndex);
+    const isPayoff = payoffSceneSet.has(scene.sceneIndex);
+    let { role, reason } = classifySceneRole(
+      scene,
+      totalScenes,
+      elapsedSecs,
+      openLoop,
+      isPayoff,
+      i
+    );
+    const canBeRehook = role !== "hook" && role !== "payoff" && role !== "conclusion" && role !== "recap" && timeSinceLastReset >= targetRehookGapSecs;
+    if (canBeRehook) {
+      const text = getSceneText(scene).toLowerCase();
+      const hasTurnSignal = text.includes("?") || text.startsWith("now") || text.startsWith("here") || text.startsWith("wait") || text.startsWith("notice") || text.startsWith("surprisingly") || text.startsWith("what about") || SURPRISE_KEYWORDS.test(text) || COMPARISON_KEYWORDS.test(text);
+      if (hasTurnSignal || timeSinceLastReset >= maxNoResetSecs) {
+        role = "re-hook";
+        reason = `Re-hook: attention refreshed after ${Math.round(timeSinceLastReset)}s neutral stretch`;
+        rehookCount++;
+        timeSinceLastReset = 0;
+      }
+    }
+    if (role === "hook") hookCount++;
+    if (role === "payoff") payoffCount++;
+    const sceneText = getSceneText(scene);
+    const kws = extractNormalizedKeywords(`${scene.visualIntent || ""} ${sceneText}`);
+    const subject = classifySubjectType(scene.visualIntent, scene.category, sceneText);
+    const sig = {
+      sceneIndex: scene.sceneIndex,
+      sceneId,
+      visualSource: scene.visualStrategy || (scene.localPath?.includes("generated") ? "ai-still" : "stock"),
+      shotType: scene.shotType || "medium",
+      energyLevel: scene.energyLevel || "medium",
+      visualIntentKeywords: kws,
+      category: scene.category,
+      motionPreset: scene.motionPreset,
+      subjectType: subject,
+      role,
+      motifId: motifSceneMap.get(scene.sceneIndex)
+    };
+    const noveltyScore = computeNoveltyScore(sig, signatures, motifs, noveltyWindowScenes);
+    signatures.push(sig);
+    recentNoveltyScores.push(noveltyScore);
+    if (noveltyScore < 0.4) {
+      lowNoveltyCount++;
+    }
+    const hasLowNoveltyStreak = isLowNoveltyStreak(recentNoveltyScores, 0.4, 3);
+    const interruptCooldown = level === "high" ? 15 : level === "low" ? 45 : 25;
+    let shouldInterrupt = false;
+    let interruptReason;
+    if (timeSinceLastPatternInterrupt >= interruptCooldown) {
+      if (role === "surprise") {
+        shouldInterrupt = true;
+        interruptReason = "Narrative surprise pivot";
+      } else if (role === "re-hook") {
+        shouldInterrupt = true;
+        interruptReason = "Re-hook attention refresh";
+      } else if (hasLowNoveltyStreak) {
+        shouldInterrupt = true;
+        interruptReason = "Low novelty streak across consecutive scenes";
+      } else if (timeSinceLastReset >= maxNoResetSecs) {
+        shouldInterrupt = true;
+        interruptReason = `Reset attention after ${Math.round(timeSinceLastReset)}s neutral stretch`;
+      } else if (scene.isPatternInterrupt) {
+        shouldInterrupt = true;
+        interruptReason = "Edit plan designated pattern interrupt";
+      }
+    }
+    if (shouldInterrupt) {
+      interruptCount++;
+      timeSinceLastPatternInterrupt = 0;
+      timeSinceLastReset = 0;
+    } else {
+      timeSinceLastPatternInterrupt += duration;
+    }
+    const isResetEvent = role === "hook" || role === "re-hook" || role === "surprise" || role === "payoff" || shouldInterrupt;
+    if (isResetEvent) {
+      timeSinceLastReset = 0;
+    } else {
+      timeSinceLastReset += duration;
+    }
+    let avoidSpoiler = false;
+    for (const l of openLoops) {
+      if (l.payoffSceneIndex !== void 0 && scene.sceneIndex > l.openedAtSceneIndex && scene.sceneIndex < l.payoffSceneIndex) {
+        avoidSpoiler = true;
+        break;
+      }
+    }
+    let intensity = "medium";
+    if (role === "hook" || role === "surprise" || role === "payoff") {
+      intensity = "high";
+    } else if (role === "bridge" || role === "conclusion" || role === "recap") {
+      intensity = "low";
+    }
+    let beatPacing = "normal";
+    if (role === "hook" || role === "re-hook" || role === "surprise") {
+      beatPacing = "fast";
+    } else if (role === "proof" || role === "payoff" || role === "bridge" || role === "conclusion") {
+      beatPacing = "slow";
+    }
+    let preferredVisualChange = "none";
+    if (shouldInterrupt) {
+      if (role === "proof") preferredVisualChange = "proof";
+      else if (role === "re-hook" || role === "surprise") preferredVisualChange = "motion";
+      else if (hasLowNoveltyStreak) preferredVisualChange = "crop";
+      else preferredVisualChange = "hard-cut";
+    }
+    let overlayPriority = "none";
+    if (role === "proof") overlayPriority = "high";
+    else if (role === "hook" || role === "payoff" || role === "surprise") overlayPriority = "medium";
+    else if (role === "re-hook") overlayPriority = "low";
+    const proofPriority = role === "proof" || role === "payoff" && PROOF_KEYWORDS.test(getSceneText(scene)) ? "high" : "normal";
+    const motionEnergy = role === "hook" || role === "re-hook" || role === "surprise" ? "elevated" : role === "proof" || role === "bridge" || role === "conclusion" ? "calm" : "normal";
+    scenePlans.push({
+      sceneIndex: scene.sceneIndex,
+      sceneId,
+      role,
+      intensity,
+      reason,
+      noveltyScore,
+      noveltyTarget: 0.5,
+      patternInterrupt: shouldInterrupt,
+      patternInterruptReason: interruptReason,
+      openLoopId: openLoop?.id,
+      payoffForLoopId: isPayoff ? openLoops.find((l) => l.payoffSceneIndex === scene.sceneIndex)?.id : void 0,
+      avoidSpoiler,
+      motionEnergy,
+      beatPacing,
+      overlayPriority,
+      proofPriority,
+      preferredVisualChange,
+      notes: [
+        `role=${role}`,
+        `novelty=${noveltyScore.toFixed(2)}`,
+        `resetTime=${Math.round(timeSinceLastReset)}s`
+      ]
+    });
+    elapsedSecs += duration;
+  }
+  const hashPayload = JSON.stringify({
+    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
+    level,
+    totalScenes,
+    scenes: rawScenes.map((s) => ({
+      i: s.sceneIndex,
+      dur: s.duration,
+      text: getSceneText(s),
+      intent: s.visualIntent,
+      e: s.energyLevel,
+      sh: s.shotType
+    }))
+  });
+  const inputHash = sha256$3(hashPayload);
+  return {
+    schemaVersion: RETENTION_PLAN_SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    inputHash,
+    totalScenes,
+    totalDuration: Math.round(totalDuration * 100) / 100,
+    strategy: {
+      level,
+      targetRehookGapSecs,
+      maxNoResetSecs,
+      noveltyWindowScenes
+    },
+    openLoops,
+    motifs,
+    scenes: scenePlans,
+    summary: {
+      hooks: hookCount,
+      rehooks: rehookCount,
+      payoffs: payoffCount,
+      patternInterrupts: interruptCount,
+      lowNoveltyScenes: lowNoveltyCount,
+      openLoops: openLoops.length
+    }
+  };
+}
+function getRetentionPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "retention-plan.json");
+}
+function loadRetentionPlan(projectDir) {
+  try {
+    const p = getRetentionPlanPath(projectDir);
+    if (!fs__namespace.existsSync(p)) return null;
+    const content = fs__namespace.readFileSync(p, "utf-8");
+    return JSON.parse(content);
+  } catch (err) {
+    logger.warn(`[RetentionDirector] Failed to load retention plan: ${String(err)}`);
+    return null;
+  }
+}
+function saveRetentionPlan(projectDir, plan) {
+  const p = getRetentionPlanPath(projectDir);
+  writeFileAtomic$5(p, JSON.stringify(plan, null, 2));
+  logger.info(
+    `[RetentionDirector] plan ready scenes=${plan.totalScenes} hooks=${plan.summary.hooks} rehooks=${plan.summary.rehooks} payoffs=${plan.summary.payoffs} openLoops=${plan.summary.openLoops} patternInterrupts=${plan.summary.patternInterrupts}`
+  );
+}
+function ensureRetentionPlan(projectDir, options) {
+  try {
+    let scenes = options?.scenes;
+    if (!scenes || scenes.length === 0) {
+      const editPlanPath = path__namespace.join(projectDir, "edit-plan", "master-edit-plan.json");
+      if (fs__namespace.existsSync(editPlanPath)) {
+        try {
+          const raw = JSON.parse(fs__namespace.readFileSync(editPlanPath, "utf-8"));
+          scenes = raw.scenes || [];
+        } catch {
+        }
+      }
+    }
+    if (!scenes || scenes.length === 0) {
+      logger.info("[RetentionDirector] No scenes provided or found in edit-plan. Skipping retention plan.");
+      return null;
+    }
+    let globalContext;
+    const globalContextPath = path__namespace.join(projectDir, "analysis", "global-script-context.json");
+    if (fs__namespace.existsSync(globalContextPath)) {
+      try {
+        globalContext = JSON.parse(fs__namespace.readFileSync(globalContextPath, "utf-8"));
+      } catch {
+      }
+    }
+    const cached = loadRetentionPlan(projectDir);
+    if (cached && !options?.force) {
+      if (cached.totalScenes === scenes.length) {
+        return cached;
+      }
+    }
+    const plan = analyzeRetentionPlan(scenes, {
+      level: options?.level || "balanced",
+      globalContext
+    });
+    saveRetentionPlan(projectDir, plan);
+    return plan;
+  } catch (err) {
+    logger.warn(`[RetentionDirector] Failed to ensure retention plan (falling open): ${String(err)}`);
+    return null;
+  }
+}
+const SCENE_RENDERER_VERSION = "scene-v2.0";
+const RENDERER_SCHEMA_VERSION = "render-v2.0";
+const OVERLAY_RENDERER_VERSION = "overlay-v2.0";
+function normalizeForCanonical(value) {
+  if (value === null || value === void 0) return null;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return String(value);
+    return Math.round(value * 1e6) / 1e6;
+  }
+  if (typeof value === "string" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(normalizeForCanonical);
+  if (typeof value === "object") {
+    const out = {};
+    for (const key2 of Object.keys(value).sort()) {
+      const v = value[key2];
+      if (v === void 0 || typeof v === "function") continue;
+      out[key2] = normalizeForCanonical(v);
+    }
+    return out;
+  }
+  return String(value);
+}
+function canonicalJson(value) {
+  return JSON.stringify(normalizeForCanonical(value));
+}
+function sha256$2(input) {
+  return crypto__namespace.createHash("sha256").update(input).digest("hex");
+}
+function fingerprintOf(value) {
+  return sha256$2(canonicalJson(value));
+}
+function normalizeSignaturePath(p) {
+  return path__namespace.normalize(path__namespace.resolve(p));
+}
+function fileSignature(filePath) {
+  if (!filePath) return null;
+  const normalizedPath = normalizeSignaturePath(filePath);
+  try {
+    const st = fs__namespace.statSync(normalizedPath);
+    return { normalizedPath, size: st.size, mtimeMs: Math.floor(st.mtimeMs) };
+  } catch {
+    return { normalizedPath, size: 0, mtimeMs: 0, missing: true };
+  }
+}
+const SMALL_JSON_LIMIT = 8 * 1024 * 1024;
+function hashFileContent(filePath) {
+  try {
+    const st = fs__namespace.statSync(filePath);
+    if (st.size <= SMALL_JSON_LIMIT) {
+      return sha256$2(fs__namespace.readFileSync(filePath));
+    }
+    return fingerprintOf(fileSignature(filePath));
+  } catch {
+    return "absent";
+  }
+}
+function hashJsonValue(value) {
+  return value === void 0 || value === null ? "none" : fingerprintOf(value);
+}
+function computeSceneFingerprint(input) {
+  return fingerprintOf({
+    v: SCENE_RENDERER_VERSION,
+    // NOTE: sceneOrdinal is intentionally excluded — clip pixels do not depend on
+    // render position, so inserting a scene elsewhere must not invalidate this clip.
+    sceneIndex: input.sceneIndex,
+    duration: input.duration,
+    startTime: input.startTime,
+    mediaType: input.mediaType,
+    media: input.mediaSignature,
+    beats: input.visualBeats ?? null,
+    filter: input.filterChain,
+    multiBeat: input.multiBeat,
+    semanticCrop: input.semanticCrop,
+    base: input.base
+  });
+}
+function computeAssemblyFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "assembly", ...input });
+}
+function computeAudioFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "audio", ...input });
+}
+function computeOverlayBlockFingerprint(input) {
+  return fingerprintOf({ v: OVERLAY_RENDERER_VERSION, kind: "overlay-block", ...input });
+}
+function computeBlockLocalOverlayFingerprint(input) {
+  return computeOverlayBlockFingerprint({
+    overlayPropsHash: input.blockOverlayPropsHash,
+    startFrame: input.startFrame,
+    endFrameExclusive: input.endFrameExclusive,
+    totalFrames: input.totalFrames,
+    base: input.base,
+    remotionSourceHash: input.remotionSourceHash,
+    hardwareAcceleration: input.hardwareAcceleration
+  });
+}
+function computeCompositeFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "composite", ...input });
+}
+function computeRenderFingerprint(input) {
+  return fingerprintOf({ v: RENDERER_SCHEMA_VERSION, kind: "render", ...input });
+}
+function shortFingerprint(fp, len = 16) {
+  return fp.replace(/[^a-f0-9]/gi, "").slice(0, len);
+}
+function computeDirectorySignature(dir, maxEntries = 2e3) {
+  const entries = [];
+  const walk = (d) => {
+    if (entries.length >= maxEntries) return;
+    let list;
+    try {
+      list = fs__namespace.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const ent of list) {
+      if (entries.length >= maxEntries) return;
+      if (ent.name === "node_modules" || ent.name.startsWith(".")) continue;
+      const full = path__namespace.join(d, ent.name);
+      if (ent.isDirectory()) walk(full);
+      else {
+        try {
+          const st = fs__namespace.statSync(full);
+          entries.push([path__namespace.relative(dir, full), st.size, Math.floor(st.mtimeMs)]);
+        } catch {
+        }
+      }
+    }
+  };
+  walk(dir);
+  entries.sort((a, b) => a[0].localeCompare(b[0]));
+  return entries.length ? fingerprintOf(entries) : "absent";
+}
+const SCHEMA_VERSION = 1;
+const OPENING_WINDOW_SECS = 60;
+function getOpeningPlanPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "opening-retention-plan.json");
+}
+function ensureOpeningRetentionPlan(inputs) {
+  try {
+    const { projectDir, scenes, retentionPlan, captionPlan, proofVisuals, visualGrammar, globalContext } = inputs;
+    const p = getOpeningPlanPath(projectDir);
+    const openingScenes = scenes.filter((s) => s.startTime < OPENING_WINDOW_SECS);
+    const inputHash = fingerprintOf({
+      v: SCHEMA_VERSION,
+      scenes: openingScenes.map((s) => ({ i: s.sceneIndex, s: s.startTime, d: s.duration, v: s.visualIntent })),
+      retention: openingScenes.map((s) => retentionPlan.scenes[s.sceneIndex]),
+      proofVisuals: proofVisuals.filter((pv) => pv.absoluteStartTime < OPENING_WINDOW_SECS),
+      visualGrammar: visualGrammar.filter((vg) => vg.sceneIndex < openingScenes.length),
+      captionPlan: captionPlan?.enabled ? captionPlan.phrases.filter((p2) => p2.start < OPENING_WINDOW_SECS) : null,
+      globalContext
+    });
+    if (fs__namespace.existsSync(p)) {
+      try {
+        const cached = JSON.parse(fs__namespace.readFileSync(p, "utf-8"));
+        if (cached.schemaVersion === SCHEMA_VERSION && cached.inputHash === inputHash) {
+          return cached;
+        }
+      } catch {
+      }
+    }
+    const plan = buildOpeningPlan(inputs, inputHash);
+    fs__namespace.writeFileSync(p, JSON.stringify(plan, null, 2), "utf-8");
+    logger.info(
+      `[OpeningRetention] window=${plan.windowSecs}s events=${plan.events.length} transitions=${plan.transitionHints.length} sfx=${plan.sfxEvents.length}`
+    );
+    return plan;
+  } catch (err) {
+    logger.warn(`[OpeningRetention] Failed to generate plan (falling open): ${String(err)}`);
+    return null;
+  }
+}
+function buildOpeningPlan(inputs, inputHash) {
+  const { scenes, retentionPlan, captionPlan, proofVisuals } = inputs;
+  const events = [];
+  const transitionHints = [];
+  const motionHints = [];
+  const sfxEvents = [];
+  const intensityCurve = [
+    { startTime: 0, endTime: 5, intensity: 1 },
+    { startTime: 5, endTime: 15, intensity: 0.9 },
+    { startTime: 15, endTime: 30, intensity: 0.75 },
+    { startTime: 30, endTime: 45, intensity: 0.6 },
+    { startTime: 45, endTime: 60, intensity: 0.4 }
+  ];
+  const activeIntervals = [];
+  if (captionPlan?.enabled) {
+    captionPlan.phrases.filter((p) => p.start < OPENING_WINDOW_SECS).forEach((p) => {
+      activeIntervals.push({ start: p.start, end: p.end, type: "caption" });
+    });
+  }
+  proofVisuals.filter((pv) => pv.absoluteStartTime < OPENING_WINDOW_SECS).forEach((pv) => {
+    activeIntervals.push({ start: pv.absoluteStartTime, end: pv.absoluteEndTime, type: "proof" });
+  });
+  function hasCollision(start, end) {
+    return activeIntervals.some((iv) => start < iv.end && end > iv.start);
+  }
+  let lastStrongEventTime = -999;
+  for (let i = 0; i < scenes.length; i++) {
+    const scene = scenes[i];
+    if (scene.startTime >= OPENING_WINDOW_SECS) break;
+    const role = retentionPlan.scenes[i];
+    if (i > 0) {
+      const prevScene = scenes[i - 1];
+      const boundaryTime = scene.startTime;
+      if (boundaryTime < OPENING_WINDOW_SECS) {
+        if (boundaryTime < 15) {
+          transitionHints.push({
+            fromSceneIndex: prevScene.sceneIndex,
+            toSceneIndex: scene.sceneIndex,
+            boundaryTime,
+            type: role.role === "setup" ? "cut" : role.role === "payoff" ? "zoomin" : "cut",
+            strength: "normal",
+            reason: "opening-documentary-cut"
+          });
+        } else if (boundaryTime < 30) {
+          if (role.role === "payoff" || role.role === "re-hook") {
+            transitionHints.push({
+              fromSceneIndex: prevScene.sceneIndex,
+              toSceneIndex: scene.sceneIndex,
+              boundaryTime,
+              type: "wipeleft",
+              strength: "normal",
+              reason: "opening-reveal"
+            });
+          }
+        }
+      }
+    }
+    if (scene.startTime < 5 && scene.duration > 2) {
+      motionHints.push({
+        sceneIndex: scene.sceneIndex,
+        startTime: scene.startTime,
+        type: "micro-push",
+        intensity: "subtle",
+        reason: "0-5s-engagement"
+      });
+    }
+    const sceneEnd = Math.min(scene.startTime + scene.duration, OPENING_WINDOW_SECS);
+    if (role.role === "hook" && scene.startTime < 15) {
+      const phrase = captionPlan?.phrases.find((p) => p.start >= scene.startTime && p.end <= sceneEnd && p.words.length <= 5);
+      if (phrase && !hasCollision(phrase.start, phrase.start + 1.5)) {
+        if (phrase.start - lastStrongEventTime > 2) {
+          const headlineText = phrase.words.map((w) => w.text).join(" ").toUpperCase().replace(/[^A-Z0-9$!? ]/g, "");
+          events.push({
+            id: `hook-headline-${i}`,
+            sourceSceneIndex: scene.sceneIndex,
+            startTime: phrase.start,
+            duration: 1.5,
+            type: "hook-headline",
+            priority: "critical",
+            primaryText: headlineText,
+            animationPreset: "hook-punch",
+            sourceEvidence: "caption",
+            confidence: 0.95
+          });
+          sfxEvents.push({
+            id: `sfx-hook-${i}`,
+            sceneIndex: scene.sceneIndex,
+            absoluteTime: phrase.start,
+            type: "soft-impact",
+            volumeDb: 0,
+            duration: 2,
+            priority: "critical",
+            reason: "headline-impact"
+          });
+          activeIntervals.push({ start: phrase.start, end: phrase.start + 1.5, type: "hook" });
+          lastStrongEventTime = phrase.start;
+        }
+      }
+    }
+    if (role.openLoopStart && scene.startTime < 30) {
+      const qPhrase = captionPlan?.phrases.find((p) => p.start >= scene.startTime && p.end <= sceneEnd && p.words.some((w) => w.text.includes("?")));
+      if (qPhrase && !hasCollision(qPhrase.start, qPhrase.start + 1.5) && qPhrase.start - lastStrongEventTime > 3) {
+        events.push({
+          id: `question-${i}`,
+          sourceSceneIndex: scene.sceneIndex,
+          startTime: qPhrase.start,
+          duration: 1.5,
+          type: "question-card",
+          priority: "high",
+          primaryText: qPhrase.words.map((w) => w.text).join(" ").toUpperCase(),
+          sourceEvidence: "caption",
+          confidence: 0.9
+        });
+        sfxEvents.push({
+          id: `sfx-q-${i}`,
+          sceneIndex: scene.sceneIndex,
+          absoluteTime: qPhrase.start,
+          type: "reverse-whoosh",
+          volumeDb: 0,
+          duration: 1,
+          priority: "high",
+          reason: "question-reversal"
+        });
+        activeIntervals.push({ start: qPhrase.start, end: qPhrase.start + 1.5, type: "question" });
+        lastStrongEventTime = qPhrase.start;
+      }
+    }
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    inputHash,
+    windowSecs: OPENING_WINDOW_SECS,
+    enabled: true,
+    intensityCurve,
+    events,
+    transitionHints,
+    motionHints,
+    sfxEvents,
+    summary: {
+      overlays: events.length,
+      transitions: transitionHints.length,
+      motionAccents: motionHints.length,
+      sfxCues: sfxEvents.length
+    }
+  };
+}
+const SAFE_PRESET_VARIATIONS = {
+  "push-in-center": ["slow-push-in", "push-in-left", "pan-left", "micro-drift"],
+  "slow-push-in": ["push-in-center", "micro-drift", "pan-right", "still-hold"],
+  "pan-left": ["pan-right", "push-in-center", "slow-push-in", "micro-drift"],
+  "pan-right": ["pan-left", "push-in-center", "slow-push-out", "micro-drift"],
+  "micro-drift": ["slow-push-in", "pan-left", "still-hold", "push-in-center"],
+  "slow-push-out": ["micro-drift", "pan-right", "still-hold", "slow-push-in"],
+  "push-out-center": ["slow-push-out", "micro-drift", "pan-left", "still-hold"],
+  "pan-up": ["pan-down", "push-in-center", "micro-drift", "slow-push-in"],
+  "pan-down": ["pan-up", "slow-push-in", "pan-right", "micro-drift"],
+  "still-hold": ["micro-drift", "slow-push-in", "pan-left"]
+};
+function pickAlternativePreset(repeatedPreset, role) {
+  const alternatives = SAFE_PRESET_VARIATIONS[repeatedPreset] || ["slow-push-in", "pan-left", "micro-drift"];
+  if (role === "proof" || role === "payoff") {
+    if (alternatives.includes("slow-push-in")) return "slow-push-in";
+    if (alternatives.includes("still-hold")) return "still-hold";
+    if (alternatives.includes("micro-drift")) return "micro-drift";
+  }
+  if (role === "hook" || role === "re-hook" || role === "surprise") {
+    if (alternatives.includes("push-in-center")) return "push-in-center";
+    if (alternatives.includes("push-in-left")) return "push-in-left";
+    if (alternatives.includes("pan-right")) return "pan-right";
+  }
+  return alternatives[0] || "micro-drift";
+}
+function applyRetentionMotionHint(baseMotion, retentionHint, recentMotionHistory = []) {
+  if (!retentionHint) {
+    return baseMotion;
+  }
+  try {
+    const isSpecObject = typeof baseMotion === "object" && baseMotion !== null && "preset" in baseMotion;
+    let currentPreset = isSpecObject ? baseMotion.preset : baseMotion;
+    const isGenericDefault = currentPreset === "push-in-center" || currentPreset === "slow-push-in";
+    if (isGenericDefault) {
+      switch (retentionHint.role) {
+        case "hook":
+        case "surprise":
+          currentPreset = "push-in-center";
+          break;
+        case "mechanism":
+          currentPreset = "pan-left";
+          break;
+        case "proof":
+          currentPreset = "still-hold";
+          break;
+        case "payoff":
+          currentPreset = "slow-push-in";
+          break;
+        case "bridge":
+        case "recap":
+        case "conclusion":
+          currentPreset = "micro-drift";
+          break;
+        case "re-hook":
+          currentPreset = "pan-right";
+          break;
+      }
+    }
+    if (recentMotionHistory.length >= 2) {
+      const lastTwo = recentMotionHistory.slice(-2);
+      if (lastTwo[0] === currentPreset && lastTwo[1] === currentPreset) {
+        const alt = pickAlternativePreset(currentPreset, retentionHint.role);
+        logger.info(
+          `[RetentionMotion] Scene ${retentionHint.sceneIndex}: repeated motion '${currentPreset}' detected, switching to '${alt}' for novelty`
+        );
+        currentPreset = alt;
+      }
+    }
+    if (isSpecObject) {
+      const spec = baseMotion;
+      let intensity = spec.intensity;
+      if (retentionHint.motionEnergy === "elevated" && intensity === "subtle") {
+        intensity = "medium";
+      } else if (retentionHint.motionEnergy === "calm" && intensity === "medium") {
+        intensity = "subtle";
+      }
+      return {
+        ...spec,
+        preset: currentPreset,
+        intensity
+      };
+    }
+    return currentPreset;
+  } catch (err) {
+    logger.warn(`[RetentionMotion] Failed to apply hint: ${String(err)}, using base motion`);
+    return baseMotion;
+  }
+}
+const DEFAULT_RETENTION_SETTINGS = {
+  enabled: true,
+  level: "balanced",
+  proofVisualsEnabled: true,
+  semanticCropEnabled: true,
+  patternInterruptEnabled: true
+};
+function atomicWriteJson(filePath, data, indent = 2) {
+  const dir = path__namespace.dirname(filePath);
+  if (!fs__namespace.existsSync(dir)) {
+    fs__namespace.mkdirSync(dir, { recursive: true });
+  }
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  const serialized = JSON.stringify(data, null, indent);
+  if (!serialized || serialized.length === 0) {
+    throw new Error(`Cannot write empty JSON data to ${filePath}`);
+  }
+  try {
+    fs__namespace.writeFileSync(tmpPath, serialized, "utf-8");
+    try {
+      fs__namespace.renameSync(tmpPath, filePath);
+    } catch {
+      if (fs__namespace.existsSync(filePath)) {
+        fs__namespace.unlinkSync(filePath);
+      }
+      fs__namespace.renameSync(tmpPath, filePath);
+    }
+  } catch (err) {
+    try {
+      if (fs__namespace.existsSync(tmpPath)) {
+        fs__namespace.unlinkSync(tmpPath);
+      }
+    } catch {
+    }
+    logger.error(`[AtomicJsonStore] Failed to write ${filePath}: ${String(err)}`);
+    throw err;
+  }
+}
+function atomicReadJson(filePath, defaultValue) {
+  try {
+    if (!fs__namespace.existsSync(filePath)) {
+      return defaultValue;
+    }
+    const raw = fs__namespace.readFileSync(filePath, "utf-8").trim();
+    if (!raw) {
+      return defaultValue;
+    }
+    return JSON.parse(raw);
+  } catch (err) {
+    logger.warn(`[AtomicJsonStore] Failed to read ${filePath}, returning default: ${String(err)}`);
+    return defaultValue;
+  }
+}
+const readJsonSafe = atomicReadJson;
+function getProjectSettingsPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "production-settings.json");
+}
+function loadProductionSettings(projectDir) {
+  if (projectDir) {
+    const projectSettingsPath = getProjectSettingsPath(projectDir);
+    if (fs__namespace.existsSync(projectSettingsPath)) {
+      const projectSettings = atomicReadJson(
+        projectSettingsPath,
+        {}
+      );
+      const nested = projectSettings.productionIntelligence || {};
+      return {
+        ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
+        ...projectSettings,
+        ...nested
+      };
+    }
+  }
+  try {
+    const config = loadConfig();
+    if (config.productionIntelligenceSettings) {
+      const nested = config.productionIntelligenceSettings.productionIntelligence || {};
+      return {
+        ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS,
+        ...config.productionIntelligenceSettings,
+        ...nested
+      };
+    }
+  } catch (err) {
+    logger.warn(`[ProductionSettings] Error reading global config: ${String(err)}`);
+  }
+  return { ...DEFAULT_PRODUCTION_INTELLIGENCE_SETTINGS };
+}
+function saveProductionSettings(settings, projectDir) {
+  const current = loadProductionSettings(projectDir);
+  const nested = settings.productionIntelligence || {};
+  const updated = {
+    ...current,
+    ...settings,
+    ...nested
+  };
+  if (projectDir) {
+    const projectSettingsPath = getProjectSettingsPath(projectDir);
+    try {
+      atomicWriteJson(projectSettingsPath, updated);
+      logger.info(`[ProductionSettings] Saved project settings: ${projectSettingsPath}`);
+    } catch (err) {
+      logger.error(`[ProductionSettings] Failed saving project settings: ${String(err)}`);
+    }
+  }
+  try {
+    const config = loadConfig();
+    config.productionIntelligenceSettings = updated;
+    saveConfig(config);
+  } catch (err) {
+    logger.warn(`[ProductionSettings] Failed saving to global config: ${String(err)}`);
+  }
+  return updated;
+}
+const CLAIM_EXTRACTION_VERSION = "1.0.0";
+function getClaimLedgerPath(projectDir) {
+  return path__namespace.join(projectDir, "analysis", "claim-evidence-ledger.json");
+}
+function computeScriptHash$1(text) {
+  return crypto__namespace.createHash("sha256").update(text.trim()).digest("hex").slice(0, 16);
+}
+function computeGlobalContextHash(ctx) {
+  if (!ctx) return "no-ctx";
+  const summary = `${ctx.primarySubject}:${ctx.centralThesis}:${ctx.exactTopicAnchors?.join(",")}`;
+  return crypto__namespace.createHash("sha256").update(summary).digest("hex").slice(0, 16);
+}
+function extractClaimsRuleBased(scenes, scriptHash, ctxHash) {
+  const claims = [];
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const statRegex = /\b\d+(\.\d+)?\s*(%|percent|percentage)\b/i;
+  const moneyRegex = /(\$\s*\d+[\d,.]*|\b\d+[\d,.]*\s*(dollars|cents|USD|billion|million|trillion))\b/i;
+  const dateRegex = /\b(18\d\d|19\d\d|20\d\d)\b/;
+  for (const sc of scenes) {
+    const text = sc.narration.trim();
+    if (!text) continue;
+    const sentences = text.split(/(?<=[.?!])\s+/).filter((s) => s.length > 10);
+    for (const sent of sentences) {
+      let type = null;
+      let importance = "MEDIUM";
+      let proofVisualType = void 0;
+      if (moneyRegex.test(sent)) {
+        type = "MONEY";
+        importance = "HIGH";
+        proofVisualType = "STAT_CARD";
+      } else if (statRegex.test(sent)) {
+        type = "STATISTIC";
+        importance = "HIGH";
+        proofVisualType = "STAT_CARD";
+      } else if (dateRegex.test(sent)) {
+        type = "DATE";
+        importance = "MEDIUM";
+        proofVisualType = "DOCUMENT_CARD";
+      }
+      if (type) {
+        const id = `claim_${crypto__namespace.createHash("md5").update(sent).digest("hex").slice(0, 10)}`;
+        const existing = claims.find((c) => c.normalizedClaim.toLowerCase() === sent.toLowerCase());
+        if (existing) {
+          if (!existing.sceneIds.includes(sc.sceneId)) {
+            existing.sceneIds.push(sc.sceneId);
+          }
+        } else {
+          claims.push({
+            id,
+            scriptText: sent,
+            normalizedClaim: sent,
+            type,
+            chapterId: sc.chapterId,
+            sequenceId: sc.sequenceId,
+            sceneIds: [sc.sceneId],
+            importance,
+            confidence: 75,
+            verificationStatus: "UNSOURCED",
+            evidenceSourceIds: [],
+            proofVisualRecommended: true,
+            proofVisualType,
+            warnings: [
+              `Extracted via rule-based parser. Requires authoritative citation.`
+            ],
+            extractionVersion: CLAIM_EXTRACTION_VERSION,
+            createdAt: now,
+            updatedAt: now
+          });
+        }
+      }
+    }
+  }
+  const ledger = {
+    projectId: "default",
+    scriptHash,
+    globalContextHash: ctxHash,
+    claims,
+    sources: [],
+    summary: computeLedgerSummary(claims),
+    generatedAt: now,
+    version: CLAIM_EXTRACTION_VERSION
+  };
+  return ledger;
+}
+function computeLedgerSummary(claims) {
+  let verified = 0;
+  let partiallyVerified = 0;
+  let unsourced = 0;
+  let contradicted = 0;
+  let criticalUnsourced = 0;
+  for (const c of claims) {
+    if (c.verificationStatus === "VERIFIED") verified++;
+    else if (c.verificationStatus === "PARTIALLY_VERIFIED") partiallyVerified++;
+    else if (c.verificationStatus === "UNSOURCED") {
+      unsourced++;
+      if (c.importance === "CRITICAL" || c.importance === "HIGH") criticalUnsourced++;
+    } else if (c.verificationStatus === "CONTRADICTED") contradicted++;
+  }
+  const totalClaims = claims.length;
+  const covered = verified + partiallyVerified;
+  const coveragePct = totalClaims > 0 ? Math.round(covered / totalClaims * 100) : 100;
+  return {
+    totalClaims,
+    verified,
+    partiallyVerified,
+    unsourced,
+    contradicted,
+    criticalUnsourced,
+    coveragePct
+  };
+}
+function sanitizeAiClaims(rawClaims, scenes) {
+  const validSceneIds = new Set(scenes.map((s) => s.sceneId));
+  const sceneMap = new Map(scenes.map((s) => [s.sceneId, s]));
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const claims = [];
+  if (!Array.isArray(rawClaims)) return claims;
+  for (let idx = 0; idx < rawClaims.length; idx++) {
+    const raw = rawClaims[idx];
+    if (typeof raw !== "object" || raw === null) continue;
+    const r = raw;
+    const scriptText = String(r.scriptText || r.claimText || "").trim();
+    if (!scriptText) continue;
+    const normalizedClaim = String(r.normalizedClaim || scriptText).trim();
+    const validTypes = [
+      "STATISTIC",
+      "MONEY",
+      "DATE",
+      "HISTORICAL_EVENT",
+      "PERSON",
+      "COMPANY",
+      "LOCATION",
+      "POLICY",
+      "QUOTE",
+      "COMPARISON",
+      "CAUSAL",
+      "GENERAL_FACT"
+    ];
+    const rawType = String(r.type || "GENERAL_FACT").toUpperCase();
+    const type = validTypes.includes(rawType) ? rawType : "GENERAL_FACT";
+    const rawImp = String(r.importance || "MEDIUM").toUpperCase();
+    const importance = rawImp === "CRITICAL" || rawImp === "HIGH" || rawImp === "LOW" ? rawImp : "MEDIUM";
+    let sceneIds = [];
+    if (Array.isArray(r.sceneIds)) {
+      sceneIds = r.sceneIds.map(String).filter((id2) => validSceneIds.has(id2));
+    }
+    if (sceneIds.length === 0) {
+      const match = scenes.find((s) => s.narration.toLowerCase().includes(scriptText.toLowerCase()));
+      if (match) sceneIds = [match.sceneId];
+    }
+    if (sceneIds.length === 0 && scenes.length > 0) {
+      sceneIds = [scenes[0].sceneId];
+    }
+    const firstScene = sceneMap.get(sceneIds[0]);
+    const rawStatus = String(r.verificationStatus || "").toUpperCase();
+    const verificationStatus = rawStatus === "PARTIALLY_VERIFIED" || rawStatus === "VERIFIED" ? "UNSOURCED" : rawStatus === "CONTRADICTED" ? "CONTRADICTED" : "UNSOURCED";
+    const warnings = Array.isArray(r.warnings) ? r.warnings.map(String) : [];
+    if (verificationStatus === "UNSOURCED" && warnings.length === 0) {
+      warnings.push(`Factual claim requires documentation or authoritative source citation.`);
+    }
+    const id = String(r.id || `claim_${idx + 1}_${crypto__namespace.createHash("md5").update(scriptText).digest("hex").slice(0, 8)}`);
+    let proofVisualType = void 0;
+    if (r.proofVisualType) {
+      const pvt = String(r.proofVisualType).toUpperCase();
+      if (["STAT_CARD", "DOCUMENT_CARD", "QUOTE_CARD", "COMPARISON_CARD", "DATA_NOTE", "ARCHIVE_VISUAL"].includes(pvt)) {
+        proofVisualType = pvt;
+      }
+    }
+    claims.push({
+      id,
+      scriptText,
+      normalizedClaim,
+      type,
+      chapterId: firstScene?.chapterId,
+      sequenceId: firstScene?.sequenceId,
+      sceneIds,
+      importance,
+      confidence: Math.min(100, Math.max(0, Number(r.confidence) || 80)),
+      verificationStatus,
+      evidenceSourceIds: [],
+      proofVisualRecommended: Boolean(r.proofVisualRecommended ?? (type === "STATISTIC" || type === "MONEY")),
+      proofVisualType,
+      warnings,
+      extractionVersion: CLAIM_EXTRACTION_VERSION,
+      createdAt: now,
+      updatedAt: now
+    });
+  }
+  return claims;
+}
+async function extractDocumentaryClaims(params) {
+  const { projectDir, scriptText, globalContext, scenes, apiKey, forceRegenerate, onProgress } = params;
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const fullText = scriptText?.trim() || scenes.map((s) => s.narration).join("\n") || "";
+  const scriptHash = computeScriptHash$1(fullText);
+  const ctxHash = computeGlobalContextHash(globalContext);
+  if (!forceRegenerate && fs__namespace.existsSync(ledgerPath)) {
+    try {
+      const existing = readJsonSafe(ledgerPath, null);
+      if (existing && existing.claims && existing.scriptHash === scriptHash && existing.globalContextHash === ctxHash) {
+        logger.info(`[ClaimLedger] Using cached Claim & Evidence Ledger (${existing.claims.length} claims)`);
+        onProgress?.(`Loaded cached Claim Ledger (${existing.claims.length} claims)`, 1);
+        return existing;
+      }
+    } catch {
+    }
+  }
+  onProgress?.(`Analyzing script for factual claims and evidence requirements...`, 0.1);
+  const cleanKey = normalizeApiKey(apiKey);
+  if (!cleanKey) {
+    logger.warn(`[ClaimLedger] No Gemini API key provided. Using rule-based claim extraction.`);
+    onProgress?.(`Gemini key unavailable — using rule-based claim extraction`, 0.5);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
+    atomicWriteJson(ledgerPath, fallbackLedger);
+    return fallbackLedger;
+  }
+  const models = getAvailableModelsForTask("claim_analysis", params.model);
+  const sceneBriefs = scenes.slice(0, 150).map((s) => ({
+    sceneId: s.sceneId,
+    sceneIndex: s.sceneIndex,
+    chapter: s.chapterTitle ?? s.chapterId ?? "",
+    narration: s.narration
+  }));
+  const prompt = `You are a Senior Documentary Fact-Checker and Archive Producer for a high-end investigative documentary.
+Analyze the following documentary script and its scene breakdown to identify ALL statements that require documentary proof or citation.
+
+CRITICAL RULES:
+1. Do NOT treat general narrative actions (e.g. "She looked out the window", "The rain fell gently") as factual claims.
+2. Focus on:
+   - STATISTIC (percentages, market share, headcounts)
+   - MONEY (dollar amounts, profits, costs, fines, valuations)
+   - DATE (specific years, historical milestones, policy launch dates)
+   - HISTORICAL_EVENT (battles, legal rulings, treaties, disasters)
+   - PERSON (specific public figures, allegations, quotes, titles)
+   - COMPANY (corporate actions, monopolies, revenue, investigations)
+   - LOCATION (geopolitical claims, boundaries, treaty zones)
+   - POLICY (laws, regulations, legal mandates, institutional rules)
+   - QUOTE (direct or indirect quotes attributed to real individuals)
+   - COMPARISON ("largest in history", "twice as expensive", "faster than X")
+   - CAUSAL ("X directly caused Y", "the collapse occurred because of Z")
+3. ANTI-HALLUCINATION:
+   - DO NOT fabricate citations, URLs, author names, or publisher names.
+   - Leave verificationStatus as "UNSOURCED".
+   - Include specific guidance in 'warnings' about what type of primary source is needed (e.g., "Requires SEC 10-K filing or BLS statistical report").
+4. Map each claim to its corresponding sceneIds from the provided scene list.
+
+Global Context:
+- Primary Subject: ${globalContext?.primarySubject ?? "Documentary subject"}
+- Central Thesis: ${globalContext?.centralThesis ?? "Documentary thesis"}
+
+Scenes:
+${JSON.stringify(sceneBriefs, null, 2)}
+
+Respond with STRICT JSON matching this schema:
+{
+  "claims": [
+    {
+      "id": "claim_1",
+      "scriptText": "exact sentence or clause from script",
+      "normalizedClaim": "concise factual assertion",
+      "type": "STATISTIC" | "MONEY" | "DATE" | "HISTORICAL_EVENT" | "PERSON" | "COMPANY" | "LOCATION" | "POLICY" | "QUOTE" | "COMPARISON" | "CAUSAL" | "GENERAL_FACT",
+      "importance": "LOW" | "MEDIUM" | "HIGH" | "CRITICAL",
+      "confidence": 85,
+      "sceneIds": ["scene_001"],
+      "proofVisualRecommended": true,
+      "proofVisualType": "STAT_CARD" | "DOCUMENT_CARD" | "QUOTE_CARD" | "COMPARISON_CARD" | "DATA_NOTE" | "ARCHIVE_VISUAL",
+      "warnings": ["Requires specific primary documentation."]
+    }
+  ]
+}`;
+  let rawJson = "";
+  let successfulModel = "";
+  for (const currentModel of models) {
+    try {
+      onProgress?.(`Extracting claims with ${currentModel}...`, 0.3);
+      const ai = new genai.GoogleGenAI({ apiKey: cleanKey, httpOptions: { apiVersion: "v1beta" } });
+      const res = await ai.models.generateContent({
+        model: currentModel,
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+          responseMimeType: "application/json",
+          temperature: 0.1,
+          maxOutputTokens: 8192
+        }
+      });
+      rawJson = res.text ?? "";
+      if (rawJson) {
+        successfulModel = currentModel;
+        recordModelSuccess(currentModel);
+        break;
+      }
+    } catch (err) {
+      const { kind, message } = classifyGeminiErrorKind(err);
+      recordModelFailure(currentModel, kind);
+      logger.warn(`[ClaimLedger] Model ${currentModel} failed (${kind}): ${message}`);
+    }
+  }
+  let claims = [];
+  if (rawJson) {
+    try {
+      const parsed = JSON.parse(rawJson);
+      const list = Array.isArray(parsed) ? parsed : parsed.claims || [];
+      claims = sanitizeAiClaims(list, scenes);
+      logger.info(`[ClaimLedger] Extracted ${claims.length} claims using ${successfulModel}`);
+    } catch (err) {
+      logger.error(`[ClaimLedger] Failed to parse AI claim response: ${String(err)}`);
+    }
+  }
+  if (claims.length === 0) {
+    logger.warn(`[ClaimLedger] AI returned no claims, executing rule-based fallback`);
+    const fallbackLedger = extractClaimsRuleBased(scenes, scriptHash, ctxHash);
+    atomicWriteJson(ledgerPath, fallbackLedger);
+    return fallbackLedger;
+  }
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  const ledger = {
+    projectId: path__namespace.basename(projectDir),
+    scriptHash,
+    globalContextHash: ctxHash,
+    claims,
+    sources: [],
+    summary: computeLedgerSummary(claims),
+    generatedAt: now,
+    version: CLAIM_EXTRACTION_VERSION
+  };
+  atomicWriteJson(ledgerPath, ledger);
+  onProgress?.(`Claim Ledger ready (${claims.length} claims, ${ledger.summary.unsourced} unsourced)`, 1);
+  return ledger;
+}
+function addEvidenceSource(projectDir, source) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const id = source.id || `src_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  const newSource = {
+    ...source,
+    id,
+    manuallyAdded: true
+  };
+  ledger.sources.push(newSource);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, source: newSource };
+}
+function linkSourceToClaim(projectDir, claimId, sourceId, newStatus) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const claim = ledger.claims.find((c) => c.id === claimId);
+  if (!claim) {
+    return { success: false, error: `Claim ${claimId} not found.` };
+  }
+  const source = ledger.sources.find((s) => s.id === sourceId);
+  if (!source) {
+    return { success: false, error: `Source ${sourceId} not found.` };
+  }
+  if (!claim.evidenceSourceIds.includes(sourceId)) {
+    claim.evidenceSourceIds.push(sourceId);
+  }
+  if (newStatus) {
+    claim.verificationStatus = newStatus;
+  } else if (claim.verificationStatus === "UNSOURCED") {
+    claim.verificationStatus = "VERIFIED";
+  }
+  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ledger.summary = computeLedgerSummary(ledger.claims);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, claim };
+}
+function unlinkSourceFromClaim(projectDir, claimId, sourceId) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const claim = ledger.claims.find((c) => c.id === claimId);
+  if (!claim) {
+    return { success: false, error: `Claim ${claimId} not found.` };
+  }
+  claim.evidenceSourceIds = claim.evidenceSourceIds.filter((id) => id !== sourceId);
+  if (claim.evidenceSourceIds.length === 0 && (claim.verificationStatus === "VERIFIED" || claim.verificationStatus === "PARTIALLY_VERIFIED")) {
+    claim.verificationStatus = "UNSOURCED";
+  }
+  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ledger.summary = computeLedgerSummary(ledger.claims);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, claim };
+}
+function updateClaimStatus(projectDir, claimId, status, warningText) {
+  const ledgerPath = getClaimLedgerPath(projectDir);
+  const ledger = readJsonSafe(ledgerPath, null);
+  if (!ledger) {
+    return { success: false, error: "Claim ledger does not exist." };
+  }
+  const claim = ledger.claims.find((c) => c.id === claimId);
+  if (!claim) {
+    return { success: false, error: `Claim ${claimId} not found.` };
+  }
+  claim.verificationStatus = status;
+  if (warningText) {
+    if (!claim.warnings.includes(warningText)) {
+      claim.warnings.push(warningText);
+    }
+  }
+  claim.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+  ledger.summary = computeLedgerSummary(ledger.claims);
+  atomicWriteJson(ledgerPath, ledger);
+  return { success: true, claim };
+}
+function escapeCsvField(val) {
+  if (val === void 0 || val === null) return '""';
+  const str = String(val).replace(/"/g, '""');
+  return `"${str}"`;
+}
+function exportClaimManifests(projectDir, exportDir) {
+  try {
+    const ledgerPath = getClaimLedgerPath(projectDir);
+    const ledger = readJsonSafe(ledgerPath, null);
+    if (!ledger) {
+      return { success: false, error: "Claim ledger not found for export." };
+    }
+    const outDir = exportDir || path__namespace.join(projectDir, "exports");
+    fs__namespace.mkdirSync(outDir, { recursive: true });
+    const jsonPath = path__namespace.join(outDir, "claim-evidence-ledger.json");
+    atomicWriteJson(jsonPath, ledger);
+    const csvPath = path__namespace.join(outDir, "sources.csv");
+    const sourceMap = new Map(ledger.sources.map((s) => [s.id, s]));
+    const headers = [
+      "claim_id",
+      "scene_ids",
+      "claim_text",
+      "claim_type",
+      "importance",
+      "verification_status",
+      "source_title",
+      "publisher",
+      "source_url",
+      "published_at",
+      "accessed_at",
+      "license",
+      "attribution",
+      "asset_id",
+      "local_path",
+      "timecode",
+      "notes"
+    ];
+    const rows = [headers.join(",")];
+    for (const claim of ledger.claims) {
+      const linkedSources = claim.evidenceSourceIds.map((id) => sourceMap.get(id)).filter(Boolean);
+      if (linkedSources.length === 0) {
+        rows.push(
+          [
+            escapeCsvField(claim.id),
+            escapeCsvField(claim.sceneIds.join(";")),
+            escapeCsvField(claim.scriptText || claim.normalizedClaim),
+            escapeCsvField(claim.type),
+            escapeCsvField(claim.importance),
+            escapeCsvField(claim.verificationStatus),
+            escapeCsvField("UNSOURCED"),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(""),
+            escapeCsvField(claim.warnings.join("; "))
+          ].join(",")
+        );
+      } else {
+        for (const src of linkedSources) {
+          const timecode = src.timecodeStart !== void 0 && src.timecodeEnd !== void 0 ? `${src.timecodeStart}-${src.timecodeEnd}` : "";
+          rows.push(
+            [
+              escapeCsvField(claim.id),
+              escapeCsvField(claim.sceneIds.join(";")),
+              escapeCsvField(claim.scriptText || claim.normalizedClaim),
+              escapeCsvField(claim.type),
+              escapeCsvField(claim.importance),
+              escapeCsvField(claim.verificationStatus),
+              escapeCsvField(src.title),
+              escapeCsvField(src.publisher),
+              escapeCsvField(src.url),
+              escapeCsvField(src.publishedAt),
+              escapeCsvField(src.accessedAt),
+              escapeCsvField(src.license),
+              escapeCsvField(src.attribution),
+              escapeCsvField(src.assetId),
+              escapeCsvField(src.localPath),
+              escapeCsvField(timecode),
+              escapeCsvField(src.notes)
+            ].join(",")
+          );
+        }
+      }
+    }
+    fs__namespace.writeFileSync(csvPath, rows.join("\n"), "utf-8");
+    const licensesPath = path__namespace.join(outDir, "licenses.json");
+    const licenses = ledger.sources.map((s) => ({
+      sourceId: s.id,
+      title: s.title ?? "Untitled Source",
+      publisher: s.publisher ?? "Unknown",
+      license: s.license ?? "All Rights Reserved / Fair Use Claim",
+      attribution: s.attribution ?? s.publisher ?? s.title ?? "",
+      url: s.url
+    }));
+    atomicWriteJson(licensesPath, {
+      project: path__namespace.basename(projectDir),
+      exportedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      licenses
+    });
+    logger.info(`[EvidenceExport] Exported ${ledger.claims.length} claims and ${ledger.sources.length} sources to ${outDir}`);
+    return { success: true, csvPath, jsonPath, licensesPath };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error(`[EvidenceExport] Failed exporting manifests: ${msg}`);
+    return { success: false, error: msg };
+  }
+}
+const YEAR_REGEX = /\b(1[6-9]\d{2}|20\d{2})('?s)?\b/;
+const CENTURY_REGEX = /\b(\d{1,2}(?:st|nd|rd|th))\s+century\b/i;
+const MONTH_YEAR_REGEX = /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(1[6-9]\d{2}|20\d{2})\b/i;
+const STAT_PERCENT_REGEX = /\b(\d+(?:\.\d+)?%)(?!\w)/;
+const STAT_MONEY_REGEX = /(\$\s*\d+(?:,\d{3})*(?:\.\d+)?(?:\s*(?:million|billion|trillion))?|\b\d+(?:\.\d+)?\s*(?:million|billion|triệu|tỷ)\s*(?:dollars|đô la|đồng|usd|vnd)?\b)/i;
+const STAT_COUNT_REGEX = /\b(\d+(?:,\d{3})+|\d{2,}\s*(?:thousand|hundred))\s+([a-zA-Z]+)\b/i;
+const LOCATION_INDICATOR_REGEX = /(?:^|\s|\b)(?:in|at|near|across|from|tại|ở)\s+(?:thành phố|thủ đô|city|capital)?\s*([A-Za-zÀ-ỹ]+(?:\s+[A-Za-zÀ-ỹ]+)*(?:,\s*[A-Za-zÀ-ỹ]+)?)/iu;
+const QUOTE_MARK_REGEX = /["“]([^"”]{6,100})["”]/;
+const QUOTE_VERB_REGEX = /\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\s+(?:said|declared|stated|proclaimed|whispered|wrote)\b[:,\s]*["“]?([^"”.!]{6,80})["”]?/i;
+const COMPARISON_REGEX = /(?:instead of|compared to|versus|\bvs\.?\b|on the other hand|while [a-z]+ [a-z]+, [a-z]+|rather than|trong khi|thay vì|so với|ngược lại|mặt khác|trái ngược)/i;
+const DOCUMENT_REGEX = /(?:document|contract|treaty|accord|constitution|charter|bill|law|docket|manifesto|record|file|deed|license|affidavit|hợp đồng|giấy tờ|hồ sơ|văn bản|nghị quyết|nghị định|hóa đơn|luật|hiến pháp)/iu;
+function classifyNarrationGrammar(narration, scene) {
+  const text = narration.trim();
+  if (scene.isFirstInChapter && scene.chapterTitle && scene.sceneIndex > 1) {
+    return {
+      type: "chapter_title",
+      confidence: 0.95,
+      reason: `First scene in chapter: "${scene.chapterTitle}"`,
+      primaryText: scene.chapterTitle.toUpperCase(),
+      secondaryText: `CHAPTER ${scene.chapterTitle}`,
+      position: "center"
+    };
+  }
+  const monthYearMatch = text.match(MONTH_YEAR_REGEX);
+  if (monthYearMatch) {
+    return {
+      type: "date_card",
+      confidence: 0.9,
+      reason: `Temporal anchor: "${monthYearMatch[0]}"`,
+      primaryText: monthYearMatch[0].toUpperCase(),
+      secondaryText: "HISTORICAL TIMELINE",
+      position: "top_right"
+    };
+  }
+  const yearMatch = text.match(YEAR_REGEX);
+  if (yearMatch) {
+    return {
+      type: "date_card",
+      confidence: 0.88,
+      reason: `Year reference: "${yearMatch[0]}"`,
+      primaryText: yearMatch[0],
+      secondaryText: "CHRONOLOGY",
+      position: "top_right"
+    };
+  }
+  const centuryMatch = text.match(CENTURY_REGEX);
+  if (centuryMatch) {
+    return {
+      type: "date_card",
+      confidence: 0.85,
+      reason: `Era reference: "${centuryMatch[0]}"`,
+      primaryText: centuryMatch[0].toUpperCase(),
+      secondaryText: "HISTORICAL ERA",
+      position: "top_right"
+    };
+  }
+  const moneyMatch = text.match(STAT_MONEY_REGEX);
+  if (moneyMatch) {
+    return {
+      type: "stat_card",
+      confidence: 0.92,
+      reason: `Financial figure: "${moneyMatch[0]}"`,
+      primaryText: moneyMatch[0].trim(),
+      secondaryText: "KEY DATA POINT",
+      position: "bottom_left"
+    };
+  }
+  const percentMatch = text.match(STAT_PERCENT_REGEX);
+  if (percentMatch) {
+    return {
+      type: "stat_card",
+      confidence: 0.9,
+      reason: `Percentage metric: "${percentMatch[0]}"`,
+      primaryText: percentMatch[0],
+      secondaryText: "STATISTICAL METRIC",
+      position: "bottom_left"
+    };
+  }
+  const countMatch = text.match(STAT_COUNT_REGEX);
+  if (countMatch && !countMatch[2].match(/^(seconds|minutes|hours|days|weeks|months|years)$/i)) {
+    return {
+      type: "stat_card",
+      confidence: 0.85,
+      reason: `Quantifiable count: "${countMatch[0]}"`,
+      primaryText: countMatch[1],
+      secondaryText: countMatch[2].toUpperCase(),
+      position: "bottom_left"
+    };
+  }
+  const quoteMarkMatch = text.match(QUOTE_MARK_REGEX);
+  if (quoteMarkMatch && quoteMarkMatch[1].length > 10) {
+    return {
+      type: "quote_card",
+      confidence: 0.88,
+      reason: "Quotation in narration",
+      primaryText: `"${quoteMarkMatch[1].trim()}"`,
+      secondaryText: "RECORDED TESTIMONY",
+      position: "bottom_right"
+    };
+  }
+  const quoteVerbMatch = text.match(QUOTE_VERB_REGEX);
+  if (quoteVerbMatch && quoteVerbMatch[2].length > 8) {
+    return {
+      type: "quote_card",
+      confidence: 0.82,
+      reason: `Attributed statement: ${quoteVerbMatch[1]}`,
+      primaryText: `"${quoteVerbMatch[2].trim()}"`,
+      secondaryText: quoteVerbMatch[1].toUpperCase(),
+      position: "bottom_right"
+    };
+  }
+  if (COMPARISON_REGEX.test(text) && text.length > 20) {
+    if (text.includes(",")) {
+      const commaParts = text.split(",");
+      const a = commaParts[0].replace(COMPARISON_REGEX, "").trim().split(/\s+/).slice(-4).join(" ");
+      const b = commaParts[1].trim().split(/\s+/).slice(0, 4).join(" ");
+      if (a && b) {
+        return {
+          type: "comparison_card",
+          confidence: 0.8,
+          reason: "Contrastive statement structure",
+          primaryText: a.toUpperCase(),
+          secondaryText: `VS. ${b.toUpperCase()}`,
+          position: "center_bottom"
+        };
+      }
+    }
+    const parts = text.split(COMPARISON_REGEX).map((p) => p.trim()).filter(Boolean);
+    if (parts.length >= 2) {
+      const a = parts[0].split(/\s+/).slice(-4).join(" ");
+      const b = parts[1].split(/\s+/).slice(0, 4).join(" ");
+      return {
+        type: "comparison_card",
+        confidence: 0.78,
+        reason: "Contrastive statement structure",
+        primaryText: a.toUpperCase(),
+        secondaryText: `VS. ${b.toUpperCase()}`,
+        position: "center_bottom"
+      };
+    }
+  }
+  if (DOCUMENT_REGEX.test(text)) {
+    const docMatch = text.match(DOCUMENT_REGEX);
+    return {
+      type: "document_card",
+      confidence: 0.8,
+      reason: `Historical or official record reference: "${docMatch?.[0]}"`,
+      primaryText: (docMatch?.[0] || "OFFICIAL RECORD").toUpperCase(),
+      secondaryText: "ARCHIVAL DOSSIER",
+      position: "bottom_right"
+    };
+  }
+  const locMatch = text.match(LOCATION_INDICATOR_REGEX);
+  if (locMatch && !locMatch[1].match(/^(January|February|March|April|May|June|July|August|September|October|November|December|Chapter|Scene|Part)$/i)) {
+    return {
+      type: "location_card",
+      confidence: 0.75,
+      reason: `Geographic location reference: "${locMatch[1]}"`,
+      primaryText: locMatch[1].toUpperCase(),
+      secondaryText: "LOCATION",
+      position: "top_left"
+    };
+  }
+  if (scene.mediaType === "image") {
+    return {
+      type: "photo_parallax",
+      confidence: 0.7,
+      reason: "Still photo suitable for documentary parallax depth movement",
+      position: "center"
+    };
+  }
+  return {
+    type: "stock_video",
+    confidence: 0.6,
+    reason: "Standard contextual footage"
+  };
+}
+function enforceGrammarDensityAndSpacing(rawDecisions, scenes, maxDensity = 0.25, minSpacingSecs = 6, captionPlan, proofVisuals) {
+  const totalScenes = scenes.length;
+  const maxAllowedGraphics = Math.max(1, Math.floor(totalScenes * maxDensity));
+  let lastGraphicEndTime = -999;
+  let lastGraphicType = "stock_video";
+  let graphicCount = 0;
+  const results = [];
+  for (let i = 0; i < rawDecisions.length; i++) {
+    const dec = { ...rawDecisions[i] };
+    const sc = scenes.find((s) => s.sceneIndex === dec.sceneIndex);
+    if (!sc) {
+      results.push(dec);
+      continue;
+    }
+    const isGraphic = dec.type !== "stock_video" && dec.type !== "stock_image" && dec.type !== "photo_parallax";
+    if (!isGraphic) {
+      dec.enabled = true;
+      results.push(dec);
+      continue;
+    }
+    if (graphicCount >= maxAllowedGraphics) {
+      dec.enabled = false;
+      dec.reason += " (disabled: reached max 25% density limit)";
+      results.push(dec);
+      continue;
+    }
+    if (lastGraphicType !== "stock_video" && lastGraphicType !== "stock_image" && lastGraphicType !== "photo_parallax" && dec.type !== "chapter_title" && lastGraphicType !== "chapter_title") {
+      dec.enabled = false;
+      dec.reason += " (disabled: anti-clutter rule — avoid consecutive graphic cards)";
+      results.push(dec);
+      continue;
+    }
+    const proposedStartTime = sc.startTime + dec.startOffset;
+    if (proposedStartTime - lastGraphicEndTime < minSpacingSecs && dec.type !== "chapter_title") {
+      dec.enabled = false;
+      dec.reason += ` (disabled: min ${minSpacingSecs}s spacing from previous graphic)`;
+      results.push(dec);
+      continue;
+    }
+    if (captionPlan?.phrases) {
+      const collision = captionPlan.phrases.some((p) => {
+        if (p.presetType === "big_statement" || p.emphasisType === "hook") {
+          const pStart = p.startTime;
+          const pEnd = p.endTime;
+          const gStart = proposedStartTime;
+          const gEnd = proposedStartTime + dec.duration;
+          return Math.max(pStart, gStart) < Math.min(pEnd, gEnd);
+        }
+        return false;
+      });
+      if (collision) {
+        dec.enabled = false;
+        dec.reason += " (disabled: collision avoidance with prominent kinetic caption)";
+        results.push(dec);
+        continue;
+      }
+    }
+    if (proofVisuals) {
+      const proofCollision = proofVisuals.some((pv) => {
+        if (pv.absoluteStartTime != null && pv.absoluteEndTime != null) {
+          const pvStart = pv.absoluteStartTime;
+          const pvEnd = pv.absoluteEndTime;
+          const gStart = proposedStartTime;
+          const gEnd = proposedStartTime + dec.duration;
+          return Math.max(pvStart, gStart) < Math.min(pvEnd, gEnd);
+        }
+        return false;
+      });
+      if (proofCollision) {
+        dec.enabled = false;
+        dec.reason += " (disabled: avoided duplicate overlay with active proof visual)";
+        results.push(dec);
+        continue;
+      }
+    }
+    dec.enabled = true;
+    lastGraphicEndTime = proposedStartTime + dec.duration;
+    lastGraphicType = dec.type;
+    graphicCount++;
+    results.push(dec);
+  }
+  return results;
+}
+function generateVisualGrammarPlan(params) {
+  const { projectDir, editPlan, captionPlan, proofVisuals } = params;
+  const prodSettings = params.settings ?? loadProductionSettings(projectDir);
+  const flattened = flattenEditPlanScenes(editPlan);
+  const claimLedgerPath = getClaimLedgerPath(projectDir);
+  const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe(claimLedgerPath, null) : null;
+  const claimsByScene = /* @__PURE__ */ new Map();
+  if (claimLedger?.claims) {
+    for (const c of claimLedger.claims) {
+      for (const scId of c.sceneIds) {
+        claimsByScene.set(scId, c);
+      }
+    }
+  }
+  const rawDecisions = flattened.map((entry) => {
+    const narration = entry.scene.narrativeText ?? "";
+    const classification = classifyNarrationGrammar(narration, {
+      isFirstInChapter: entry.isFirstInChapter,
+      chapterTitle: entry.chapterTitle,
+      sceneIndex: entry.sceneIndex,
+      mediaType: entry.scene.mediaType
+    });
+    const duration = entry.scene.duration ?? (entry.scene.endTime ?? 0) - (entry.scene.startTime ?? 0);
+    const graphicDuration = Math.min(Math.max(2.5, duration * 0.6), 4.5);
+    const startOffset = Math.min(0.5, Math.max(0, duration - graphicDuration));
+    const linkedClaim = claimsByScene.get(entry.sceneId);
+    let enabled = prodSettings.enabled && prodSettings.visualSceneGrammarEnabled;
+    let reason = classification.reason;
+    if (linkedClaim) {
+      if (linkedClaim.verificationStatus === "CONTRADICTED") {
+        enabled = false;
+        reason = `BLOCKED_BY_EVIDENCE: Claim "${linkedClaim.normalizedClaim}" is contradicted.`;
+      } else if (linkedClaim.verificationStatus === "VERIFIED") {
+        reason += ` (Verified by documentation)`;
+        if (linkedClaim.evidenceSourceIds?.length > 0 && !classification.secondaryText) {
+          const src = claimLedger?.sources?.find((s) => s.id === linkedClaim.evidenceSourceIds[0]);
+          if (src?.publisher || src?.title) {
+            classification.secondaryText = `SOURCE: ${src.publisher || src.title}`;
+          }
+        }
+      } else if (linkedClaim.verificationStatus === "UNSOURCED") {
+        reason += ` (Caution: claim is unsourced)`;
+      }
+    }
+    return {
+      sceneId: entry.sceneId,
+      sceneIndex: entry.sceneIndex,
+      type: classification.type,
+      confidence: classification.confidence,
+      reason,
+      primaryText: classification.primaryText,
+      secondaryText: classification.secondaryText,
+      sourceNarration: narration.slice(0, 100),
+      startOffset,
+      duration: graphicDuration,
+      position: classification.position ?? "bottom_right",
+      enabled
+    };
+  });
+  const sceneInfos = flattened.map((f) => ({
+    sceneIndex: f.sceneIndex,
+    startTime: f.scene.startTime ?? 0,
+    endTime: f.scene.endTime ?? 0,
+    duration: f.scene.duration ?? (f.scene.endTime ?? 0) - (f.scene.startTime ?? 0)
+  }));
+  const finalDecisions = enforceGrammarDensityAndSpacing(
+    rawDecisions,
+    sceneInfos,
+    prodSettings.maxVisualGrammarDensity || 0.25,
+    6,
+    captionPlan,
+    proofVisuals
+  );
+  const activeGraphics = finalDecisions.filter(
+    (d) => d.enabled && d.type !== "stock_video" && d.type !== "stock_image" && d.type !== "photo_parallax"
+  );
+  const plan = {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    density: flattened.length > 0 ? activeGraphics.length / flattened.length : 0,
+    totalScenes: flattened.length,
+    graphicCount: activeGraphics.length,
+    decisions: finalDecisions
+  };
+  const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
+  atomicWriteJson(planPath, plan);
+  logger.info(
+    `[VisualGrammar] Generated plan with ${activeGraphics.length}/${flattened.length} graphics (${Math.round(plan.density * 100)}% density)`
+  );
+  return plan;
+}
+function loadVisualGrammarPlan(projectDir) {
+  const planPath = path.join(projectDir, "analysis", "visual-grammar-plan.json");
+  if (!fs__namespace.existsSync(planPath)) return null;
+  return readJsonSafe(planPath, null);
+}
+const ffmpegStatic$1 = require("ffmpeg-static");
+const ffprobeStatic$1 = require("ffprobe-static");
+const probeCache = /* @__PURE__ */ new Map();
+async function probeMediaDetailed(filePath) {
+  if (!filePath || !fs__namespace.existsSync(filePath)) return null;
+  try {
+    const stat = fs__namespace.statSync(filePath);
+    const cached = probeCache.get(filePath);
+    if (cached && cached.mtimeMs === stat.mtimeMs) {
+      return cached.probe;
+    }
+    if (!ffprobeStatic$1?.path || !fs__namespace.existsSync(ffprobeStatic$1.path)) {
+      logger.warn("[QA-Probe] ffprobe binary not found");
+      return null;
+    }
+    return new Promise((resolve) => {
+      const proc = cp.spawn(
+        ffprobeStatic$1.path,
+        [
+          "-v",
+          "error",
+          "-show_entries",
+          "stream=codec_type,codec_name,width,height,r_frame_rate,duration:format=duration,size",
+          "-of",
+          "json",
+          filePath
+        ],
+        { windowsHide: true }
+      );
+      let stdout = "";
+      proc.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      proc.on("close", (code) => {
+        if (code !== 0) {
+          resolve(null);
+          return;
+        }
+        try {
+          const parsed = JSON.parse(stdout);
+          const streams = parsed.streams ?? [];
+          const videoStream = streams.find((s) => s.codec_type === "video");
+          const audioStream = streams.find((s) => s.codec_type === "audio");
+          const formatDuration = parseFloat(parsed.format?.duration ?? "0");
+          const videoDuration = parseFloat(videoStream?.duration ?? "0");
+          const durationSecs = formatDuration > 0 ? formatDuration : videoDuration;
+          let fps = 30;
+          if (videoStream?.r_frame_rate) {
+            const [num, den] = videoStream.r_frame_rate.split("/").map(Number);
+            if (num && den) fps = Math.round(num / den * 100) / 100;
+          }
+          const details = {
+            hasVideo: !!videoStream,
+            hasAudio: !!audioStream,
+            width: Number(videoStream?.width) || 0,
+            height: Number(videoStream?.height) || 0,
+            durationSecs,
+            fps,
+            codecVideo: videoStream?.codec_name,
+            codecAudio: audioStream?.codec_name,
+            fileSizeBytes: stat.size
+          };
+          probeCache.set(filePath, { probe: details, mtimeMs: stat.mtimeMs });
+          resolve(details);
+        } catch {
+          resolve(null);
+        }
+      });
+      proc.on("error", () => resolve(null));
+    });
+  } catch (err) {
+    logger.warn(`[QA-Probe] Error probing file ${filePath}: ${String(err)}`);
+    return null;
+  }
+}
+async function analyzeVideoQuality(filePath, totalDuration) {
+  const result = {
+    durationSecs: totalDuration,
+    blackSegments: [],
+    totalBlackDuration: 0,
+    blackCoveragePct: 0,
+    freezeSegments: [],
+    silenceSegments: []
+  };
+  if (!ffmpegStatic$1 || !fs__namespace.existsSync(filePath)) {
+    return result;
+  }
+  return new Promise((resolve) => {
+    const proc = cp.spawn(
+      ffmpegStatic$1,
+      [
+        "-v",
+        "info",
+        "-i",
+        filePath,
+        "-vf",
+        "blackdetect=d=1.5:pix_th=0.10,freezedetect=n=-50dB:d=3.0",
+        "-af",
+        "silencedetect=noise=-50dB:d=3.0",
+        "-f",
+        "null",
+        "-"
+      ],
+      { windowsHide: true }
+    );
+    let stderr = "";
+    proc.stderr.on("data", (d) => {
+      stderr += d.toString();
+    });
+    proc.on("close", () => {
+      const blackMatches = stderr.matchAll(/black_start:([\d.]+)\s+black_end:([\d.]+)\s+black_duration:([\d.]+)/g);
+      for (const m of blackMatches) {
+        const start = parseFloat(m[1]);
+        const end = parseFloat(m[2]);
+        const duration = parseFloat(m[3]);
+        result.blackSegments.push({ start, end, duration });
+        result.totalBlackDuration += duration;
+      }
+      if (totalDuration > 0) {
+        result.blackCoveragePct = Math.round(result.totalBlackDuration / totalDuration * 100);
+      }
+      const freezeStartMatches = stderr.matchAll(/freeze_start:\s*([\d.]+)/g);
+      const freezeDurMatches = stderr.matchAll(/freeze_duration:\s*([\d.]+)/g);
+      const freezeStarts = Array.from(freezeStartMatches).map((m) => parseFloat(m[1]));
+      const freezeDurs = Array.from(freezeDurMatches).map((m) => parseFloat(m[1]));
+      for (let i = 0; i < Math.min(freezeStarts.length, freezeDurs.length); i++) {
+        const start = freezeStarts[i];
+        const dur = freezeDurs[i];
+        result.freezeSegments.push({ start, end: start + dur, duration: dur });
+      }
+      const silStarts = Array.from(stderr.matchAll(/silence_start:\s*([\d.]+)/g)).map((m) => parseFloat(m[1]));
+      const silDurs = Array.from(stderr.matchAll(/silence_duration:\s*([\d.]+)/g)).map((m) => parseFloat(m[1]));
+      for (let i = 0; i < Math.min(silStarts.length, silDurs.length); i++) {
+        const start = silStarts[i];
+        const dur = silDurs[i];
+        result.silenceSegments.push({ start, end: start + dur, duration: dur });
+      }
+      resolve(result);
+    });
+    proc.on("error", () => resolve(result));
+  });
+}
+async function generateContactSheet(videoPath, outputPath, durationSecs) {
+  if (!ffmpegStatic$1 || !fs__namespace.existsSync(videoPath) || durationSecs <= 0) {
+    return false;
+  }
+  try {
+    const tmpDir = fs__namespace.mkdtempSync("contact_sheet_");
+    const frameCount = 5;
+    const timestamps = [
+      0.5,
+      Math.max(1, durationSecs * 0.25),
+      Math.max(2, durationSecs * 0.5),
+      Math.max(3, durationSecs * 0.75),
+      Math.max(4, durationSecs - 0.8)
+    ];
+    const extractedFiles = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      const ts = Math.min(timestamps[i], Math.max(0, durationSecs - 0.2));
+      const framePath = `${tmpDir}/frame_${i}.jpg`;
+      await new Promise((resolve) => {
+        const p = cp.spawn(
+          ffmpegStatic$1,
+          [
+            "-y",
+            "-ss",
+            String(ts),
+            "-i",
+            videoPath,
+            "-vframes",
+            "1",
+            "-q:v",
+            "3",
+            framePath
+          ],
+          { windowsHide: true }
+        );
+        p.on("close", () => resolve());
+        p.on("error", () => resolve());
+      });
+      if (fs__namespace.existsSync(framePath) && fs__namespace.statSync(framePath).size > 0) {
+        extractedFiles.push(framePath);
+      }
+    }
+    if (extractedFiles.length === 0) {
+      fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
+      return false;
+    }
+    const tileFilter = extractedFiles.length >= 5 ? "tile=5x1" : `tile=${extractedFiles.length}x1`;
+    const concatInputArgs = extractedFiles.flatMap((f) => ["-i", f]);
+    await new Promise((resolve, reject2) => {
+      const p = cp.spawn(
+        ffmpegStatic$1,
+        [
+          "-y",
+          ...concatInputArgs,
+          "-filter_complex",
+          `${extractedFiles.map((_, idx) => `[${idx}:v]scale=384:216[v${idx}]`).join(";")};${extractedFiles.map((_, idx) => `[v${idx}]`).join("")}${tileFilter}`,
+          outputPath
+        ],
+        { windowsHide: true }
+      );
+      p.on("close", (code) => {
+        if (code === 0 && fs__namespace.existsSync(outputPath) && fs__namespace.statSync(outputPath).size > 0) {
+          resolve();
+        } else {
+          reject2(new Error(`FFmpeg contact sheet tile exited with ${code}`));
+        }
+      });
+      p.on("error", reject2);
+    });
+    fs__namespace.rmSync(tmpDir, { recursive: true, force: true });
+    return true;
+  } catch (err) {
+    logger.warn(`[QA-ContactSheet] Failed to generate contact sheet: ${String(err)}`);
+    return false;
+  }
+}
+const POSTFLIGHT_THRESHOLDS = {
+  MAX_BENIGN_BLACK_SEGMENT_SECS: 2,
+  // Black transition dip <= 2s is benign
+  FATAL_BLACK_COVERAGE_PERCENT: 80,
+  // > 80% black coverage across entire video is fatal
+  WARNING_FREEZE_SEGMENT_SECS: 4,
+  // Freeze frame > 4.0s triggers warning
+  DURATION_MISMATCH_WARN_SECS: 1,
+  // Duration difference > 1.0s triggers warning
+  DURATION_MISMATCH_FATAL_PERCENT: 15
+  // > 15% duration mismatch is fatal
+};
+async function runRenderPostflight(options) {
+  const {
+    projectDir,
+    workingOutputPath,
+    expectedDuration,
+    totalScenes,
+    hasVoiceover,
+    targetResolution = { width: 1920, height: 1080 }
+  } = options;
+  const issues = [];
+  let issueId = 1;
+  function addIssue(severity, category, message, suggestion, details) {
+    issues.push({
+      id: `postflight_${issueId++}`,
+      stage: "postflight",
+      severity,
+      category,
+      message,
+      suggestion,
+      details
+    });
+  }
+  if (!fs__namespace.existsSync(workingOutputPath) || fs__namespace.statSync(workingOutputPath).size === 0) {
+    addIssue("fatal", "output", "Render output file is missing or has 0 bytes.", "Check FFmpeg logs for render crash");
+    return buildReport$1(expectedDuration, 0, totalScenes, issues);
+  }
+  const probe = await probeMediaDetailed(workingOutputPath);
+  if (!probe) {
+    addIssue("fatal", "output", "FFprobe failed to inspect render output.", "The output file is corrupt or unreadable");
+    return buildReport$1(expectedDuration, 0, totalScenes, issues);
+  }
+  if (!probe.hasVideo || probe.durationSecs <= 0) {
+    addIssue("fatal", "output", "Render output has no valid video stream or duration is 0.", "Ensure input media files are valid and FFmpeg arguments are correct");
+  }
+  if (hasVoiceover && !probe.hasAudio) {
+    addIssue("fatal", "audio", "Render output is missing audio stream while voiceover was expected.", "Check audio mixing and codec settings");
+  }
+  if (probe.width !== targetResolution.width || probe.height !== targetResolution.height) {
+    addIssue(
+      "warning",
+      "output",
+      `Rendered resolution (${probe.width}x${probe.height}) differs from target (${targetResolution.width}x${targetResolution.height})`,
+      "Verify scaling filter in render pipeline"
+    );
+  }
+  const durationDiff = Math.abs(probe.durationSecs - expectedDuration);
+  const durationMismatchPercent = expectedDuration > 0 ? durationDiff / expectedDuration * 100 : 0;
+  if (durationDiff > POSTFLIGHT_THRESHOLDS.DURATION_MISMATCH_WARN_SECS) {
+    if (durationMismatchPercent > POSTFLIGHT_THRESHOLDS.DURATION_MISMATCH_FATAL_PERCENT && expectedDuration > 10) {
+      addIssue(
+        "fatal",
+        "output",
+        `Rendered duration (${probe.durationSecs.toFixed(1)}s) deviates by ${durationMismatchPercent.toFixed(1)}% from expected (${expectedDuration.toFixed(1)}s)`,
+        "Check scene transition and audio alignment"
+      );
+    } else {
+      addIssue(
+        "warning",
+        "output",
+        `Rendered duration (${probe.durationSecs.toFixed(1)}s) deviates slightly from expected (${expectedDuration.toFixed(1)}s)`,
+        "Normal variation from transition xfade"
+      );
+    }
+  }
+  const quality = await analyzeVideoQuality(workingOutputPath, probe.durationSecs);
+  if (quality.blackCoveragePct >= POSTFLIGHT_THRESHOLDS.FATAL_BLACK_COVERAGE_PERCENT) {
+    addIssue(
+      "fatal",
+      "output",
+      `Severe black screen detected: ${quality.blackCoveragePct}% of the video is completely black`,
+      "Check if video codecs or transition offsets are producing black frames"
+    );
+  } else {
+    for (const b of quality.blackSegments) {
+      if (b.duration > POSTFLIGHT_THRESHOLDS.MAX_BENIGN_BLACK_SEGMENT_SECS) {
+        addIssue(
+          "warning",
+          "output",
+          `Prolonged black segment of ${b.duration.toFixed(1)}s detected at ${b.start.toFixed(1)}s - ${b.end.toFixed(1)}s`,
+          "Check missing media or long transition dip"
+        );
+      }
+    }
+  }
+  for (const f of quality.freezeSegments) {
+    if (f.duration > POSTFLIGHT_THRESHOLDS.WARNING_FREEZE_SEGMENT_SECS) {
+      addIssue(
+        "warning",
+        "output",
+        `Freeze frame of ${f.duration.toFixed(1)}s detected at ${f.start.toFixed(1)}s - ${f.end.toFixed(1)}s`,
+        "Check if source footage duration is too short for scene duration"
+      );
+    }
+  }
+  const contactSheetPath = path.join(projectDir, "output", "render-contact-sheet.jpg");
+  try {
+    const csSuccess = await generateContactSheet(workingOutputPath, contactSheetPath, probe.durationSecs);
+    if (csSuccess) {
+      addIssue("info", "output", "Contact sheet generated successfully at output/render-contact-sheet.jpg");
+    } else {
+      addIssue("warning", "output", "Failed to generate visual contact sheet (non-fatal)");
+    }
+  } catch (err) {
+    addIssue("warning", "output", `Contact sheet error: ${String(err)} (non-fatal)`);
+  }
+  const report = buildReport$1(expectedDuration, probe.durationSecs, totalScenes, issues);
+  const reportPath = path.join(projectDir, "analysis", "render-qa.json");
+  atomicWriteJson(reportPath, report);
+  logger.info(`[QA-Postflight] Status: ${report.status} (${report.fatalCount} fatal, ${report.warningCount} warning)`);
+  return report;
+}
+function buildReport$1(expectedDuration, actualDuration, totalScenes, issues) {
+  const fatalCount = issues.filter((i) => i.severity === "fatal").length;
+  const warningCount = issues.filter((i) => i.severity === "warning").length;
+  const infoCount = issues.filter((i) => i.severity === "info").length;
+  let status = "passed";
+  if (fatalCount > 0) {
+    status = "failed";
+  } else if (warningCount > 0) {
+    status = "passed_with_warnings";
+  }
+  return {
+    version: 1,
+    generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    status,
+    expectedDuration: Math.round(expectedDuration * 100) / 100,
+    actualDuration: Math.round(actualDuration * 100) / 100,
+    totalScenes,
+    resolvedScenes: totalScenes,
+    missingScenes: 0,
+    fatalCount,
+    warningCount,
+    infoCount,
+    issues
+  };
 }
 const EDITORIAL_SETTINGS_SCHEMA_VERSION = 1;
 const DEFAULT_EDITORIAL_SETTINGS = {
@@ -13843,7 +13896,7 @@ async function runRenderPreflight(options) {
   let mediaIndex = [];
   const mediaIndexPath = path.join(projectDir, "analysis", "media-index.json");
   if (fs__namespace.existsSync(mediaIndexPath)) {
-    mediaIndex = readJsonSafe$1(mediaIndexPath, []);
+    mediaIndex = readJsonSafe(mediaIndexPath, []);
   }
   let resolvedScenesCount = 0;
   for (const entry of flattened) {
@@ -13891,7 +13944,7 @@ async function runRenderPreflight(options) {
   }
   const audioPlanPath = path.join(projectDir, "analysis", "audio-plan.json");
   if (fs__namespace.existsSync(audioPlanPath)) {
-    const audioPlan = readJsonSafe$1(audioPlanPath, {});
+    const audioPlan = readJsonSafe(audioPlanPath, {});
     if (audioPlan.musicTrack?.filePath && !fs__namespace.existsSync(audioPlan.musicTrack.filePath)) {
       addIssue("warning", "audio", `Approved background music file missing: ${audioPlan.musicTrack.filePath}`, "Check audio library");
     }
@@ -21459,7 +21512,7 @@ function getCandidatesStorePath(projectDir) {
 }
 function loadStockCandidates(projectDir) {
   const filePath = getCandidatesStorePath(projectDir);
-  return readJsonSafe$1(filePath, {});
+  return readJsonSafe(filePath, {});
 }
 function saveStockCandidates(projectDir, data) {
   const filePath = getCandidatesStorePath(projectDir);
@@ -21473,7 +21526,7 @@ function getVisualTruthStorePath(projectDir) {
 }
 function loadVisualTruthStore(projectDir) {
   const filePath = getVisualTruthStorePath(projectDir);
-  return readJsonSafe$1(filePath, {
+  return readJsonSafe(filePath, {
     version: VISUAL_TRUTH_ANALYSIS_VERSION,
     updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
     verifications: {}
@@ -22229,7 +22282,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
   const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe$1(reviewPath, []) : [];
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe(reviewPath, []) : [];
   const existingMap = /* @__PURE__ */ new Map();
   for (const a of existingAssignments) {
     existingMap.set(a.sceneIndex, a);
@@ -22535,7 +22588,7 @@ async function runContextAwareStockEngine(params, onProgress = () => {
             if (isVisualTruthEnabled && apiKey) {
               try {
                 const claimLedgerPath = getClaimLedgerPath(projectDir);
-                const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe$1(claimLedgerPath, null) : null;
+                const claimLedger = fs__namespace.existsSync(claimLedgerPath) ? readJsonSafe(claimLedgerPath, null) : null;
                 const rerankResult = await rerankShortlistedCandidates({
                   projectDir,
                   sceneId,
@@ -22865,7 +22918,7 @@ async function runStockEngine(params, onProgress = () => {
   let manifest = loadAssetsManifest(stockDir);
   const usedAssetIds = new Set(manifest.map((a) => a.assetId));
   const reviewPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe$1(reviewPath, []) : [];
+  const existingAssignments = fs__namespace.existsSync(reviewPath) ? readJsonSafe(reviewPath, []) : [];
   const existingMap = /* @__PURE__ */ new Map();
   for (const a of existingAssignments) {
     existingMap.set(a.sceneIndex, a);
@@ -24378,7 +24431,7 @@ async function runSimpleAssemblyRenderStage(options, onProgress, signal) {
   let targetName = baseTargetName;
   let targetPath = path__namespace.join(outputDir, `${targetName}.mp4`);
   let counter = 1;
-  while (fs__namespace.existsSync(targetPath) && (!existingProvenance || existingProvenance.assemblyMode !== "simple-assembly")) {
+  while (fs__namespace.existsSync(targetPath) && (!existingProvenance || existingProvenance.assemblyMode !== "simple-assembly" || existingProvenance.backgroundMusicMode !== effectiveMusicMode)) {
     targetName = `${baseTargetName}_${counter}`;
     targetPath = path__namespace.join(outputDir, `${targetName}.mp4`);
     counter++;
@@ -27750,13 +27803,16 @@ async function runAudioSearchStage(options, onProgress, signal) {
   if (isSimpleAssembly && isNoMusic) {
     onProgress("Simple Assembly + No Music: Voiceover only, zero background music and zero SFX", 1);
     let plan2 = loadAudioPlan(options.projectDir);
+    const hadExistingPlanOnDisk = !!plan2;
     if (!plan2) {
       plan2 = {
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
         sections: [],
         sfxAssignments: []
       };
-      saveAudioPlan(options.projectDir, plan2);
+      if (!hadExistingPlanOnDisk) {
+        saveAudioPlan(options.projectDir, plan2);
+      }
     }
     return {
       success: true,
@@ -27777,6 +27833,7 @@ async function runAudioSearchStage(options, onProgress, signal) {
     onProgress("No Background Music selected: skipping music search...", 0.1);
     checkAborted(signal);
     let plan2 = loadAudioPlan(options.projectDir);
+    const hadExistingPlanOnDisk = !!plan2;
     if (!plan2) {
       plan2 = {
         generatedAt: (/* @__PURE__ */ new Date()).toISOString(),
@@ -27834,7 +27891,9 @@ async function runAudioSearchStage(options, onProgress, signal) {
         }
       }
     } else {
-      saveAudioPlan(options.projectDir, plan2);
+      if (!hadExistingPlanOnDisk) {
+        saveAudioPlan(options.projectDir, plan2);
+      }
     }
     const downloadedSfxCount2 = plan2?.sfxAssignments?.filter(
       (s) => s.approved && s.approvedLocalPath && fs__namespace.existsSync(s.approvedLocalPath)
@@ -27851,7 +27910,7 @@ async function runAudioSearchStage(options, onProgress, signal) {
       }
     };
   }
-  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? "health" : "default", options.backgroundMusicMode)) {
+  if (isAudioValid(options.projectDir, options.requireBackgroundMusic, isHealthAudio ? "health" : "default", options.backgroundMusicMode, options.assemblyMode)) {
     const cachedPlan = loadAudioPlan(options.projectDir);
     if (cachedPlan) {
       const downloadedMusicCount2 = cachedPlan.sections.filter(
@@ -28477,10 +28536,14 @@ class PipelineOrchestrator {
         this.stopHeartbeat(norm2);
         return;
       }
-      const state2 = loadPipelineState(norm2);
-      if (state2 && state2.runId === runId && state2.overallStatus === "running") {
-        updateHeartbeat(state2);
-        savePipelineStateAtomic(norm2, state2);
+      const activeState = instance.state;
+      if (activeState && activeState.runId === runId && activeState.overallStatus === "running") {
+        updateHeartbeat(activeState);
+        try {
+          savePipelineStateAtomic(norm2, activeState);
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+        }
       }
     }, 3e3);
     this.heartbeatTimers.set(norm2, timer);
@@ -28546,13 +28609,14 @@ class PipelineOrchestrator {
     const effectiveOptions = {
       ...options,
       projectDir: norm2,
-      editorialSettings: effectiveEditorial
+      editorialSettings: effectiveEditorial,
+      initialRequireBackgroundMusic: options.initialRequireBackgroundMusic ?? options.requireBackgroundMusic
     };
     return this.withProjectLock(norm2, async () => {
       const existing = this.activeInstances.get(norm2);
       if (existing) {
         logger.warn(`[Pipeline] Pipeline is already running in memory for project: ${norm2}`);
-        const currentState = loadPipelineState(norm2);
+        const currentState = existing.state ?? loadPipelineState(norm2);
         return {
           runId: existing.runId,
           state: currentState ?? createInitialPipelineState(effectiveOptions, computeInputFingerprint(norm2, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath), existing.runId)
@@ -28567,7 +28631,11 @@ class PipelineOrchestrator {
           logger.info(`[Pipeline] Reclaiming lease from prior unmanaged/stale run for ${norm2}`);
           state2.overallStatus = "interrupted";
           releaseLease(state2);
-          savePipelineStateAtomic(norm2, state2);
+          try {
+            savePipelineStateAtomic(norm2, state2);
+          } catch (err) {
+            logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+          }
         }
       }
       const fingerprint = computeInputFingerprint(norm2, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath);
@@ -28583,6 +28651,7 @@ class PipelineOrchestrator {
         state2.runId = runId;
         state2.inputFingerprint = fingerprint;
         state2.options = effectiveOptions;
+        state2.renderSettings = getActiveRunRenderSettings(effectiveOptions);
         state2.overallStatus = "running";
         state2.version = (state2.version ?? 0) + 1;
         state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -28600,6 +28669,7 @@ class PipelineOrchestrator {
         abortController,
         stageStartTime: Date.now(),
         currentStage: "validating",
+        state: state2,
         promise: Promise.resolve(state2)
         // replaced below
       };
@@ -28617,7 +28687,7 @@ class PipelineOrchestrator {
     return this.withProjectLock(norm2, async () => {
       const existing = this.activeInstances.get(norm2);
       if (existing) {
-        const currentState = loadPipelineState(norm2);
+        const currentState = existing.state ?? loadPipelineState(norm2);
         return { runId: existing.runId, state: currentState };
       }
       let state2 = loadPipelineState(norm2);
@@ -28661,6 +28731,11 @@ class PipelineOrchestrator {
       state2.fatalErrors = [];
       const firstPending = PIPELINE_EXECUTION_STAGES.find((s) => state2.stages[s]?.status !== "completed") || "validating";
       state2.currentStage = firstPending;
+      state2.options = {
+        ...state2.options,
+        initialRequireBackgroundMusic: state2.options.initialRequireBackgroundMusic ?? state2.options.requireBackgroundMusic
+      };
+      state2.renderSettings = getActiveRunRenderSettings(state2.options);
       state2.lease = createLease(runId, firstPending);
       savePipelineStateAtomic(norm2, state2);
       this.broadcastProgress(state2);
@@ -28673,6 +28748,7 @@ class PipelineOrchestrator {
         abortController,
         stageStartTime: Date.now(),
         currentStage: firstPending,
+        state: state2,
         promise: Promise.resolve(state2)
       };
       instance.promise = this.executePipelineLoop(state2, abortController);
@@ -28685,11 +28761,13 @@ class PipelineOrchestrator {
    */
   cancelPipeline(projectDirOrRunId) {
     let targetProjectDir = null;
+    let cancelledInstanceState = null;
     for (const [projectDir, instance] of this.activeInstances.entries()) {
       if (instance.runId === projectDirOrRunId || projectDir === projectDirOrRunId) {
         logger.info(`[Pipeline] Cancelling active pipeline run ${instance.runId} for ${projectDir}`);
         instance.abortController.abort();
         targetProjectDir = projectDir;
+        cancelledInstanceState = instance.state;
         break;
       }
     }
@@ -28698,7 +28776,7 @@ class PipelineOrchestrator {
     }
     this.stopHeartbeat(targetProjectDir);
     this.activeInstances.delete(targetProjectDir);
-    const state2 = loadPipelineState(targetProjectDir);
+    const state2 = cancelledInstanceState ?? loadPipelineState(targetProjectDir);
     if (state2) {
       state2.overallStatus = "cancelled";
       if (state2.currentStage && state2.stages[state2.currentStage] && state2.stages[state2.currentStage].status === "running") {
@@ -28719,6 +28797,10 @@ class PipelineOrchestrator {
    */
   getStatus(projectDir) {
     const norm2 = normalizeProjectDir(projectDir);
+    const active = this.activeInstances.get(norm2);
+    if (active) {
+      return active.state;
+    }
     const state2 = loadPipelineState(norm2);
     if (!state2) return null;
     if (state2.overallStatus === "running" && !this.activeInstances.has(norm2)) {
@@ -28745,7 +28827,8 @@ class PipelineOrchestrator {
           resumable: false,
           completedStages: [],
           invalidStages: [],
-          warnings: ["Pipeline is currently active in memory."]
+          warnings: ["Pipeline is currently active in memory."],
+          snapshot: toSnapshot(active.state)
         };
       }
       const state2 = loadPipelineState(norm2);
@@ -28908,13 +28991,311 @@ class PipelineOrchestrator {
         resumeFrom,
         completedStages,
         invalidStages,
-        warnings
+        warnings,
+        snapshot: toSnapshot(state2)
       };
     });
   }
   /**
-   * Chạy lại một stage cụ thể (dành cho debugging hoặc sửa lỗi).
+   * Live update final rendering strategy and background music mode for an active run
+   * while waiting for manually imported AI assets in stock-search.
+   * Never restarts the pipeline, never invalidates completed upstream stages, and
+   * never mutates project default settings.
    */
+  async updateFinalRenderOptions(request) {
+    if (!request || typeof request !== "object") {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: "INVALID_OPTIONS",
+        error: "Invalid update request."
+      };
+    }
+    const { projectDir, runId, assemblyMode, backgroundMusicMode, expectedStateVersion } = request;
+    if (assemblyMode !== "full-production" && assemblyMode !== "simple-assembly" || backgroundMusicMode !== "auto" && backgroundMusicMode !== "off") {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: "INVALID_OPTIONS",
+        error: "Invalid assembly mode or background music mode."
+      };
+    }
+    if (!projectDir || typeof projectDir !== "string" || !projectDir.trim()) {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: "RUN_NOT_FOUND",
+        error: "No active pipeline run found for the specified project."
+      };
+    }
+    if (!runId || typeof runId !== "string" || !runId.trim()) {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: "RUN_MISMATCH",
+        error: "A valid active run ID is required."
+      };
+    }
+    const norm2 = normalizeProjectDir(projectDir);
+    const tooLateMessage = "The pipeline has already passed the manual asset waiting stage.\n\nFinal Render Mode cannot be changed live now.\n\nUse the supported rerender workflow instead.";
+    return this.withProjectLock(norm2, async () => {
+      const instance = this.activeInstances.get(norm2);
+      if (!instance) {
+        const diskState = loadPipelineState(norm2);
+        if (!diskState) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            errorCode: "RUN_NOT_FOUND",
+            error: "No active pipeline run found for this project."
+          };
+        }
+        if (diskState.runId !== runId) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: diskState.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(diskState.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(diskState.options),
+            stateVersion: diskState.version,
+            errorCode: "RUN_MISMATCH",
+            error: "The requested run ID does not match the current project run.",
+            snapshot: toSnapshot(diskState)
+          };
+        }
+        if (diskState.overallStatus === "completed") {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: diskState.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(diskState.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(diskState.options),
+            stateVersion: diskState.version,
+            errorCode: "TOO_LATE",
+            error: tooLateMessage,
+            snapshot: toSnapshot(diskState)
+          };
+        }
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: diskState.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(diskState.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(diskState.options),
+          stateVersion: diskState.version,
+          errorCode: "NOT_RUNNING",
+          error: "The pipeline is not actively running in this application process.",
+          snapshot: toSnapshot(diskState)
+        };
+      }
+      const state2 = instance.state;
+      if (!state2) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: "RUN_NOT_FOUND",
+          error: "No active pipeline state found for this project."
+        };
+      }
+      if (instance.runId !== runId || state2.runId !== runId) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: "RUN_MISMATCH",
+          error: "The requested run ID does not match the active pipeline run.",
+          snapshot: toSnapshot(state2)
+        };
+      }
+      if (instance.abortController.signal.aborted || state2.overallStatus !== "running") {
+        const isCompleted = state2.overallStatus === "completed";
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: isCompleted ? "TOO_LATE" : "NOT_RUNNING",
+          error: isCompleted ? tooLateMessage : "The pipeline run is no longer active.",
+          snapshot: toSnapshot(state2)
+        };
+      }
+      if (state2.lease && state2.lease.appInstanceId !== APP_INSTANCE_ID) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: "NOT_RUNNING",
+          error: "The pipeline run is owned by another application process.",
+          snapshot: toSnapshot(state2)
+        };
+      }
+      const downstreamStages = ["audio-search", "preflight", "rendering", "postflight"];
+      const downstreamStarted = downstreamStages.includes(state2.currentStage) || state2.currentStage === "completed" || downstreamStages.some((s) => state2.stages[s] && state2.stages[s].status !== "pending") || state2.stages["stock-search"]?.status === "completed" || state2.stages["stock-search"]?.stats?.manualAiWaitCompleted === true;
+      if (downstreamStarted) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: "TOO_LATE",
+          error: tooLateMessage,
+          snapshot: toSnapshot(state2)
+        };
+      }
+      if (state2.currentStage !== "stock-search" || state2.stages["stock-search"]?.status !== "running") {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: "NOT_WAITING_FOR_ASSETS",
+          error: "The pipeline is not currently in the manual AI asset waiting stage.",
+          snapshot: toSnapshot(state2)
+        };
+      }
+      const waitInfo = state2.stages["stock-search"]?.manualAiWait;
+      if (!waitInfo || typeof waitInfo.expected !== "number" || waitInfo.expected <= 0) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: "NOT_WAITING_FOR_ASSETS",
+          error: "The current run is not waiting for manually imported AI assets.",
+          snapshot: toSnapshot(state2)
+        };
+      }
+      if (typeof waitInfo.ready !== "number" || waitInfo.ready >= waitInfo.expected) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+          stateVersion: state2.version,
+          errorCode: "TOO_LATE",
+          error: tooLateMessage,
+          snapshot: toSnapshot(state2)
+        };
+      }
+      const manualStatus = getManualAiStatus$1(norm2);
+      if (manualStatus.hasPromptPack) {
+        if (manualStatus.expected <= 0) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: state2.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+            stateVersion: state2.version,
+            errorCode: "NOT_WAITING_FOR_ASSETS",
+            error: "The current run has no manual AI scenes awaiting import.",
+            snapshot: toSnapshot(state2)
+          };
+        }
+        if (manualStatus.allReady || manualStatus.ready >= manualStatus.expected) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: state2.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(state2.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state2.options),
+            stateVersion: state2.version,
+            errorCode: "TOO_LATE",
+            error: tooLateMessage,
+            snapshot: toSnapshot(state2)
+          };
+        }
+      }
+      const currentAssembly = resolveVideoAssemblyMode(state2.options);
+      const currentMusic = resolveBackgroundMusicMode(state2.options);
+      if (expectedStateVersion !== void 0 && typeof expectedStateVersion === "number" && expectedStateVersion !== state2.version && (currentAssembly !== assemblyMode || currentMusic !== backgroundMusicMode)) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: currentAssembly,
+          effectiveBackgroundMusicMode: currentMusic,
+          stateVersion: state2.version,
+          errorCode: "STALE_REQUEST",
+          error: "Pipeline state changed before this update could be applied. Please review current settings and try again.",
+          snapshot: toSnapshot(state2)
+        };
+      }
+      if (currentAssembly === assemblyMode && currentMusic === backgroundMusicMode && state2.options.assemblyMode === assemblyMode && state2.options.backgroundMusicMode === backgroundMusicMode && state2.renderSettings?.assemblyMode === assemblyMode && state2.renderSettings?.backgroundMusicMode === backgroundMusicMode) {
+        return {
+          success: true,
+          appliedToActiveRun: true,
+          runId: state2.runId,
+          effectiveAssemblyMode: currentAssembly,
+          effectiveBackgroundMusicMode: currentMusic,
+          stateVersion: state2.version,
+          snapshot: toSnapshot(state2)
+        };
+      }
+      const initialReq = state2.options.initialRequireBackgroundMusic !== void 0 ? state2.options.initialRequireBackgroundMusic : currentMusic !== "off" ? state2.options.requireBackgroundMusic : false;
+      const previousOptions = { ...state2.options };
+      const previousRenderSettings = state2.renderSettings ? { ...state2.renderSettings } : void 0;
+      state2.options = {
+        ...state2.options,
+        initialRequireBackgroundMusic: initialReq,
+        assemblyMode,
+        backgroundMusicMode,
+        requireBackgroundMusic: backgroundMusicMode === "off" ? false : initialReq
+      };
+      state2.renderSettings = getActiveRunRenderSettings(state2.options);
+      try {
+        savePipelineStateAtomic(norm2, state2);
+      } catch (err) {
+        state2.options = previousOptions;
+        state2.renderSettings = previousRenderSettings;
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[Pipeline] Failed to save live final render options for ${norm2}: ${msg}`);
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state2.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(previousOptions),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(previousOptions),
+          stateVersion: state2.version,
+          errorCode: "SAVE_FAILED",
+          error: `Failed to persist updated render settings: ${msg}`,
+          snapshot: toSnapshot(state2)
+        };
+      }
+      this.broadcastProgress(state2);
+      const effective = getActiveRunRenderSettings(state2.options);
+      logger.info(
+        `[Pipeline] Updated active run ${state2.runId} final render options: assemblyMode=${effective.assemblyMode}, backgroundMusicMode=${effective.backgroundMusicMode} (version=${state2.version})`
+      );
+      return {
+        success: true,
+        appliedToActiveRun: true,
+        runId: state2.runId,
+        effectiveAssemblyMode: effective.assemblyMode,
+        effectiveBackgroundMusicMode: effective.backgroundMusicMode,
+        stateVersion: state2.version,
+        snapshot: toSnapshot(state2)
+      };
+    });
+  }
+  /**
+  * Chạy lại một stage cụ thể (dành cho debugging hoặc sửa lỗi).
+  */
   async retryStage(projectDir, targetStage) {
     const norm2 = normalizeProjectDir(projectDir);
     let state2 = loadPipelineState(norm2);
@@ -28958,7 +29339,7 @@ class PipelineOrchestrator {
       try {
         instance.abortController.abort();
         this.stopHeartbeat(projectDir);
-        const state2 = loadPipelineState(projectDir);
+        const state2 = instance.state ?? loadPipelineState(projectDir);
         if (state2 && state2.overallStatus === "running") {
           state2.overallStatus = "interrupted";
           if (state2.currentStage && state2.stages[state2.currentStage]) {
@@ -29020,7 +29401,11 @@ class PipelineOrchestrator {
         };
         state2.version = (state2.version ?? 0) + 1;
         state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        savePipelineStateAtomic(norm2, state2);
+        try {
+          savePipelineStateAtomic(norm2, state2);
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+        }
         this.broadcastProgress(state2);
         const stageStartTime = Date.now();
         const onProgress = (message, progress, meta) => {
@@ -29033,14 +29418,24 @@ class PipelineOrchestrator {
           state2.stages[stage].progress = Math.min(Math.max(progress, 0), 1);
           if (meta && "manualAiWait" in meta) {
             if (meta.manualAiWait) state2.stages[stage].manualAiWait = meta.manualAiWait;
-            else delete state2.stages[stage].manualAiWait;
+            else {
+              delete state2.stages[stage].manualAiWait;
+              state2.stages[stage].stats = {
+                ...state2.stages[stage].stats || {},
+                manualAiWaitCompleted: true
+              };
+            }
           }
           state2.version = (state2.version ?? 0) + 1;
           state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
           if (state2.lease) {
             state2.lease.heartbeatAt = state2.updatedAt;
           }
-          savePipelineStateAtomic(norm2, state2);
+          try {
+            savePipelineStateAtomic(norm2, state2);
+          } catch (err) {
+            logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+          }
           this.broadcastProgress(state2);
         };
         let stageResult;
@@ -29111,7 +29506,11 @@ class PipelineOrchestrator {
           state2.version = (state2.version ?? 0) + 1;
           state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
           releaseLease(state2);
-          savePipelineStateAtomic(norm2, state2);
+          try {
+            savePipelineStateAtomic(norm2, state2);
+          } catch (err) {
+            logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+          }
           this.broadcastProgress(state2);
           pipelineProfiler.endRun();
           return state2;
@@ -29127,7 +29526,11 @@ class PipelineOrchestrator {
           state2.version = (state2.version ?? 0) + 1;
           state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
           releaseLease(state2);
-          savePipelineStateAtomic(norm2, state2);
+          try {
+            savePipelineStateAtomic(norm2, state2);
+          } catch (err) {
+            logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+          }
           this.broadcastProgress(state2);
           pipelineProfiler.endRun();
           return state2;
@@ -29141,7 +29544,11 @@ class PipelineOrchestrator {
         state2.version = (state2.version ?? 0) + 1;
         state2.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
         releaseLease(state2);
-        savePipelineStateAtomic(norm2, state2);
+        try {
+          savePipelineStateAtomic(norm2, state2);
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm2}: ${String(err)}`);
+        }
         this.broadcastProgress(state2);
         logger.info(`[Pipeline] Pipeline ${state2.runId} completed successfully!`);
         void thumbnailAutoTrigger.startIfEligible({
@@ -29861,10 +30268,10 @@ function registerRenderHandlers(ipcMain) {
       const qaPath = path__namespace.join(params.projectDir, "analysis", "render-qa.json");
       const preflightPath = path__namespace.join(params.projectDir, "analysis", "render-preflight.json");
       if (fs__namespace.existsSync(qaPath)) {
-        return readJsonSafe$1(qaPath, null);
+        return readJsonSafe(qaPath, null);
       }
       if (fs__namespace.existsSync(preflightPath)) {
-        return readJsonSafe$1(preflightPath, null);
+        return readJsonSafe(preflightPath, null);
       }
       return null;
     }
@@ -29915,7 +30322,7 @@ async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
     saveStockCandidates(projectDir, candidatesStore);
     const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
     if (fs__namespace.existsSync(assignmentsPath)) {
-      const assignments = readJsonSafe$1(assignmentsPath, []);
+      const assignments = readJsonSafe(assignmentsPath, []);
       const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
       if (idx >= 0) {
         assignments[idx].asset = asset;
@@ -29931,7 +30338,7 @@ async function selectCandidateForScene(projectDir, sceneIndex, candidateId) {
     }
     const planPath = path.join(projectDir, "analysis", "master-edit-plan.json");
     if (fs__namespace.existsSync(planPath)) {
-      const plan = readJsonSafe$1(planPath, {});
+      const plan = readJsonSafe(planPath, {});
       for (const ch of plan.chapters ?? []) {
         const seqs = ch.sequences ?? ch.chapters_seq ?? [];
         for (const seq of seqs) {
@@ -29973,7 +30380,7 @@ function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
     }
     const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
     if (fs__namespace.existsSync(assignmentsPath)) {
-      const assignments = readJsonSafe$1(assignmentsPath, []);
+      const assignments = readJsonSafe(assignmentsPath, []);
       const idx = assignments.findIndex((a) => a.sceneIndex === sceneIndex);
       if (idx >= 0) {
         assignments[idx].approvalStatus = "approved";
@@ -29992,7 +30399,7 @@ function approveCandidateForScene(projectDir, sceneIndex, candidateId) {
 }
 function calculateStoryboardSummary(projectDir) {
   const assignmentsPath = path.join(projectDir, "analysis", "stock-assignments.json");
-  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe$1(assignmentsPath, []) : [];
+  const assignments = fs__namespace.existsSync(assignmentsPath) ? readJsonSafe(assignmentsPath, []) : [];
   const totalScenes = assignments.length;
   let assignedScenes = 0;
   let approvedScenes = 0;
@@ -30322,7 +30729,7 @@ function registerStockHandlers(ipcMain) {
   ipcMain.handle(IPC_CHANNELS.CLAIM_GET_LEDGER, (_event, projectDir) => {
     try {
       const ledgerPath = getClaimLedgerPath(projectDir);
-      return readJsonSafe$1(ledgerPath, null);
+      return readJsonSafe(ledgerPath, null);
     } catch (err) {
       logger.error(`[ClaimIPC] Failed to load claim ledger: ${String(err)}`);
       return null;
@@ -30345,7 +30752,7 @@ function registerStockHandlers(ipcMain) {
     (_event, params) => {
       try {
         const ledgerPath = getClaimLedgerPath(params.projectDir);
-        const ledger = readJsonSafe$1(ledgerPath, null);
+        const ledger = readJsonSafe(ledgerPath, null);
         if (!ledger) return { success: false, error: "Ledger not found" };
         ledger.sources = ledger.sources.filter((s) => s.id !== params.sourceId);
         for (const claim of ledger.claims) {
@@ -30803,6 +31210,23 @@ function registerPipelineHandlers(ipcMain) {
         const msg = err instanceof Error ? err.message : String(err);
         logger.error(`[PipelineIPC] Recover failed: ${msg}`);
         return { success: false, error: msg };
+      }
+    }
+  );
+  ipcMain.handle(
+    IPC_CHANNELS.PIPELINE_UPDATE_FINAL_RENDER_OPTIONS,
+    async (_event, request) => {
+      try {
+        return await pipelineOrchestrator.updateFinalRenderOptions(request);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logger.error(`[PipelineIPC] UpdateFinalRenderOptions failed: ${msg}`);
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: "SAVE_FAILED",
+          error: msg
+        };
       }
     }
   );

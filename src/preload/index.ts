@@ -49,7 +49,9 @@ import type {
   RenderPreferencesDTO,
   VideoProductionModeSettings,
   SimpleAssemblyProgressPayload,
-  SimpleAssemblyResult
+  SimpleAssemblyResult,
+  UpdateFinalRenderOptionsRequest,
+  UpdateFinalRenderOptionsResult
 } from '../../shared/types'
 import type { FlowKitRuntimeSettings, FlowKitRuntimeStatus, FlowReadinessResult } from '../main/thumbnail/flowkit-runtime-manager'
 
@@ -443,6 +445,11 @@ const api = {
       projectDir: string
     ): Promise<{ success: boolean; result?: PipelineRecoveryResult; state?: AutoPipelineState; error?: string }> =>
       ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RECOVER, { projectDir }),
+
+    updateFinalRenderOptions: (
+      request: UpdateFinalRenderOptionsRequest
+    ): Promise<UpdateFinalRenderOptionsResult> =>
+      ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_UPDATE_FINAL_RENDER_OPTIONS, request),
 
     onProgress: (callback: (state: AutoPipelineState) => void): (() => void) => {
       const handler = (_event: Electron.IpcRendererEvent, state: AutoPipelineState): void => {

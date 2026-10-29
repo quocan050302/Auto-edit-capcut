@@ -7927,12 +7927,47 @@ function resolveVisualMixConfig(options) {
   }
   return { ...DEFAULT_VISUAL_MIX_CONFIG };
 }
+function resolveBackgroundMusicMode(options) {
+  if (typeof options === "string") {
+    return options === "off" ? "off" : "auto";
+  }
+  return options?.backgroundMusicMode === "off" ? "off" : "auto";
+}
+function resolveVideoAssemblyMode(options) {
+  if (typeof options === "string") {
+    return options === "simple-assembly" ? "simple-assembly" : "full-production";
+  }
+  return options?.assemblyMode === "simple-assembly" ? "simple-assembly" : "full-production";
+}
 const DEFAULT_PRODUCTION_MODE_SETTINGS = {
   schemaVersion: 1,
   assemblyMode: "full-production",
   backgroundMusicMode: "auto",
   shortClipPolicy: "freeze-last-frame"
 };
+function getActiveRunRenderSettings(options) {
+  return {
+    assemblyMode: resolveVideoAssemblyMode(options),
+    backgroundMusicMode: resolveBackgroundMusicMode(options)
+  };
+}
+function isLiveRenderModeSwitchEligible(state) {
+  if (!state) return false;
+  if (state.overallStatus !== "running") return false;
+  if (state.currentStage !== "stock-search") return false;
+  const stockStage = state.stages?.["stock-search"];
+  if (!stockStage || stockStage.status !== "running") return false;
+  if (stockStage.stats?.manualAiWaitCompleted === true) return false;
+  const waitInfo = stockStage.manualAiWait;
+  if (!waitInfo || typeof waitInfo.expected !== "number" || waitInfo.expected <= 0) return false;
+  if (typeof waitInfo.ready !== "number" || waitInfo.ready >= waitInfo.expected) return false;
+  const downstream = ["audio-search", "preflight", "rendering", "postflight"];
+  for (const stage of downstream) {
+    const st = state.stages?.[stage];
+    if (st && st.status !== "pending") return false;
+  }
+  return true;
+}
 const THUMBNAIL_CATEGORIES = [
   "US Grocery",
   "Preparedness",
@@ -7941,6 +7976,48 @@ const THUMBNAIL_CATEGORIES = [
   "Streamer Reaction",
   "Custom"
 ];
+function mergeIncomingPipelineState(prev, incoming) {
+  if (!incoming) return null;
+  const incomingAsState = incoming;
+  const incomingRenderSettings = incoming.renderSettings ?? (incomingAsState.options ? getActiveRunRenderSettings(incomingAsState.options) : void 0);
+  if (!prev) {
+    return {
+      ...incomingAsState,
+      ...incomingRenderSettings ? { renderSettings: incomingRenderSettings } : {}
+    };
+  }
+  if (prev.runId === incoming.runId) {
+    const prevVersion = prev.version ?? 0;
+    const incomingVersion = incoming.version ?? 0;
+    if (incomingVersion < prevVersion) {
+      return prev;
+    }
+    const effectiveRenderSettings = incomingRenderSettings ?? prev.renderSettings;
+    const mergedOptions = incomingAsState.options ? {
+      ...incomingAsState.options,
+      ...effectiveRenderSettings ? {
+        assemblyMode: effectiveRenderSettings.assemblyMode,
+        backgroundMusicMode: effectiveRenderSettings.backgroundMusicMode
+      } : {}
+    } : prev.options ? {
+      ...prev.options,
+      ...effectiveRenderSettings ? {
+        assemblyMode: effectiveRenderSettings.assemblyMode,
+        backgroundMusicMode: effectiveRenderSettings.backgroundMusicMode
+      } : {}
+    } : void 0;
+    return {
+      ...prev,
+      ...incomingAsState,
+      ...mergedOptions ? { options: mergedOptions } : {},
+      ...effectiveRenderSettings ? { renderSettings: effectiveRenderSettings } : {}
+    };
+  }
+  return {
+    ...incomingAsState,
+    ...incomingRenderSettings ? { renderSettings: incomingRenderSettings } : {}
+  };
+}
 function usePipeline(projectDir) {
   const [pipelineState, setPipelineState] = reactExports.useState(null);
   const [isLoading, setIsLoading] = reactExports.useState(false);
@@ -7957,15 +8034,7 @@ function usePipeline(projectDir) {
       setPipelineState(null);
       return;
     }
-    setPipelineState((prev) => {
-      if (!prev) return incoming;
-      const prevVersion = prev.version ?? 0;
-      const incomingVersion = incoming.version ?? 0;
-      if (incomingVersion >= prevVersion) {
-        return incoming;
-      }
-      return prev;
-    });
+    setPipelineState((prev) => mergeIncomingPipelineState(prev, incoming));
   }, []);
   const refreshStatus = reactExports.useCallback(async () => {
     if (!projectDir) {
@@ -8136,6 +8205,63 @@ function usePipeline(projectDir) {
     },
     [projectDir, updateStateIfNewer]
   );
+  const updateFinalRenderOptions = reactExports.useCallback(
+    async (params) => {
+      const targetProjectDir = projectDir || pipelineState?.projectDir;
+      const targetRunId = params.runId || pipelineState?.runId || "";
+      if (!targetProjectDir) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: "RUN_NOT_FOUND",
+          error: "No active project directory."
+        };
+      }
+      try {
+        const res = await window.api.pipeline.updateFinalRenderOptions({
+          projectDir: targetProjectDir,
+          runId: targetRunId,
+          assemblyMode: params.assemblyMode,
+          backgroundMusicMode: params.backgroundMusicMode,
+          ...params.expectedStateVersion !== void 0 ? { expectedStateVersion: params.expectedStateVersion } : {}
+        });
+        if (isMountedRef.current) {
+          if (res.snapshot) {
+            updateStateIfNewer(res.snapshot);
+          } else if (res.success && res.effectiveAssemblyMode && res.effectiveBackgroundMusicMode) {
+            setPipelineState((prev) => {
+              if (!prev || res.runId && prev.runId !== res.runId) return prev;
+              const nextVersion = res.stateVersion ?? prev.version;
+              if (nextVersion < prev.version) return prev;
+              return {
+                ...prev,
+                version: nextVersion,
+                renderSettings: {
+                  assemblyMode: res.effectiveAssemblyMode,
+                  backgroundMusicMode: res.effectiveBackgroundMusicMode
+                },
+                options: prev.options ? {
+                  ...prev.options,
+                  assemblyMode: res.effectiveAssemblyMode,
+                  backgroundMusicMode: res.effectiveBackgroundMusicMode
+                } : prev.options
+              };
+            });
+          }
+        }
+        return res;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: "SAVE_FAILED",
+          error: msg
+        };
+      }
+    },
+    [projectDir, pipelineState?.projectDir, pipelineState?.runId, updateStateIfNewer]
+  );
   const isRunning = pipelineState?.overallStatus === "running";
   return {
     pipelineState,
@@ -8148,7 +8274,8 @@ function usePipeline(projectDir) {
     cancelPipeline,
     retryStage,
     runFromStage,
-    refreshStatus
+    refreshStatus,
+    updateFinalRenderOptions
   };
 }
 const STORAGE_KEY_INTERFACE_MODE = "ai-video-factory.interface-mode";
@@ -12333,7 +12460,7 @@ function computePhaseState(phase, pipelineState) {
         summary = "Background music and sound effects matched";
         break;
       case "build":
-        summary = pipelineState?.options?.assemblyMode === "simple-assembly" ? "Render preflight passed and scenes concatenated with voiceover" : "Render preflight passed and video rendered";
+        summary = (pipelineState?.renderSettings?.assemblyMode ?? pipelineState?.options?.assemblyMode) === "simple-assembly" ? "Render preflight passed and scenes concatenated with voiceover" : "Render preflight passed and video rendered";
         break;
       case "final-check":
         summary = "Postflight quality check completed";
@@ -12363,7 +12490,7 @@ function computePhaseState(phase, pipelineState) {
         summary = "Selects and blends background soundtrack";
         break;
       case "build":
-        summary = pipelineState?.options?.assemblyMode === "simple-assembly" ? "Render Preflight QA & Simple Assembly concatenation" : "Automated QA check and final video rendering";
+        summary = (pipelineState?.renderSettings?.assemblyMode ?? pipelineState?.options?.assemblyMode) === "simple-assembly" ? "Render Preflight QA & Simple Assembly concatenation" : "Automated QA check and final video rendering";
         break;
       case "final-check":
         summary = "Final output verification and validation";
@@ -14089,6 +14216,614 @@ function ManualAiPromptPanel({ project, pipelineState, onNavigateToSetup }) {
     ] })
   ] });
 }
+const SIMPLE_ASSEMBLY_EXPLANATION = "All intelligent production stages remain unchanged. Only the final render joins the completed scenes with voiceover, using hard cuts and no Remotion overlays.";
+const NO_MUSIC_EXPLANATION = "The final MP4 will contain the input voiceover without background music. In Simple Assembly, no additional SFX will be added.";
+const PRESERVED_PRODUCTION_ITEMS = [
+  "AI Planning",
+  "Visual Director",
+  "Prompt Packs",
+  "Stock Assignments",
+  "Imported Scenes",
+  "Scene Readiness",
+  "Current Run"
+];
+function resolveActiveRunEffectiveSettings(pipelineState) {
+  if (pipelineState?.renderSettings) {
+    return {
+      assemblyMode: resolveVideoAssemblyMode(pipelineState.renderSettings.assemblyMode),
+      backgroundMusicMode: resolveBackgroundMusicMode(pipelineState.renderSettings.backgroundMusicMode)
+    };
+  }
+  return getActiveRunRenderSettings(pipelineState?.options);
+}
+function formatAssemblyModeLabel(mode) {
+  return mode === "simple-assembly" ? "Simple Assembly" : "Full Smart Render";
+}
+function formatMusicModeLabel(mode) {
+  return mode === "off" ? "No Music" : "Add Music";
+}
+function computeWillChangeSummary(current, draft) {
+  const changes = [];
+  if (current.assemblyMode !== draft.assemblyMode) {
+    changes.push("Final Rendering Strategy");
+  }
+  if (current.backgroundMusicMode !== draft.backgroundMusicMode) {
+    changes.push("Background Music");
+  }
+  if (changes.length === 0) {
+    changes.push("Final Rendering Strategy (No change from current run)");
+  }
+  return changes;
+}
+function ActiveRunRenderSettings({
+  projectDir,
+  pipelineState,
+  onUpdateFinalRenderOptions
+}) {
+  if (!pipelineState || !pipelineState.runId) {
+    return null;
+  }
+  const effectiveSettings = resolveActiveRunEffectiveSettings(pipelineState);
+  const isEligibleForLiveSwitch = isLiveRenderModeSwitchEligible(pipelineState);
+  const waitInfo = pipelineState.stages?.["stock-search"]?.manualAiWait;
+  const [isModalOpen, setIsModalOpen] = reactExports.useState(false);
+  const [draftAssemblyMode, setDraftAssemblyMode] = reactExports.useState(
+    effectiveSettings.assemblyMode
+  );
+  const [draftMusicMode, setDraftMusicMode] = reactExports.useState(
+    effectiveSettings.backgroundMusicMode
+  );
+  const [isSaving, setIsSaving] = reactExports.useState(false);
+  const [modalError, setModalError] = reactExports.useState(null);
+  const [appliedNotice, setAppliedNotice] = reactExports.useState(null);
+  const isSubmittingRef = reactExports.useRef(false);
+  reactExports.useEffect(() => {
+    if (!isModalOpen) {
+      setDraftAssemblyMode(effectiveSettings.assemblyMode);
+      setDraftMusicMode(effectiveSettings.backgroundMusicMode);
+    }
+  }, [isModalOpen, effectiveSettings.assemblyMode, effectiveSettings.backgroundMusicMode]);
+  reactExports.useEffect(() => {
+    setAppliedNotice(null);
+  }, [pipelineState.runId]);
+  const handleOpenModal = () => {
+    const latest = resolveActiveRunEffectiveSettings(pipelineState);
+    setDraftAssemblyMode(latest.assemblyMode);
+    setDraftMusicMode(latest.backgroundMusicMode);
+    setModalError(null);
+    setIsModalOpen(true);
+  };
+  const handleCancelModal = () => {
+    if (isSaving) return;
+    const latest = resolveActiveRunEffectiveSettings(pipelineState);
+    setDraftAssemblyMode(latest.assemblyMode);
+    setDraftMusicMode(latest.backgroundMusicMode);
+    setModalError(null);
+    setIsModalOpen(false);
+  };
+  const handleApplyToCurrentRun = async () => {
+    if (isSaving || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setIsSaving(true);
+    setModalError(null);
+    setAppliedNotice(null);
+    try {
+      let result;
+      if (onUpdateFinalRenderOptions) {
+        result = await onUpdateFinalRenderOptions({
+          assemblyMode: draftAssemblyMode,
+          backgroundMusicMode: draftMusicMode,
+          runId: pipelineState.runId
+        });
+      } else {
+        const targetDir = projectDir || pipelineState.projectDir;
+        result = await window.api.pipeline.updateFinalRenderOptions({
+          projectDir: targetDir,
+          runId: pipelineState.runId,
+          assemblyMode: draftAssemblyMode,
+          backgroundMusicMode: draftMusicMode
+        });
+      }
+      if (result.success && result.appliedToActiveRun) {
+        const appliedAssembly = result.effectiveAssemblyMode ?? draftAssemblyMode;
+        const appliedMusic = result.effectiveBackgroundMusicMode ?? draftMusicMode;
+        setDraftAssemblyMode(appliedAssembly);
+        setDraftMusicMode(appliedMusic);
+        setAppliedNotice(
+          `Applied to current run: ${formatAssemblyModeLabel(appliedAssembly)} + ${formatMusicModeLabel(appliedMusic)}`
+        );
+        setIsModalOpen(false);
+      } else {
+        if (result.effectiveAssemblyMode) {
+          setDraftAssemblyMode(result.effectiveAssemblyMode);
+        }
+        if (result.effectiveBackgroundMusicMode) {
+          setDraftMusicMode(result.effectiveBackgroundMusicMode);
+        }
+        setModalError(
+          result.error || "Could not update Final Render Mode for the current run. The safe waiting window may have closed."
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setModalError(msg || "Unexpected error while updating Final Render Mode.");
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSaving(false);
+    }
+  };
+  const currentLabel = `${formatAssemblyModeLabel(effectiveSettings.assemblyMode)} + ${formatMusicModeLabel(
+    effectiveSettings.backgroundMusicMode
+  )}`;
+  const draftLabel = `${formatAssemblyModeLabel(draftAssemblyMode)} + ${formatMusicModeLabel(
+    draftMusicMode
+  )}`;
+  const willChangeItems = computeWillChangeSummary(effectiveSettings, {
+    assemblyMode: draftAssemblyMode,
+    backgroundMusicMode: draftMusicMode
+  });
+  return /* @__PURE__ */ jsxRuntimeExports.jsxs(
+    "div",
+    {
+      "data-testid": "active-run-render-settings",
+      style: {
+        background: "#16162a",
+        border: isEligibleForLiveSwitch ? "1px solid #3d3d6b" : "1px solid #2b2b44",
+        borderRadius: 10,
+        padding: "14px 18px",
+        display: "flex",
+        flexDirection: "column",
+        gap: 10
+      },
+      children: [
+        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            style: {
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              flexWrap: "wrap",
+              gap: 10
+            },
+            children: [
+              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 4 }, children: [
+                /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }, children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "span",
+                    {
+                      style: {
+                        fontSize: 11,
+                        fontWeight: 800,
+                        letterSpacing: "0.06em",
+                        textTransform: "uppercase",
+                        color: "#a29bfe"
+                      },
+                      children: "FINAL RENDER SETTINGS"
+                    }
+                  ),
+                  isEligibleForLiveSwitch && waitInfo ? /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "span",
+                    {
+                      "data-testid": "active-run-waiting-badge",
+                      style: {
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        background: "rgba(108, 92, 231, 0.18)",
+                        color: "#c8c3ff",
+                        border: "1px solid rgba(108, 92, 231, 0.38)"
+                      },
+                      children: [
+                        "AI Assets ",
+                        waitInfo.ready,
+                        " / ",
+                        waitInfo.expected,
+                        " Ready — Waiting for",
+                        " ",
+                        Math.max(0, waitInfo.expected - waitInfo.ready),
+                        " remaining scenes"
+                      ]
+                    }
+                  ) : /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "span",
+                    {
+                      "data-testid": "active-run-readonly-badge",
+                      style: {
+                        fontSize: 11,
+                        fontWeight: 600,
+                        padding: "2px 8px",
+                        borderRadius: 999,
+                        background: "#222238",
+                        color: "#8e8ea8",
+                        border: "1px solid #32324e"
+                      },
+                      children: "Read-only for current stage"
+                    }
+                  )
+                ] }),
+                /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                  "div",
+                  {
+                    style: {
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 18,
+                      flexWrap: "wrap",
+                      fontSize: 13,
+                      color: "#e0e0f0",
+                      marginTop: 2
+                    },
+                    children: [
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#8e8ea8", marginRight: 6 }, children: "Current Run:" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { "data-testid": "active-run-assembly-mode-badge", style: { color: "#fff" }, children: formatAssemblyModeLabel(effectiveSettings.assemblyMode) })
+                      ] }),
+                      /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#8e8ea8", marginRight: 6 }, children: "Background Music:" }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { "data-testid": "active-run-music-mode-badge", style: { color: "#fff" }, children: formatMusicModeLabel(effectiveSettings.backgroundMusicMode) })
+                      ] })
+                    ]
+                  }
+                )
+              ] }),
+              isEligibleForLiveSwitch && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                "button",
+                {
+                  type: "button",
+                  "data-testid": "change-final-render-mode-btn",
+                  onClick: handleOpenModal,
+                  style: {
+                    padding: "8px 14px",
+                    background: "#262645",
+                    color: "#e6e4ff",
+                    border: "1px solid #5849c4",
+                    borderRadius: 8,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6
+                  },
+                  children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "⚙" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("span", { children: "Change Final Render Mode" })
+                  ]
+                }
+              )
+            ]
+          }
+        ),
+        appliedNotice && /* @__PURE__ */ jsxRuntimeExports.jsxs(
+          "div",
+          {
+            "data-testid": "active-run-applied-notice",
+            style: {
+              padding: "8px 12px",
+              borderRadius: 6,
+              background: "rgba(0, 184, 148, 0.14)",
+              border: "1px solid rgba(0, 184, 148, 0.4)",
+              color: "#55efc4",
+              fontSize: 12,
+              fontWeight: 600
+            },
+            children: [
+              "✓ ",
+              appliedNotice
+            ]
+          }
+        ),
+        isModalOpen && /* @__PURE__ */ jsxRuntimeExports.jsx(
+          "div",
+          {
+            "data-testid": "change-final-render-modal",
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-labelledby": "change-final-render-modal-title",
+            style: {
+              position: "fixed",
+              inset: 0,
+              background: "rgba(8, 8, 16, 0.76)",
+              zIndex: 1200,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              padding: 20
+            },
+            children: /* @__PURE__ */ jsxRuntimeExports.jsxs(
+              "div",
+              {
+                style: {
+                  width: "100%",
+                  maxWidth: 540,
+                  background: "#19192d",
+                  border: "1px solid #3f3f68",
+                  borderRadius: 12,
+                  padding: 22,
+                  color: "#eaeaff",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 16,
+                  boxShadow: "0 20px 50px rgba(0,0,0,0.6)"
+                },
+                children: [
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "h3",
+                      {
+                        id: "change-final-render-modal-title",
+                        style: {
+                          margin: 0,
+                          fontSize: 15,
+                          fontWeight: 800,
+                          letterSpacing: "0.04em",
+                          color: "#fff"
+                        },
+                        children: "CHANGE FINAL RENDER SETTINGS"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("p", { style: { margin: "6px 0 0 0", fontSize: 12, color: "#b4b4d0", lineHeight: 1.5 }, children: "This change applies to the current Production run. All completed AI Planning, prompts, scene assignments and imported assets will be preserved." })
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 700, color: "#c8c8e6" }, children: "Final Renderer" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "label",
+                      {
+                        "data-testid": "radio-assembly-full",
+                        style: {
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 10,
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          border: draftAssemblyMode === "full-production" ? "1px solid #6c5ce7" : "1px solid #2e2e4d",
+                          background: draftAssemblyMode === "full-production" ? "rgba(108, 92, 231, 0.14)" : "#141424",
+                          cursor: isSaving ? "not-allowed" : "pointer"
+                        },
+                        children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "input",
+                            {
+                              type: "radio",
+                              name: "active-run-assembly-mode",
+                              value: "full-production",
+                              checked: draftAssemblyMode === "full-production",
+                              disabled: isSaving,
+                              onChange: () => setDraftAssemblyMode("full-production"),
+                              style: { marginTop: 2 }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 2 }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, fontWeight: 700, color: "#fff" }, children: "Full Smart Render" }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11.5, color: "#9c9cb8", lineHeight: 1.4 }, children: "Uses the full intelligent renderer with configured motion, transitions and caption/overlay policies." })
+                          ] })
+                        ]
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "label",
+                      {
+                        "data-testid": "radio-assembly-simple",
+                        style: {
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 10,
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          border: draftAssemblyMode === "simple-assembly" ? "1px solid #6c5ce7" : "1px solid #2e2e4d",
+                          background: draftAssemblyMode === "simple-assembly" ? "rgba(108, 92, 231, 0.14)" : "#141424",
+                          cursor: isSaving ? "not-allowed" : "pointer"
+                        },
+                        children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "input",
+                            {
+                              type: "radio",
+                              name: "active-run-assembly-mode",
+                              value: "simple-assembly",
+                              checked: draftAssemblyMode === "simple-assembly",
+                              disabled: isSaving,
+                              onChange: () => setDraftAssemblyMode("simple-assembly"),
+                              style: { marginTop: 2 }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 2 }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, fontWeight: 700, color: "#fff" }, children: "Simple Assembly" }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11.5, color: "#9c9cb8", lineHeight: 1.4 }, children: SIMPLE_ASSEMBLY_EXPLANATION })
+                          ] })
+                        ]
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 8 }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { fontSize: 12, fontWeight: 700, color: "#c8c8e6" }, children: "Background Music" }),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "label",
+                      {
+                        "data-testid": "radio-music-auto",
+                        style: {
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 10,
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          border: draftMusicMode === "auto" ? "1px solid #6c5ce7" : "1px solid #2e2e4d",
+                          background: draftMusicMode === "auto" ? "rgba(108, 92, 231, 0.14)" : "#141424",
+                          cursor: isSaving ? "not-allowed" : "pointer"
+                        },
+                        children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "input",
+                            {
+                              type: "radio",
+                              name: "active-run-music-mode",
+                              value: "auto",
+                              checked: draftMusicMode === "auto",
+                              disabled: isSaving,
+                              onChange: () => setDraftMusicMode("auto"),
+                              style: { marginTop: 2 }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 2 }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, fontWeight: 700, color: "#fff" }, children: "Add Music" }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11.5, color: "#9c9cb8", lineHeight: 1.4 }, children: "Automatically selects and mixes background music for the final render." })
+                          ] })
+                        ]
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                      "label",
+                      {
+                        "data-testid": "radio-music-off",
+                        style: {
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: 10,
+                          padding: "10px 12px",
+                          borderRadius: 8,
+                          border: draftMusicMode === "off" ? "1px solid #6c5ce7" : "1px solid #2e2e4d",
+                          background: draftMusicMode === "off" ? "rgba(108, 92, 231, 0.14)" : "#141424",
+                          cursor: isSaving ? "not-allowed" : "pointer"
+                        },
+                        children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx(
+                            "input",
+                            {
+                              type: "radio",
+                              name: "active-run-music-mode",
+                              value: "off",
+                              checked: draftMusicMode === "off",
+                              disabled: isSaving,
+                              onChange: () => setDraftMusicMode("off"),
+                              style: { marginTop: 2 }
+                            }
+                          ),
+                          /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", flexDirection: "column", gap: 2 }, children: [
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 13, fontWeight: 700, color: "#fff" }, children: "No Music" }),
+                            /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { fontSize: 11.5, color: "#9c9cb8", lineHeight: 1.4 }, children: NO_MUSIC_EXPLANATION })
+                          ] })
+                        ]
+                      }
+                    )
+                  ] }),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                    "div",
+                    {
+                      "data-testid": "modal-confirmation-summary",
+                      style: {
+                        background: "#121222",
+                        border: "1px solid #2c2c4a",
+                        borderRadius: 8,
+                        padding: "12px 14px",
+                        fontSize: 12,
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 8
+                      },
+                      children: [
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#8e8ea8" }, children: "Current:" }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { "data-testid": "summary-current-mode", style: { color: "#d0d0e8" }, children: currentLabel })
+                        ] }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "space-between", gap: 8 }, children: [
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("span", { style: { color: "#8e8ea8" }, children: "New:" }),
+                          /* @__PURE__ */ jsxRuntimeExports.jsx("strong", { "data-testid": "summary-new-mode", style: { color: "#a29bfe" }, children: draftLabel })
+                        ] }),
+                        /* @__PURE__ */ jsxRuntimeExports.jsxs(
+                          "div",
+                          {
+                            style: {
+                              borderTop: "1px solid #252540",
+                              paddingTop: 8,
+                              display: "grid",
+                              gridTemplateColumns: "1fr 1fr",
+                              gap: 10
+                            },
+                            children: [
+                              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#55efc4", fontWeight: 700, marginBottom: 4 }, children: "Will be preserved:" }),
+                                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#b8b8d0", fontSize: 11.5, lineHeight: 1.45 }, children: PRESERVED_PRODUCTION_ITEMS.join(" • ") })
+                              ] }),
+                              /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { children: [
+                                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#ffeaa7", fontWeight: 700, marginBottom: 4 }, children: "Will change:" }),
+                                /* @__PURE__ */ jsxRuntimeExports.jsx("div", { style: { color: "#b8b8d0", fontSize: 11.5, lineHeight: 1.45 }, children: willChangeItems.join(" • ") })
+                              ] })
+                            ]
+                          }
+                        )
+                      ]
+                    }
+                  ),
+                  modalError && /* @__PURE__ */ jsxRuntimeExports.jsx(
+                    "div",
+                    {
+                      "data-testid": "modal-error-banner",
+                      style: {
+                        padding: "10px 12px",
+                        borderRadius: 8,
+                        background: "rgba(214, 48, 49, 0.16)",
+                        border: "1px solid rgba(214, 48, 49, 0.48)",
+                        color: "#ff7675",
+                        fontSize: 12,
+                        whiteSpace: "pre-line",
+                        lineHeight: 1.45
+                      },
+                      children: modalError
+                    }
+                  ),
+                  /* @__PURE__ */ jsxRuntimeExports.jsxs("div", { style: { display: "flex", justifyContent: "flex-end", gap: 10 }, children: [
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        "data-testid": "modal-cancel-btn",
+                        disabled: isSaving,
+                        onClick: handleCancelModal,
+                        style: {
+                          padding: "8px 16px",
+                          background: "transparent",
+                          color: "#b8b8d0",
+                          border: "1px solid #3a3a5c",
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          cursor: isSaving ? "not-allowed" : "pointer"
+                        },
+                        children: "Cancel"
+                      }
+                    ),
+                    /* @__PURE__ */ jsxRuntimeExports.jsx(
+                      "button",
+                      {
+                        type: "button",
+                        "data-testid": "modal-apply-btn",
+                        disabled: isSaving,
+                        onClick: () => void handleApplyToCurrentRun(),
+                        style: {
+                          padding: "8px 16px",
+                          background: isSaving ? "#483d8b" : "#6c5ce7",
+                          color: "#fff",
+                          border: "none",
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 700,
+                          cursor: isSaving ? "not-allowed" : "pointer"
+                        },
+                        children: isSaving ? "Applying..." : "Apply to Current Run"
+                      }
+                    )
+                  ] })
+                ]
+              }
+            )
+          }
+        )
+      ]
+    }
+  );
+}
 function fmtStopwatch(secs) {
   const m2 = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
@@ -14134,7 +14869,8 @@ function ClientPipelineDashboard({
   onCancel,
   onResume,
   onRetryStage,
-  onNavigate
+  onNavigate,
+  onUpdateFinalRenderOptions
 }) {
   const [showCancelDialog, setShowCancelDialog] = reactExports.useState(false);
   const [showTechnicalDetails, setShowTechnicalDetails] = reactExports.useState(false);
@@ -14572,6 +15308,14 @@ function ClientPipelineDashboard({
       ] })
     ] }),
     /* @__PURE__ */ jsxRuntimeExports.jsx(
+      ActiveRunRenderSettings,
+      {
+        projectDir: project.projectDir,
+        pipelineState,
+        onUpdateFinalRenderOptions
+      }
+    ),
+    /* @__PURE__ */ jsxRuntimeExports.jsx(
       ManualAiPromptPanel,
       {
         project,
@@ -14745,7 +15489,8 @@ function ProductionPage({ project, onNavigate }) {
     isRunning,
     cancelPipeline,
     resumePipeline,
-    retryStage
+    retryStage,
+    updateFinalRenderOptions
   } = usePipeline(project.projectDir);
   return /* @__PURE__ */ jsxRuntimeExports.jsx(
     ClientPipelineDashboard,
@@ -14756,7 +15501,8 @@ function ProductionPage({ project, onNavigate }) {
       onCancel: cancelPipeline,
       onResume: resumePipeline,
       onRetryStage: retryStage,
-      onNavigate
+      onNavigate,
+      onUpdateFinalRenderOptions: updateFinalRenderOptions
     }
   );
 }

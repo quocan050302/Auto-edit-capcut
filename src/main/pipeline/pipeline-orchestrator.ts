@@ -2,7 +2,17 @@ import { BrowserWindow } from 'electron'
 import { v4 as uuidv4 } from 'uuid'
 import { logger } from '../logger'
 import { thumbnailAutoTrigger } from '../thumbnail/thumbnail-auto-trigger'
-import { IPC_CHANNELS } from '../../../shared/types'
+import {
+  IPC_CHANNELS,
+  getActiveRunRenderSettings,
+  resolveVideoAssemblyMode,
+  resolveBackgroundMusicMode
+} from '../../../shared/types'
+import type {
+  UpdateFinalRenderOptionsRequest,
+  UpdateFinalRenderOptionsResult
+} from '../../../shared/types'
+import { getManualAiStatus } from '../visual-mix/manual-ai/manual-ai-validator'
 import type {
   PipelineRecoveryResult,
   PipelineSnapshot,
@@ -96,6 +106,7 @@ interface ActivePipelineInstance {
   promise: Promise<AutoPipelineState>
   stageStartTime: number
   currentStage: PipelineStage
+  state: AutoPipelineState
 }
 
 class PipelineOrchestrator {
@@ -162,10 +173,14 @@ class PipelineOrchestrator {
         this.stopHeartbeat(norm)
         return
       }
-      const state = loadPipelineState(norm)
-      if (state && state.runId === runId && state.overallStatus === 'running') {
-        updateHeartbeat(state)
-        savePipelineStateAtomic(norm, state)
+      const activeState = instance.state
+      if (activeState && activeState.runId === runId && activeState.overallStatus === 'running') {
+        updateHeartbeat(activeState)
+        try {
+          savePipelineStateAtomic(norm, activeState)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
       }
     }, 3000)
     this.heartbeatTimers.set(norm, timer)
@@ -247,7 +262,9 @@ class PipelineOrchestrator {
     const effectiveOptions: AutoPipelineOptions = {
       ...options,
       projectDir: norm,
-      editorialSettings: effectiveEditorial
+      editorialSettings: effectiveEditorial,
+      initialRequireBackgroundMusic:
+        options.initialRequireBackgroundMusic ?? options.requireBackgroundMusic
     }
 
     return this.withProjectLock(norm, async () => {
@@ -255,7 +272,7 @@ class PipelineOrchestrator {
       const existing = this.activeInstances.get(norm)
       if (existing) {
         logger.warn(`[Pipeline] Pipeline is already running in memory for project: ${norm}`)
-        const currentState = loadPipelineState(norm)
+        const currentState = existing.state ?? loadPipelineState(norm)
         return {
           runId: existing.runId,
           state: currentState ?? createInitialPipelineState(effectiveOptions, computeInputFingerprint(norm, effectiveOptions.scriptPath, effectiveOptions.voiceoverPath), existing.runId)
@@ -277,7 +294,11 @@ class PipelineOrchestrator {
           logger.info(`[Pipeline] Reclaiming lease from prior unmanaged/stale run for ${norm}`)
           state.overallStatus = 'interrupted'
           releaseLease(state)
+          try {
           savePipelineStateAtomic(norm, state)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
         }
       }
 
@@ -295,6 +316,7 @@ class PipelineOrchestrator {
         state.runId = runId
         state.inputFingerprint = fingerprint
         state.options = effectiveOptions
+        state.renderSettings = getActiveRunRenderSettings(effectiveOptions)
         state.overallStatus = 'running'
         state.version = (state.version ?? 0) + 1
         state.updatedAt = new Date().toISOString()
@@ -316,6 +338,7 @@ class PipelineOrchestrator {
         abortController,
         stageStartTime: Date.now(),
         currentStage: 'validating',
+        state,
         promise: Promise.resolve(state) // replaced below
       }
 
@@ -336,7 +359,7 @@ class PipelineOrchestrator {
     return this.withProjectLock(norm, async () => {
       const existing = this.activeInstances.get(norm)
       if (existing) {
-        const currentState = loadPipelineState(norm)
+        const currentState = existing.state ?? loadPipelineState(norm)
         return { runId: existing.runId, state: currentState! }
       }
 
@@ -395,6 +418,12 @@ class PipelineOrchestrator {
       // Tìm stage đầu tiên chưa hoàn thành
       const firstPending = PIPELINE_EXECUTION_STAGES.find((s) => state!.stages[s]?.status !== 'completed') || 'validating'
       state.currentStage = firstPending
+      state.options = {
+        ...state.options,
+        initialRequireBackgroundMusic:
+          state.options.initialRequireBackgroundMusic ?? state.options.requireBackgroundMusic
+      }
+      state.renderSettings = getActiveRunRenderSettings(state.options)
       state.lease = createLease(runId, firstPending)
 
       savePipelineStateAtomic(norm, state)
@@ -410,6 +439,7 @@ class PipelineOrchestrator {
         abortController,
         stageStartTime: Date.now(),
         currentStage: firstPending,
+        state,
         promise: Promise.resolve(state)
       }
 
@@ -425,6 +455,7 @@ class PipelineOrchestrator {
    */
   public cancelPipeline(projectDirOrRunId: string): boolean {
     let targetProjectDir: string | null = null
+    let cancelledInstanceState: AutoPipelineState | null = null
 
     // 1. Kiểm tra trong activeInstances
     for (const [projectDir, instance] of this.activeInstances.entries()) {
@@ -432,6 +463,7 @@ class PipelineOrchestrator {
         logger.info(`[Pipeline] Cancelling active pipeline run ${instance.runId} for ${projectDir}`)
         instance.abortController.abort()
         targetProjectDir = projectDir
+        cancelledInstanceState = instance.state
         break
       }
     }
@@ -444,7 +476,7 @@ class PipelineOrchestrator {
     this.activeInstances.delete(targetProjectDir)
 
     // 2. Cập nhật persisted state trên đĩa kể cả khi instance không còn trong RAM
-    const state = loadPipelineState(targetProjectDir)
+    const state = cancelledInstanceState ?? loadPipelineState(targetProjectDir)
     if (state) {
       state.overallStatus = 'cancelled'
       if (state.currentStage && state.stages[state.currentStage] && state.stages[state.currentStage].status === 'running') {
@@ -467,6 +499,10 @@ class PipelineOrchestrator {
    */
   public getStatus(projectDir: string): AutoPipelineState | null {
     const norm = normalizeProjectDir(projectDir)
+    const active = this.activeInstances.get(norm)
+    if (active) {
+      return active.state
+    }
     const state = loadPipelineState(norm)
     if (!state) return null
 
@@ -499,7 +535,8 @@ class PipelineOrchestrator {
           resumable: false,
           completedStages: [],
           invalidStages: [],
-          warnings: ['Pipeline is currently active in memory.']
+          warnings: ['Pipeline is currently active in memory.'],
+          snapshot: toSnapshot(active.state)
         }
       }
 
@@ -697,12 +734,366 @@ class PipelineOrchestrator {
         resumeFrom,
         completedStages,
         invalidStages,
-        warnings
+        warnings,
+        snapshot: toSnapshot(state)
       }
     })
   }
 
   /**
+   * Live update final rendering strategy and background music mode for an active run
+   * while waiting for manually imported AI assets in stock-search.
+   * Never restarts the pipeline, never invalidates completed upstream stages, and
+   * never mutates project default settings.
+   */
+  public async updateFinalRenderOptions(
+    request: UpdateFinalRenderOptionsRequest
+  ): Promise<UpdateFinalRenderOptionsResult> {
+    if (!request || typeof request !== 'object') {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: 'INVALID_OPTIONS',
+        error: 'Invalid update request.'
+      }
+    }
+
+    const { projectDir, runId, assemblyMode, backgroundMusicMode, expectedStateVersion } = request
+
+    if (
+      (assemblyMode !== 'full-production' && assemblyMode !== 'simple-assembly') ||
+      (backgroundMusicMode !== 'auto' && backgroundMusicMode !== 'off')
+    ) {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: 'INVALID_OPTIONS',
+        error: 'Invalid assembly mode or background music mode.'
+      }
+    }
+
+    if (!projectDir || typeof projectDir !== 'string' || !projectDir.trim()) {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: 'RUN_NOT_FOUND',
+        error: 'No active pipeline run found for the specified project.'
+      }
+    }
+
+    if (!runId || typeof runId !== 'string' || !runId.trim()) {
+      return {
+        success: false,
+        appliedToActiveRun: false,
+        errorCode: 'RUN_MISMATCH',
+        error: 'A valid active run ID is required.'
+      }
+    }
+
+    const norm = normalizeProjectDir(projectDir)
+    const tooLateMessage =
+      'The pipeline has already passed the manual asset waiting stage.\n\nFinal Render Mode cannot be changed live now.\n\nUse the supported rerender workflow instead.'
+
+    return this.withProjectLock(norm, async () => {
+      const instance = this.activeInstances.get(norm)
+      if (!instance) {
+        const diskState = loadPipelineState(norm)
+        if (!diskState) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            errorCode: 'RUN_NOT_FOUND',
+            error: 'No active pipeline run found for this project.'
+          }
+        }
+        if (diskState.runId !== runId) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: diskState.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(diskState.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(diskState.options),
+            stateVersion: diskState.version,
+            errorCode: 'RUN_MISMATCH',
+            error: 'The requested run ID does not match the current project run.',
+            snapshot: toSnapshot(diskState)
+          }
+        }
+        if (diskState.overallStatus === 'completed') {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: diskState.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(diskState.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(diskState.options),
+            stateVersion: diskState.version,
+            errorCode: 'TOO_LATE',
+            error: tooLateMessage,
+            snapshot: toSnapshot(diskState)
+          }
+        }
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: diskState.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(diskState.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(diskState.options),
+          stateVersion: diskState.version,
+          errorCode: 'NOT_RUNNING',
+          error: 'The pipeline is not actively running in this application process.',
+          snapshot: toSnapshot(diskState)
+        }
+      }
+
+      const state = instance.state
+      if (!state) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: 'RUN_NOT_FOUND',
+          error: 'No active pipeline state found for this project.'
+        }
+      }
+
+      if (instance.runId !== runId || state.runId !== runId) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: 'RUN_MISMATCH',
+          error: 'The requested run ID does not match the active pipeline run.',
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      if (instance.abortController.signal.aborted || state.overallStatus !== 'running') {
+        const isCompleted = state.overallStatus === 'completed'
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: isCompleted ? 'TOO_LATE' : 'NOT_RUNNING',
+          error: isCompleted ? tooLateMessage : 'The pipeline run is no longer active.',
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      if (state.lease && state.lease.appInstanceId !== APP_INSTANCE_ID) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: 'NOT_RUNNING',
+          error: 'The pipeline run is owned by another application process.',
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      const downstreamStages: PipelineStage[] = ['audio-search', 'preflight', 'rendering', 'postflight']
+      const downstreamStarted =
+        downstreamStages.includes(state.currentStage) ||
+        state.currentStage === 'completed' ||
+        downstreamStages.some((s) => state.stages[s] && state.stages[s].status !== 'pending') ||
+        state.stages['stock-search']?.status === 'completed' ||
+        state.stages['stock-search']?.stats?.manualAiWaitCompleted === true
+
+      if (downstreamStarted) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: 'TOO_LATE',
+          error: tooLateMessage,
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      if (state.currentStage !== 'stock-search' || state.stages['stock-search']?.status !== 'running') {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: 'NOT_WAITING_FOR_ASSETS',
+          error: 'The pipeline is not currently in the manual AI asset waiting stage.',
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      const waitInfo = state.stages['stock-search']?.manualAiWait
+      if (!waitInfo || typeof waitInfo.expected !== 'number' || waitInfo.expected <= 0) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: 'NOT_WAITING_FOR_ASSETS',
+          error: 'The current run is not waiting for manually imported AI assets.',
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      if (typeof waitInfo.ready !== 'number' || waitInfo.ready >= waitInfo.expected) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+          stateVersion: state.version,
+          errorCode: 'TOO_LATE',
+          error: tooLateMessage,
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      // Authoritative backend readiness check when a prompt pack exists on disk
+      const manualStatus = getManualAiStatus(norm)
+      if (manualStatus.hasPromptPack) {
+        if (manualStatus.expected <= 0) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: state.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+            stateVersion: state.version,
+            errorCode: 'NOT_WAITING_FOR_ASSETS',
+            error: 'The current run has no manual AI scenes awaiting import.',
+            snapshot: toSnapshot(state)
+          }
+        }
+        if (manualStatus.allReady || manualStatus.ready >= manualStatus.expected) {
+          return {
+            success: false,
+            appliedToActiveRun: false,
+            runId: state.runId,
+            effectiveAssemblyMode: resolveVideoAssemblyMode(state.options),
+            effectiveBackgroundMusicMode: resolveBackgroundMusicMode(state.options),
+            stateVersion: state.version,
+            errorCode: 'TOO_LATE',
+            error: tooLateMessage,
+            snapshot: toSnapshot(state)
+          }
+        }
+      }
+
+      const currentAssembly = resolveVideoAssemblyMode(state.options)
+      const currentMusic = resolveBackgroundMusicMode(state.options)
+
+      if (
+        expectedStateVersion !== undefined &&
+        typeof expectedStateVersion === 'number' &&
+        expectedStateVersion !== state.version &&
+        (currentAssembly !== assemblyMode || currentMusic !== backgroundMusicMode)
+      ) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: currentAssembly,
+          effectiveBackgroundMusicMode: currentMusic,
+          stateVersion: state.version,
+          errorCode: 'STALE_REQUEST',
+          error: 'Pipeline state changed before this update could be applied. Please review current settings and try again.',
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      // Idempotency: if identical settings are already explicitly committed, return immediately without side effects
+      if (
+        currentAssembly === assemblyMode &&
+        currentMusic === backgroundMusicMode &&
+        state.options.assemblyMode === assemblyMode &&
+        state.options.backgroundMusicMode === backgroundMusicMode &&
+        state.renderSettings?.assemblyMode === assemblyMode &&
+        state.renderSettings?.backgroundMusicMode === backgroundMusicMode
+      ) {
+        return {
+          success: true,
+          appliedToActiveRun: true,
+          runId: state.runId,
+          effectiveAssemblyMode: currentAssembly,
+          effectiveBackgroundMusicMode: currentMusic,
+          stateVersion: state.version,
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      const initialReq =
+        state.options.initialRequireBackgroundMusic !== undefined
+          ? state.options.initialRequireBackgroundMusic
+          : currentMusic !== 'off'
+          ? state.options.requireBackgroundMusic
+          : false
+
+      const previousOptions: AutoPipelineOptions = { ...state.options }
+      const previousRenderSettings = state.renderSettings ? { ...state.renderSettings } : undefined
+
+      state.options = {
+        ...state.options,
+        initialRequireBackgroundMusic: initialReq,
+        assemblyMode,
+        backgroundMusicMode,
+        requireBackgroundMusic: backgroundMusicMode === 'off' ? false : initialReq
+      }
+      state.renderSettings = getActiveRunRenderSettings(state.options)
+
+      try {
+        savePipelineStateAtomic(norm, state)
+      } catch (err) {
+        state.options = previousOptions
+        state.renderSettings = previousRenderSettings
+        const msg = err instanceof Error ? err.message : String(err)
+        logger.error(`[Pipeline] Failed to save live final render options for ${norm}: ${msg}`)
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          runId: state.runId,
+          effectiveAssemblyMode: resolveVideoAssemblyMode(previousOptions),
+          effectiveBackgroundMusicMode: resolveBackgroundMusicMode(previousOptions),
+          stateVersion: state.version,
+          errorCode: 'SAVE_FAILED',
+          error: `Failed to persist updated render settings: ${msg}`,
+          snapshot: toSnapshot(state)
+        }
+      }
+
+      this.broadcastProgress(state)
+      const effective = getActiveRunRenderSettings(state.options)
+      logger.info(
+        `[Pipeline] Updated active run ${state.runId} final render options: assemblyMode=${effective.assemblyMode}, backgroundMusicMode=${effective.backgroundMusicMode} (version=${state.version})`
+      )
+
+      return {
+        success: true,
+        appliedToActiveRun: true,
+        runId: state.runId,
+        effectiveAssemblyMode: effective.assemblyMode,
+        effectiveBackgroundMusicMode: effective.backgroundMusicMode,
+        stateVersion: state.version,
+        snapshot: toSnapshot(state)
+      }
+    })
+  }
+
+    /**
    * Chạy lại một stage cụ thể (dành cho debugging hoặc sửa lỗi).
    */
   public async retryStage(projectDir: string, targetStage: PipelineStage): Promise<{ runId: string; state: AutoPipelineState }> {
@@ -762,7 +1153,7 @@ class PipelineOrchestrator {
         instance.abortController.abort()
         this.stopHeartbeat(projectDir)
 
-        const state = loadPipelineState(projectDir)
+        const state = instance.state ?? loadPipelineState(projectDir)
         if (state && state.overallStatus === 'running') {
           state.overallStatus = 'interrupted'
           if (state.currentStage && state.stages[state.currentStage]) {
@@ -836,7 +1227,11 @@ class PipelineOrchestrator {
         }
         state.version = (state.version ?? 0) + 1
         state.updatedAt = new Date().toISOString()
-        savePipelineStateAtomic(norm, state)
+        try {
+          savePipelineStateAtomic(norm, state)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
         this.broadcastProgress(state)
 
         const stageStartTime = Date.now()
@@ -857,14 +1252,24 @@ class PipelineOrchestrator {
           state.stages[stage].progress = Math.min(Math.max(progress, 0), 1)
           if (meta && 'manualAiWait' in meta) {
             if (meta.manualAiWait) state.stages[stage].manualAiWait = meta.manualAiWait
-            else delete state.stages[stage].manualAiWait
+            else {
+              delete state.stages[stage].manualAiWait
+              state.stages[stage].stats = {
+                ...(state.stages[stage].stats || {}),
+                manualAiWaitCompleted: true
+              }
+            }
           }
           state.version = (state.version ?? 0) + 1
           state.updatedAt = new Date().toISOString()
           if (state.lease) {
             state.lease.heartbeatAt = state.updatedAt
           }
+          try {
           savePipelineStateAtomic(norm, state)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
           this.broadcastProgress(state)
         }
 
@@ -939,7 +1344,11 @@ class PipelineOrchestrator {
           state.version = (state.version ?? 0) + 1
           state.updatedAt = new Date().toISOString()
           releaseLease(state)
+          try {
           savePipelineStateAtomic(norm, state)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
           this.broadcastProgress(state)
           pipelineProfiler.endRun()
           return state
@@ -956,7 +1365,11 @@ class PipelineOrchestrator {
           state.version = (state.version ?? 0) + 1
           state.updatedAt = new Date().toISOString()
           releaseLease(state)
+          try {
           savePipelineStateAtomic(norm, state)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
           this.broadcastProgress(state)
           pipelineProfiler.endRun()
           return state
@@ -974,7 +1387,11 @@ class PipelineOrchestrator {
         state.version = (state.version ?? 0) + 1
         state.updatedAt = new Date().toISOString()
         releaseLease(state)
-        savePipelineStateAtomic(norm, state)
+        try {
+          savePipelineStateAtomic(norm, state)
+        } catch (err) {
+          logger.warn(`[Pipeline] Heartbeat save failed for ${norm}: ${String(err)}`)
+        }
         this.broadcastProgress(state)
         logger.info(`[Pipeline] Pipeline ${state.runId} completed successfully!`)
 
