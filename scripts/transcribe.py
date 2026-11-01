@@ -2,6 +2,7 @@
 # requires-python = ">=3.9"
 # dependencies = [
 #   "faster-whisper>=1.0.0",
+#   "av<17",
 # ]
 # ///
 """
