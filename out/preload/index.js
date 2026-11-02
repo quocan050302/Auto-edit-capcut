@@ -104,6 +104,7 @@ const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: "pipeline:retry-stage",
   PIPELINE_RUN_FROM_STAGE: "pipeline:run-from-stage",
   PIPELINE_RECOVER: "pipeline:recover",
+  PIPELINE_UPDATE_FINAL_RENDER_OPTIONS: "pipeline:update-final-render-options",
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: "manual-ai:get-status",
   MANUAL_AI_GET_PROMPT_TEXT: "manual-ai:get-prompt-text",
@@ -330,6 +331,7 @@ const api = {
     retryStage: (projectDir, stage) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RETRY_STAGE, { projectDir, stage }),
     runFromStage: (projectDir, stage, options) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RUN_FROM_STAGE, { projectDir, stage, options }),
     recover: (projectDir) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_RECOVER, { projectDir }),
+    updateFinalRenderOptions: (request) => electron.ipcRenderer.invoke(IPC_CHANNELS.PIPELINE_UPDATE_FINAL_RENDER_OPTIONS, request),
     onProgress: (callback) => {
       const handler = (_event, state) => {
         callback(state);

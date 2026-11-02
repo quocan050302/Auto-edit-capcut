@@ -1611,6 +1611,7 @@ export const IPC_CHANNELS = {
   PIPELINE_RETRY_STAGE: 'pipeline:retry-stage',
   PIPELINE_RUN_FROM_STAGE: 'pipeline:run-from-stage',
   PIPELINE_RECOVER: 'pipeline:recover',
+  PIPELINE_UPDATE_FINAL_RENDER_OPTIONS: 'pipeline:update-final-render-options',
 
   // Manual AI image workflow (Custom Mix → AI Image Mode = Prompt)
   MANUAL_AI_GET_STATUS: 'manual-ai:get-status',
@@ -1888,6 +1889,79 @@ export interface AutoPipelineOptions {
   backgroundMusicMode?: BackgroundMusicMode
   shortClipPolicy?: ShortClipPolicy
   sceneFolder?: string
+  /** Preserves original requireBackgroundMusic preference when toggling backgroundMusicMode live. */
+  initialRequireBackgroundMusic?: boolean
+}
+
+export interface ActiveRunRenderSettings {
+  assemblyMode: VideoAssemblyMode
+  backgroundMusicMode: BackgroundMusicMode
+}
+
+export function getActiveRunRenderSettings(
+  options?: {
+    assemblyMode?: VideoAssemblyMode
+    backgroundMusicMode?: BackgroundMusicMode
+  } | null
+): ActiveRunRenderSettings {
+  return {
+    assemblyMode: resolveVideoAssemblyMode(options),
+    backgroundMusicMode: resolveBackgroundMusicMode(options)
+  }
+}
+
+export function isLiveRenderModeSwitchEligible(
+  state?: {
+    overallStatus?: PipelineOverallStatus
+    currentStage?: PipelineStage
+    stages?: Record<string, PipelineStageState>
+  } | null
+): boolean {
+  if (!state) return false
+  if (state.overallStatus !== 'running') return false
+  if (state.currentStage !== 'stock-search') return false
+  const stockStage = state.stages?.['stock-search']
+  if (!stockStage || stockStage.status !== 'running') return false
+  if (stockStage.stats?.manualAiWaitCompleted === true) return false
+  const waitInfo = stockStage.manualAiWait
+  if (!waitInfo || typeof waitInfo.expected !== 'number' || waitInfo.expected <= 0) return false
+  if (typeof waitInfo.ready !== 'number' || waitInfo.ready >= waitInfo.expected) return false
+  const downstream: PipelineStage[] = ['audio-search', 'preflight', 'rendering', 'postflight']
+  for (const stage of downstream) {
+    const st = state.stages?.[stage]
+    if (st && st.status !== 'pending') return false
+  }
+  return true
+}
+
+export type UpdateFinalRenderOptionsErrorCode =
+  | 'RUN_NOT_FOUND'
+  | 'RUN_MISMATCH'
+  | 'NOT_RUNNING'
+  | 'NOT_WAITING_FOR_ASSETS'
+  | 'TOO_LATE'
+  | 'STALE_REQUEST'
+  | 'INVALID_OPTIONS'
+  | 'SAVE_FAILED'
+
+export interface UpdateFinalRenderOptionsRequest {
+  projectDir: string
+  runId: string
+  assemblyMode: VideoAssemblyMode
+  backgroundMusicMode: BackgroundMusicMode
+  expectedStateVersion?: number
+}
+
+export interface UpdateFinalRenderOptionsResult {
+  success: boolean
+  appliedToActiveRun: boolean
+  runId?: string
+  effectiveAssemblyMode?: VideoAssemblyMode
+  effectiveBackgroundMusicMode?: BackgroundMusicMode
+  stateVersion?: number
+  errorCode?: UpdateFinalRenderOptionsErrorCode
+  error?: string
+  snapshot?: PipelineSnapshot
 }
 
 export type PipelineOverallStatus =
@@ -1923,6 +1997,7 @@ export interface PipelineSnapshot {
   renderOutputPath?: string
   preflightReportPath?: string
   postflightReportPath?: string
+  renderSettings?: ActiveRunRenderSettings
 }
 
 export interface PipelineRecoveryResult {
@@ -1955,6 +2030,7 @@ export interface AutoPipelineState {
   renderOutputPath?: string
   preflightReportPath?: string
   postflightReportPath?: string
+  renderSettings?: ActiveRunRenderSettings
 }
 
 export interface PipelineError {

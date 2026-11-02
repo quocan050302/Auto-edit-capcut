@@ -14,7 +14,8 @@ export function ProductionPage({ project, onNavigate }: ProductionPageProps): Re
     isRunning,
     cancelPipeline,
     resumePipeline,
-    retryStage
+    retryStage,
+    updateFinalRenderOptions
   } = usePipeline(project.projectDir)
 
   return (
@@ -26,6 +27,7 @@ export function ProductionPage({ project, onNavigate }: ProductionPageProps): Re
       onResume={resumePipeline}
       onRetryStage={retryStage}
       onNavigate={onNavigate}
+      onUpdateFinalRenderOptions={updateFinalRenderOptions}
     />
   )
 }

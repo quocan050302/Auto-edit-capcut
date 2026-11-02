@@ -1,10 +1,83 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
-import type {
-  AutoPipelineState,
-  AutoPipelineOptions,
-  PipelineStage,
-  PipelineRecoveryResult
+import {
+  getActiveRunRenderSettings,
+  type AutoPipelineState,
+  type AutoPipelineOptions,
+  type PipelineSnapshot,
+  type PipelineStage,
+  type PipelineRecoveryResult,
+  type VideoAssemblyMode,
+  type BackgroundMusicMode,
+  type UpdateFinalRenderOptionsResult
 } from '../../../../shared/types'
+
+/**
+ * Pure monotonic state reducer for AutoPipelineState / PipelineSnapshot updates.
+ * Rejects stale snapshots (lower version for the same runId) and preserves
+ * full options + effective renderSettings across compact progress broadcasts.
+ */
+export function mergeIncomingPipelineState(
+  prev: AutoPipelineState | null,
+  incoming: AutoPipelineState | PipelineSnapshot | null
+): AutoPipelineState | null {
+  if (!incoming) return null
+  const incomingAsState = incoming as AutoPipelineState
+  const incomingRenderSettings =
+    incoming.renderSettings ??
+    (incomingAsState.options ? getActiveRunRenderSettings(incomingAsState.options) : undefined)
+
+  if (!prev) {
+    return {
+      ...incomingAsState,
+      ...(incomingRenderSettings ? { renderSettings: incomingRenderSettings } : {})
+    }
+  }
+
+  // If the incoming state is for the same run, enforce monotonic version ordering
+  if (prev.runId === incoming.runId) {
+    const prevVersion = prev.version ?? 0
+    const incomingVersion = incoming.version ?? 0
+    if (incomingVersion < prevVersion) {
+      return prev
+    }
+
+    const effectiveRenderSettings = incomingRenderSettings ?? prev.renderSettings
+    const mergedOptions: AutoPipelineOptions | undefined = incomingAsState.options
+      ? {
+          ...incomingAsState.options,
+          ...(effectiveRenderSettings
+            ? {
+                assemblyMode: effectiveRenderSettings.assemblyMode,
+                backgroundMusicMode: effectiveRenderSettings.backgroundMusicMode
+              }
+            : {})
+        }
+      : prev.options
+      ? {
+          ...prev.options,
+          ...(effectiveRenderSettings
+            ? {
+                assemblyMode: effectiveRenderSettings.assemblyMode,
+                backgroundMusicMode: effectiveRenderSettings.backgroundMusicMode
+              }
+            : {})
+        }
+      : undefined
+
+    return {
+      ...prev,
+      ...incomingAsState,
+      ...(mergedOptions ? { options: mergedOptions } : {}),
+      ...(effectiveRenderSettings ? { renderSettings: effectiveRenderSettings } : {})
+    }
+  }
+
+  // New runId replaces previous run state
+  return {
+    ...incomingAsState,
+    ...(incomingRenderSettings ? { renderSettings: incomingRenderSettings } : {})
+  }
+}
 
 export function usePipeline(projectDir?: string | null) {
   const [pipelineState, setPipelineState] = useState<AutoPipelineState | null>(null)
@@ -20,20 +93,12 @@ export function usePipeline(projectDir?: string | null) {
   }, [])
 
   // Cập nhật snapshot theo thứ tự version đơn điệu, bỏ qua late events
-  const updateStateIfNewer = useCallback((incoming: AutoPipelineState | null) => {
+  const updateStateIfNewer = useCallback((incoming: AutoPipelineState | PipelineSnapshot | null) => {
     if (!incoming) {
       setPipelineState(null)
       return
     }
-    setPipelineState((prev) => {
-      if (!prev) return incoming
-      const prevVersion = prev.version ?? 0
-      const incomingVersion = incoming.version ?? 0
-      if (incomingVersion >= prevVersion) {
-        return incoming
-      }
-      return prev
-    })
+    setPipelineState((prev) => mergeIncomingPipelineState(prev, incoming))
   }, [])
 
   // Tải trạng thái hiện tại từ main process
@@ -219,6 +284,77 @@ export function usePipeline(projectDir?: string | null) {
     [projectDir, updateStateIfNewer]
   )
 
+  const updateFinalRenderOptions = useCallback(
+    async (params: {
+      assemblyMode: VideoAssemblyMode
+      backgroundMusicMode: BackgroundMusicMode
+      runId?: string
+      expectedStateVersion?: number
+    }): Promise<UpdateFinalRenderOptionsResult> => {
+      const targetProjectDir = projectDir || pipelineState?.projectDir
+      const targetRunId = params.runId || pipelineState?.runId || ''
+      if (!targetProjectDir) {
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: 'RUN_NOT_FOUND',
+          error: 'No active project directory.'
+        }
+      }
+      try {
+        const res = await window.api.pipeline.updateFinalRenderOptions({
+          projectDir: targetProjectDir,
+          runId: targetRunId,
+          assemblyMode: params.assemblyMode,
+          backgroundMusicMode: params.backgroundMusicMode,
+          ...(params.expectedStateVersion !== undefined
+            ? { expectedStateVersion: params.expectedStateVersion }
+            : {})
+        })
+        if (isMountedRef.current) {
+          if (res.snapshot) {
+            updateStateIfNewer(res.snapshot)
+          } else if (
+            res.success &&
+            res.effectiveAssemblyMode &&
+            res.effectiveBackgroundMusicMode
+          ) {
+            setPipelineState((prev) => {
+              if (!prev || (res.runId && prev.runId !== res.runId)) return prev
+              const nextVersion = res.stateVersion ?? prev.version
+              if (nextVersion < prev.version) return prev
+              return {
+                ...prev,
+                version: nextVersion,
+                renderSettings: {
+                  assemblyMode: res.effectiveAssemblyMode!,
+                  backgroundMusicMode: res.effectiveBackgroundMusicMode!
+                },
+                options: prev.options
+                  ? {
+                      ...prev.options,
+                      assemblyMode: res.effectiveAssemblyMode!,
+                      backgroundMusicMode: res.effectiveBackgroundMusicMode!
+                    }
+                  : prev.options
+              }
+            })
+          }
+        }
+        return res
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        return {
+          success: false,
+          appliedToActiveRun: false,
+          errorCode: 'SAVE_FAILED',
+          error: msg
+        }
+      }
+    },
+    [projectDir, pipelineState?.projectDir, pipelineState?.runId, updateStateIfNewer]
+  )
+
   const isRunning = pipelineState?.overallStatus === 'running'
 
   return {
@@ -232,6 +368,7 @@ export function usePipeline(projectDir?: string | null) {
     cancelPipeline,
     retryStage,
     runFromStage,
-    refreshStatus
+    refreshStatus,
+    updateFinalRenderOptions
   }
 }

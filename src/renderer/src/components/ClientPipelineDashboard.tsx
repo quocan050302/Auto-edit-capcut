@@ -7,6 +7,12 @@ import { PipelineTimeline } from './PipelineTimeline'
 import { LivePipelineInspector } from './LivePipelineInspector'
 import { getPageForPipelineStage } from '../navigation/pipelineStageNavigation'
 import { ManualAiPromptPanel } from './ManualAiPromptPanel'
+import { ActiveRunRenderSettings } from './ActiveRunRenderSettings'
+import type {
+  VideoAssemblyMode,
+  BackgroundMusicMode,
+  UpdateFinalRenderOptionsResult
+} from '../../../../shared/types'
 
 export interface ClientPipelineDashboardProps {
   project: ProjectState
@@ -16,6 +22,12 @@ export interface ClientPipelineDashboardProps {
   onResume: () => Promise<boolean>
   onRetryStage: (stage: PipelineStage) => Promise<boolean>
   onNavigate: (page: string) => void
+  onUpdateFinalRenderOptions?: (params: {
+    assemblyMode: VideoAssemblyMode
+    backgroundMusicMode: BackgroundMusicMode
+    runId?: string
+    expectedStateVersion?: number
+  }) => Promise<UpdateFinalRenderOptionsResult>
 }
 
 function fmtStopwatch(secs: number): string {
@@ -78,6 +90,7 @@ export function ClientPipelineDashboard({
   onResume,
   onRetryStage,
   onNavigate
+  , onUpdateFinalRenderOptions
 }: ClientPipelineDashboardProps): React.ReactElement {
   const [showCancelDialog, setShowCancelDialog] = useState(false)
   const [showTechnicalDetails, setShowTechnicalDetails] = useState(false)
@@ -617,6 +630,13 @@ export function ClientPipelineDashboard({
           </button>
         </div>
       </div>
+
+      {/* Active Run Final Render Settings (live switchable during manual AI asset wait, read-only otherwise) */}
+      <ActiveRunRenderSettings
+        projectDir={project.projectDir}
+        pipelineState={pipelineState}
+        onUpdateFinalRenderOptions={onUpdateFinalRenderOptions}
+      />
 
       {/* Prompt mode: prompt pack + manual AI image import (renders nothing in Auto / Default) */}
       <ManualAiPromptPanel

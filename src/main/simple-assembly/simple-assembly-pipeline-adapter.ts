@@ -135,7 +135,12 @@ export async function runSimpleAssemblyRenderStage(
   let targetName = baseTargetName
   let targetPath = path.join(outputDir, `${targetName}.mp4`)
   let counter = 1
-  while (fs.existsSync(targetPath) && (!existingProvenance || existingProvenance.assemblyMode !== 'simple-assembly')) {
+  while (
+    fs.existsSync(targetPath) &&
+    (!existingProvenance ||
+      existingProvenance.assemblyMode !== 'simple-assembly' ||
+      existingProvenance.backgroundMusicMode !== effectiveMusicMode)
+  ) {
     targetName = `${baseTargetName}_${counter}`
     targetPath = path.join(outputDir, `${targetName}.mp4`)
     counter++
